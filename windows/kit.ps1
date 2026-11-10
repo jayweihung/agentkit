@@ -1889,7 +1889,7 @@ function Git-State([string]$dir, [string]$file) { # "new", "changed" or "" (or "
     $st = "$(& git -C $dir status --porcelain --untracked-files=all -- $file 2>$null | Select-Object -First 1)"
     if (-not $st) { return '' }
     $c = $st.Substring(0, [Math]::Min(2, $st.Length))
-    if ($c -eq '??' -or $c.StartsWith('A')) { 'new' } else { 'changed' }
+    if ($c -eq ('?' + '?') -or $c.StartsWith('A')) { 'new' } else { 'changed' }
 }
 function Agent-Body([string]$f) { # the lines after the frontmatter
     $lines = (Read-Text $f) -split "`n"; $c = 0; $out = @()
