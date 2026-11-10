@@ -1364,7 +1364,7 @@ function Cmd-Push($rest) {
 
     # what changed: only item files are sent
     $all = @(Git-Q -C $dir -c core.quotePath=false status --porcelain --untracked-files=all | Where-Object { $_.Length -gt 3 } | ForEach-Object { $_.Substring(3) -replace '^.* -> ', '' })
-    $files = @($all | Where-Object { $_ -match '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md)$' })
+    $files = @($all | Where-Object { $_ -match '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$' })
     $other = @($all | Where-Object { $files -notcontains $_ })
     if ($files.Count -eq 0) { Say "沒有要送的（$leaf 裡沒有改過的 rule、skill、mcp、agent）"; return }
     $items = @(Push-Items $dir $files)
@@ -1450,6 +1450,163 @@ function Cmd-Push($rest) {
     if ($compare) { Say "開 PR：$compare" } else { Say "請到 Gitea 用分支 $b 開 PR" }
 }
 
+# ---------- collect / outdated: other people's skills, from their own repos ----------
+# third_party.lock: name<TAB>url<TAB>path<TAB>ref<TAB>commit<TAB>license<TAB>date
+$script:LockHead = '# third_party.lock - written by kit collect; name url path ref commit license date'
+function Url-Id([string]$u) { # host/path of a git URL, without scheme, user, .git or trailing /
+    ((($u -replace '^[a-z+]+://', '') -replace '^[^@/]*@', '') -replace '^([^/:]+):', '$1/').TrimEnd('/') -replace '\.git$', ''
+}
+function Collect-Allowed([string]$url, [string]$dir) {
+    $id = Url-Id $url
+    $dirs = @($dir); if (Test-Path -LiteralPath $Machine) { $dirs += @(Src-Dirs) }
+    foreach ($d in $dirs) {
+        foreach ($e in @(YGet (Join-Path $d 'kit.yaml') 'collect_sources')) {
+            if (-not $e) { continue }
+            $e = Url-Id $e
+            if ($id -eq $e -or $id.StartsWith("$e/")) { return $true }
+        }
+    }
+    $false
+}
+function Check-Maintainer([string]$dir) {
+    $m = @(YGet (Join-Path $dir 'kit.yaml') 'maintainers' | Where-Object { $_ })
+    if ($m.Count -eq 0) { return }
+    $me = "$(& git -C $dir config user.email 2>$null)"
+    $who = @($me, ($me -replace '@.*$', ''), $env:USERNAME, $env:USER) | Where-Object { $_ }
+    foreach ($w in $who) { if ($m -contains $w) { return } }
+    Die '只有維護者能用 collect／outdated（kit.yaml 的 maintainers）'
+}
+function License-Kind([string]$f) {
+    $t = Read-Text $f
+    if ($t -match '(?i)Apache License') { 'Apache-2.0' }
+    elseif ($t -match '(?i)MIT License|Permission is hereby granted, free of charge') { 'MIT' }
+    elseif ($t -match '(?i)Mozilla Public License') { 'MPL-2.0' }
+    elseif ($t -match '(?i)GNU (AFFERO|LESSER)? *GENERAL PUBLIC LICENSE') { 'GPL' }
+    elseif ($t -match '(?i)Redistribution and use in source and binary forms') { 'BSD' }
+    elseif ($t -match '(?i)CC0|Creative Commons') { 'CC' }
+    else { 'unknown' }
+}
+function Lock-Rows([string]$dir) {
+    $f = Join-Path $dir 'third_party.lock'
+    if (-not (Test-Path -LiteralPath $f)) { return @() }
+    @((Read-Text $f) -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ -and -not $_.StartsWith('#') })
+}
+function Lock-Get([string]$dir, [string]$name) { foreach ($r in Lock-Rows $dir) { if ($r.Split("`t")[0] -eq $name) { return $r } }; $null }
+function Lock-Set([string]$dir, [string]$line) {
+    $n = $line.Split("`t")[0]
+    $rows = [string[]]@(@(Lock-Rows $dir | Where-Object { $_.Split("`t")[0] -ne $n }) + @($line))
+    [Array]::Sort($rows, [StringComparer]::Ordinal)
+    Write-Text (Join-Path $dir 'third_party.lock') ($LockHead + "`n" + ($rows -join "`n") + "`n")
+}
+function Cmd-Collect($rest) {
+    $arg = ''; $path = ''; $name = ''; $ref = ''; $to = ''; $force = $false
+    $r = @($rest | Where-Object { $_ })
+    for ($i = 0; $i -lt $r.Count; $i++) {
+        switch -CaseSensitive ($r[$i]) {
+            '--path' { if ($i + 1 -ge $r.Count) { Die '--path 後面要接 repo 裡的資料夾' }; $i++; $path = $r[$i] }
+            '--name' { if ($i + 1 -ge $r.Count) { Die '--name 後面要接名字' }; $i++; $name = $r[$i] }
+            '--ref' { if ($i + 1 -ge $r.Count) { Die '--ref 後面要接分支或 tag' }; $i++; $ref = $r[$i] }
+            '--to' { if ($i + 1 -ge $r.Count) { Die '--to 後面要接來源' }; $i++; $to = $r[$i] }
+            '--force' { $force = $true }
+            default { if ($r[$i].StartsWith('-')) { Die "不認得 $($r[$i])" }; if ($arg) { Die "多了一個參數：$($r[$i])" }; $arg = $r[$i] }
+        }
+    }
+    if (-not $arg) { Die '用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag]，或 kit collect <名字>（再收一次）' }
+    $dir = Target-Dir $to
+    Check-Maintainer $dir
+    if (Is-Url $arg) { $url = $arg }
+    else {
+        $line = Lock-Get $dir $arg; if (-not $line) { Die "$(Split-Path -Leaf $dir) 的 third_party.lock 裡沒有 ${arg}（第一次收要給網址）" }
+        $f = $line.Split("`t"); $name = $arg; $url = $f[1]
+        if (-not $path -and $f[2] -ne '.') { $path = $f[2] }
+        if (-not $ref -and $f[3] -ne '-') { $ref = $f[3] }
+    }
+    if (-not (Collect-Allowed $url $dir)) { Die "$(Url-Id $url) 不在 collect_sources（$(Split-Path -Leaf $dir)/kit.yaml），不能收" }
+    $real = "$(& git ls-remote --get-url $url 2>$null)"
+    if ($real -and $real -ne $url -and -not (Collect-Allowed $real $dir)) { Die "git 設定把 $url 改到 ${real}，不在 collect_sources" }
+    $path = $path.Replace('\', '/').Trim('/')
+    if ("/$path/" -match '/\.\.?/') { Die '--path 不能有 .. 或 .' }
+
+    $tmp = New-TempDir 'kit-collect.'
+    try {
+        $repo = Join-Path $tmp 'repo'
+        Say "從 $(Url-Id $url) 下載$(if ($ref) { "（$ref）" })…"
+        $ga = @('clone', '-q', '--depth', '1', '--no-recurse-submodules'); if ($ref) { $ga += @('--branch', $ref) }
+        $out = Git-Safe @($ga + @($url, $repo))
+        if ($LASTEXITCODE -ne 0) { foreach ($l in @($out)) { Warn "  $l" }; Die "沒辦法下載 $url" }
+        $sha = "$(& git -C $repo rev-parse HEAD)".Trim()
+        $repo = Full-Path $repo
+        $src = if ($path) { Join-Path $repo $path } else { $repo }
+        if (Test-Path -LiteralPath $src -PathType Container) { $src = Full-Path $src }
+        if (-not ($src + [IO.Path]::DirectorySeparatorChar).StartsWith($repo + [IO.Path]::DirectorySeparatorChar) -and $src -ne $repo) { Die '--path 要在 repo 裡面' }
+        if (-not (Test-Path -LiteralPath (Join-Path $src 'SKILL.md') -PathType Leaf)) { Die "$(Url-Id $url)$(if ($path) { "/$path" }) 裡沒有 SKILL.md（用 --path 指出 skill 的資料夾）" }
+        if (-not $name) { try { $name = @(YGet-From (Yaml-Lines (Join-Path $src 'SKILL.md') -Frontmatter) 'name')[0] } catch { $name = '' } }
+        if (-not $name) { $name = Split-Path -Leaf $src }
+        if (-not (Valid-Name $name)) { Die "名字 $name 不行（只能小寫英文、數字和 -），用 --name 給一個" }
+        $dst = Join-Path (Join-Path $dir 'skills') $name
+        if ((Test-Path -LiteralPath $dst) -and -not (Lock-Get $dir $name) -and -not $force) { Die "$(Split-Path -Leaf $dir) 已經有 skill:${name}，而且不是 collect 收的（要整份換掉加 --force，或用 --name 換名字）" }
+        $lic = $null
+        foreach ($d in @($src, $repo)) {
+            if ($lic) { break }
+            $lic = @(Get-ChildItem -LiteralPath $d -File -Force | Where-Object { $_.Name -cmatch '^(LICENSE|LICENCE|COPYING)' } | Sort-Object Name | Select-Object -First 1 | ForEach-Object { $_.FullName })[0]
+        }
+        if (-not $lic) { Die "$(Url-Id $url) 沒有 LICENSE，不知道能不能用，不收" }
+        $kind = License-Kind $lic
+        $outDir = Join-Path $tmp 'out'; Ensure-Dir $outDir
+        $scripts = @()
+        foreach ($e in @(Walk-Tree $src)) {
+            $rel = Rel-Path $src $e.FullName
+            if ("/$rel" -match '/\.') { continue }   # .github/, .claude-plugin/ ...: for other tools, not the skill
+            if (Is-Link $e) { Warn "跳過捷徑 $rel"; continue }
+            if ($e.PSIsContainer) { continue }
+            if ($e.Length -gt 0 -and (Is-Binary $e.FullName)) { Warn "跳過非文字檔 $rel"; continue }
+            $t = Join-Path $outDir $rel; Ensure-Dir (Split-Path -Parent $t); Copy-Item -LiteralPath $e.FullName -Destination $t
+            if ($rel -match '\.(sh|py|js|mjs|cjs|ts|ps1|rb|pl|bat|cmd)$') { $scripts += $rel }
+        }
+        $licName = Split-Path -Leaf $lic
+        if (-not (Test-Path -LiteralPath (Join-Path $outDir $licName))) { Copy-Item -LiteralPath $lic -Destination (Join-Path $outDir $licName) }
+        if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }
+        Ensure-Dir (Join-Path $dir 'skills')
+        Copy-Item -LiteralPath $outDir -Destination $dst -Recurse
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    $p2 = if ($path) { $path } else { '.' }; $r2 = if ($ref) { $ref } else { '-' }
+    Lock-Set $dir ((@($name, $url, $p2, $r2, $sha, $kind, (Get-Date -Format 'yyyy-MM-dd'))) -join "`t")
+    Say "已收 skill:$name ← $(Url-Id $url)$(if ($path) { "/$path" }) @ $($sha.Substring(0, 12))（授權 $kind）"
+    if ($kind -eq 'unknown') { Warn "認不出授權種類，請自己看 skills/$name/$licName" }
+    if ($kind -eq 'GPL') { Warn 'GPL 類授權：改了再發布要公開原始碼，請確認可以用' }
+    if ($scripts.Count -gt 0) { Warn "這個 skill 有會執行的檔案，送出前請看過： $($scripts -join ' ')" }
+    $script:Quiet2 = $true
+    if (-not (Check-Dirs @($dir) $false)) { Warn 'kit check 有問題，送出前請先打  kit check  看看' }
+    Say '下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR'
+}
+function Cmd-Outdated($rest) {
+    $to = ''; $r = @($rest | Where-Object { $_ })
+    for ($i = 0; $i -lt $r.Count; $i++) { if ($r[$i] -eq '--to' -and $i + 1 -lt $r.Count) { $i++; $to = $r[$i] } else { Die '用法：kit outdated [--to 來源]' } }
+    $dir = Target-Dir $to
+    Check-Maintainer $dir
+    if (-not (Test-Path -LiteralPath (Join-Path $dir 'third_party.lock'))) { Say "$(Split-Path -Leaf $dir) 沒有 third_party.lock（還沒用 kit collect 收過東西）"; return }
+    $new = 0
+    foreach ($row in Lock-Rows $dir) {
+        $f = $row.Split("`t"); $n = $f[0]; $url = $f[1]; $ref = $f[3]; $sha = $f[4]
+        if (-not (Collect-Allowed $url $dir)) { Warn "${n}：$(Url-Id $url) 已經不在 collect_sources，不檢查"; continue }
+        $now = ''
+        if ($ref -eq '-') {
+            foreach ($l in @(Git-Safe ls-remote $url HEAD)) { $p = "$l".Split("`t"); if ($p.Count -ge 2 -and $p[1] -eq 'HEAD') { $now = $p[0]; break } }
+        } else {
+            $b = ''; $t = ''; $pe = ''
+            foreach ($l in @(Git-Safe ls-remote $url "refs/heads/$ref" "refs/tags/$ref" "refs/tags/$ref^{}")) {
+                $p = "$l".Split("`t"); if ($p.Count -lt 2) { continue }
+                if ($p[1] -eq "refs/heads/$ref") { $b = $p[0] } elseif ($p[1] -eq "refs/tags/$ref^{}") { $pe = $p[0] } elseif ($p[1] -eq "refs/tags/$ref") { $t = $p[0] }
+            }
+            $now = if ($b) { $b } elseif ($pe) { $pe } else { $t }
+        }
+        if (-not $now) { Warn "${n}：連不到 $(Url-Id $url)" }
+        elseif ($now -eq $sha) { Say "  ${n}：最新（$($sha.Substring(0, 12))）" }
+        else { Say "  ${n}：有新版本 $($sha.Substring(0, 12)) → $($now.Substring(0, 12))，打  kit collect $n  收新的"; $new++ }
+    }
+    if ($new -gt 0) { Say "kit：$new 個有新版本" }
+}
+
 function Usage {
     Say @'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -1466,6 +1623,11 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit diff   [種類] <名字> --from 本機資料夾   比較
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
+
+維護者用（只收 kit.yaml 的 collect_sources 列的原作者）：
+  kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支]   收別人的 skill（保留 LICENSE）
+  kit collect <名字>                再收一次＝整份換成原作者的新版
+  kit outdated                      看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml
@@ -1497,6 +1659,8 @@ try {
         'diff' { Cmd-DiffUpdate 'diff' $rest }
         'update' { Cmd-DiffUpdate 'update' $rest }
         'check' { Cmd-Check $rest }
+        'collect' { Cmd-Collect $rest }
+        'outdated' { Cmd-Outdated $rest }
         'export-self' { Cmd-ExportSelf $rest }
         'ci-template' { Cmd-CiTemplate $rest }
         'push' { Cmd-Push $rest }

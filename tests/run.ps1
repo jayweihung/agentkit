@@ -514,6 +514,51 @@ Check 'uninstall: omp mcp.json byte-identical' { SameBytes "$T/omp.orig" "$H/.om
 Check 'uninstall: omp AGENTS.md (made by kit) gone' { -not (Test-Path "$H/.omp/agent/AGENTS.md") }
 Check 'uninstall: ~/.agents/skills emptied' { @(Get-ChildItem -Force "$H/.agents/skills" -ErrorAction SilentlyContinue).Count -eq 0 }
 
+# ---------- collect / outdated (other people's skills; a local repo plays the author) ----------
+function FileUrl([string]$p) { $p = $p.Replace('\', '/'); if ($p.StartsWith('/')) { "file://$p" } else { "file:///$p" } }
+function G { & git @args 2>&1 | Out-Null }
+$UP = Join-Path $T 'upstream'; $CO = Join-Path $T 'collector'; $NL = Join-Path $T 'nolic'
+W "$UP/skills/foo/SKILL.md" "---`nname: foo`ndescription: >-`n  Upstream foo.`n---`nfoo v1`n"
+W "$UP/skills/foo/scripts/run.sh" "echo hi`n"; W "$UP/skills/foo/.github/ci.yml" "x`n"
+[IO.File]::WriteAllBytes("$UP/skills/foo/logo.png", [byte[]](0, 1))
+$haveLink = $true; try { [void](New-Item -ItemType SymbolicLink -Path "$UP/skills/foo/link.md" -Target 'SKILL.md' -ErrorAction Stop) } catch { $haveLink = $false }
+W "$UP/LICENSE" "MIT License`n`nPermission is hereby granted, free of charge, ...`n"
+foreach ($r in $UP, $NL) { if ($r -eq $NL) { W "$NL/skills/bar/SKILL.md" "---`nname: bar`ndescription: b`n---`nb`n" }; G -C $r init -q; G -C $r config user.name a; G -C $r config user.email a@a; G -C $r add -A; G -C $r commit -qm v1 }
+W "$CO/kit.yaml" "name: collector`ncollect_sources: [$(FileUrl $UP), $(FileUrl $NL)]`n"
+Push-Location $CO
+Kit collect (FileUrl $UP) --path skills/foo
+Check "collect copies the skill with the repo's LICENSE" { $rc -eq 0 -and (Test-Path "$CO/skills/foo/SKILL.md") -and (ReadT "$CO/skills/foo/LICENSE") -match 'MIT License' -and (Test-Path "$CO/skills/foo/scripts/run.sh") }
+Check 'collect skips binaries, links and dot folders' { -not (Test-Path "$CO/skills/foo/logo.png") -and -not (Test-Path "$CO/skills/foo/link.md") -and -not (Test-Path "$CO/skills/foo/.github") }
+Check 'collect points at files that run' { $out -match '會執行的檔案' -and $out -match 'scripts/run.sh' }
+$v1 = "$(& git -C $UP rev-parse HEAD)".Trim()
+Check 'third_party.lock records author, commit, license' { @((ReadT "$CO/third_party.lock") -split "`n" | Where-Object { $f = $_.Split("`t"); $f[0] -eq 'foo' -and $f[1] -eq (FileUrl $UP) -and $f[2] -eq 'skills/foo' -and $f[4] -eq $v1 -and $f[5] -eq 'MIT' }).Count -eq 1 }
+Kit collect (FileUrl "$T/elsewhere")
+Check 'collect refuses authors not in collect_sources' { $rc -ne 0 -and $out -match '不在 collect_sources' }
+Kit collect (FileUrl $NL) --path skills/bar
+Check 'collect refuses a repo without a license' { $rc -ne 0 -and $out -match '沒有 LICENSE' -and -not (Test-Path "$CO/skills/bar") }
+W "$CO/skills/own/SKILL.md" "---`nname: own`ndescription: mine`n---`nmine`n"
+Kit collect (FileUrl $UP) --path skills/foo --name own
+Check 'collect will not replace your own skill without --force' { $rc -ne 0 -and (ReadT "$CO/skills/own/SKILL.md") -match 'mine' }
+Remove-Item -Recurse -Force "$CO/skills/own"
+Kit outdated
+Check 'outdated: up to date' { $out -match 'foo：最新' }
+Add-Content -LiteralPath "$UP/skills/foo/SKILL.md" 'foo v2'; G -C $UP commit -qam v2
+Kit outdated
+Check 'outdated: new version upstream' { $out -match 'foo：有新版本' -and $out -match 'kit collect foo' }
+Add-Content -LiteralPath "$CO/skills/foo/SKILL.md" 'local edit'
+Kit collect foo
+$v2 = "$(& git -C $UP rev-parse HEAD)".Trim()
+Check 'collect <name> replaces the whole copy with the new version' { $l = ReadT "$CO/third_party.lock"; $s = ReadT "$CO/skills/foo/SKILL.md"; $rc -eq 0 -and $s -match 'foo v2' -and $s -notmatch 'local edit' -and $l.Contains($v2) -and @($l -split "`n" | Where-Object { $_ -like "foo`t*" }).Count -eq 1 }
+G -C $UP tag -a v1.0 -m rel; Add-Content -LiteralPath "$UP/skills/foo/SKILL.md" 'foo v3'; G -C $UP commit -qam v3
+Kit collect foo --ref v1.0
+Check 'collect --ref takes a tag' { $rc -eq 0 -and (ReadT "$CO/skills/foo/SKILL.md") -notmatch 'foo v3' }
+Kit outdated
+Check 'outdated follows the tag, not the branch' { $out -match 'foo：最新' }
+Add-Content -LiteralPath "$CO/kit.yaml" 'maintainers: [someone-else]'
+Kit collect foo
+Check 'only maintainers may collect' { $rc -ne 0 -and $out -match '維護者' }
+Pop-Location
+
 # ---------- install.ps1 ----------
 $env:AGENTKIT_HOME = Join-Path $T 'inst'
 & $Exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'windows/install.ps1') -Quiet
