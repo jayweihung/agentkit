@@ -473,7 +473,7 @@ add_includes() { # add sources that a source includes but machine.yaml does not 
         write_machine "$(m_sources; printf '%s\n' "$more")" "$(m_added)" "$(m_removed)"
         while IFS= read -r s; do
             fetch_source "$s"
-            [ -n "${KIT_INIT:-}" ] || say "kit：加了來源 ${s}（$(basename "$(src_dir "$s")") 的 kit.yaml 引用它）"
+            [ -n "${KIT_INIT:-}" ] || say "kit：加了來源 ${s}（某個來源的 kit.yaml 引用它）"
         done <<EOF
 $more
 EOF
