@@ -160,6 +160,28 @@ Check 'run prompt has rule and body' { $p = ReadT (Join-Path $tmp 'prompt.md'); 
 Check 'run mcp json valid' { (JGet (Join-Path $tmp 'mcp.json') 'mcpServers.gerrit.command') -eq '"uvx"' }
 Remove-Item -Recurse -Force $tmp
 
+function Lines-After($key) { $script:lines | Where-Object { $_.StartsWith($key) } | Select-Object -First 1 | ForEach-Object { $_.Substring($key.Length) } }
+function Untoml([string]$v) { [regex]::Replace($v.Replace('\"', '"').Trim('"'), '\\u([0-9A-F]{4})', { param($m) [string][char][Convert]::ToInt32($m.Groups[1].Value, 16) }) }
+$env:KIT_DRY_RUN = '1'; Kit run gerrit --tool codex exec; Remove-Item env:KIT_DRY_RUN
+$lines = $out -split "`n" | ForEach-Object { $_.TrimEnd("`r") }
+$tmp = Lines-After 'tmp='
+$dev = Lines-After 'developer_instructions='; $srv = Lines-After 'mcp_servers.gerrit='
+Check 'codex run: one safe argument (no space or bare quote)' { $dev -and -not ($dev -match '\s') -and -not ($dev.Replace('\"', '') -match '"') -and -not ($srv -match '\s') }
+Check 'codex run: instructions decode to the prompt' { (Untoml $dev) -eq (ReadT (Join-Path $tmp 'prompt.md')) }
+Check 'codex run: instructions list skill path' { (Untoml $dev).Contains((Join-Path (Join-Path (Join-Path $tmp 'skills') 'gerrit-review') 'SKILL.md')) }
+Check 'codex run: deny -> disabled_tools, env kept' { $srv.Contains('disabled_tools=[\"submit_change\"]') -and (Untoml $srv).Contains('${HOME}/.config/gerrit') }
+Check 'codex run: warns tools.only, keeps user args' { $out.Contains('tools.only') -and ($lines -contains 'exec') }
+Remove-Item -Recurse -Force $tmp
+$env:KIT_DRY_RUN = '1'; Kit run gerrit --tool omp; Remove-Item env:KIT_DRY_RUN
+$lines = $out -split "`n" | ForEach-Object { $_.TrimEnd("`r") }
+$tmp = Lines-After 'tmp='
+Check 'omp run: config overlay points at skills' { (ReadT (Join-Path $tmp 'omp.yml')).Contains((Join-Path $tmp 'skills').Replace('\', '\\')) -and (Test-Path (Join-Path $tmp 'skills/gerrit-review/SKILL.md')) }
+Check 'omp run: prompt + lowercase tools' { ($lines -contains '--append-system-prompt') -and ($lines -contains 'read,grep,glob') }
+Check 'omp run: warns no per-agent mcp' { $out.Contains('kit add mcp') }
+Remove-Item -Recurse -Force $tmp
+Kit run gerrit --tool vim
+Check 'run rejects unknown tool' { $rc -ne 0 }
+
 # ---------- auto sync when Claude starts ----------
 [IO.File]::AppendAllText("$TEAM/skills/gerrit-review/SKILL.md", "hook change`n")
 $sw = [Diagnostics.Stopwatch]::StartNew(); Kit sync --hook; $sw.Stop()

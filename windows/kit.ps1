@@ -691,21 +691,40 @@ function Cmd-AddRm([string]$verb, $rest) {
     Write-Machine (M-Sources) $added $removed
     Apply-All
 }
+function Arg-TomlStr([string]$s) { # a TOML string safe to pass as ONE argument on every Windows shell:
+    # no spaces, quotes, backslashes or % inside (all written as \uXXXX); outer quotes as \" for the C runtime
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $s.ToCharArray()) {
+        if ([int]$ch -gt 127 -or $ch -match '[A-Za-z0-9_.,:/()\[\]{}=+@#-]') { [void]$sb.Append($ch) }
+        else { [void]$sb.Append(('\u{0:X4}' -f [int]$ch)) }
+    }
+    '\"' + $sb.ToString() + '\"'
+}
+function Arg-TomlKey([string]$k) { if ($k -match '^[A-Za-z0-9_-]+$') { $k } else { Arg-TomlStr $k } }
 function Cmd-Run($rest) {
     $rest = @($rest)
-    if ($rest.Count -lt 1) { Die '用法：kit run <agent> [claude 的參數...]' }
+    if ($rest.Count -lt 1) { Die '用法：kit run <agent> [--tool claude|codex|omp] [工具的參數...]' }
     Need-Init
-    $name = $rest[0]; $extra = if ($rest.Count -gt 1) { $rest[1..($rest.Count - 1)] } else { @() }
+    $name = $rest[0]; $extra = if ($rest.Count -gt 1) { @($rest[1..($rest.Count - 1)]) } else { @() }
+    $tool = 'claude'
+    if ($extra.Count -gt 0 -and $extra[0] -eq '--tool') {
+        if ($extra.Count -lt 2) { Die '--tool 後面要接 claude、codex 或 omp' }
+        $tool = $extra[1]; $extra = if ($extra.Count -gt 2) { @($extra[2..($extra.Count - 1)]) } else { @() }
+    }
+    if (@('claude', 'codex', 'omp') -notcontains $tool) { Die '--tool 只能是 claude、codex 或 omp' }
     $f = Find-Item 'agent' $name; if (-not $f) { Die "找不到 agent ${name}（打 kit list 看有哪些）" }
     $script:Quiet = $true; try { Cmd-Sync } catch { }; $script:Quiet = $false
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('kit-run.' + [IO.Path]::GetRandomFileName())
-    Ensure-Dir (Join-Path $tmp '.claude/skills')
+    $skdir = if ($tool -eq 'claude') { Join-Path $tmp '.claude/skills' } else { Join-Path $tmp 'skills' }
+    Ensure-Dir $skdir
     $fm = $null
     try { $fm = Yaml-Lines $f -Frontmatter } catch { Die "bad header in $f" }
+    $skills = @()
     foreach ($n in YGet-From $fm 'skills') {
         $p = Find-Item 'skill' $n; if (-not $p) { Warn "skill $n not found"; continue }
-        Copy-Item -LiteralPath (Split-Path -Parent $p) -Destination (Join-Path $tmp ".claude/skills/$n") -Recurse
+        Copy-Item -LiteralPath (Split-Path -Parent $p) -Destination (Join-Path $skdir $n) -Recurse
+        $skills += $n
     }
     $sb = New-Object System.Text.StringBuilder
     foreach ($n in YGet-From $fm 'rules') {
@@ -713,20 +732,61 @@ function Cmd-Run($rest) {
         [void]$sb.Append((Read-Text $p)).Append("`n")
     }
     $c = 0; foreach ($l in (Read-Text $f) -split "`n") { if ($c -ge 2) { [void]$sb.Append($l.TrimEnd("`r")).Append("`n") }; if ($l.TrimEnd("`r") -eq '---') { $c++ } }
-    Write-Text (Join-Path $tmp 'prompt.md') $sb.ToString()
-    $mcps = @(foreach ($n in YGet-From $fm 'mcp') {
-        $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
-        $k = Mcp-Json $p; if ($k) { (Json-Str $n) + ':' + $k }
-    })
-    Write-Text (Join-Path $tmp 'mcp.json') ('{"mcpServers":{' + ($mcps -join ',') + "}}`n")
+    if ($tool -eq 'codex' -and $skills.Count -gt 0) {
+        # Codex cannot load skills from an extra folder: list them, it reads one when needed
+        [void]$sb.Append("`n## Skills`nSkills you have. Before doing a task one of them covers, read its SKILL.md and follow it.`n")
+        foreach ($n in $skills) {
+            $sk = Join-Path (Join-Path $skdir $n) 'SKILL.md'; $desc = ''
+            try { $desc = @(YGet-From (Yaml-Lines $sk -Frontmatter) 'description')[0] } catch { }
+            [void]$sb.Append("- ${n}: $desc ($sk)`n")
+        }
+    }
+    $prompt = $sb.ToString()
+    Write-Text (Join-Path $tmp 'prompt.md') $prompt
+    $only = @(YGet-From $fm 'tools.only'); $deny = @(YGet-From $fm 'tools.deny')
+    $mcpNames = @(YGet-From $fm 'mcp')
 
     $a = New-Object System.Collections.Generic.List[string]
-    $a.AddRange([string[]]@('--add-dir', $tmp, '--append-system-prompt-file', (Join-Path $tmp 'prompt.md'), '--mcp-config', (Join-Path $tmp 'mcp.json')))
-    $only = @(YGet-From $fm 'tools.only'); if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add($only -join ',') }
-    foreach ($d in YGet-From $fm 'tools.deny') { $a.Add('--disallowedTools'); $a.Add($d) }
+    switch ($tool) {
+        'claude' {
+            $mcps = @(foreach ($n in $mcpNames) {
+                $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
+                $k = Mcp-Json $p; if ($k) { (Json-Str $n) + ':' + $k }
+            })
+            Write-Text (Join-Path $tmp 'mcp.json') ('{"mcpServers":{' + ($mcps -join ',') + "}}`n")
+            $a.AddRange([string[]]@('--add-dir', $tmp, '--append-system-prompt-file', (Join-Path $tmp 'prompt.md'), '--mcp-config', (Join-Path $tmp 'mcp.json')))
+            if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add($only -join ',') }
+            foreach ($d in $deny) { $a.Add('--disallowedTools'); $a.Add($d) }
+        }
+        'codex' {
+            $a.Add('-c'); $a.Add('developer_instructions=' + (Arg-TomlStr $prompt))
+            foreach ($n in $mcpNames) {
+                $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
+                $y = Yaml-Lines $p; $cmd = @(YGet-From $y 'command')
+                if ($cmd.Count -eq 0 -or -not $cmd[0]) { Warn "$p has no command"; continue }
+                $v = '{command=' + (Arg-TomlStr $cmd[0])
+                $args2 = @(YGet-From $y 'args'); if ($args2.Count -gt 0) { $v += ',args=[' + ((@($args2) | ForEach-Object { Arg-TomlStr $_ }) -join ',') + ']' }
+                $envs = @(Mcp-Env $y); if ($envs.Count -gt 0) { $v += ',env={' + ((@($envs) | ForEach-Object { (Arg-TomlKey $_[0]) + '=' + (Arg-TomlStr $_[1]) }) -join ',') + '}' }
+                $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Arg-TomlStr $d.Substring("mcp__${n}__".Length) } })
+                if ($tools.Count -gt 0) { $v += ',disabled_tools=[' + ($tools -join ',') + ']' }
+                $a.Add('-c'); $a.Add("mcp_servers.$(Arg-TomlKey $n)=$v}")
+            }
+            if ($only.Count -gt 0) { Warn 'Codex 不能只開某些內建工具，tools.only 這次不套用' }
+            if (@($deny | Where-Object { -not $_.StartsWith('mcp__') }).Count -gt 0) { Warn 'Codex 只能禁用 MCP 的工具，其他的 tools.deny 這次不套用' }
+        }
+        'omp' {
+            Write-Text (Join-Path $tmp 'omp.yml') ("skills:`n  customDirectories:`n    - " + (Json-Str $skdir) + "`n")
+            $a.AddRange([string[]]@('--config', (Join-Path $tmp 'omp.yml'), '--append-system-prompt', (Join-Path $tmp 'prompt.md')))
+            if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add(($only -join ',').ToLowerInvariant()) }
+            if ($mcpNames.Count -gt 0) { Warn 'omp 不能在啟動時加 MCP：這個 agent 的 MCP 請用  kit add mcp <名字>  加到全域' }
+            if ($deny.Count -gt 0) { Warn 'omp 不能禁用單一工具，tools.deny 這次不套用' }
+        }
+    }
     foreach ($x in $extra) { $a.Add($x) }
-    if ($env:KIT_DRY_RUN) { Say 'claude'; foreach ($x in $a) { Say $x }; Say "tmp=$tmp"; return }
-    & claude @($a.ToArray())
+    if ($env:KIT_DRY_RUN) { Say $tool; foreach ($x in $a) { Say $x }; Say "tmp=$tmp"; return }
+    # the same quoting rules on PowerShell 5.1 and 7 (Arg-TomlStr is written for them)
+    $PSNativeCommandArgumentPassing = 'Legacy'
+    & $tool @($a.ToArray())
     $rc = $LASTEXITCODE
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     exit $rc
@@ -783,7 +843,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit list                          有哪些、你在用哪些、哪些是新的
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
-  kit run <agent> [claude 的參數]   開一個做好的 agent
+  kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent
   kit sync [--force]                現在更新（kit run 會自動做）
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）

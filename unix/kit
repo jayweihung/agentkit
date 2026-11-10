@@ -485,49 +485,114 @@ cmd_add_rm() {
     apply_claude
 }
 
+toml_str() { # quote a string for TOML (a basic string; newlines escaped)
+    local s=$1
+    s=${s//\\/\\\\}; s=${s//\"/\\\"}
+    s=${s//$TAB/\\t}; s=${s//$'\r'/\\r}; s=${s//$'\n'/\\n}
+    printf '"%s"' "$s"
+}
+
+mcp_toml_inline() { # mcp_toml_inline FILE NAME -> {command="..", args=[..], env={..}, disabled_tools=[..]}
+    local f=$1 n=$2 cmd out a first t k v
+    cmd=$(yget "$f" command); [ -n "$cmd" ] || { warn "$f has no command"; return 1; }
+    out="{command=$(toml_str "$cmd")"
+    first=1; a=""
+    while IFS= read -r v; do [ -n "$v" ] || continue; [ $first = 1 ] || a="$a, "; first=0; a="$a$(toml_str "$v")"; done <<EOF
+$(yget "$f" args)
+EOF
+    [ -n "$a" ] && out="$out, args=[$a]"
+    first=1; a=""
+    while IFS="$TAB" read -r k v; do [ -n "$k" ] || continue; [ $first = 1 ] || a="$a, "; first=0; a="$a$(toml_key "$k")=$(toml_str "$v")"; done <<EOF
+$(yaml "$f" | awk -F'\t' '$1 ~ /^env\./ { k = substr($1, 5); sub(/^[^\t]*\t/, ""); print k "\t" $0 }')
+EOF
+    [ -n "$a" ] && out="$out, env={$a}"
+    printf '%s}' "$out"
+}
+
 cmd_run() {
-    [ $# -ge 1 ] || die "用法：kit run <agent> [claude 的參數...]"
+    [ $# -ge 1 ] || die "用法：kit run <agent> [--tool claude|codex|omp] [工具的參數...]"
     need_init
     local name=$1; shift
+    local tool=claude
+    if [ "${1:-}" = --tool ]; then tool=${2:-}; shift 2 || die "--tool 後面要接 claude、codex 或 omp"; fi
+    case $tool in claude|codex|omp) ;; *) die "--tool 只能是 claude、codex 或 omp";; esac
     local f; f=$(find_item agent "$name") || die "找不到 agent ${name}（打 kit list 看有哪些）"
     QUIET=1 cmd_sync 2>/dev/null || true
 
     local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-run.XXXXXX")
-    mkdir -p "$tmp/.claude/skills"
-    local n p
+    local n p d k
     local fm; fm=$(LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$f") || die "bad header in $f"
     fmget() { printf '%s\n' "$fm" | awk -F'\t' -v p="$1" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
 
+    # the agent's skills, each in its own folder
+    local skdir="$tmp/skills"; [ $tool = claude ] && skdir="$tmp/.claude/skills"
+    mkdir -p "$skdir"
     for n in $(fmget skills); do
         p=$(find_item skill "$n") || { warn "skill $n not found"; continue; }
-        cp -R "$(dirname "$p")" "$tmp/.claude/skills/$n"
+        cp -R "$(dirname "$p")" "$skdir/$n"
     done
+    # the agent's rules + its prompt
     {
         for n in $(fmget rules); do
             p=$(find_item rule "$n") || { warn "rule $n not found"; continue; }
             cat "$p"; echo
         done
         awk 'c >= 2 { print } /^---$/ { c++ }' "$f"
+        if [ $tool = codex ] && [ -n "$(ls "$skdir")" ]; then
+            # Codex cannot load skills from an extra folder: list them, it reads one when needed
+            echo; echo "## Skills"
+            echo "Skills you have. Before doing a task one of them covers, read its SKILL.md and follow it."
+            for d in "$skdir"/*/; do
+                n=$(basename "$d")
+                printf -- '- %s: %s (%sSKILL.md)\n' "$n" "$(LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$d/SKILL.md" 2>/dev/null | awk -F'\t' '$1 == "description" { print $2 }')" "$d"
+            done
+        fi
     } > "$tmp/prompt.md"
-    local mcps="" k first=1
-    for n in $(fmget mcp); do
-        p=$(find_item mcp "$n") || { warn "mcp $n not found"; continue; }
-        k=$(mcp_json "$p") || continue
-        [ $first = 1 ] || mcps="$mcps,"; first=0
-        mcps="$mcps$(json_str "$n"):$k"
-    done
-    printf '{"mcpServers":{%s}}\n' "$mcps" > "$tmp/mcp.json"
+    local only deny; only=$(fmget tools.only | paste -sd, -); deny=$(fmget tools.deny)
 
-    local args=(--add-dir "$tmp" --append-system-prompt-file "$tmp/prompt.md" --mcp-config "$tmp/mcp.json")
-    local only; only=$(fmget tools.only | paste -sd, -)
-    [ -n "$only" ] && args+=(--tools "$only")
-    local d
-    while IFS= read -r d; do [ -n "$d" ] && args+=(--disallowedTools "$d"); done <<EOF
-$(fmget tools.deny)
+    local args=()
+    case $tool in
+    claude)
+        local mcps="" first=1
+        for n in $(fmget mcp); do
+            p=$(find_item mcp "$n") || { warn "mcp $n not found"; continue; }
+            k=$(mcp_json "$p") || continue
+            [ $first = 1 ] || mcps="$mcps,"; first=0
+            mcps="$mcps$(json_str "$n"):$k"
+        done
+        printf '{"mcpServers":{%s}}\n' "$mcps" > "$tmp/mcp.json"
+        args=(--add-dir "$tmp" --append-system-prompt-file "$tmp/prompt.md" --mcp-config "$tmp/mcp.json")
+        [ -n "$only" ] && args+=(--tools "$only")
+        while IFS= read -r d; do [ -n "$d" ] && args+=(--disallowedTools "$d"); done <<EOF
+$deny
 EOF
+        ;;
+    codex)
+        args=(-c "developer_instructions=$(toml_str "$(cat "$tmp/prompt.md")")")
+        for n in $(fmget mcp); do
+            p=$(find_item mcp "$n") || { warn "mcp $n not found"; continue; }
+            k=$(mcp_toml_inline "$p" "$n") || continue
+            local t="" first=1
+            while IFS= read -r d; do case $d in "mcp__${n}__"*) [ $first = 1 ] || t="$t, "; first=0; t="$t$(toml_str "${d#mcp__${n}__}")";; esac; done <<EOF
+$deny
+EOF
+            [ -n "$t" ] && k="${k%\}}, disabled_tools=[$t]}"
+            args+=(-c "mcp_servers.$(toml_key "$n")=$k")
+        done
+        [ -n "$only" ] && warn "Codex 不能只開某些內建工具，tools.only 這次不套用"
+        printf '%s\n' "$deny" | grep -qv '^mcp__' && [ -n "$deny" ] && warn "Codex 只能禁用 MCP 的工具，其他的 tools.deny 這次不套用"
+        ;;
+    omp)
+        printf 'skills:\n  customDirectories:\n    - %s\n' "$(toml_str "$skdir")" > "$tmp/omp.yml"
+        args=(--config "$tmp/omp.yml" --append-system-prompt "$tmp/prompt.md")
+        [ -n "$only" ] && args+=(--tools "$(printf '%s' "$only" | tr 'A-Z' 'a-z')")
+        [ -n "$(fmget mcp)" ] && warn "omp 不能在啟動時加 MCP：這個 agent 的 MCP 請用  kit add mcp <名字>  加到全域"
+        [ -n "$deny" ] && warn "omp 不能禁用單一工具，tools.deny 這次不套用"
+        ;;
+    esac
     set -- "${args[@]}" "$@"
-    [ -n "${KIT_DRY_RUN:-}" ] && { printf '%s\n' claude "$@"; printf 'tmp=%s\n' "$tmp"; return 0; }
-    claude "$@"
+    [ -n "${KIT_DRY_RUN:-}" ] && { printf '%s\n' "$tool" "$@"; printf 'tmp=%s\n' "$tmp"; return 0; }
+    "$tool" "$@"
     local rc=$?
     rm -rf "$tmp"
     return $rc
@@ -577,7 +642,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit list                          有哪些、你在用哪些、哪些是新的
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
-  kit run <agent> [claude 的參數]   開一個做好的 agent
+  kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）

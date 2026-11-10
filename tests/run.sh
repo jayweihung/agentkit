@@ -127,6 +127,26 @@ check "run prompt has rule and body" 'grep -q "Only comment" "$tmp/prompt.md" &&
 check "run mcp json valid" 'LC_ALL=C awk -f "$JA" "$tmp/mcp.json" >/dev/null && grep -q gerrit-mcp-server "$tmp/mcp.json"'
 rm -rf "$tmp"
 
+out=$(KIT_DRY_RUN=1 kit run gerrit --tool codex exec 2>&1)
+tmp=$(echo "$out" | sed -n 's/^tmp=//p')
+dev=$(echo "$out" | sed -n 's/^developer_instructions=//p')
+srv=$(echo "$out" | sed -n 's/^mcp_servers\.gerrit=//p')
+check "codex run: instructions have rule, body, skill path" 'echo "$dev" | grep -q "Only comment" && echo "$dev" | grep -q "Gerrit helper" && echo "$dev" | grep -qF "$tmp/skills/gerrit-review/SKILL.md"'
+check "codex run: values are valid TOML" 'printf "a = %s\nb = %s\n" "$dev" "$srv" | python3 -c "import sys,tomllib; d=tomllib.loads(sys.stdin.read()); assert d[\"b\"][\"command\"]==\"uvx\"" 2>/dev/null'
+check "codex run: deny -> disabled_tools" 'echo "$srv" | grep -qF "disabled_tools=[\"submit_change\"]"'
+check "codex run: env not expanded" 'echo "$srv" | grep -qF "\${HOME}/.config/gerrit"'
+check "codex run: warns tools.only, keeps user args" 'echo "$out" | grep -q "tools.only" && echo "$out" | grep -qx exec'
+rm -rf "$tmp"
+
+out=$(KIT_DRY_RUN=1 kit run gerrit --tool omp 2>&1)
+tmp=$(echo "$out" | sed -n 's/^tmp=//p')
+check "omp run: config overlay points at skills" 'grep -qF "$tmp/skills" "$tmp/omp.yml" && [ -f "$tmp/skills/gerrit-review/SKILL.md" ]'
+check "omp run: prompt + lowercase tools" 'echo "$out" | grep -qx -- --append-system-prompt && echo "$out" | grep -qx "read,grep,glob"'
+check "omp run: warns no per-agent mcp" 'echo "$out" | grep -q "kit add mcp"'
+rm -rf "$tmp"
+out=$(kit run gerrit --tool vim 2>&1); rc=$?
+check "run rejects unknown tool" '[ $rc -ne 0 ]'
+
 # ---------- auto sync when Claude starts ----------
 check "SessionStart hook added" 'jget "$HOME/.claude/settings.json" hooks.SessionStart | grep -qF "sync --hook"'
 check "hook added once" '[ "$(jget "$HOME/.claude/settings.json" hooks.SessionStart | grep -c "sync --hook")" = 1 ]'

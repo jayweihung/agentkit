@@ -28,7 +28,7 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
     kit list                      有哪些、在用哪些
     kit add skill <名字>          開始用
     kit rm  skill <名字>          不用了
-    kit run <agent>               開一個做好的 agent
+    kit run <agent> [--tool codex|omp]   開一個做好的 agent（預設 Claude）
     kit sync                      更新
     kit self-update               更新 kit 本身
     kit uninstall [--self]        移除
@@ -42,7 +42,13 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | 不支援 |
 
 改 JSON 前會留一份 `.kit-backup`。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。
-`kit run <agent>` 目前只支援 Claude。
+`kit run <agent>` 只在這次啟動時帶入 agent 的東西，不改設定檔：
+
+| | rule + 提示 | skill | MCP | tools.only | tools.deny |
+|---|---|---|---|---|---|
+| Claude | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Codex | ✅ | ✅（列在提示裡，用到時才讀） | ✅ | ✗ | 只限 MCP 工具 |
+| omp | ✅ | ✅ | ✗（要用 `kit add mcp` 加到全域） | ✅ | ✗ |
 
 ## 測試
 
