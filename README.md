@@ -14,7 +14,13 @@ macOS：同上。內建的 bash 3.2 和 awk 就夠，不用 Homebrew。
 若還沒有 git，先打 `xcode-select --install`。PATH 會加進你的 shell 會讀的檔
 （zsh → `~/.zshrc`，bash → `~/.bash_profile`）。
 
-Windows：之後提供（PowerShell 版）。
+Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
+
+    git clone <這個 repo 的網址> %USERPROFILE%\src\agentkit
+    powershell -NoProfile -ExecutionPolicy Bypass -File %USERPROFILE%\src\agentkit\windows\install.ps1
+
+裝到 `%LOCALAPPDATA%\Programs\agentkit`，並加進你的 PATH（開新的終端機後生效）。
+在 cmd 和 PowerShell 都是打 `kit`。
 
 ## 使用
 
@@ -42,3 +48,4 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 
     tests/json_test.sh
     tests/run.sh          在暫時的 HOME 裡跑，不會動到你的設定
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests\run.ps1    （Windows 版）
