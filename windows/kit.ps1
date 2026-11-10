@@ -669,8 +669,9 @@ function Includes { # include: entries of every source; a local path is relative
 }
 function Add-Includes([bool]$quietly = $false) { # add sources that a source includes but machine.yaml does not list yet (also chains)
     for ($n = 0; $n -lt 5; $n++) {
-        $have = @(M-Sources)
-        $more = @(@(Includes) | Where-Object { $_ -and $have -notcontains $_ })
+        $have = @(M-Sources); $dirs = @(Src-Dirs)
+        # skip includes that are already a source (same URL, or the same folder as a clone)
+        $more = @(@(Includes) | Where-Object { $_ -and $have -notcontains $_ -and $dirs -notcontains (Src-Dir $_) })
         if ($more.Count -eq 0) { return }
         Write-Machine (Uniq (@($have) + @($more))) @(M-Added) @(M-Removed)
         foreach ($s in $more) {

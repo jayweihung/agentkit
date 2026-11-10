@@ -468,7 +468,8 @@ includes() { # include: entries of every source; a local path is relative to the
 add_includes() { # add sources that a source includes but machine.yaml does not list yet (also chains)
     local more s n
     for n in 1 2 3 4 5; do
-        more=$(includes | grep -vxF -f <(m_sources; echo '##none##'))
+        # skip includes that are already a source (same URL, or the same folder as a clone)
+        more=$(includes | while IFS= read -r s; do src_dirs | grep -qxF "$(src_dir "$s")" || printf '%s\n' "$s"; done | grep -vxF -f <(m_sources; echo '##none##'))
         [ -n "$more" ] || return 0
         write_machine "$(m_sources; printf '%s\n' "$more")" "$(m_added)" "$(m_removed)"
         while IFS= read -r s; do

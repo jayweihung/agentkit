@@ -243,6 +243,18 @@ Check 'sync keeps what you added' { @((ReadT $mf) -split "`n" | Where-Object { $
 Check 'items of the new source are announced' { $out.Contains('rule:extra-rule') }
 Kit sync
 Check 'include added only once' { @([regex]::Matches((ReadT $mf), 'extra-src')).Count -eq 1 }
+# a clone of a URL source sits in ~/agentkit/<name>; an include pointing at that folder is the same source
+W "$T/lc/rules/lc.md" "x`n"
+& git -C "$T/lc" init -q; & git -C "$T/lc" add -A; & git -C "$T/lc" -c user.name=t -c user.email=t@t commit -qm x; & git clone -q --bare "$T/lc" "$T/lc.git" 2>$null
+& git clone -q "$T/lc.git" "$H/agentkit/lib-clone" 2>$null
+$mback = ReadT $mf
+W $mf ($mback -replace '(?m)^sources:.*$', "`$0`n  - https://gitea.example/team/lib-clone.git")
+$kback = ReadT "$TEAM/kit.yaml"
+$lc = (Resolve-Path -LiteralPath "$H/agentkit/lib-clone").ProviderPath
+W "$TEAM/kit.yaml" ($kback -replace '(?m)^include: \[(.*)\]', "include: [`$1, $lc]")
+Kit sync
+Check "include of a cloned source's folder is not added twice" { $rc -eq 0 -and @([regex]::Matches((ReadT $mf), 'lib-clone')).Count -eq 1 -and $out.Contains('rule:lc') }
+W "$TEAM/kit.yaml" $kback; W $mf $mback; Remove-Item -Recurse -Force "$H/agentkit/lib-clone"
 
 # ---------- allowed_hosts ----------
 Kit init $TEAM 'https://public-git.example/someone/agentkit-library.git'
