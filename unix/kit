@@ -122,7 +122,9 @@ src_dir() { # local checkout of a source
 }
 src_dirs() { m_sources | while IFS= read -r s; do src_dir "$s"; done; }
 
-allowed_hosts() { src_dirs | while IFS= read -r d; do yget "$d/kit.yaml" allowed_hosts; done | awk 'NF && !seen[$0]++'; }
+allowed_hosts() { # from the configured sources (+ the source kit push sends from)
+    { [ -f "$MACHINE" ] && src_dirs; [ -n "${PUSH_DIR:-}" ] && printf '%s\n' "$PUSH_DIR"; } | while IFS= read -r d; do yget "$d/kit.yaml" allowed_hosts; done | awk 'NF && !seen[$0]++'
+}
 
 check_host() { # refuse URLs whose host is not allowed
     local url=$1 hosts h
@@ -885,6 +887,134 @@ EOF
     fi
     if check_dirs "${dirs[@]}"; then say "kit check：沒問題（${#dirs[@]} 個來源）"; else printf 'kit check：%s 個問題\n' "$PROBLEMS" >&2; exit 1; fi
 }
+
+# ---------- push: send your changes in a source to Gitea as a pull request ----------
+url_path() { # owner/repo of a git URL or folder (last two parts, no .git)
+    printf '%s\n' "$1" | sed -E 's#^[a-z+]+://[^/]*/##; s#^[^/]*@[^:/]*:##; s#/+$##; s#\.git$##' | awk -F/ '{ if (NF >= 2) print $(NF-1) "/" $NF; else print $NF }'
+}
+push_items() { # changed item files (one per line) -> verb<TAB>kind:name, one per item
+    local f k n p
+    while IFS= read -r f; do
+        case $f in
+            rules/*.md) k=rule; n=${f#rules/}; n=${n%.md}; p=$f;;
+            skills/*/*) k=skill; n=${f#skills/}; n=${n%%/*}; p=skills/$n/SKILL.md;;
+            mcp/*.yaml) k=mcp; n=${f#mcp/}; n=${n%.yaml}; p=$f;;
+            agents/*.md) k=agent; n=${f#agents/}; n=${n%.md}; p=$f;;
+            *) continue;;
+        esac
+        if git cat-file -e "HEAD:$p" 2>/dev/null; then
+            if [ -e "$p" ]; then printf 'update\t%s:%s\n' "$k" "$n"; else printf 'remove\t%s:%s\n' "$k" "$n"; fi
+        else printf 'add\t%s:%s\n' "$k" "$n"; fi
+    done | awk -F'\t' '!seen[$2]++'
+}
+token_file_ok() { # warn when the token file can be read by others
+    local m; m=$(ls -l "$1" 2>/dev/null | cut -c5-10)
+    [ "$m" = "------" ] || warn "${1} 的權限太開放了，請打  chmod 600 $1"
+}
+cmd_push() {
+    local to="" dry=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --to) to=${2:-}; shift 2 || die "--to 後面要接來源";;
+            --dry-run) dry=1; shift;;
+            *) die "用法：kit push [--to 來源] [--dry-run]";;
+        esac
+    done
+    local dir; dir=$(target_dir "$to") || exit 1
+    cd "$dir" || die "找不到 $dir"
+    [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || die "$(basename "$dir") 不是 git repo（要先 git clone 團隊來源）"
+    PUSH_DIR=$(pwd -P)
+
+    # what changed: only item files are sent
+    local all files items other
+    all=$(git -c core.quotePath=false status --porcelain --untracked-files=all | cut -c4- | sed 's/.* -> //')
+    files=$(printf '%s\n' "$all" | grep -E '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md)$')
+    other=$(printf '%s\n' "$all" | grep -vxF -f <(printf '%s\n' "$files"; echo '##none##') | awk 'NF')
+    [ -n "$files" ] || { say "沒有要送的（$(basename "$dir") 裡沒有改過的 rule、skill、mcp、agent）"; return 0; }
+    items=$(printf '%s\n' "$files" | push_items)
+    [ -n "$other" ] && warn "這些不是 rule、skill、mcp、agent，不會送：$(printf '%s' "$other" | paste -sd' ' -)"
+
+    # checks: any problem stops everything
+    check_dirs "$PUSH_DIR" || die "kit check 有問題，什麼都沒送（改好再 kit push）"
+    local doms email
+    doms=$(yget kit.yaml author_domains)
+    if [ -n "$doms" ]; then
+        email=$(git config user.email)
+        printf '%s\n' "$doms" | grep -qxF "${email##*@}" || die "git 的 user.email 不是公司網域（要是 $(printf '%s' "$doms" | paste -sd' ' -)），什麼都沒送。請打  git config user.email 你的公司信箱"
+    fi
+    local origin; origin=$(git remote get-url origin 2>/dev/null) || die "$(basename "$dir") 沒有 origin，不知道要送到哪"
+    check_host "$origin"
+    local api web owner_repo
+    owner_repo=$(url_path "$origin")
+    if [ -n "${KIT_GITEA_API:-}" ]; then api=${KIT_GITEA_API%/}; check_host "$api"; web=${api%/api/v1}
+    elif is_url "$origin"; then web="https://$(url_host "$origin")"; api="$web/api/v1"
+    else api=""; web=""
+    fi
+
+    # branch: kit/<names>-YYYYMMDD, -2, -3 ... when taken
+    local names base b i=1 remote
+    names=$(printf '%s\n' "$items" | cut -f2 | sed 's/^[^:]*://' | paste -sd- - | cut -c1-40 | sed 's/-*$//')
+    base="kit/${names}-$(date +%Y%m%d)"; b=$base
+    remote=$(git_safe ls-remote --heads origin 2>/dev/null | awk '{ sub(/^refs\/heads\//, "", $2); print $2 }')
+    while git show-ref --verify -q "refs/heads/$b" || printf '%s\n' "$remote" | grep -qxF "$b"; do i=$((i+1)); b="$base-$i"; done
+    local into; into=$(git symbolic-ref --short -q refs/remotes/origin/HEAD); into=${into#origin/}; [ -n "$into" ] || into=main
+    local msg="" v
+    for v in add update remove; do
+        local l; l=$(printf '%s\n' "$items" | awk -F'\t' -v v="$v" '$1 == v { print $2 }' | paste -sd, - | sed 's/,/, /g')
+        [ -n "$l" ] && msg="${msg:+$msg; }$v $l"
+    done
+    msg="kit: $msg"
+
+    say "要送的檔案（$(basename "$dir")）："
+    printf '%s\n' "$files" | sed 's/^/  /'
+    say "分支：${b}（PR 到 ${into}）"
+    say "commit：${msg}"
+    [ -n "$dry" ] && { say "（--dry-run：沒有 commit，沒有送）"; return 0; }
+
+    # commit on the new branch, then go back to where you were
+    # the branch starts from origin's base, so unpushed local commits are never sent
+    local orig start=HEAD; orig=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
+    git_safe fetch -q --no-recurse-submodules origin "+refs/heads/$into:refs/remotes/origin/$into" 2>/dev/null || warn "沒辦法更新 origin/${into}（沒網路？）"
+    git rev-parse -q --verify "refs/remotes/origin/$into" >/dev/null && start="refs/remotes/origin/$into"
+    git checkout -q -b "$b" "$start" || die "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送"
+    local list=() f
+    while IFS= read -r f; do list+=("$f"); done <<EOF
+$files
+EOF
+    if ! { git add -A -- "${list[@]}" && git commit -q -m "$msg" -- "${list[@]}"; }; then
+        git checkout -q "$orig"; git branch -q -D "$b" 2>/dev/null
+        die "commit 失敗，什麼都沒送"
+    fi
+    git checkout -q "$orig" || warn "沒辦法切回 ${orig}，你現在在 $b"
+    git_safe push -q --no-recurse-submodules origin "refs/heads/$b:refs/heads/$b" || die "沒辦法 push 分支 ${b}（沒網路？）。commit 留在本機的 $b"
+    say "已送出分支 ${b}（改的檔案現在在這個分支上，PR 合併後 git pull 就會拿到）"
+
+    # pull request
+    local tok="" tf="$KIT_CONF/gitea-token" compare=""
+    [ -n "$web" ] && compare="$web/$owner_repo/compare/$into...$b"
+    if [ -n "${KIT_GITEA_TOKEN:-}" ]; then tok=$KIT_GITEA_TOKEN
+    elif [ -f "$tf" ]; then token_file_ok "$tf"; tok=$(tr -d ' \r\n' < "$tf")
+    fi
+    if [ -n "$tok" ] && [ -n "$api" ]; then
+        local tmp code pr body
+        tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-push.XXXXXX"); chmod 700 "$tmp"
+        ( umask 077; printf 'Authorization: token %s\n' "$tok" > "$tmp/h" )   # never on the command line
+        body="由 kit push 送出：
+$(printf '%s\n' "$items" | awk -F'\t' '{ print "- " $1 " " $2 }')"
+        body=${body//\\/\\\\}; body=${body//\"/\\\"}; body=${body//$'\n'/\\n}
+        printf '{"title":%s,"head":%s,"base":%s,"body":"%s"}' "$(json_str "$msg")" "$(json_str "$b")" "$(json_str "$into")" "$body" > "$tmp/body"
+        code=$(curl -sS --max-time 30 -o "$tmp/resp" -w '%{http_code}' -X POST -H @"$tmp/h" -H 'Content-Type: application/json' \
+            --data-binary @"$tmp/body" "$api/repos/$owner_repo/pulls" 2>/dev/null)
+        pr=$(json_get "$tmp/resp" html_url | sed 's/^"//; s/"$//')
+        rm -rf "$tmp"
+        case $code in 2??) [ -n "$pr" ] && { say "已開 PR：$pr"; return 0; };; esac
+        warn "沒辦法自動開 PR（Gitea 回 ${code:-沒回應}）"
+    elif [ -z "$tok" ]; then
+        say "沒有 Gitea token（KIT_GITEA_TOKEN 或 ${tf}），PR 請自己開"
+    fi
+    if [ -n "$compare" ]; then say "開 PR：$compare"; else say "請到 Gitea 用分支 $b 開 PR"; fi
+    return 0
+}
 usage() {
     cat <<'EOF'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -901,6 +1031,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit diff   [種類] <名字> --from 本機資料夾   比較
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
+  kit push [--to 來源] [--dry-run]  檢查後把改的東西送到 Gitea 開 PR
 
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
@@ -921,6 +1052,7 @@ case ${1:-} in
     diff)      shift; cmd_diff_update diff "$@";;
     update)    shift; cmd_diff_update update "$@";;
     check)     shift; cmd_check "$@";;
+    push)      shift; cmd_push "$@";;
     uninstall) shift; cmd_uninstall "$@";;
     self-update) cmd_self_update;;
     --version|version) echo "kit $KIT_VERSION";;
