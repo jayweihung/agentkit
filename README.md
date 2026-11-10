@@ -81,6 +81,24 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 要自動開 PR 就放 Gitea token：環境變數 `KIT_GITEA_TOKEN`，或檔案
 `~/.config/agentkit/gitea-token`（`chmod 600`）。沒有 token 時會印出網址讓你自己開。
 
+## 只用核准過的版本（給 root 這類帳號）
+
+有些帳號（例如 root）不應該自動照著來源走：來源是別的帳號可以改的。這種帳號用：
+
+    kit init <來源>... --approvals <核准紀錄的 repo> --signers <allowed_signers 檔>
+
+kit 只會用 `approved.txt` 裡寫的 commit，而且 `approved.txt` 要有對的 ssh 簽章（namespace `agentkit`），
+`serial` 不能比上次用的小（不能退回舊的核准）。沒核准的新 commit、被改過的清單都不會用。
+`kit self-update` 也只會換到核准的 kit 版本。
+
+核准的人在自己的電腦上（金鑰只放這裡）：
+
+    kit approve <核准紀錄的 clone> <來源的 clone>... --key <ssh 金鑰>
+    git -C <核准紀錄的 clone> push
+
+它會列出每個來源從上次核准到現在改了什麼，問你要不要核准，再簽章、commit。
+（目前只有 Linux／Mac 版有這個功能。）
+
 ## 測試
 
     tests/json_test.sh

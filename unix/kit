@@ -99,6 +99,7 @@ state_del() { [ -f "$STATE" ] || return 0; awk -F'\t' -v k="$1" -v n="$2" '!($1 
 
 # ---------- machine.yaml ----------
 m_sources() { yget "$MACHINE" sources; }
+M_APPROVALS=$(yget "$MACHINE" approvals 2>/dev/null); M_SIGNERS=$(yget "$MACHINE" signers 2>/dev/null)
 m_added()   { yget "$MACHINE" added; }
 m_removed() { yget "$MACHINE" removed; }
 
@@ -110,6 +111,10 @@ write_machine() { # write_machine SOURCES ADDED REMOVED (newline separated lists
         printf '%s\n' "$1" | awk 'NF { print "  - " $0 }'
         printf 'added: [%s]\n'   "$(printf '%s\n' "$2" | awk 'NF' | paste -sd, - | sed 's/,/, /g')"
         printf 'removed: [%s]    # kit rm; sync will not add these back\n' "$(printf '%s\n' "$3" | awk 'NF' | paste -sd, - | sed 's/,/, /g')"
+        if [ -n "${M_APPROVALS:-}" ]; then
+            echo "# only signed, approved versions of the sources are used (kit approve)"
+            printf 'approvals: %s\nsigners: %s\n' "$M_APPROVALS" "$M_SIGNERS"
+        fi
     } > "$MACHINE.tmp" && mv "$MACHINE.tmp" "$MACHINE"
 }
 
@@ -143,11 +148,61 @@ git_safe() { # git without prompts, submodules or LFS downloads
     GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 git "$@"
 }
 
+# ---------- signed approvals (for accounts, like root, that must not follow sources blindly) ----------
+# approved.txt (in the approvals repo) lists "<repo name> <commit>" lines and "serial: N";
+# approved.txt.sig is an ssh signature (namespace agentkit) checked against the signers file.
+APPROVED=""; APPROVED_READ=""
+approvals_dir() { printf '%s/.approvals\n' "$KIT_SRC"; }
+read_approvals() { # sets APPROVED ("name sha" lines); returns 1 when there is no valid signed list
+    [ -n "$APPROVED_READ" ] && { [ -n "$APPROVED" ]; return; }
+    APPROVED_READ=1
+    local d f p serial old
+    d=$(approvals_dir)
+    if is_url "$M_APPROVALS"; then
+        check_host "$M_APPROVALS"
+        if [ -d "$d/.git" ]; then git_safe -C "$d" pull --ff-only -q --no-recurse-submodules || warn "沒辦法更新核准紀錄（沒網路？）"
+        else mkdir -p "$KIT_SRC"; git_safe clone -q --no-recurse-submodules "$M_APPROVALS" "$d" || { warn "沒辦法 clone 核准紀錄 $M_APPROVALS"; return 1; }; fi
+    else d=$M_APPROVALS; fi
+    f="$d/approved.txt"
+    [ -f "$f" ] && [ -f "$f.sig" ] || { warn "核准紀錄裡沒有 approved.txt 和 approved.txt.sig"; return 1; }
+    [ -f "$M_SIGNERS" ] || { warn "找不到 signers 檔：$M_SIGNERS"; return 1; }
+    p=$(ssh-keygen -Y find-principals -s "$f.sig" -f "$M_SIGNERS" 2>/dev/null | head -n 1)
+    if [ -z "$p" ] || ! ssh-keygen -Y verify -f "$M_SIGNERS" -I "$p" -n agentkit -s "$f.sig" < "$f" >/dev/null 2>&1; then
+        warn "核准紀錄的簽章不對，不換版本（有人改過 approved.txt？）"; return 1
+    fi
+    serial=$(awk '$1 == "serial:" { print $2; exit }' "$f"); old=$(state_get approvals serial)
+    case $serial in ""|*[!0-9]*) warn "核准紀錄沒有 serial"; return 1;; esac
+    if [ -n "$old" ] && [ "$serial" -lt "$old" ]; then warn "核准紀錄比上次用的舊（serial ${serial} < ${old}），不換版本"; return 1; fi
+    state_set approvals serial "$serial"
+    APPROVED=$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:"' "$f")
+    [ -n "$APPROVED" ]
+}
+approved_sha() { # approved_sha NAME
+    read_approvals || return 1
+    printf '%s\n' "$APPROVED" | awk -v n="$1" '$1 == n { print $2; exit }' | grep .
+}
+fetch_approved() { # fetch_approved URL DIR : check out the approved commit of a source, never anything else
+    local s=$1 d=$2 n sha cur
+    n=$(src_name "$s")
+    if ! sha=$(approved_sha "$n"); then
+        [ -d "$d/.git" ] && { warn "$n 沒有有效的核准，繼續用現在的版本"; return 0; }
+        die "$n 還沒核准，不能用（先在 Mac 上 kit approve）"
+    fi
+    if [ -d "$d/.git" ]; then git_safe -C "$d" fetch -q --no-recurse-submodules origin || warn "沒辦法更新 ${n}（沒網路？）"
+    else mkdir -p "$KIT_SRC"; git_safe clone -q --no-checkout --no-recurse-submodules "$s" "$d" || die "沒辦法 clone $s"; fi
+    cur=$(git -C "$d" rev-parse -q --verify HEAD 2>/dev/null)
+    [ "$cur" = "$sha" ] && [ -z "$(git -C "$d" status --porcelain 2>/dev/null)" ] && return 0
+    git -C "$d" -c advice.detachedHead=false checkout -q -f --detach "$sha" 2>/dev/null || { warn "$n 找不到核准的版本 $(printf %.12s "$sha")（還沒 push？），繼續用現在的版本"; return 0; }
+    git -C "$d" clean -qfdx
+    say "kit：$n 換到核准的版本 $(printf %.12s "$sha")"
+}
+
 fetch_source() { # clone or fast-forward one source
     local s=$1 d
     is_url "$s" || { [ -d "$s" ] || die "找不到來源資料夾：$s"; return 0; }
     check_host "$s"
     d=$(src_dir "$s")
+    [ -n "$M_APPROVALS" ] && { fetch_approved "$s" "$d"; return 0; }
     if [ -d "$d/.git" ]; then
         git_safe -C "$d" pull --ff-only --quiet --no-recurse-submodules || warn "沒辦法更新 $(src_name "$s")（沒網路？）"
     else
@@ -415,8 +470,22 @@ need_init() { [ -f "$MACHINE" ] || die "還沒設定：先打  kit init <網址�
 
 cmd_init() {
     local KIT_INIT=1
-    [ $# -ge 1 ] || die "用法：kit init <網址或資料夾> [更多來源...]"
-    local s srcs="" more d
+    local s srcs="" more d args=()
+    M_APPROVALS=""; M_SIGNERS=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --approvals) M_APPROVALS=${2:-}; shift 2 || die "--approvals 後面要接核准紀錄的 repo";;
+            --signers)   M_SIGNERS=${2:-}; shift 2 || die "--signers 後面要接 allowed_signers 檔";;
+            *) args+=("$1"); shift;;
+        esac
+    done
+    [ ${#args[@]} -ge 1 ] || die "用法：kit init <網址或資料夾> [更多來源...] [--approvals <repo> --signers <檔>]"
+    if [ -n "$M_APPROVALS$M_SIGNERS" ]; then
+        [ -n "$M_APPROVALS" ] && [ -n "$M_SIGNERS" ] || die "--approvals 和 --signers 要一起給"
+        M_SIGNERS=$(cd "$(dirname "$M_SIGNERS")" 2>/dev/null && printf '%s/%s' "$(pwd)" "$(basename "$M_SIGNERS")") || die "找不到 $M_SIGNERS"
+        is_url "$M_APPROVALS" || M_APPROVALS=$(cd "$M_APPROVALS" && pwd) || die "找不到 $M_APPROVALS"
+    fi
+    set -- "${args[@]}"
     for s in "$@"; do
         is_url "$s" || s=$(cd "$s" 2>/dev/null && pwd) || die "找不到資料夾：$s"
         srcs="$srcs$s
@@ -676,7 +745,14 @@ cmd_self_update() { # pull the clone kit was installed from, then reinstall
     local repo; repo=$(cat "$KIT_LIB/.repo" 2>/dev/null) || die "不知道 kit 是從哪個 clone 裝的；請到 clone 裡 git pull 後重跑 unix/install.sh"
     [ -d "$repo/.git" ] || die "找不到 clone：$repo"
     local url; url=$(git -C "$repo" remote get-url origin 2>/dev/null) && check_host "$url"
-    git_safe -C "$repo" pull --ff-only -q || die "沒辦法更新 ${repo}（沒網路，或 clone 裡有自己的改動？）"
+    if [ -n "$M_APPROVALS" ]; then
+        [ -n "$url" ] || die "$repo 沒有 origin"
+        local sha; sha=$(approved_sha "$(src_name "$url")") || die "kit 本身（$(src_name "$url")）沒有有效的核准，不更新"
+        git_safe -C "$repo" fetch -q --no-recurse-submodules origin || die "沒辦法 fetch $repo"
+        git -C "$repo" -c advice.detachedHead=false checkout -q -f --detach "$sha" || die "找不到核准的版本 $sha"
+    else
+        git_safe -C "$repo" pull --ff-only -q || die "沒辦法更新 ${repo}（沒網路，或 clone 裡有自己的改動？）"
+    fi
     sh "$repo/unix/install.sh" --quiet || die "重新安裝失敗"
     say "kit：已更新到 $(cat "$KIT_LIB/VERSION" 2>/dev/null)"
 }
@@ -1194,6 +1270,47 @@ $(printf '%s\n' "$items" | awk -F'\t' '{ print "- " $1 " " $2 }')"
     if [ -n "$compare" ]; then say "開 PR：$compare"; else say "請到 Gitea 用分支 $b 開 PR"; fi
     return 0
 }
+cmd_approve() { # kit approve <approvals repo> <source clone>... --key <ssh key> [--yes]
+    local dir="" key="" yes="" repos=() r n sha prev f tmp serial
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --key) key=${2:-}; shift 2 || die "--key 後面要接簽章用的 ssh 金鑰";;
+            --yes) yes=1; shift;;
+            *) if [ -z "$dir" ]; then dir=$1; else repos+=("$1"); fi; shift;;
+        esac
+    done
+    [ -n "$dir" ] && [ ${#repos[@]} -ge 1 ] && [ -n "$key" ] || die "用法：kit approve <核准紀錄的 repo> <來源的 clone>... --key <ssh 金鑰>"
+    [ -d "$dir/.git" ] || die "$dir 要是一個 git repo（放核准紀錄）"
+    [ -f "$key" ] || die "找不到金鑰 $key"
+    f="$dir/approved.txt"; tmp=$(mktemp "${TMPDIR:-/tmp}/kit-approve.XXXXXX")
+    serial=$(awk '$1 == "serial:" { print $2; exit }' "$f" 2>/dev/null); serial=$(( ${serial:-0} + 1 ))
+    awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:"' "$f" 2>/dev/null > "$tmp"
+    for r in "${repos[@]}"; do
+        [ -d "$r/.git" ] || die "$r 不是 git clone"
+        [ -z "$(git -C "$r" status --porcelain)" ] || die "$r 有還沒 commit 的改動"
+        n=$(basename "$(cd "$r" && pwd)"); sha=$(git -C "$r" rev-parse HEAD)
+        prev=$(awk -v n="$n" '$1 == n { print $2; exit }' "$tmp")
+        printf '\n== %s  %s → %s\n' "$n" "$( [ -n "$prev" ] && printf %.12s "$prev" || echo 第一次)" "$(printf %.12s "$sha")"
+        if [ "$prev" = "$sha" ]; then echo "（沒有變）"
+        elif [ -n "$prev" ] && git -C "$r" cat-file -e "$prev^{commit}" 2>/dev/null; then
+            git -C "$r" --no-pager log --oneline "$prev..$sha"; git -C "$r" --no-pager diff --stat "$prev" "$sha"
+        else git -C "$r" --no-pager log --oneline -5 "$sha"; fi
+        [ -n "$(git -C "$r" branch -r --contains "$sha" 2>/dev/null)" ] || warn "$n 的 $(printf %.12s "$sha") 還沒 push 到任何遠端"
+        awk -v n="$n" '$1 != n' "$tmp" > "$tmp.2"; printf '%s %s\n' "$n" "$sha" >> "$tmp.2"; mv "$tmp.2" "$tmp"
+    done
+    if [ -z "$yes" ]; then
+        printf '\n核准上面這些版本？[y/N] ' > /dev/tty; read -r a < /dev/tty
+        case $a in y|Y|yes) ;; *) rm -f "$tmp"; die "沒有核准";; esac
+    fi
+    { echo "# agentkit approvals - signed with kit approve; do not edit by hand"
+      echo "serial: $serial"
+      LC_ALL=C sort "$tmp"; } > "$f"
+    rm -f "$tmp" "$f.sig"
+    ssh-keygen -Y sign -q -f "$key" -n agentkit "$f" || die "簽章失敗"
+    git -C "$dir" add approved.txt approved.txt.sig && git -C "$dir" commit -q -m "approve serial $serial" || die "commit 失敗"
+    say "kit：已核准並簽章（serial ${serial}）。下一步：git -C $dir push"
+}
+
 usage() {
     cat <<'EOF'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -1215,6 +1332,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                       kit ci-template .gitea/workflows/kit-check.yaml
   kit push [--to 來源] [--dry-run]  檢查後把改的東西送到 Gitea 開 PR
 
+  kit approve <核准紀錄> <來源 clone>... --key <金鑰>   簽章核准這些版本（給 root 這類只用核准版本的帳號）
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
@@ -1239,6 +1357,7 @@ case ${1:-} in
     push)      shift; cmd_push "$@";;
     uninstall) shift; cmd_uninstall "$@";;
     self-update) cmd_self_update;;
+    approve)   shift; cmd_approve "$@";;
     --version|version) echo "kit $KIT_VERSION";;
     ""|-h|--help|help) usage;;
     *) die "沒有這個指令：$1（打 kit help）";;

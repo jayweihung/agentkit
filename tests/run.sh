@@ -487,6 +487,51 @@ echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"
 
+# ---------- signed approvals (root uses only versions signed on the Mac) ----------
+SA="$T/signed"; mkdir -p "$SA"
+ssh-keygen -q -t ed25519 -N '' -C approver -f "$SA/key"
+printf 'jay namespaces="agentkit" %s\n' "$(cat "$SA/key.pub")" > "$SA/allowed_signers"
+ssh-keygen -q -t ed25519 -N '' -C mallory -f "$SA/badkey"
+mkdir -p "$SA/work/srcA/rules"; echo "Approved rule v1." > "$SA/work/srcA/rules/ar.md"; printf 'name: srcA\nrequired:\n  rules: [ar]\n' > "$SA/work/srcA/kit.yaml"
+( cd "$SA/work/srcA" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm v1 && git clone -q --bare . "$SA/srcA.git" && git remote add origin "$SA/srcA.git" && git fetch -q origin )
+mkdir -p "$SA/appr-work"; ( cd "$SA/appr-work" && git init -q && git config user.name t && git config user.email t@t && git commit -q --allow-empty -m start && git clone -q --bare . "$SA/approvals.git" && git remote add origin "$SA/approvals.git" )
+out=$(kit approve "$SA/appr-work" "$SA/work/srcA" --key "$SA/key" --yes 2>&1); rc=$?
+check "approve signs and commits" '[ $rc -eq 0 ] && [ -f "$SA/appr-work/approved.txt.sig" ] && grep -q "^serial: 1$" "$SA/appr-work/approved.txt" && grep -q "^srcA " "$SA/appr-work/approved.txt"'
+git -C "$SA/appr-work" push -q origin HEAD:master 2>/dev/null || git -C "$SA/appr-work" push -q origin HEAD 2>/dev/null
+RH="$T/roothome"; mkdir -p "$RH"
+rk() { HOME="$RH" AGENTKIT_CONFIG="$RH/.config/agentkit" AGENTKIT_SOURCES="$RH/agentkit" "$KIT" "$@"; }
+out=$(rk init "file://$SA/srcA.git" --approvals "file://$SA/approvals.git" --signers "$SA/allowed_signers" 2>&1); rc=$?
+v1=$(git -C "$SA/work/srcA" rev-parse HEAD)
+check "signed init uses the approved commit" '[ $rc -eq 0 ] && [ "$(git -C "$RH/agentkit/srcA" rev-parse HEAD)" = "$v1" ] && grep -q "ar.md" "$RH/.claude/CLAUDE.md"'
+check "machine.yaml keeps approvals and signers" 'grep -q "^approvals: file://" "$RH/.config/agentkit/machine.yaml" && grep -q "^signers: " "$RH/.config/agentkit/machine.yaml"'
+( cd "$SA/work/srcA" && echo "Unapproved v2." > rules/ar.md && git commit -qam v2 && git push -q origin HEAD 2>/dev/null )
+out=$(rk sync 2>&1)
+check "unapproved new commit is not used" '[ "$(git -C "$RH/agentkit/srcA" rev-parse HEAD)" = "$v1" ] && grep -q "v1" "$RH/agentkit/srcA/rules/ar.md"'
+rk add skill nothing >/dev/null 2>&1
+check "add/rm keep the approvals setting" 'grep -q "^approvals: " "$RH/.config/agentkit/machine.yaml"'
+out=$(kit approve "$SA/appr-work" "$SA/work/srcA" --key "$SA/key" --yes 2>&1)
+check "approve shows what changed" 'echo "$out" | grep -q "v2" && echo "$out" | grep -q "rules/ar.md"'
+cp "$SA/appr-work/approved.txt" "$SA/appr1.txt.v2"; git -C "$SA/appr-work" show HEAD~1:approved.txt > "$SA/old.txt"; git -C "$SA/appr-work" show HEAD~1:approved.txt.sig > "$SA/old.sig"
+git -C "$SA/appr-work" push -q origin HEAD 2>/dev/null
+out=$(rk sync 2>&1)
+check "approved v2 is used after approve" '[ "$(git -C "$RH/agentkit/srcA" rev-parse HEAD)" = "$(git -C "$SA/work/srcA" rev-parse HEAD)" ] && echo "$out" | grep -q 換到核准的版本'
+# someone with write access to the approvals repo but without the key
+( cd "$SA/appr-work" && printf '# x\nserial: 9\nsrcA %s\n' "$v1" > approved.txt && git commit -qam forged && git push -q origin HEAD 2>/dev/null )
+out=$(rk sync 2>&1)
+check "edited list without a new signature is refused" 'echo "$out" | grep -q 簽章不對 && grep -q "Unapproved v2" "$RH/agentkit/srcA/rules/ar.md"'
+( cd "$SA/appr-work" && rm -f approved.txt.sig && ssh-keygen -Y sign -q -f "$SA/badkey" -n agentkit approved.txt && git add -A && git commit -qm forged2 && git push -q origin HEAD 2>/dev/null )
+out=$(rk sync 2>&1)
+check "list signed by another key is refused" 'echo "$out" | grep -q 簽章不對 && grep -q "Unapproved v2" "$RH/agentkit/srcA/rules/ar.md"'
+( cd "$SA/appr-work" && cp "$SA/old.txt" approved.txt && cp "$SA/old.sig" approved.txt.sig && git add -A && git commit -qm replay && git push -q origin HEAD 2>/dev/null )
+out=$(rk sync 2>&1)
+check "an older signed list (serial 1) cannot roll back" 'echo "$out" | grep -q "比上次用的舊" && grep -q "Unapproved v2" "$RH/agentkit/srcA/rules/ar.md"'
+echo "local edit" >> "$RH/agentkit/srcA/rules/ar.md"
+( cd "$SA/appr-work" && git checkout -q HEAD~3 -- approved.txt approved.txt.sig && git commit -qm restore && git push -q origin HEAD 2>/dev/null )
+out=$(rk sync 2>&1)
+check "local edits in the clone are reset to the approved commit" '! grep -q "local edit" "$RH/agentkit/srcA/rules/ar.md"'
+out=$(HOME="$RH" AGENTKIT_CONFIG="$RH/.config/agentkit" AGENTKIT_SOURCES="$RH/agentkit2" "$KIT" init "file://$SA/srcA.git" --approvals "$SA/nowhere" --signers "$SA/allowed_signers" 2>&1); rc=$?
+check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/agentkit2/srcA/rules" ]'
+
 # ---------- code checks ----------
 check "no \$var directly before non-ASCII (bash 3.2 reads it as part of the name)" '! LC_ALL=C grep -nE "\\\$[A-Za-z_][A-Za-z0-9_]*[^ -~]" "$KIT" "$HERE/../unix/install.sh"'
 
