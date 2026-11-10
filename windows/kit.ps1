@@ -615,6 +615,27 @@ function Apply-All {
 # ---------- commands ----------
 function Need-Init { if (-not (Test-Path -LiteralPath $Machine)) { Die '還沒設定：先打  kit init <網址或資料夾>' } }
 function Seen-All { foreach ($i in Available) { if ($null -eq (State-Get 'seen' $i)) { State-Set 'seen' $i 1 } } }
+function Ver-Num([string]$v) { # sortable text for x.y.z ("+build" ignored); $null for a dev build or anything else
+    $v = ($v -replace '\+.*$', '').Trim()
+    if ($v -notmatch '^\d+(\.\d+){0,2}$') { return $null }
+    $p = @($v.Split('.')) + @('0', '0')
+    '{0:D9}{1:D9}{2:D9}' -f [long]$p[0], [long]$p[1], [long]$p[2]
+}
+function Version-Nag { # tell once when a source's kit.yaml wants a newer kit (not in the background, not when quiet)
+    if ($script:Quiet -or $script:LogPath) { return }
+    $best = Ver-Num $KitVersion; if (-not $best) { return }
+    $need = ''
+    foreach ($d in Src-Dirs) {
+        foreach ($v in @(YGet (Join-Path $d 'kit.yaml') 'kit_version')) {
+            $n = Ver-Num $v
+            if ($n -and [string]::CompareOrdinal($n, $best) -gt 0) { $best = $n; $need = $v.Trim() }
+        }
+    }
+    if (-not $need) { if ($null -ne (State-Get 'nag' 'kit_version')) { State-Del 'nag' 'kit_version' }; return }
+    if ((State-Get 'nag' 'kit_version') -eq "${need} ${KitVersion}") { return }
+    Say "kit：團隊要 kit ${need} 以上，你的是 ${KitVersion}。請打  kit self-update"
+    State-Set 'nag' 'kit_version' "${need} ${KitVersion}"
+}
 
 function Cmd-Init($srcs) {
     if (@($srcs).Count -lt 1) { Die '用法：kit init <網址或資料夾> [更多來源...]' }
@@ -644,6 +665,7 @@ function Cmd-Sync {
     $new = @(foreach ($i in Available) { if ($null -eq (State-Get 'seen' $i)) { $i } })
     if ($new.Count -gt 0) { Say "kit：新： $($new -join ' ')  （要用就 kit add <種類> <名字>）" }
     Seen-All
+    Version-Nag
 }
 function Sync-Hook { # run by Claude at start: sync in the background, at most every 10 minutes
     if (-not (Test-Path -LiteralPath $Machine)) { exit 0 }
@@ -684,6 +706,7 @@ function Cmd-List {
     Say ''
     Say '* 在用   R 團隊必備   N 新的   agent 用  kit run <名字>  開'
     Say "寫到：$(Targets)"
+    Version-Nag
 }
 function Cmd-AddRm([string]$verb, $rest) {
     $rest = @($rest)
@@ -1129,6 +1152,12 @@ function Cmd-Check($rest) {
     if (Check-Dirs $dirs) { Say "kit check：沒問題（$($dirs.Count) 個來源）" }
     else { [Console]::Error.WriteLine("kit check：$($script:Problems.Count) 個問題"); exit 1 }
 }
+function Cmd-CiTemplate { # print the Gitea Actions workflow that runs kit check --ci on pull requests
+    foreach ($f in @((Join-Path $KitLib 'templates/gitea-kit-check.yaml'), (Join-Path (Split-Path -Parent $KitLib) 'templates/gitea-kit-check.yaml'))) {
+        if (Test-Path -LiteralPath $f -PathType Leaf) { [Console]::Out.Write((Read-Text $f)); return }
+    }
+    Die '找不到範本 gitea-kit-check.yaml（請重跑 windows\install.ps1）'
+}
 
 # ---------- export-self: a clean copy of kit's own source, for a company git server ----------
 function Kit-Repo { # the clone kit was installed from, else the repo this kit runs from
@@ -1278,6 +1307,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
+  kit ci-template                   印出 Gitea Actions 範本（PR 自動跑 kit check --ci），用法：
+                                      kit ci-template > .gitea/workflows/kit-check.yaml
 
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
@@ -1306,6 +1337,7 @@ try {
         'update' { Cmd-DiffUpdate 'update' $rest }
         'check' { Cmd-Check $rest }
         'export-self' { Cmd-ExportSelf $rest }
+        'ci-template' { Cmd-CiTemplate }
         'uninstall' { Cmd-Uninstall $rest }
         'self-update' { Cmd-SelfUpdate }
         { $_ -in '--version', 'version' } { Say "kit $KitVersion" }

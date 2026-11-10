@@ -148,6 +148,37 @@ Check 'list shows unused' { $out -match '(?m)^   skill:gerrit-workflow' }
 Check 'list shows agent' { $out.Contains('agent:gerrit') }
 Check 'list shows targets (Claude only here)' { $out -match '(?m)^寫到：Claude$' }
 
+# ---------- kit_version: tell once when the team wants a newer kit ----------
+$teamYaml = ReadT "$TEAM/kit.yaml"
+function Team-Version([string]$v) { W "$TEAM/kit.yaml" ($teamYaml.TrimEnd("`n") + "`nkit_version: $v`n") }
+function State-Nag { @((ReadT "$H/.config/agentkit/state.tsv") -split "`n" | Where-Object { $_.StartsWith("nag`t") }).Count }
+Team-Version '0.4.0'
+Kit sync
+Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 0.4.0 以上，你的是 0.1.0。請打  kit self-update') }
+Kit sync; $o1 = $out; Kit list
+Check 'old kit: told only once' { -not ($o1 + $out).Contains('團隊要') }
+Team-Version '0.10.0'
+Kit list
+Check 'team version changed: list tells again (numbers, not text)' { $out.Contains('團隊要 kit 0.10.0 以上') }
+$realKit = $Kit; $Kit = Join-Path $T 'dev/windows/kit.ps1'
+W $Kit ''; Copy-Item -LiteralPath $realKit -Destination $Kit -Force
+Team-Version '0.6.0'
+Kit sync
+Check 'dev build (no VERSION) is not told' { -not $out.Contains('團隊要') }
+W "$T/dev/VERSION" "0.6.0+local`n"; Kit sync
+Check '+build part ignored' { -not $out.Contains('團隊要') }
+W "$T/dev/VERSION" "0.5.9`n"; Kit sync
+Check 'older patch level is told' { $out.Contains('團隊要 kit 0.6.0 以上，你的是 0.5.9') }
+W "$T/dev/VERSION" "0.6.0`n"; Kit sync
+Check 'new enough: note forgotten' { (State-Nag) -eq 0 }
+$Kit = $realKit
+# kit_version 0.6.0 stays for the background sync below
+
+# ---------- ci-template ----------
+Kit ci-template
+$tmpl = (ReadT (Join-Path $Repo 'templates/gitea-kit-check.yaml')).Replace("`r", '').TrimEnd("`n")   # output lines are joined with LF
+Check 'ci-template prints the template' { $rc -eq 0 -and $out -ceq $tmpl }
+
 # ---------- run (dry run: show the claude command) ----------
 $env:KIT_DRY_RUN = '1'; Kit run gerrit --model sonnet; Remove-Item env:KIT_DRY_RUN
 $lines = $out -split "`n"
@@ -190,10 +221,13 @@ for ($i = 0; $i -lt 30; $i++) { if (-not (Test-Path "$H/.config/agentkit/sync.lo
 Start-Sleep -Milliseconds 300
 Check 'hook synced in the background' { (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('hook change') }
 Check 'hook logs' { (ReadT "$H/.config/agentkit/sync.log") -match '(?m)^== ' }
+Check 'hook: kit_version not told in the background' { -not (ReadT "$H/.config/agentkit/sync.log").Contains('團隊要') -and (State-Nag) -eq 0 }
 [IO.File]::AppendAllText("$TEAM/skills/gerrit-review/SKILL.md", "second change`n")
 Kit sync --hook; Start-Sleep -Seconds 2
 Check 'hook runs at most every 10 minutes' { -not (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('second change') }
 Kit sync
+Check 'hook: kit_version told at the next sync' { $out.Contains('團隊要 kit 0.6.0 以上') }
+W "$TEAM/kit.yaml" $teamYaml
 
 # ---------- allowed_hosts ----------
 Kit init $TEAM 'https://public-git.example/someone/agentkit-library.git'
@@ -359,6 +393,15 @@ Check 'uninstall: codex toml byte-identical' { SameBytes "$T/codex.orig" "$H/.co
 Check 'uninstall: omp mcp.json byte-identical' { SameBytes "$T/omp.orig" "$H/.omp/agent/mcp.json" }
 Check 'uninstall: omp AGENTS.md (made by kit) gone' { -not (Test-Path "$H/.omp/agent/AGENTS.md") }
 Check 'uninstall: ~/.agents/skills emptied' { @(Get-ChildItem -Force "$H/.agents/skills" -ErrorAction SilentlyContinue).Count -eq 0 }
+
+# ---------- install.ps1 ----------
+$env:AGENTKIT_HOME = Join-Path $T 'inst'
+& $Exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'windows/install.ps1') -Quiet
+Remove-Item env:AGENTKIT_HOME
+$Kit = Join-Path $T 'inst/lib/kit.ps1'
+Kit ci-template
+Check 'installed kit has the ci template' { $rc -eq 0 -and $out -ceq $tmpl }
+$Kit = $realKit
 
 # ---------- the script files themselves ----------
 Check 'kit.ps1 and install.ps1 start with a UTF-8 BOM (needed by PowerShell 5.1)' {

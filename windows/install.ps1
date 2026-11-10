@@ -22,6 +22,8 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 New-Item -ItemType Directory -Force -Path $lib | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'windows\kit.ps1') -Destination (Join-Path $lib 'kit.ps1') -Force
 Copy-Item -LiteralPath (Join-Path $repo 'VERSION') -Destination (Join-Path $lib 'VERSION') -Force
+New-Item -ItemType Directory -Force -Path (Join-Path $lib 'templates') | Out-Null
+Copy-Item -Path (Join-Path $repo 'templates\*') -Destination (Join-Path $lib 'templates') -Force
 Copy-Item -LiteralPath (Join-Path $repo 'windows\kit.cmd') -Destination (Join-Path $dest 'kit.cmd') -Force
 [IO.File]::WriteAllText((Join-Path $lib '.repo'), $repo, (New-Object Text.UTF8Encoding $false))   # where kit self-update pulls from
 

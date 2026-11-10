@@ -403,7 +403,7 @@ sync_hook() { # run by Claude at start: sync in the background, at most every 10
     (
         trap 'rmdir "$lock" 2>/dev/null' EXIT
         printf '== %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-        GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20 cmd_sync
+        GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20 NO_NAG=1 cmd_sync
     ) </dev/null >>"$log" 2>&1 &
     exit 0
 }
@@ -437,6 +437,26 @@ cmd_init() {
 
 seen_all() { for i in $(available); do state_set seen "$i" 1; done; }
 
+version_nag() { # tell once when a source's kit.yaml wants a newer kit (not in the background, not when quiet)
+    [ -z "${QUIET:-}${NO_NAG:-}" ] || return 0
+    local need
+    # x.y.z compared as numbers, "+build" ignored; a dev build (no VERSION) is never told
+    need=$(src_dirs | while IFS= read -r d; do yget "$d/kit.yaml" kit_version; done | awk -v have="$KIT_VERSION" '
+        function num(v,   p, n, i) {
+            sub(/\+.*/, "", v); n = split(v, p, ".")
+            if (n < 1 || n > 3) return ""
+            for (i = 1; i <= n; i++) if (p[i] !~ /^[0-9]+$/) return ""
+            return sprintf("%09d%09d%09d", p[1], p[2], p[3])
+        }
+        BEGIN { best = num(have); if (best == "") exit }
+        { n = num($0); if (n != "" && n > best) { best = n; need = $0 } }
+        END { if (need != "") print need }')
+    if [ -z "$need" ]; then [ -z "$(state_get nag kit_version)" ] || state_del nag kit_version; return 0; fi
+    [ "$(state_get nag kit_version)" = "$need $KIT_VERSION" ] && return 0
+    say "kit：團隊要 kit ${need} 以上，你的是 ${KIT_VERSION}。請打  kit self-update"
+    state_set nag kit_version "$need $KIT_VERSION"
+}
+
 cmd_sync() {
     need_init
     local s
@@ -446,6 +466,7 @@ cmd_sync() {
     for i in $(available); do [ -n "$(state_get seen "$i")" ] || new="$new $i"; done
     [ -n "$new" ] && say "kit：新：$new  （要用就 kit add <種類> <名字>）"
     seen_all
+    version_nag
 }
 
 cmd_list() {
@@ -463,6 +484,7 @@ cmd_list() {
     say ""
     say "* 在用   R 團隊必備   N 新的   agent 用  kit run <名字>  開"
     say "寫到：$(targets)"
+    version_nag
 }
 
 cmd_add_rm() {
@@ -1010,6 +1032,13 @@ cmd_export_self() {
     say "下一步（在公司）：在 Gitea 的 agentkit repo clone 裡，刪掉 .git 以外的舊檔案，"
     say "  放進這個資料夾的內容後 commit，訊息只寫：kit ${ver}"
 }
+cmd_ci_template() { # print the Gitea Actions workflow that runs kit check --ci on pull requests
+    local f
+    for f in "$KIT_LIB/templates/gitea-kit-check.yaml" "$KIT_LIB/../templates/gitea-kit-check.yaml"; do
+        [ -f "$f" ] && { cat "$f"; return 0; }
+    done
+    die "找不到範本 gitea-kit-check.yaml（請重跑 unix/install.sh）"
+}
 usage() {
     cat <<'EOF'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -1027,6 +1056,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
+  kit ci-template                   印出 Gitea Actions 範本（PR 自動跑 kit check --ci），用法：
+                                      kit ci-template > .gitea/workflows/kit-check.yaml
 
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
@@ -1048,6 +1079,7 @@ case ${1:-} in
     update)    shift; cmd_diff_update update "$@";;
     check)     shift; cmd_check "$@";;
     export-self) shift; cmd_export_self "$@";;
+    ci-template) cmd_ci_template;;
     uninstall) shift; cmd_uninstall "$@";;
     self-update) cmd_self_update;;
     --version|version) echo "kit $KIT_VERSION";;

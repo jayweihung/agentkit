@@ -1,0 +1,55 @@
+# Gitea Actions: run "kit check --ci" on every pull request.
+#
+# Put it in a content repo with:
+#   kit ci-template > .gitea/workflows/kit-check.yaml
+#
+# Set up once (repository or organization settings > Actions):
+#   Variables:
+#     AGENTKIT_REPO   git URL of the company's agentkit repo (where people install kit from)
+#   Secrets (only if the runner cannot read AGENTKIT_REPO without logging in):
+#     AGENTKIT_TOKEN  read-only access token for AGENTKIT_REPO
+# To block merging when the check fails, add "kit-check" as a required status
+# check in the branch protection rule of the target branch.
+#
+# Needs a Linux runner with bash, awk and git. actions/checkout is fetched from
+# the instance's DEFAULT_ACTIONS_URL (an admin can point it at a local mirror).
+
+name: kit-check
+
+on:
+  pull_request:
+
+jobs:
+  kit-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pull request (full history, for the author check)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ gitea.event.pull_request.head.sha }}
+
+      - name: Install kit from the company repo
+        env:
+          AGENTKIT_REPO: ${{ vars.AGENTKIT_REPO }}
+          AGENTKIT_TOKEN: ${{ secrets.AGENTKIT_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "$AGENTKIT_REPO" ]; then
+            echo "Set the Actions variable AGENTKIT_REPO to the git URL of the agentkit repo" >&2
+            exit 1
+          fi
+          src=$(mktemp -d)
+          if [ -n "$AGENTKIT_TOKEN" ]; then
+            # through the environment, so the token is not on the command line
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: token $AGENTKIT_TOKEN"
+          fi
+          git clone --quiet --depth 1 "$AGENTKIT_REPO" "$src/agentkit"
+          unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+          sh "$src/agentkit/unix/install.sh" --quiet
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: kit check --ci
+        env:
+          KIT_CI_BASE: origin/${{ gitea.base_ref }}
+        run: kit check --ci
