@@ -27,10 +27,16 @@ Windows：之後提供（PowerShell 版）。
     kit self-update               更新 kit 本身
     kit uninstall [--self]        移除
 
-kit 只改這些檔，而且只改自己加的部分：
-`~/.claude/CLAUDE.md`（標記之間的區塊）、`~/.claude/skills/<kit 放的>`、
-`~/.claude.json` 的 `mcpServers`、`~/.claude/settings.json` 的 `permissions.deny`。
-改 JSON 前會留一份 `.kit-backup`。
+kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
+
+| | rule | skill | MCP | 團隊禁用的工具 |
+|---|---|---|---|---|
+| Claude Code | `~/.claude/CLAUDE.md`（標記之間，@ 引用） | `~/.claude/skills/` | `~/.claude.json` | `~/.claude/settings.json` 的 `permissions.deny` |
+| Codex | `~/.codex/AGENTS.md`（標記之間，內容直接放進去） | `~/.agents/skills/` | `~/.codex/config.toml`（標記之間） | MCP 工具 → `disabled_tools` |
+| omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | 不支援 |
+
+改 JSON 前會留一份 `.kit-backup`。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。
+`kit run <agent>` 目前只支援 Claude。
 
 ## 測試
 

@@ -11,7 +11,7 @@ DEST=${AGENTKIT_HOME:-$HOME/.local/share/agentkit}
 BIN=$HOME/.local/bin
 
 for t in bash awk git; do
-    command -v "$t" >/dev/null 2>&1 || { echo "install: 找不到 $t，請先裝好" >&2; exit 1; }
+    command -v "$t" >/dev/null 2>&1 || { echo "install: 找不到 ${t}，請先裝好" >&2; exit 1; }
 done
 # on a Mac without the developer tools, /usr/bin/git is only a stub that pops up an installer
 if [ "$(uname)" = Darwin ] && ! xcode-select -p >/dev/null 2>&1 && [ "$(command -v git)" = /usr/bin/git ]; then
