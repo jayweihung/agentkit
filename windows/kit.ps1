@@ -650,21 +650,39 @@ function Cmd-Init($srcs) {
     })
     Write-Machine $list @() @()
     foreach ($s in M-Sources) { Fetch-Source $s }
-    # sources may include more sources (for example the third-party repo)
-    $more = @(foreach ($d in Src-Dirs) { YGet (Join-Path $d 'kit.yaml') 'include' })
-    if ($more.Count -gt 0) {
-        Write-Machine (Uniq ($list + $more)) @() @()
-        foreach ($s in $more) { Fetch-Source $s }
-    }
+    Add-Includes $true
     Write-Machine (M-Sources) (Kit-Items 'recommended') @()
     Say "kit：設定好 $(@(M-Sources).Count) 個來源"
     Apply-All
     Seen-All
     Say 'kit：完成。打  kit list  看有哪些'
 }
+function Includes { # include: entries of every source; a local path is relative to the source that lists it
+    Uniq @(foreach ($d in Src-Dirs) {
+        foreach ($i in @(YGet (Join-Path $d 'kit.yaml') 'include')) {
+            if (-not $i) { continue }
+            if (Is-Url $i) { $i; continue }
+            $p = if ([IO.Path]::IsPathRooted($i)) { $i } else { Join-Path $d $i }
+            if (Test-Path -LiteralPath $p -PathType Container) { (Resolve-Path -LiteralPath $p).ProviderPath } else { $p }
+        }
+    })
+}
+function Add-Includes([bool]$quietly = $false) { # add sources that a source includes but machine.yaml does not list yet (also chains)
+    for ($n = 0; $n -lt 5; $n++) {
+        $have = @(M-Sources)
+        $more = @(@(Includes) | Where-Object { $_ -and $have -notcontains $_ })
+        if ($more.Count -eq 0) { return }
+        Write-Machine (Uniq (@($have) + @($more))) @(M-Added) @(M-Removed)
+        foreach ($s in $more) {
+            Fetch-Source $s
+            if (-not $quietly) { Say "kit：加了來源 ${s}（某個來源的 kit.yaml 引用它）" }
+        }
+    }
+}
 function Cmd-Sync {
     Need-Init
     foreach ($s in M-Sources) { Fetch-Source $s }
+    Add-Includes
     Apply-All
     $new = @(foreach ($i in Available) { if ($null -eq (State-Get 'seen' $i)) { $i } })
     if ($new.Count -gt 0) { Say "kit：新： $($new -join ' ')  （要用就 kit add <種類> <名字>）" }
@@ -1156,9 +1174,15 @@ function Cmd-Check($rest) {
     if (Check-Dirs $dirs) { Say "kit check：沒問題（$($dirs.Count) 個來源）" }
     else { [Console]::Error.WriteLine("kit check：$($script:Problems.Count) 個問題"); exit 1 }
 }
-function Cmd-CiTemplate { # print the Gitea Actions workflow that runs kit check --ci on pull requests
+function Cmd-CiTemplate($rest) { # print (or write to FILE, no BOM) the Gitea Actions workflow that runs kit check --ci on pull requests
+    $to = @(@($rest) | Where-Object { $_ })
     foreach ($f in @((Join-Path $KitLib 'templates/gitea-kit-check.yaml'), (Join-Path (Split-Path -Parent $KitLib) 'templates/gitea-kit-check.yaml'))) {
-        if (Test-Path -LiteralPath $f -PathType Leaf) { [Console]::Out.Write((Read-Text $f)); return }
+        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }
+        if ($to.Count -gt 0) {
+            $p = $to[0]; $dir = Split-Path -Parent $p; if ($dir) { Ensure-Dir $dir }
+            Write-Text $p (Read-Text $f); Say "已寫到 $p"
+        } else { [Console]::Out.Write((Read-Text $f)) }
+        return
     }
     Die '找不到範本 gitea-kit-check.yaml（請重跑 windows\install.ps1）'
 }
@@ -1437,8 +1461,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
-  kit ci-template                   印出 Gitea Actions 範本（PR 自動跑 kit check --ci），用法：
-                                      kit ci-template > .gitea/workflows/kit-check.yaml
+  kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
+                                      kit ci-template .gitea/workflows/kit-check.yaml
   kit push [--to 來源] [--dry-run]  檢查後把改的東西送到 Gitea 開 PR
 
   kit self-update                   更新 kit 本身
@@ -1468,7 +1492,7 @@ try {
         'update' { Cmd-DiffUpdate 'update' $rest }
         'check' { Cmd-Check $rest }
         'export-self' { Cmd-ExportSelf $rest }
-        'ci-template' { Cmd-CiTemplate }
+        'ci-template' { Cmd-CiTemplate $rest }
         'push' { Cmd-Push $rest }
         'uninstall' { Cmd-Uninstall $rest }
         'self-update' { Cmd-SelfUpdate }

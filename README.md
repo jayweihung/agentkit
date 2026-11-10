@@ -37,7 +37,7 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
 
 內容 repo 的 PR 自動檢查（Gitea Actions，Linux runner）：
 
-    kit ci-template > .gitea/workflows/kit-check.yaml
+    kit ci-template .gitea/workflows/kit-check.yaml
 
 要在 repo 或組織設定 Actions 變數 `AGENTKIT_REPO`（agentkit repo 的 git 網址；私有的話再加 secret `AGENTKIT_TOKEN`），
 並在分支保護把 `kit-check` 設成必須通過。細節看範本裡的註解。

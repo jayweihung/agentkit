@@ -178,6 +178,8 @@ $Kit = $realKit
 Kit ci-template
 $tmpl = (ReadT (Join-Path $Repo 'templates/gitea-kit-check.yaml')).Replace("`r", '').TrimEnd("`n")   # output lines are joined with LF
 Check 'ci-template prints the template' { $rc -eq 0 -and $out -ceq $tmpl }
+Kit ci-template "$T/ci/.gitea/workflows/kit-check.yaml"
+Check 'ci-template writes a file (no BOM)' { SameBytes "$T/ci/.gitea/workflows/kit-check.yaml" (Join-Path $Repo 'templates/gitea-kit-check.yaml') }
 
 # ---------- run (dry run: show the claude command) ----------
 $env:KIT_DRY_RUN = '1'; Kit run gerrit --model sonnet; Remove-Item env:KIT_DRY_RUN
@@ -228,6 +230,19 @@ Check 'hook runs at most every 10 minutes' { -not (ReadT "$H/.claude/skills/gerr
 Kit sync
 Check 'hook: kit_version told at the next sync' { $out.Contains('團隊要 kit 0.6.0 以上') }
 W "$TEAM/kit.yaml" $teamYaml
+
+# ---------- a source starts including another one ----------
+W "$T/extra-src/rules/extra-rule.md" "Extra rule.`n"
+$mf = "$H/.config/agentkit/machine.yaml"
+$before = @((ReadT $mf) -split "`n" | Where-Object { $_.StartsWith('added') })[0]
+$ky = ReadT "$TEAM/kit.yaml"; W "$TEAM/kit.yaml" ($ky -replace '(?m)^include: \[(.*)\]', 'include: [$1, ../extra-src]')
+Kit sync
+$extra = (Resolve-Path -LiteralPath "$T/extra-src").ProviderPath
+Check 'sync adds a new include (relative to the source)' { (ReadT $mf).Contains("  - $extra") -and $out.Contains('加了來源') }
+Check 'sync keeps what you added' { @((ReadT $mf) -split "`n" | Where-Object { $_.StartsWith('added') })[0] -eq $before }
+Check 'items of the new source are announced' { $out.Contains('rule:extra-rule') }
+Kit sync
+Check 'include added only once' { @([regex]::Matches((ReadT $mf), 'extra-src')).Count -eq 1 }
 
 # ---------- allowed_hosts ----------
 Kit init $TEAM 'https://public-git.example/someone/agentkit-library.git'

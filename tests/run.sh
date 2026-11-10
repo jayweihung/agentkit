@@ -144,6 +144,9 @@ check "new enough: note forgotten" '[ -z "$(state_nag)" ]'
 # ---------- ci-template ----------
 out=$(kit ci-template)
 check "ci-template prints the template" '[ "$out" = "$(cat "$HERE/../templates/gitea-kit-check.yaml")" ]'
+kit ci-template "$T/ci/.gitea/workflows/kit-check.yaml" >/dev/null
+check "ci-template writes a file" 'cmp -s "$T/ci/.gitea/workflows/kit-check.yaml" "$HERE/../templates/gitea-kit-check.yaml"'
+
 
 # ---------- run (dry run: show the claude command) ----------
 out=$(KIT_DRY_RUN=1 kit run gerrit --model sonnet 2>&1)
@@ -192,6 +195,17 @@ check "hook runs at most every 10 minutes" '! grep -q "second change" "$HOME/.cl
 out=$(kit sync 2>&1)
 check "hook: kit_version told at the next sync" 'echo "$out" | grep -qF "團隊要 kit 0.6.0 以上"'
 cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"
+
+# ---------- a source starts including another one ----------
+mkdir -p "$T/extra-src/rules"; echo "Extra rule." > "$T/extra-src/rules/extra-rule.md"
+before=$(grep '^added' "$HOME/.config/agentkit/machine.yaml")
+sed "s#^include: \[\(.*\)\]#include: [\1, ../extra-src]#" "$TEAM/kit.yaml" > "$T/k.tmp" && mv "$T/k.tmp" "$TEAM/kit.yaml"
+out=$(kit sync 2>&1)
+check "sync adds a new include (relative to the source)" 'grep -qxF "  - $T/extra-src" "$HOME/.config/agentkit/machine.yaml" && echo "$out" | grep -q "加了來源"'
+check "sync keeps what you added" '[ "$(grep "^added" "$HOME/.config/agentkit/machine.yaml")" = "$(echo "$before" | grep "^added")" ]'
+check "items of the new source are announced" 'echo "$out" | grep -q "rule:extra-rule"'
+out=$(kit sync 2>&1)
+check "include added only once" '[ "$(grep -c "extra-src" "$HOME/.config/agentkit/machine.yaml")" = 1 ]'
 
 # ---------- allowed_hosts ----------
 out=$(kit init "$TEAM" https://public-git.example/someone/agentkit-library.git 2>&1); rc=$?
