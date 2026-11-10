@@ -42,7 +42,7 @@ json_edit() { # json_edit FILE OPSFILE : edit FILE, keep a backup
     # edit a snapshot, and only swap the result in (atomic rename) if FILE did
     # not change meanwhile; otherwise try again.
     local f=$1 ops=$2 snap tmp try new=0
-    [ -f "$f" ] || { printf '{}\n' > "$f"; new=1; }
+    [ -f "$f" ] || { mkdir -p "$(dirname "$f")"; printf '{}\n' > "$f"; new=1; }
     snap=$(mktemp "$f.kit.XXXXXX") || die "cannot write next to $f"
     tmp=$(mktemp "$f.kit.XXXXXX") || { rm -f "$snap"; die "cannot write next to $f"; }
     for try in 1 2 3 4 5; do
@@ -634,6 +634,257 @@ cmd_self_update() { # pull the clone kit was installed from, then reinstall
     say "kit：已更新到 $(cat "$KIT_LIB/VERSION" 2>/dev/null)"
 }
 
+# ---------- authoring: new / diff / update (local folders only, never the network) ----------
+valid_name() { case $1 in ""|-*|*[!a-z0-9-]*) return 1;; *) return 0;; esac; }
+target_dir() { # where new/update write: --to <source name|folder>, else the folder you are in if it has kit.yaml, else the first source
+    local d
+    if [ -n "$1" ]; then
+        while IFS= read -r d; do [ -n "$d" ] && [ "$(basename "$d")" = "$1" ] && { printf '%s\n' "$d"; return 0; }; done <<EOF
+$( [ -f "$MACHINE" ] && src_dirs )
+EOF
+        [ -d "$1" ] || die "找不到 --to $1（要是來源名字或資料夾）"
+        (cd "$1" && pwd); return 0
+    fi
+    [ -f ./kit.yaml ] && { pwd; return 0; }
+    need_init
+    src_dirs | head -n 1
+}
+item_hash() { # item_hash KIND PATH(the item file)
+    if [ "$1" = skill ]; then dir_hash "$(dirname "$2")"; else cksum < "$2" | awk '{print $1}'; fi
+}
+stage_from() { # stage_from KIND NAME FROM OUTDIR : copy what kit accepts from a local folder/file into OUTDIR; prints the item file
+    local kind=$1 name=$2 from=$3 out=$4 f rel scripts=0 skipped=0 ext
+    is_url "$from" && die "--from 只吃本機的資料夾或檔案（先自己 git clone 到暫存資料夾）"
+    [ -e "$from" ] || die "找不到 $from"
+    [ -d "$from" ] && from=$(cd "$from" && pwd -P)
+    case $kind in
+    skill)
+        [ -d "$from" ] && [ -f "$from/SKILL.md" ] || die "$from 要是有 SKILL.md 的資料夾"
+        grep -q 'scripts/' "$from/SKILL.md" && scripts=1
+        mkdir -p "$out/$name"
+        while IFS= read -r f; do
+            rel=${f#"$from"/}
+            case /$rel in */.git/*|*/.DS_Store) continue;; esac
+            case $(basename "$rel") in LICENSE*|LICENCE*|COPYING*|README*|CHANGELOG*) skipped=$((skipped+1)); continue;; esac
+            if [ -L "$f" ]; then skipped=$((skipped+1)); continue; fi
+            case $rel in
+                scripts/*) [ $scripts = 1 ] || { skipped=$((skipped+1)); continue; };;
+                *.md) ;;
+                *) skipped=$((skipped+1)); continue;;
+            esac
+            mkdir -p "$(dirname "$out/$name/$rel")"; cp "$f" "$out/$name/$rel"
+        done <<EOF
+$(cd "$from" && find "$(pwd -P)" -name .git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort)
+EOF
+        [ $skipped -gt 0 ] && warn "跳過 $skipped 個檔案（只帶 .md$( [ $scripts = 1 ] && echo '、scripts/')；不帶 LICENSE、README、.git）"
+        printf '%s\n' "$out/$name/SKILL.md";;
+    rule|agent|mcp)
+        ext=md; [ $kind = mcp ] && ext=yaml
+        f=$from; [ -d "$f" ] && f="$from/$name.$ext"
+        [ -f "$f" ] && [ ! -L "$f" ] || die "$from 要是一個 .$ext 檔（或有 $name.$ext 的資料夾）"
+        case $f in *.$ext) ;; *) die "$f 要是 .$ext 檔";; esac
+        cp "$f" "$out/$name.$ext"; printf '%s\n' "$out/$name.$ext";;
+    esac
+}
+put_item() { # put_item KIND NAME STAGED_FILE TARGET_DIR : replace the item in the target with the staged copy
+    local dst; dst=$(item_path "$4" "$1" "$2")
+    mkdir -p "$(dirname "$dst")"
+    if [ "$1" = skill ]; then rm -rf "$(dirname "$dst")"; cp -R "$(dirname "$3")" "$(dirname "$dst")"; else cp "$3" "$dst"; fi
+    printf '%s\n' "$dst"
+}
+skeleton() { # skeleton KIND NAME FILE
+    case $1 in
+    rule)  printf '# %s\n\n（在這裡寫規則，一條一行。）\n' "$2";;
+    skill) printf -- '---\nname: %s\ndescription: （什麼時候用這個 skill，一句話）\n---\n\n（在這裡寫步驟。）\n' "$2";;
+    mcp)   printf 'command: （啟動 MCP server 的程式，例如 uvx）\nargs: []\n# env:\n#   KEY: value      # 不要放密碼\n';;
+    agent) printf -- '---\nname: %s\ndescription: （這個 agent 做什麼）\nrules: []\nskills: []\nmcp: []\n# tools:\n#   only: [Read, Grep, Glob]\n#   deny: []\n---\n（在這裡寫 agent 的角色和做法。）\n' "$2";;
+    esac > "$3"
+}
+parse_item_args() { # sets KIND NAME FROM TO FORCE_IT from: [KIND] NAME [--from P] [--to T] [--force]
+    KIND=; NAME=; FROM=; TO=; FORCE_IT=
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --from) FROM=${2:-}; shift 2 || die "--from 後面要接資料夾";;
+            --to)   TO=${2:-}; shift 2 || die "--to 後面要接來源";;
+            --force) FORCE_IT=1; shift;;
+            *) if [ -z "$NAME" ] && [ -z "$KIND" ] && printf '%s\n' $KINDS | grep -qxF "$1"; then KIND=$1; elif [ -z "$NAME" ]; then NAME=$1; else die "多了一個參數：$1"; fi; shift;;
+        esac
+    done
+}
+guess_kind() { # guess_kind DIR NAME
+    local k found=""
+    for k in $KINDS; do [ -f "$(item_path "$1" "$k" "$2")" ] && found="$found $k"; done
+    set -- $found
+    [ $# = 1 ] || { [ $# = 0 ] && die "$(basename "$1") 裡沒有 ${NAME}"; die "$NAME 有好幾種（$*），請寫出種類，例：kit diff skill $NAME"; }
+    printf '%s\n' "$1"
+}
+
+cmd_new() {
+    parse_item_args "$@"
+    [ -n "$KIND" ] && [ -n "$NAME" ] || die "用法：kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]"
+    valid_name "$NAME" || die "名字只能用小寫英文、數字和 -：$NAME"
+    local dir dst tmp f; dir=$(target_dir "$TO")
+    dst=$(item_path "$dir" "$KIND" "$NAME")
+    [ -e "$dst" ] && die "$(basename "$dir") 已經有 $KIND:${NAME}（要更新用 kit update）"
+    if [ -f "$MACHINE" ] && f=$(find_item "$KIND" "$NAME"); then die "名字重複：別的來源已經有 $KIND:${NAME}（${f}）"; fi
+    if [ -n "$FROM" ]; then
+        tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-new.XXXXXX")
+        f=$(stage_from "$KIND" "$NAME" "$FROM" "$tmp") || { rm -rf "$tmp"; exit 1; }
+        dst=$(put_item "$KIND" "$NAME" "$f" "$dir"); rm -rf "$tmp"
+        state_set from "$KIND:$NAME@$dir" "$(item_hash "$KIND" "$dst")"
+        say "已從 $FROM 帶進 ${dst#"$dir"/}（在 $(basename "$dir")）"
+        say "記得刪掉暫存的資料夾：$FROM"
+    else
+        mkdir -p "$(dirname "$dst")"; skeleton "$KIND" "$NAME" "$dst"
+        say "已建立 ${dst#"$dir"/}（在 $(basename "$dir")），打開它寫內容"
+    fi
+    check_dirs "$dir" >/dev/null 2>&1 || warn "kit check 有問題，送出前請先打  kit check  看看"
+    return 0
+}
+
+cmd_diff_update() { # cmd_diff_update diff|update ARGS...
+    local mode=$1; shift
+    parse_item_args "$@"
+    [ -n "$NAME" ] && [ -n "$FROM" ] || die "用法：kit $mode [種類] <名字> --from 本機資料夾 [--to 來源]"
+    local dir dst tmp f old now
+    dir=$(target_dir "$TO")
+    [ -n "$KIND" ] || KIND=$(guess_kind "$dir" "$NAME") || exit 1
+    dst=$(item_path "$dir" "$KIND" "$NAME")
+    [ -f "$dst" ] || die "$(basename "$dir") 裡沒有 $KIND:${NAME}（新的用 kit new）"
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-diff.XXXXXX")
+    f=$(stage_from "$KIND" "$NAME" "$FROM" "$tmp") || { rm -rf "$tmp"; exit 1; }
+    if [ "$mode" = diff ]; then
+        if [ "$KIND" = skill ]; then diff -ru "$(dirname "$dst")" "$(dirname "$f")"; else diff -u "$dst" "$f"; fi
+        [ $? = 0 ] && say "一樣，沒有要更新的"
+        rm -rf "$tmp"; return 0
+    fi
+    old=$(state_get from "$KIND:$NAME@$dir"); now=$(item_hash "$KIND" "$dst")
+    if [ -z "$FORCE_IT" ] && [ "$old" != "$now" ]; then
+        rm -rf "$tmp"
+        if [ -z "$old" ]; then die "$KIND:$NAME 不是這台用 kit new --from 帶進來的，不知道有沒有人改過。先 kit diff 看清楚，確定要蓋掉再加 --force"; fi
+        die "$KIND:$NAME 在 $(basename "$dir") 被改過（跟上次帶進來的不一樣）。先 kit diff 看差在哪；要保留別人的修改就手動合併，確定要蓋掉再加 --force"
+    fi
+    if [ "$KIND" = skill ]; then diff -rq "$(dirname "$dst")" "$(dirname "$f")" >/dev/null; else cmp -s "$dst" "$f"; fi && { rm -rf "$tmp"; say "一樣，沒有要更新的"; return 0; }
+    dst=$(put_item "$KIND" "$NAME" "$f" "$dir"); rm -rf "$tmp"
+    state_set from "$KIND:$NAME@$dir" "$(item_hash "$KIND" "$dst")"
+    say "已更新 ${dst#"$dir"/}（在 $(basename "$dir")）。記得刪掉暫存的資料夾：$FROM"
+}
+
+# ---------- check ----------
+problem() { printf '%s\n' "$*" >> "$PROBLEM_FILE"; printf 'kit check: %s\n' "$*" >&2; }
+fm_of() { LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$1" 2>/dev/null; }
+fm_val() { printf '%s\n' "$1" | awk -F'\t' -v p="$2" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
+private_words() { # nonblank lines of the private word lists (this machine + sources), into a file
+    local out=$1 d
+    { cat "$KIT_CONF/private-words.txt" 2>/dev/null
+      [ -f "$MACHINE" ] && src_dirs | while IFS= read -r d; do cat "$d/private-words.txt" 2>/dev/null; done
+    } | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' | awk 'NF && !seen[$0]++' > "$out"
+}
+check_dirs() { # check_dirs DIR... : print problems, return 1 if any
+    local d f n k v hosts names pw rel line h ref fm range
+    names=$(mktemp "${TMPDIR:-/tmp}/kit-check.XXXXXX"); pw="$names.pw"
+    PROBLEM_FILE="$names.problems"; : > "$PROBLEM_FILE"
+    # every item name, from the folders checked and the configured sources
+    for d in "$@" $( [ -f "$MACHINE" ] && src_dirs ); do
+        [ -d "$d" ] || continue
+        for f in "$d"/rules/*.md "$d"/skills/*/SKILL.md "$d"/mcp/*.yaml "$d"/agents/*.md; do
+            [ -f "$f" ] || continue
+            case $f in */rules/*) printf 'rule:%s\t%s\n' "$(basename "$f" .md)" "$d";; */skills/*) printf 'skill:%s\t%s\n' "$(basename "$(dirname "$f")")" "$d";;
+                        */mcp/*) printf 'mcp:%s\t%s\n' "$(basename "$f" .yaml)" "$d";; *) printf 'agent:%s\t%s\n' "$(basename "$f" .md)" "$d";; esac
+        done
+    done | awk -F'\t' '!seen[$0]++' > "$names"
+    # the same name in two places
+    awk -F'\t' '{ c[$1]++; w[$1] = w[$1] " " $2 } END { for (k in c) if (c[k] > 1) print k "\t" w[k] }' "$names" | while IFS="$TAB" read -r k v; do
+        problem "名字重複：$k 在$v"
+    done
+    private_words "$pw"
+    for d in "$@"; do
+        [ -d "$d" ] || { problem "找不到資料夾 $d"; continue; }
+        # format of each item
+        for f in "$d"/skills/*/SKILL.md "$d"/agents/*.md; do
+            [ -f "$f" ] || continue
+            rel=${f#"$d"/}
+            case $f in */SKILL.md) n=$(basename "$(dirname "$f")");; *) n=$(basename "$f" .md);; esac
+            valid_name "$n" || problem "$rel: 名字只能用小寫英文、數字和 -"
+            head -n 1 "$f" | grep -qx -- '---' && fm=$(fm_of "$f") || { problem "$rel: 開頭要有 --- 包起來的 name、description"; continue; }
+            [ "$(fm_val "$fm" name)" = "$n" ] || problem "$rel: name 要寫 $n"
+            [ -n "$(fm_val "$fm" description)" ] || problem "$rel: 少了 description"
+            case $f in */agents/*)
+                for k in rule skill mcp; do
+                    for ref in $(fm_val "$fm" "${k}s"); do grep -q "^$k:$ref$TAB" "$names" || problem "$rel: 找不到 $k:$ref"; done
+                done;;
+            esac
+        done
+        for f in "$d"/rules/*.md; do [ -f "$f" ] || continue; valid_name "$(basename "$f" .md)" || problem "${f#"$d"/}: 名字只能用小寫英文、數字和 -"; [ -s "$f" ] || problem "${f#"$d"/}: 是空的"; done
+        for f in "$d"/mcp/*.yaml; do
+            [ -f "$f" ] || continue; rel=${f#"$d"/}
+            valid_name "$(basename "$f" .yaml)" || problem "$rel: 名字只能用小寫英文、數字和 -"
+            [ -n "$(yget "$f" command)" ] || problem "$rel: 少了 command"
+            for v in $(yget "$f" command) $(yget "$f" args); do
+                case $v in git+*|github:*|*://*|git@*) problem "$rel: MCP 只能從公司允許的套件來源裝，不能用 $v 這種寫法";; esac
+            done
+        done
+        if [ -f "$d/kit.yaml" ]; then
+            for k in rule skill mcp; do
+                for ref in $(yget "$d/kit.yaml" "required.${k}s") $(yget "$d/kit.yaml" "recommended.${k}s"); do
+                    grep -q "^$k:$ref$TAB" "$names" || { if [ -n "${CHECK_CI:-}" ] && [ -n "$(yget "$d/kit.yaml" include)" ]; then warn "kit.yaml: $k:$ref 不在這個 repo（應該在 include 的來源）"; else problem "kit.yaml: 找不到 $k:$ref"; fi; }
+                done
+            done
+        fi
+        # files: no git inside, no links, text only
+        ( cd "$d" && find . -mindepth 1 \( -name .git -prune -o -print \) ) | while IFS= read -r f; do
+            rel=${f#./}
+            if [ -L "$d/$rel" ]; then echo "$rel: 不能放捷徑（symlink）"
+            elif [ -f "$d/$rel" ]; then
+                case $rel in .gitmodules|*/.gitmodules) echo "$rel: 不能用 git submodule";; esac
+                [ -s "$d/$rel" ] && ! LC_ALL=C grep -qI . "$d/$rel" 2>/dev/null && [ "$(LC_ALL=C tr -d '\n' < "$d/$rel" | wc -c)" -gt 0 ] && echo "$rel: 只能放文字檔"
+            fi
+        done > "$names.files"
+        ( cd "$d" && find . -mindepth 2 -name .git | sed 's#^\./##; s#$#: 裡面不能有別的 git repo#' ) >> "$names.files"
+        while IFS= read -r line; do problem "$line"; done < "$names.files"
+        # URLs only to content_hosts (when the source lists them)
+        hosts=$( { yget "$d/kit.yaml" content_hosts; [ -f "$MACHINE" ] && src_dirs | while IFS= read -r v; do yget "$v/kit.yaml" content_hosts; done; } | awk 'NF && !seen[$0]++')
+        if [ -n "$hosts" ]; then
+            LC_ALL=C grep -rnIoE --exclude-dir=.git '(https?|ssh|git)://[^][ "<>()`'"'"']+|git@[A-Za-z0-9.-]+:' "$d" 2>/dev/null | while IFS= read -r line; do
+                v=${line#*:*:}; h=$(url_host "$v")
+                printf '%s\n' "$hosts" | grep -qxF "$h" || echo "${line%%:*}" "$(printf '%s' "$line" | cut -d: -f2)" "$h"
+            done | while read -r f n h; do problem "${f#"$d"/}:$n: 網址 $h 不在 content_hosts"; done
+        fi
+        # private words (only the place, never the word)
+        if [ -s "$pw" ]; then
+            LC_ALL=C grep -rnIiF -f "$pw" --exclude-dir=.git --exclude=private-words.txt "$d" 2>/dev/null | cut -d: -f1,2 | while IFS= read -r line; do problem "${line#"$d"/}: 有不該公開的字"; done
+            ( cd "$d" && find . -mindepth 1 -name .git -prune -o -print ) | sed 's#^\./##' | grep -iF -f "$pw" | while IFS= read -r line; do problem "$line: 檔名有不該公開的字"; done
+        fi
+        # --ci: commit author emails
+        if [ -n "${CHECK_CI:-}" ] && [ -d "$d/.git" ]; then
+            v=$(yget "$d/kit.yaml" author_domains)
+            if [ -n "$v" ]; then
+                if [ -n "${KIT_CI_BASE:-}" ]; then range="$KIT_CI_BASE..HEAD"; else range="-1"; fi
+                git -C "$d" log --format='%h %ae' "$range" 2>/dev/null | while read -r h line; do
+                    printf '%s\n' "$v" | grep -qxF "${line##*@}" || problem "commit $h: 作者 email 不是公司網域"
+                done
+            fi
+        fi
+    done
+    PROBLEMS=$(wc -l < "$PROBLEM_FILE" | tr -d ' ')
+    rm -f "$names" "$names.files" "$pw" "$PROBLEM_FILE"
+    [ "$PROBLEMS" = 0 ]
+}
+
+cmd_check() {
+    local dirs=() a
+    for a in "$@"; do
+        case $a in --ci) CHECK_CI=1;; -*) die "不認得 $a";; *) dirs+=("$(cd "$a" 2>/dev/null && pwd || echo "$a")");; esac
+    done
+    if [ ${#dirs[@]} = 0 ]; then
+        if [ -f ./kit.yaml ] || [ -n "${CHECK_CI:-}" ]; then dirs=("$(pwd)")
+        else need_init; while IFS= read -r a; do dirs+=("$a"); done <<EOF
+$(src_dirs)
+EOF
+        fi
+    fi
+    if check_dirs "${dirs[@]}"; then say "kit check：沒問題（${#dirs[@]} 個來源）"; else printf 'kit check：%s 個問題\n' "$PROBLEMS" >&2; exit 1; fi
+}
 usage() {
     cat <<'EOF'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -644,6 +895,13 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
+
+寫內容的人用（只吃本機資料夾，不連網）：
+  kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]
+  kit diff   [種類] <名字> --from 本機資料夾   比較
+  kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
+  kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
+
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
@@ -659,6 +917,10 @@ case ${1:-} in
     add)       shift; cmd_add_rm add "$@";;
     rm|remove) shift; cmd_add_rm rm "$@";;
     run)       shift; cmd_run "$@";;
+    new)       shift; cmd_new "$@";;
+    diff)      shift; cmd_diff_update diff "$@";;
+    update)    shift; cmd_diff_update update "$@";;
+    check)     shift; cmd_check "$@";;
     uninstall) shift; cmd_uninstall "$@";;
     self-update) cmd_self_update;;
     --version|version) echo "kit $KIT_VERSION";;

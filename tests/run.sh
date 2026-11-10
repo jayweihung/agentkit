@@ -166,6 +166,80 @@ out=$(kit init "$TEAM" https://github.com/someone/agentkit-library.git 2>&1); rc
 check "host outside allowed_hosts refused" '[ $rc -ne 0 ] && echo "$out" | grep -q "github.com 不在允許的主機清單"'
 kit init "$TEAM" >/dev/null 2>&1
 
+# ---------- new / diff / update / check (authoring, local only) ----------
+AU="$T/authoring"; LIB="$T/lib"
+mkdir -p "$AU" "$LIB/skills/foo/scripts" "$LIB/skills/foo/.git" "$LIB/skills/bar"
+printf 'name: authoring\ncontent_hosts: [gitea.example]\nrequired:\n  rules: [sec]\n' > "$AU/kit.yaml"
+printf -- '---\nname: foo\ndescription: foo skill\n---\nRun scripts/x.sh, see https://gitea.example/doc\n' > "$LIB/skills/foo/SKILL.md"
+echo 'echo hi' > "$LIB/skills/foo/scripts/x.sh"; echo MIT > "$LIB/skills/foo/LICENSE"; echo readme > "$LIB/skills/foo/README.md"
+printf '\0\1\2' > "$LIB/skills/foo/logo.png"; echo x > "$LIB/skills/foo/.git/config"
+printf -- '---\nname: bar\ndescription: bar\n---\nbar\n' > "$LIB/skills/bar/SKILL.md"; echo 'echo no' > "$LIB/skills/bar/run.sh"
+cd "$AU"
+out=$(kit new rule sec 2>&1); rc=$?
+check "new rule skeleton in the folder with kit.yaml" '[ $rc -eq 0 ] && [ -s "$AU/rules/sec.md" ]'
+kit new agent bot >/dev/null 2>&1
+check "new agent skeleton has frontmatter" 'head -2 "$AU/agents/bot.md" | grep -qx "name: bot"'
+out=$(kit new skill foo --from "$LIB/skills/foo" 2>&1); rc=$?
+check "new --from copies md and declared scripts" '[ $rc -eq 0 ] && [ -f "$AU/skills/foo/SKILL.md" ] && [ -f "$AU/skills/foo/scripts/x.sh" ]'
+check "new --from skips LICENSE, README, binaries, .git" '[ ! -e "$AU/skills/foo/LICENSE" ] && [ ! -e "$AU/skills/foo/README.md" ] && [ ! -e "$AU/skills/foo/logo.png" ] && [ ! -e "$AU/skills/foo/.git" ]'
+check "new --from reminds to delete the temp folder" 'echo "$out" | grep -q 記得刪掉'
+kit new skill bar --from "$LIB/skills/bar" >/dev/null 2>&1
+check "undeclared extra files not copied" '[ ! -e "$AU/skills/bar/run.sh" ]'
+out=$(kit new skill foo 2>&1); rc=$?
+check "new refuses an existing name" '[ $rc -ne 0 ]'
+out=$(kit new skill gerrit-review 2>&1); rc=$?
+check "new refuses a name another source has" '[ $rc -ne 0 ] && echo "$out" | grep -q 名字重複'
+out=$(kit new skill Bad_Name 2>&1); rc=$?
+check "new refuses bad names" '[ $rc -ne 0 ]'
+for u in https://github.com/x/y git@github.com:x/y.git; do
+    out=$(kit new skill zz --from "$u" 2>&1); rc=$?
+    check "--from refuses $u" '[ $rc -ne 0 ] && echo "$out" | grep -q 本機'
+done
+echo "new line" >> "$LIB/skills/foo/SKILL.md"
+out=$(kit diff foo --from "$LIB/skills/foo" 2>&1)
+check "diff shows the change" 'echo "$out" | grep -q "^+new line"'
+out=$(kit update foo --from "$LIB/skills/foo" 2>&1); rc=$?
+check "update applies it" '[ $rc -eq 0 ] && grep -q "new line" "$AU/skills/foo/SKILL.md"'
+echo "colleague edit" >> "$AU/skills/foo/SKILL.md"; echo "second" >> "$LIB/skills/foo/SKILL.md"
+out=$(kit update foo --from "$LIB/skills/foo" 2>&1); rc=$?
+check "update stops when someone changed it" '[ $rc -ne 0 ] && grep -q "colleague edit" "$AU/skills/foo/SKILL.md" && echo "$out" | grep -q 被改過'
+out=$(kit update skill foo --from "$LIB/skills/foo" --force 2>&1); rc=$?
+check "update --force overwrites" '[ $rc -eq 0 ] && ! grep -q "colleague edit" "$AU/skills/foo/SKILL.md" && grep -q second "$AU/skills/foo/SKILL.md"'
+printf -- '---\nname: bot\ndescription: b\nskills: [foo]\n---\nhi\n' > "$AU/agents/bot.md"
+out=$(kit check 2>&1); rc=$?
+check "check passes on clean content" '[ $rc -eq 0 ]'
+printf -- '---\nname: bot\ndescription: b\nskills: [foo, nope]\n---\nsee https://evil.example/x\n' > "$AU/agents/bot.md"
+mkdir -p "$AU/mcp"; printf 'command: uvx\nargs: [git+https://gitea.example/x.git]\n' > "$AU/mcp/m.yaml"
+mkdir -p "$AU/skills/baz"; printf 'no header\n' > "$AU/skills/baz/SKILL.md"
+cp "$LIB/skills/foo/logo.png" "$AU/skills/foo/"; ln -s /etc/hosts "$AU/rules/link.md"
+mkdir -p "$AU/skills/foo/.git"; echo "[submodule]" > "$AU/.gitmodules"
+mkdir -p "$HOME/.config/agentkit"; printf '# mine\nTopSecretName\n' > "$HOME/.config/agentkit/private-words.txt"
+echo "by topsecretname" >> "$AU/rules/sec.md"
+out=$(kit check 2>&1); rc=$?
+check "check fails" '[ $rc -ne 0 ]'
+check "check: missing reference" 'echo "$out" | grep -q "agents/bot.md: 找不到 skill:nope"'
+check "check: url not in content_hosts" 'echo "$out" | grep -q "agents/bot.md:6: 網址 evil.example"'
+check "check: mcp from git" 'echo "$out" | grep -q "mcp/m.yaml: MCP 只能"'
+check "check: skill header" 'echo "$out" | grep -q "skills/baz/SKILL.md: 開頭要有"'
+check "check: binary, symlink, submodule, nested git" 'echo "$out" | grep -q "logo.png: 只能放文字檔" && echo "$out" | grep -q "link.md: 不能放捷徑" && echo "$out" | grep -q ".gitmodules: 不能用" && echo "$out" | grep -q "skills/foo/.git: 裡面不能有"'
+check "check: private word found, never printed" 'echo "$out" | grep -q "rules/sec.md:[0-9]*: 有不該公開的字" && ! echo "$out" | grep -qi topsecret'
+check "check: counts every problem" 'echo "$out" | grep -q "kit check：9 個問題"'
+mkdir -p "$AU/skills/gerrit-review"; printf -- '---\nname: gerrit-review\ndescription: x\n---\nx\n' > "$AU/skills/gerrit-review/SKILL.md"
+out=$(kit check "$AU" 2>&1)
+check "check: duplicate name across sources" 'echo "$out" | grep -q "名字重複：skill:gerrit-review"'
+rm -rf "$AU/skills/gerrit-review"
+# --ci: author emails from the company domain only
+rm -rf "$AU/skills/foo/.git" "$AU/.gitmodules" "$AU/rules/link.md" "$AU/skills/foo/logo.png" "$AU/skills/baz" "$AU/mcp"
+printf -- '---\nname: bot\ndescription: b\nskills: [foo]\n---\nhi\n' > "$AU/agents/bot.md"; echo "Be safe." > "$AU/rules/sec.md"
+echo "author_domains: [corp.example]" >> "$AU/kit.yaml"
+git -C "$AU" init -q && git -C "$AU" add -A && git -C "$AU" -c user.name=a -c user.email=me@home.example commit -qm x
+out=$(kit check --ci 2>&1); rc=$?
+check "check --ci: author email must be company" '[ $rc -ne 0 ] && echo "$out" | grep -q "作者 email 不是公司網域"'
+git -C "$AU" -c user.name=a -c user.email=me@corp.example commit -q --amend --reset-author -m x
+out=$(kit check --ci 2>&1); rc=$?
+check "check --ci passes" '[ $rc -eq 0 ]'
+cd "$T"
+
 # ---------- uninstall ----------
 kit add skill gerrit-review >/dev/null 2>&1; kit add mcp gerrit >/dev/null 2>&1
 kit uninstall >/dev/null 2>&1
