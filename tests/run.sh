@@ -622,6 +622,9 @@ check "herdr-panel install: layout backed up first" 'cmp -s "$(ls "$HH"/layouts/
 out=$(hp install --keep-env 2>&1); rc=$?
 check "herdr-panel install again: layout not changed twice" '[ $rc -eq 0 ] && [ "$(grep -c "\"kit-toggle\"" "$HH/layouts/mine.json")" = 1 ] && [ "$(ls "$HH"/layouts/ | grep -c kit-backup)" = 1 ]'
 check "herdr-panel --keep-env: the panel runs kit with this HOME" 'grep -qF "\"HOME\": \"$HOME\"" "$HH/mods/kit/config.json"'
+echo old > "$HH/mods/kit/main.js"; cp "$HH/mods/kit/config.json" "$T/panel-cfg"
+HERDR_APP_HOME="$HH" AGENTKIT_HOME="$T/inst-p" sh "$HERE/../unix/install.sh" --quiet >/dev/null 2>&1
+check "reinstall / self-update refreshes an installed panel, keeps its settings" 'cmp -s "$HH/mods/kit/main.js" "$HERE/../herdr/kit-panel/main.js" && cmp -s "$HH/mods/kit/config.json" "$T/panel-cfg"'
 out=$(hp uninstall 2>&1); rc=$?
 check "herdr-panel uninstall: mod and layout blocks gone" '[ $rc -eq 0 ] && [ ! -e "$HH/mods/kit" ] && ! grep -q "kit" "$HH/layouts/mine.json" && grep -q "\"tabs\"" "$HH/layouts/mine.json"'
 printf '{\n  "layout": "main"\n}\n' > "$HH/shared.json"
@@ -631,6 +634,8 @@ hp uninstall >/dev/null 2>&1
 mkdir -p "$HH/mods/kit"; echo mine > "$HH/mods/kit/main.js"
 out=$(hp install 2>&1); rc=$?
 check "herdr-panel: someone else's mods/kit is left alone" '[ $rc -ne 0 ] && echo "$out" | grep -q "不是 kit 放的" && [ "$(cat "$HH/mods/kit/main.js")" = mine ]'
+HERDR_APP_HOME="$HH" AGENTKIT_HOME="$T/inst-p" sh "$HERE/../unix/install.sh" --quiet >/dev/null 2>&1
+check "reinstall leaves someone else's mods/kit alone" '[ "$(cat "$HH/mods/kit/main.js")" = mine ]'
 out=$(hp uninstall 2>&1); rc=$?
 check "herdr-panel uninstall: someone else's mods/kit is left alone" '[ $rc -ne 0 ] && [ -f "$HH/mods/kit/main.js" ]'
 out=$(HERDR_APP_HOME="$T/no-herdr" kit herdr-panel install 2>&1); rc=$?

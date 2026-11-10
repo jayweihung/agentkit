@@ -597,6 +597,9 @@ Check 'herdr-panel install: button in the tab bar, panel beside the work area' {
 Check 'herdr-panel install: layout backed up first' { @(Backups).Count -eq 1 -and (ReadT @(Backups)[0].FullName) -ceq $mineOrig }
 Kit herdr-panel install
 Check 'herdr-panel install again: layout not changed twice' { $rc -eq 0 -and ([regex]::Matches((ReadT "$HH/layouts/mine.json"), '"kit-toggle"')).Count -eq 1 -and @(Backups).Count -eq 1 }
+W "$HH/mods/kit/main.js" 'old'; $pcfg = ReadT "$HH/mods/kit/config.json"
+$env:AGENTKIT_HOME = Join-Path $T 'inst-p'; & $Exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'windows/install.ps1') -Quiet; Remove-Item env:AGENTKIT_HOME
+Check 'reinstall / self-update refreshes an installed panel, keeps its settings' { (SameBytes "$HH/mods/kit/main.js" (Join-Path $Repo 'herdr/kit-panel/main.js')) -and (ReadT "$HH/mods/kit/config.json") -ceq $pcfg }
 if (-not $OnWindows) {
     Kit herdr-panel install --keep-env
     Check 'herdr-panel --keep-env: the panel runs kit with this HOME' { (ReadT "$HH/mods/kit/config.json").Contains("`"HOME`": `"$H`"") }
