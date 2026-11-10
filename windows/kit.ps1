@@ -773,7 +773,7 @@ function Json-Keys([string]$file, [string[]]$path) { # the keys of the object at
 }
 function Real-Dir([string]$d) { # the folder with links resolved (like pwd -P), as Claude names its projects
     $f = Full-Path $d
-    if (-not $OnWindows) { $r = "$(& /bin/sh -c 'cd "$1" && pwd -P' sh $f 2>$null)".Trim(); if ($r) { return $r } }
+    if (-not $OnWindows) { $r = "$(& /bin/sh -c 'if cd "$1"; then pwd -P; fi' sh $f 2>$null)".Trim(); if ($r) { return $r } }
     $f
 }
 function Here-Short([string]$dir, [string]$f) { # inside DIR relative to it, else with ~ for the home folder

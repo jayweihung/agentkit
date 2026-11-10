@@ -1,16 +1,19 @@
 // kit panel for Herdr: see and change what kit manages (rules, skills, MCP servers, agents) without typing.
+// It follows the agent (terminal) you clicked last: kit runs on that agent's machine, and the panel also lists
+// what that agent reads from its folder (CLAUDE.md, .claude/rules, .claude/skills, .mcp.json) besides kit's.
 // Installed by `kit herdr-panel install` into <Herdr home>/mods/kit, next to config.json (how to run kit
 // on this computer) and mod.json. Everything goes through the kit command itself:
-//   kit list --json      what there is and what is in use      kit add|rm <kind> <name>
+//   kit list --json --dir <folder> --pid <pid>   what there is, what is in use, what the folder adds
+//   kit add|rm <kind> <name>
 //   kit sync             update                                kit run <agent> --tool <tool>  (in a new tab)
 // Roles (props.role): the panel (default) and "toggle", the tab-bar button that shows or hides "kit-panel".
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, settings, exec, run, layout, shared, setShared, window, appHome, readTextFile, props as blockProps } from "herdr";
+import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, focused, terminals, spaces, props as blockProps } from "herdr";
 
 const TOGGLE = "kit-toggle", PANEL = "kit-panel";
 const SHIPPED = ["main", "terminals", "win98"]; // Herdr's own layouts: read-only, so "放進上排" clones one first
-const DATA = "kit.data.v1", BUSY = "kit.busy", MSG = "kit.msg";
+const DATA = "kit.data.v2", BUSY = "kit.busy", MSG = "kit.msg", TARGET = "kit.target";
 const TOGGLE_NODE = { id: TOGGLE, type: "block", content: { mod: "kit", props: { role: "toggle" } }, size: { px: 56 } };
 const PANEL_NODE = { id: PANEL, type: "column", children: [{ id: "kit", type: "block", content: { mod: "kit" } }],
   size: { px: 420 }, min: 320, max: 800 };
@@ -63,15 +66,32 @@ async function kitConfig() {
   // Windows has no env program: the variables are only for trying the panel on a Mac/Linux test setup.
   return env.length && !isWindows() ? ["/usr/bin/env", ...env, ...kit] : kit;
 }
-async function kit(args, timeout) {
-  const argv = await kitConfig();
-  try {
-    const r = await exec(argv[0], [...argv.slice(1), ...args], { timeout });
-    return { code: r.code, out: String(r.stdout ?? ""), err: String(r.stderr ?? "") };
-  } catch (e) {
-    return { code: -1, out: "", err: `沒辦法執行 kit（${argv[0]}）：${e?.message ?? e}` };
+// On another machine (a space's machine): kit from PATH or ~/.local/bin (Mac/Linux), else kit.cmd (Windows).
+const REMOTE_SH = ["sh", "-c", 'command -v kit >/dev/null 2>&1 && exec kit "$@"; exec "$HOME/.local/bin/kit" "$@"', "kit"];
+async function kitArgv(machine) { return machine ? REMOTE_SH : kitConfig(); }
+async function kit(args, timeout, machine = null) {
+  const tries = machine ? [REMOTE_SH, ["kit.cmd"]] : [await kitConfig()];
+  let last = "";
+  for (const argv of tries) {
+    try {
+      const r = await exec(argv[0], [...argv.slice(1), ...args], { timeout, on: machine });
+      return { code: r.code, out: String(r.stdout ?? ""), err: String(r.stderr ?? "") };
+    } catch (e) { last = String(e?.message ?? e); }
   }
+  return { code: -1, out: "", err: machine ? `連不到 ${machine}，或那台沒裝 kit：${last}` : `沒辦法執行 kit：${last}` };
 }
+// The terminal you clicked last (clicking this panel moves focus here, so keep the one before).
+function currentTarget(prev) {
+  const f = focused();
+  if (!f?.terminal) return prev ?? { key: "local", term: null, machine: null, space: f?.space ?? null, cwd: null, title: "", agent: false };
+  const t = terminals().find((x) => x.address === f.terminal) ?? {};
+  const sp = spaces().find((s) => s.id === f.space);
+  const machine = sp?.machine ?? null, cwd = f.cwd ?? t.cwd ?? null;
+  return { key: `${machine ?? ""}|${cwd ?? ""}|${f.terminal}`, term: f.terminal, machine, space: f.space, cwd,
+    title: t.title || t.name || t.program?.name || f.terminal, agent: Boolean(f.agent || t.program?.agent) };
+}
+// a folder with ~ for this computer's home (other machines' paths stay as they are)
+const shortDir = (d) => { const h = String(home() ?? "").replace(/\\/g, "/"); return d && h && (d + "/").startsWith(h + "/") ? "~" + d.slice(h.length) : d; };
 // kit's own messages, without the "kit: " / "kit：" in front of each line
 const clean = (s) => String(s).split("\n").map((l) => l.replace(/^kit[:：]\s?/, "")).join("\n").trim();
 
@@ -84,9 +104,15 @@ export default class KitPanel extends View {
     try { this.folded = JSON.parse(this.load("folded") || "{}"); } catch { this.folded = {}; }
     // Both the button and the panel keep the shared list fresh (a hidden panel may not have started yet);
     // the background sync Claude starts may change things, so look again every minute.
-    const stale = () => !this.data || Date.now() - (this.data.at ?? 0) > 50000;
+    this.target = currentTarget(shared(TARGET) ?? null);
+    const stale = () => !this.data || this.data.key !== this.target.key || Date.now() - (this.data.at ?? 0) > 50000;
     if (this.role === "panel" || stale()) this.refresh(cx);
     cx.timer.every(60000, (cx) => { if (stale() && !this.busy) this.refresh(cx); });
+    // follow the agent you click: look at the focus often, ask kit again only when it changed
+    if (this.role === "panel") cx.timer.every(700, (cx) => {
+      const t = currentTarget(this.target);
+      if (t.key !== this.target.key) { this.target = t; setShared(TARGET, t); if (!this.busy) this.refresh(cx); cx.notify(); }
+    });
   }
 
   load(k) { try { return localStorage.getItem(`kit.${k}`); } catch { return null; } }
@@ -96,13 +122,24 @@ export default class KitPanel extends View {
   get busy() { return shared(BUSY) ?? null; }
 
   refresh(cx) {
+    const tg = this.target ?? currentTarget(null);
     cx.spawn(async (cx) => {
-      const r = await kit(["list", "--json"], 60000);
+      const args = ["list", "--json"];
+      if (tg.cwd) args.push("--dir", tg.cwd);
+      if (tg.term) {
+        const g = await hc(["get", tg.term, "--json"]).catch(() => null);
+        try { const pid = JSON.parse(g?.stdout ?? "{}").pid; if (pid) args.push("--pid", String(pid)); } catch {}
+      }
+      let r = await kit(args, 60000, tg.machine), warn = null;
+      // an older kit without --dir: ask again without it
+      if (r.code !== 0 && /--dir|--pid|用法/.test(r.err)) r = await kit(["list", "--json"], 60000, tg.machine);
+      if (r.code === -1 && tg.machine) { warn = clean(r.err); r = await kit(["list", "--json"], 60000, null); }
       let d = null;
       if (r.code === 0) {
         try { d = JSON.parse(r.out); } catch { d = null; }
-        setShared(DATA, d ? { ...d, at: Date.now() } : { error: "kit list --json 的輸出讀不懂（kit 太舊？請打 kit self-update）", at: Date.now() });
-      } else setShared(DATA, { error: clean(r.err || r.out) || `kit list 失敗（${r.code}）`, at: Date.now() });
+        setShared(DATA, d ? { ...d, key: tg.key, warn, machine: warn ? null : tg.machine, at: Date.now() }
+          : { error: "kit list --json 的輸出讀不懂（kit 太舊？請打 kit self-update）", key: tg.key, at: Date.now() });
+      } else setShared(DATA, { error: clean(r.err || r.out) || `kit list 失敗（${r.code}）`, key: tg.key, at: Date.now() });
       cx.notify();
     });
   }
@@ -114,7 +151,7 @@ export default class KitPanel extends View {
     setShared(MSG, null);
     cx.notify();
     cx.spawn(async (cx) => {
-      const r = await kit(args, 600000);
+      const r = await kit(args, 600000, this.data?.machine ?? null);
       const text = clean([r.out, r.err].filter(Boolean).join("\n"));
       setShared(MSG, { ok: r.code === 0, label, text: text || (r.code === 0 ? "完成" : `失敗（${r.code}）`), at: Date.now() });
       setShared(BUSY, null);
@@ -126,13 +163,14 @@ export default class KitPanel extends View {
   // kit run <agent> in a new tab of this space (kit syncs first, then starts the tool)
   openAgent(name, cx) {
     cx.spawn(async (cx) => {
-      const argv = await kitConfig();
+      const machine = this.data?.machine ?? null;
+      const argv = await kitArgv(machine);
       const tool = (this.data?.tools ?? ["claude"]).includes(this.tool) ? this.tool : "claude";
       const kitArgs = [...argv, "run", name, "--tool", tool];
       // kit.cmd is a batch file: start it through cmd so the terminal can run it
       const full = isWindows() && /\.(cmd|bat)$/i.test(argv[0]) ? ["cmd.exe", "/d", "/c", ...kitArgs] : kitArgs;
       try {
-        await run("tab.new", { name: `${name}（${TOOL_NAMES[tool] ?? tool}）`, argv: full });
+        await run("tab.new", { name: `${name}（${TOOL_NAMES[tool] ?? tool}）`, argv: full, ...(this.target?.space ? { space: this.target.space } : {}), ...(this.target?.cwd ? { folder: this.target.cwd } : {}) });
         setShared(MSG, { ok: true, label: "開啟", text: `在新分頁開了 ${name}（${TOOL_NAMES[tool] ?? tool}）`, at: Date.now() });
       } catch (e) {
         setShared(MSG, { ok: false, label: "開啟", text: `開不起來：${e?.message ?? e}`, at: Date.now() });
@@ -166,20 +204,29 @@ export default class KitPanel extends View {
     if (msg) root.child(this.message(t, z, msg));
     if (!d) return root.child(div().p(14).text_color(t.muted).child("讀取中…"));
     if (d.error) return root.child(this.problem(t, z, d.error));
+    if (d.warn) root.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked)
+      .child(`${d.warn}\n先顯示這台電腦的。`));
+    if (d.here?.user) return root.child(v_flex().p(14).gap(6)
+      .child(div().font_semibold().child(`這個 agent 用 ${d.here.user} 帳號跑`))
+      .child(div().text_size(z - 1).text_color(t.muted).child(d.here.user === "root"
+        ? "root 只用你在 Mac 上簽過的版本，這裡看不到也不能改。要換版本：在 Mac 上 kit approve，再請它 kit sync。"
+        : "這裡只看得到你自己帳號的 kit，看不到也不能改它的。")));
     if (d.kit_version_wanted) root.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked)
       .child(`團隊要 kit ${d.kit_version_wanted} 以上，你的是 ${d.kit}。請在終端機打  kit self-update`));
     return root.child(this.list(t, z, d));
   }
 
   header(t, z) {
-    const d = this.data, busy = this.busy;
+    const d = this.data, busy = this.busy, tg = this.target ?? {};
     const inBar = Boolean(find(layout(), TOGGLE));
+    const where = [tg.title || "這台電腦", d?.machine ?? tg.machine ?? "這台電腦", shortDir(d?.here?.dir ?? tg.cwd)].filter(Boolean).join(" · ");
     return v_flex().flex_none().border_b(1).border_color(t.border)
       .child(h_flex().px(10).py(6).gap(6).items_center()
         .child(div().flex_1().min_w(0).truncate().font_semibold().child(d?.kit ? `kit ${d.kit}` : "kit"))
         .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { kind: "primary", off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
         .child(this.btn(t, z, "reload", "↻", { off: Boolean(busy), on: (cx) => this.refresh(cx) }))
         .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { on: () => run("layout.hide", { id: PANEL }) }))))
+      .child(div().px(12).pb(3).text_size(z - 1).truncate().text_color(t.foreground).child(`跟著：${where}`))
       .when(Boolean(d?.sources?.length), (el) => el.child(div().px(12).pb(5).text_size(z - 1.5).truncate().text_color(t.muted)
         .child(`來源：${d.sources.map((s) => s.name).join("、")}`)));
   }
@@ -228,7 +275,43 @@ export default class KitPanel extends View {
       if (!folded) body.child(v_flex().gap(4).children(rows.map((i) => this.row(t, z, i))));
     }
     if (!items.length) body.child(div().text_color(t.muted).child("來源裡還沒有東西。"));
+    if (d.here) this.hereSections(t, z, d.here, body);
     return body;
+  }
+
+  // what the agent reads besides kit's: its folder (and the ones above), and this account's own (not kit's)
+  hereSections(t, z, here, body) {
+    const groups = [
+      { id: "here-dir", title: "這個目錄自己的（只看）", rows: (here.items ?? []).filter((i) => i.scope === "dir") },
+      { id: "here-user", title: "帳號裡另外有的（不是 kit 管的）", rows: (here.items ?? []).filter((i) => i.scope === "user") },
+    ];
+    body.child(div().mt(4).border_t(1).border_color(t.border));
+    if (here.error) body.child(div().text_size(z - 1).text_color(t.muted).child(`${shortDir(here.dir)}：${here.error}`));
+    for (const g of groups) {
+      if (!g.rows.length) continue;
+      const folded = this.folded[g.id] ?? g.rows.length > 8;
+      const count = ["rule", "skill", "mcp"].map((k) => [k, g.rows.filter((i) => i.kind === k).length]).filter(([, n]) => n)
+        .map(([k, n]) => `${k === "rule" ? "規則" : k === "skill" ? "skill" : "MCP"} ${n}`).join(" · ");
+      body.child(h_flex().id(`sec-${g.id}`).gap(6).items_center().cursor_pointer().on_mouse_down("left", stop)
+        .on_click((_e, cx) => { this.folded[g.id] = !folded; this.save("folded", JSON.stringify(this.folded)); cx.notify(); })
+        .child(div().w(12).text_color(t.muted).child(folded ? "▸" : "▾"))
+        .child(div().font_semibold().child(g.title))
+        .child(div().text_size(z - 1.5).text_color(t.muted).child(count)));
+      if (!folded) body.child(v_flex().gap(4).children(g.rows.map((i) => this.hereRow(t, z, i))));
+    }
+    if (!groups.some((g) => g.rows.length) && !here.error) body.child(div().text_size(z - 1).text_color(t.muted).child("這個目錄沒有自己的規則、skill、MCP。"));
+  }
+
+  hereRow(t, z, i) {
+    const badge = (text) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(t.muted).child(text);
+    const kind = i.kind === "rule" ? "規則" : i.kind === "skill" ? "skill" : "MCP";
+    const head = h_flex().gap(5).items_center().min_w(0).child(badge(kind))
+      .child(div().min_w(0).truncate().font_semibold().child(shortDir(i.name)));
+    if (i.tools && i.tools !== "claude") head.child(badge(i.tools === "codex omp" ? "Codex／omp" : i.tools));
+    const sub = i.description || shortDir(i.path);
+    return v_flex().id(`here-${i.scope}-${i.kind}-${i.path}-${i.name}`).px(8).py(4).gap(1).rounded(6).hover((s) => s.bg(t.hover))
+      .child(head)
+      .when(Boolean(sub), (el) => el.child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child(sub)));
   }
 
   toolPicker(t, z, tools) {
