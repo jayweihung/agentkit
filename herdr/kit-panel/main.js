@@ -9,8 +9,8 @@
 // Roles (props.role): the panel (default), "toggle" (the tab-bar button that shows or hides "kit-panel") and
 // "pane": a popup opened by the kit button in an agent's pane header (mod kit-pane) for that one agent (props.target).
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, focused, terminals, spaces, closeOverlay, props as blockProps } from "herdr";
+import { v_flex, h_flex, InputState, Input, Editor, EditorState } from "gpui-base";
+import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, writeTextFile, focused, terminals, spaces, closeOverlay, props as blockProps } from "herdr";
 
 const TOGGLE = "kit-toggle", PANEL = "kit-panel";
 const SHIPPED = ["main", "terminals", "win98"]; // Herdr's own layouts: read-only, so "放進上排" clones one first
@@ -95,8 +95,6 @@ function currentTarget(prev) {
 }
 // the repository's view of a machine: no folder, no process (only what kit itself manages there)
 const repoTarget = (machine) => ({ key: `repo|${machine ?? ""}`, term: null, machine, space: null, cwd: null, title: "", agent: false, program: null });
-// the machines this window has spaces on (null: this computer)
-const machinesHere = () => [null, ...new Set(spaces().map((s) => s.machine).filter(Boolean))];
 // a folder with ~ for this computer's home (other machines' paths stay as they are)
 const shortDir = (d) => { const h = String(home() ?? "").replace(/\\/g, "/"); return d && h && (d + "/").startsWith(h + "/") ? "~" + d.slice(h.length) : d; };
 // kit's own messages, without the "kit: " / "kit：" in front of each line
@@ -118,32 +116,41 @@ async function loadFor(tg, strict = false) {
   try { return { ...JSON.parse(r.out), key: tg.key, warn, machine: warn ? null : tg.machine, at: Date.now() }; }
   catch { return { error: "kit list --json 的輸出讀不懂（kit 太舊？請打 kit self-update）", key: tg.key, at: Date.now() }; }
 }
-// The repository: kit list on this computer and on every machine this window has spaces on, put together.
-// The things are the same everywhere (the same source repos); what differs is where each one is in use:
-// item.on = { "": status here, "<machine>": status there } (no key: that machine's sources lack it, sync there).
-async function loadRepo() {
-  const ms = machinesHere();
-  const all = await Promise.all(ms.map(async (m) => {
-    try { return [m, await loadFor(repoTarget(m), true)]; } catch (e) { return [m, { error: String(e?.message ?? e) }]; }
+// The repository is this computer's: the source folders (git clones) are where rules / skills / MCP are written,
+// kit push sends them, every machine's kit sync brings them. Which files git sees as changed, per source:
+// { root, files: ["skills/x/SKILL.md", ...] } keyed by the source folder.
+const slash = (p) => String(p ?? "").replace(/\\/g, "/");
+async function loadChanges(dirs) {
+  const out = {};
+  await Promise.all(dirs.map(async (dir) => {
+    try {
+      const top = await exec("git", ["-C", dir, "rev-parse", "--show-toplevel"], { timeout: 15000 });
+      if (top.code !== 0) return;
+      const r = await exec("git", ["-C", dir, "status", "--porcelain", "--untracked-files=all"], { timeout: 15000 });
+      if (r.code !== 0) return;
+      const files = String(r.stdout).split("\n").filter(Boolean)
+        .map((l) => l.slice(3).replace(/^.* -> /, "").replace(/^"(.*)"$/, "$1"));
+      out[slash(dir)] = { root: slash(String(top.stdout).trim()), files };
+    } catch {}
   }));
-  const items = new Map(), sources = new Map(), machines = [];
-  for (const [m, d] of all) {
-    machines.push({ machine: m, error: d.error ?? null });
-    if (d.error) continue;
-    for (const s of d.sources ?? []) if (!sources.has(s.name)) sources.set(s.name, s);
-    for (const i of d.items ?? []) {
-      if (i.kind === "agent") continue;
-      const k = `${i.kind}:${i.name}`, cur = items.get(k) ?? { ...i, on: {} };
-      cur.on[m ?? ""] = i.status;
-      cur.new = cur.new || i.new;
-      if (!cur.description && i.description) cur.description = i.description;
-      items.set(k, cur);
-    }
+  return out;
+}
+// is this item's file (a skill: anything in its folder) among the changed ones
+function changedItem(i, changes) {
+  const p = slash(i.path);
+  for (const c of Object.values(changes ?? {})) {
+    if (!p.startsWith(c.root + "/")) continue;
+    const rel = p.slice(c.root.length + 1), dir = rel.replace(/\/[^/]*$/, "/");
+    if (c.files.some((f) => f === rel || (i.kind === "skill" && f.startsWith(dir)))) return true;
   }
-  const here = all[0][1];
-  if (machines.every((x) => x.error)) return { error: here.error, key: "repo", at: Date.now() };
-  return { key: "repo", at: Date.now(), kit: here.kit, kit_version_wanted: here.kit_version_wanted ?? "",
-    items: [...items.values()], sources: [...sources.values()], machines };
+  return false;
+}
+// open a file in this computer's own editor for it
+function openOutside(path) {
+  const w = window()?.platform;
+  if (w === "windows") return exec("cmd.exe", ["/d", "/c", "start", "", path]);
+  if (w === "macos") return exec("open", ["-t", path]);
+  return exec("xdg-open", [path]);
 }
 function icon(p, size, color) {
   if (!p?.icon) return null;
@@ -171,9 +178,13 @@ export default class KitPanel extends View {
     // the repository (倉庫): everything kit's sources have, and on which machines your account uses it
     this.kind = this.load("kind") || "skill";
     this.open = null;   // the row showing its details
+    this.edit = null;   // { item, orig, dirty, err } while a file is open; this.code is its editor
+    this.making = null; // { source } while adding a new one
     if (this.role === "panel") {
       this.input = InputState.new({ placeholder: "找：名字、說明、來源" });
       this.input.on("change", (_e, cx) => { this.filter = this.input.value().trim().toLowerCase(); cx.notify(); });
+      this.newName = InputState.new({ placeholder: "名字：小寫英文、數字和 -" });
+      this.newName.on("submit", (_e, cx) => this.make(cx));
     }
     this.target = { key: "repo" };
     const stale = () => !this.data || this.data.key !== "repo" || Date.now() - (this.data.at ?? 0) > 50000;
@@ -192,7 +203,18 @@ export default class KitPanel extends View {
     const tg = this.target ?? currentTarget(null);
     cx.spawn(async (cx) => {
       let d;
-      try { d = this.role === "pane" ? await loadFor(tg) : await loadRepo(); } catch (e) { d = { error: `讀不到：${e?.message ?? e}`, key: tg.key, at: Date.now() }; }
+      try {
+        if (this.role === "pane") d = await loadFor(tg);
+        else {
+          d = await loadFor(repoTarget(null));
+          if (!d.error) {
+            d.key = "repo";
+            const changes = await loadChanges((d.sources ?? []).map((x) => x.dir).filter(Boolean));
+            d.items = (d.items ?? []).filter((i) => i.kind !== "agent").map((i) => ({ ...i, changed: changedItem(i, changes) }));
+            d.dirty = (d.sources ?? []).map((x) => ({ ...x, n: changes[slash(x.dir)]?.files.length ?? 0 })).filter((x) => x.n);
+          }
+        }
+      } catch (e) { d = { error: `讀不到：${e?.message ?? e}`, key: tg.key, at: Date.now() }; }
       if (this.role === "pane") setShared(PANE_DATA, { ...(shared(PANE_DATA) ?? {}), [tg.key]: d }); else setShared(DATA, d);
       cx.notify();
     });
@@ -286,94 +308,172 @@ export default class KitPanel extends View {
     return root.child(this.role === "panel" ? this.repo(t, z, d) : this.list(t, z, d));
   }
 
-  // 倉庫: tabs per kind (+ the sources), a search, each thing with what it is, where from, and whether this account uses it
+  // 倉庫: the things kit's sources have, to read and write. The list (tabs, search, + 新增), or one file open in the editor.
   repo(t, z, d) {
-    const items = (d.items ?? []).filter((i) => i.kind !== "agent"), f = this.filter;
-    const sources = d.sources ?? [];
-    const tabs = [["rule", "規則"], ["skill", "Skills"], ["mcp", "MCP"], ["source", "來源"]];
-    const count = (k) => k === "source" ? sources.length : items.filter((i) => i.kind === k).length;
-    const newIn = (k) => items.filter((i) => i.kind === k && i.new).length;
+    if (this.edit) return this.editor(t, z);
+    const items = d.items ?? [], f = this.filter;
+    const tabs = [["rule", "規則"], ["skill", "Skills"], ["mcp", "MCP"]];
     const kind = tabs.some(([k]) => k === this.kind) ? this.kind : "skill";
     const box = v_flex().flex_1().min_h(0);
-    box.child(h_flex().flex_none().px(10).pt(8).gap(4).children(tabs.map(([k, label]) => {
-      const on = k === kind, n = newIn(k);
+    box.child(h_flex().flex_none().px(10).pt(8).gap(4).items_center().children(tabs.map(([k, label]) => {
+      const on = k === kind, n = items.filter((i) => i.kind === k).length, ch = items.filter((i) => i.kind === k && i.changed).length;
       return h_flex().id(`tab-${k}`).h(28).px(10).gap(5).items_center().rounded(6).cursor_pointer()
         .bg(on ? t.selected : t.surface).text_color(on ? t.foreground : t.muted).font_semibold()
         .hover((st) => st.bg(t.hover)).on_mouse_down("left", stop)
-        .on_click((_e, cx) => { this.kind = k; this.save("kind", k); this.open = null; cx.notify(); })
-        .child(label).child(div().text_size(z - 2).text_color(t.dim).child(String(count(k))))
-        .when(n > 0, (el) => el.child(div().px(4).rounded(4).text_size(z - 3).bg(t.done).text_color(t.background).child(`${n} 新`)));
-    })));
+        .on_click((_e, cx) => { this.kind = k; this.save("kind", k); this.making = null; cx.notify(); })
+        .child(label).child(div().text_size(z - 2).text_color(t.dim).child(String(n)))
+        .when(ch > 0, (el) => el.child(div().size(6).rounded(3).bg(t.working)));
+    })).child(div().flex_1())
+      .child(this.btn(t, z, "new", "＋ 新增", { small: true, on: (cx) => {
+        this.making = this.making ? null : { source: (d.sources ?? [])[0]?.name ?? null };
+        if (this.making) this.newName.focus();
+        cx.notify();
+      } })));
+    if (this.making) box.child(this.maker(t, z, d, kind));
     box.child(div().flex_none().px(10).pt(8).child(Input.new(this.input).h(30).px(8).rounded(6).border_1().border_color(t.border)
       .bg(t.background).text_size(z - 1).text_color(t.foreground)));
-    const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(2);
     const hit = (...xs) => !f || xs.some((x) => String(x ?? "").toLowerCase().includes(f));
-    if (kind === "source") {
-      body.child(div().pb(4).text_size(z - 1.5).text_color(t.muted).child("kit 從這些地方拿東西。按上面的 ⟳ 同步 會把每個來源更新成最新的。"));
-      const rows = sources.filter((s) => hit(s.name, s.source));
-      for (const s of rows) {
-        const n = items.filter((i) => i.source === s.name).length;
-        body.child(v_flex().id(`src-${s.name}`).px(8).py(6).gap(1).rounded(6).hover((st) => st.bg(t.hover))
-          .child(h_flex().gap(6).items_center().child(div().font_semibold().child(s.name))
-            .child(div().text_size(z - 2).text_color(t.dim).child(`${n} 樣`)))
-          .child(div().truncate().text_size(z - 1.5).text_color(t.muted).font_family(mono()).child(shortDir(s.source))));
-      }
-      if (!rows.length) body.child(div().p(8).text_color(t.muted).child(sources.length ? "找不到符合的來源。" : "還沒有來源：在終端機打  kit init <團隊來源的網址>"));
-      return box.child(body);
-    }
-    const ms = d.machines ?? [{ machine: null, error: null }];
-    const usedN = (i) => Object.values(i.on ?? {}).filter((v) => v === "used" || v === "required").length;
-    const rank = (i) => (i.new ? 0 : 1) * 100 - usedN(i);
     const rows = items.filter((i) => i.kind === kind && hit(i.name, i.description, i.source))
-      .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
-    body.child(div().pb(4).text_size(z - 1.5).text_color(t.muted)
-      .child(ms.length > 1
-        ? "每格一台主機，✓ 在用、＋ 沒用，按一下切換（那台每個 agent 都會有）。"
-        : "✓ 在用、＋ 沒用，按一下切換（每個 agent 都會有）。"));
-    for (const x of ms.filter((x) => x.error)) body.child(div().pb(4).text_size(z - 1.5).text_color(t.blocked)
-      .child(`${x.machine ?? "這台電腦"}：${x.error}`));
-    for (const i of rows) body.child(this.repoRow(t, z, i, ms));
-    if (!rows.length) body.child(div().p(8).text_color(t.muted).child(f ? "找不到符合的。" : "這一類還沒有東西。"));
+      .sort((a, b) => (b.changed - a.changed) || (b.new - a.new) || a.name.localeCompare(b.name));
+    const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(2);
+    for (const i of rows) body.child(this.repoRow(t, z, i));
+    if (!rows.length) body.child(div().p(8).text_color(t.muted).child(f ? "找不到符合的。" : "這一類還沒有東西，按「＋ 新增」寫一個。"));
     return box.child(body);
   }
 
-  // a repository row: name, marks, what it is; one chip per machine (in use or not, click to change); click the row for more
-  repoRow(t, z, i, ms) {
-    const id = `${i.kind}:${i.name}`, opened = this.open === id, busy = Boolean(this.busy);
-    const on = i.on ?? {}, required = Object.values(on).includes("required");
+  // + 新增: a name and which source it goes in, then kit new writes the starting file and the editor opens it
+  maker(t, z, d, kind) {
+    const srcs = d.sources ?? [], cur = this.making.source;
+    const what = { rule: "規則", skill: "skill", mcp: "MCP" }[kind];
+    return v_flex().flex_none().mx(10).mt(8).p(10).gap(8).rounded(8).bg(t.raised)
+      .child(div().font_semibold().child(`新的${what}`))
+      .child(Input.new(this.newName).h(30).px(8).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(z - 1).text_color(t.foreground))
+      .when(srcs.length > 1, (el) => el.child(h_flex().gap(4).items_center().flex_wrap()
+        .child(div().text_size(z - 1.5).text_color(t.dim).child("放在："))
+        .children(srcs.map((x) => div().id(`to-${x.name}`).px(8).py(2).rounded(5).text_size(z - 1.5).cursor_pointer()
+          .bg(x.name === cur ? t.selected : t.surface).text_color(x.name === cur ? t.foreground : t.muted)
+          .border_1().border_color(x.name === cur ? t.accent : t.border)
+          .on_mouse_down("left", stop).on_click((_e, cx) => { this.making.source = x.name; cx.notify(); })
+          .child(x.name)))))
+      .child(h_flex().gap(6)
+        .child(this.btn(t, z, "make", "建立", { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.make(cx) }))
+        .child(this.btn(t, z, "make-cancel", "取消", { small: true, on: (cx) => { this.making = null; cx.notify(); } })));
+  }
+
+  make(cx) {
+    const name = this.newName.value().trim(), kind = this.kind, to = this.making?.source;
+    if (!name || this.busy) return;
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) { setShared(MSG, { ok: false, label: "新增", text: "名字只能用小寫英文、數字和 -", at: Date.now() }); cx.notify(); return; }
+    setShared(BUSY, "新增");
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const r = await kit(["new", kind, name, ...(to ? ["--to", to] : [])], 60000);
+      setShared(BUSY, null);
+      if (r.code !== 0) { setShared(MSG, { ok: false, label: "新增", text: clean(r.err || r.out), at: Date.now() }); cx.notify(); return; }
+      this.making = null;
+      this.newName.set_value("");
+      setShared(MSG, null);
+      const d = await loadFor(repoTarget(null)).catch(() => null);
+      const it = (d?.items ?? []).find((i) => i.kind === kind && i.name === name);
+      if (it) await this.openItem(it, cx);
+      this.refresh(cx);
+      cx.notify();
+    });
+  }
+
+  // a row: name, marks (改過 / 新 / 團隊必備), what it is and where from; click to open it
+  repoRow(t, z, i) {
     const badge = (text, color) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(color).child(text);
-    const head = h_flex().gap(5).items_center().min_w(0)
-      .child(div().min_w(0).truncate().font_semibold().child(i.name))
-      .when(required, (el) => el.child(badge("團隊必備", t.accent)))
-      .when(Boolean(i.new), (el) => el.child(badge("新", t.done)));
-    const chip = ({ machine: m, error }) => {
-      const st = error ? "down" : on[m ?? ""] ?? "missing", name = m ?? "這台";
-      const used = st === "used" || st === "required", can = !busy && (st === "used" || st === "unused");
-      const text = st === "down" ? `${name} ？` : st === "missing" ? `${name} —` : `${used ? "✓" : "＋"} ${name}`;
-      return div().id(`chip-${id}-${m ?? "here"}`).h(22).px(7).flex().flex_none().items_center().rounded(5).text_size(z - 2)
-        .bg(used ? t.selected : t.surface).text_color(used ? t.foreground : t.dim)
-        .border_1().border_color(used ? t.accent : t.border)
-        .when(can, (el) => el.cursor_pointer().hover((s) => s.border_color(t.foreground)).on_mouse_down("left", stop)
-          .on_click((_e, cx) => {
-            cx.stop_propagation();
-            const verb = st === "used" ? "拿掉" : "加上";
-            this.act(`${verb} ${i.name}（${m ?? "這台電腦"}）`, [st === "used" ? "rm" : "add", i.kind, i.name], cx, [m]);
-          }))
-        .child(text);
-    };
-    const why = { required: "團隊必備（拿不掉）", used: "在用", unused: "沒用", missing: "那台的來源還沒有它（到那台 ⟳ 同步）", down: "連不到" };
-    return v_flex().id(`repo-${id}`).rounded(6).hover((s) => s.bg(t.hover)).when(opened, (el) => el.bg(t.raised))
-      .on_mouse_down("left", stop)
-      .on_click((_e, cx) => { this.open = opened ? null : id; cx.notify(); })
-      .child(h_flex().gap(8).items_center().px(8).py(5)
-        .child(v_flex().flex_1().min_w(0).gap(1).child(head)
-          .when(Boolean(i.description || i.source), (el) => el.child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted)
-            .child([i.description, i.source].filter(Boolean).join(" · ")))))
-        .child(h_flex().flex_none().gap(4).children(ms.map(chip))))
-      .when(opened, (el) => el.child(v_flex().px(8).pb(8).gap(4).text_size(z - 1.5).text_color(t.muted)
-        .when(Boolean(i.description), (e) => e.child(div().text_color(t.foreground).child(i.description)))
-        .child(div().child(`來源：${i.source || "—"}${i.new ? "　·　剛加進來源" : ""}`))
-        .children(ms.map(({ machine: m, error }) => div().child(`${m ?? "這台電腦"}：${why[error ? "down" : on[m ?? ""] ?? "missing"]}`)))));
+    return h_flex().id(`repo-${i.kind}-${i.name}`).gap(8).items_center().px(8).py(6).rounded(6).cursor_pointer()
+      .hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
+      .on_click((_e, cx) => cx.spawn(async (cx) => { await this.openItem(i, cx); cx.notify(); }))
+      .child(v_flex().flex_1().min_w(0).gap(1)
+        .child(h_flex().gap(5).items_center().min_w(0)
+          .child(div().min_w(0).truncate().font_semibold().child(i.name))
+          .when(Boolean(i.changed), (el) => el.child(badge("改過", t.working)))
+          .when(Boolean(i.new), (el) => el.child(badge("新", t.done)))
+          .when(i.status === "required", (el) => el.child(badge("團隊必備", t.accent))))
+        .child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child([i.description, i.source].filter(Boolean).join(" · ") || "（還沒寫說明）")))
+      .child(div().flex_none().text_color(t.dim).child("›"));
+  }
+
+  async openItem(i, cx) {
+    const text = await readTextFile(i.path).catch(() => null);
+    if (text === null) { setShared(MSG, { ok: false, label: "打開", text: `讀不到 ${shortDir(i.path)}`, at: Date.now() }); return; }
+    this.code?.release();
+    const th = theme();
+    this.code = EditorState.new({ language: i.kind === "mcp" ? "yaml" : "md", value: text, soft_wrap: true,
+      font_family: settings().font_family, font_size: 12,
+      syntax: { keyword: th.ansi5, string: th.ansi2, comment: th.dim, function: th.ansi4, type: th.ansi3, number: th.ansi1, constant: th.ansi6 } });
+    this.edit = { item: i, orig: text, dirty: false, err: null };
+    this.code.on("change", (_e, cx) => {
+      const dirty = this.code.value() !== this.edit?.orig;
+      if (this.edit && dirty !== this.edit.dirty) { this.edit.dirty = dirty; cx.notify(); }
+    });
+    setShared(MSG, null);
+  }
+
+  closeItem(cx) {
+    this.code?.release();
+    this.code = null;
+    this.edit = null;
+    cx.notify();
+  }
+
+  saveItem(cx) {
+    const e = this.edit;
+    if (!e?.dirty) return;
+    const text = this.code.value();
+    cx.spawn(async (cx) => {
+      try {
+        await writeTextFile(e.item.path, text, e.orig);
+        e.orig = text; e.dirty = false; e.err = null;
+        this.refresh(cx);
+      } catch (err) {
+        e.err = "這個檔案在別的地方被改過了。先複製你改的，按「重新讀取」，再貼回去。";
+      }
+      cx.notify();
+    });
+  }
+
+  // one file open: its name and source, 存檔 / 用編輯器開 / 重新讀取, then the editor
+  editor(t, z) {
+    const e = this.edit, i = e.item;
+    return v_flex().flex_1().min_h(0)
+      .child(h_flex().flex_none().px(10).py(8).gap(6).items_center().border_b(1).border_color(t.border)
+        .child(this.btn(t, z, "back", e.dirty ? "← 不存，回去" : "← 回去", { small: true, on: (cx) => this.closeItem(cx) }))
+        .child(v_flex().flex_1().min_w(0)
+          .child(div().truncate().font_semibold().child(i.name))
+          .child(div().truncate().text_size(z - 2).text_color(t.muted).child(`${i.source} · ${shortDir(i.path)}`)))
+        .child(this.btn(t, z, "save", e.dirty ? "存檔" : "已存", { small: true, kind: "primary", off: !e.dirty, on: (cx) => this.saveItem(cx) })))
+      .when(Boolean(e.err), (el) => el.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked).child(e.err)))
+      .child(Editor.new(this.code).flex_1().min_h(0))
+      .child(h_flex().flex_none().px(10).py(6).gap(6).items_center().border_t(1).border_color(t.border)
+        .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(e.dirty ? "還沒存檔" : i.changed ? "存好了，還沒送出（上面的「送出」）" : ""))
+        .child(this.btn(t, z, "reload", "重新讀取", { small: true, on: (cx) => cx.spawn(async (cx) => { await this.openItem(i, cx); cx.notify(); }) }))
+        .child(this.btn(t, z, "outside", "用編輯器開", { small: true, on: () => { openOutside(i.path).catch(() => {}); } })));
+  }
+
+  // 送出: kit push for each source with changes (kit check first; it opens a PR)
+  pushAll(cx) {
+    const dirty = this.data?.dirty ?? [];
+    if (!dirty.length || this.busy) return;
+    setShared(BUSY, "送出");
+    setShared(MSG, null);
+    cx.notify();
+    cx.spawn(async (cx) => {
+      let ok = true;
+      const parts = [];
+      for (const x of dirty) {
+        const r = await kit(["push", "--to", x.name], 600000);
+        ok = ok && r.code === 0;
+        parts.push(`【${x.name}】\n${clean([r.out, r.err].filter(Boolean).join("\n")) || (r.code === 0 ? "送出了" : `失敗（${r.code}）`)}`);
+      }
+      setShared(MSG, { ok, label: "送出", text: parts.join("\n\n"), at: Date.now() });
+      setShared(BUSY, null);
+      this.refresh(cx);
+      cx.notify();
+    });
   }
 
   header(t, z) {
@@ -394,16 +494,15 @@ export default class KitPanel extends View {
 
   repoHeader(t, z) {
     const d = this.data, busy = this.busy, inBar = Boolean(find(layout(), TOGGLE));
-    const ok = (d?.machines ?? [{ machine: null }]).filter((x) => !x.error).map((x) => x.machine);
-    const sub = d && !d.error
-      ? `${(d.items ?? []).length} 樣 · ${(d.sources ?? []).length} 個來源 · ${(d.machines ?? []).length || 1} 台主機`
-      : "規則、skill、MCP 都在這裡";
+    const dirty = d?.dirty ?? [], n = dirty.reduce((a, x) => a + x.n, 0);
+    const sub = d && !d.error ? `${(d.items ?? []).length} 樣 · ${(d.sources ?? []).map((x) => x.name).join("、")}` : "規則、skill、MCP 都在這裡";
     return h_flex().flex_none().px(10).py(8).gap(8).items_center().border_b(1).border_color(t.border)
       .child(div().size(32).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().font_semibold().text_size(z - 1).child("kit"))
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().font_semibold().child("倉庫"))
-        .child(div().truncate().text_size(z - 1.5).text_color(t.muted).child(sub)))
-      .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx, ok) }))
+        .child(div().truncate().text_size(z - 1.5).text_color(n ? t.working : t.muted).child(n ? `改過 ${n} 個檔案，還沒送出` : sub)))
+      .when(n > 0, (el) => el.child(this.btn(t, z, "push", busy === "送出" ? "送出中…" : "送出", { small: true, kind: "primary", off: Boolean(busy), on: (cx) => this.pushAll(cx) })))
+      .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
       .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
   }
 

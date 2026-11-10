@@ -889,7 +889,7 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
         if ($k -eq 'agent') { $status = 'agent' }
         $new = if ($null -eq (State-Get 'seen' $i)) { 'true' } else { 'false' }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
-        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p))}")
+        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p)), `"path`": $(Json-S $p)}")
     }
     [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))")
     if ($hereDir) { [void]$sb.Append((Here-Json $hereDir $herePid)) }

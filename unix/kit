@@ -679,8 +679,8 @@ EOF
         new=false; [ -n "$(state_get seen "$i")" ] || new=true
         d=$(item_path "" "$k" "$n"); d=${p%"$d"}               # the source folder that has it
         [ $first = 1 ] || printf ','; first=0
-        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "source": %s, "description": %s}' \
-            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")"
+        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "source": %s, "description": %s, "path": %s}' \
+            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")" "$(json_s "$p")"
     done
     printf '\n  ],\n  "kit_version_wanted": %s' "$(json_s "$(wanted_version)")"
     [ -n "${HERE_DIR:-}" ] && here_json "$HERE_DIR" "${HERE_PID:-}"

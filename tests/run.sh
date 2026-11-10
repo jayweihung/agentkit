@@ -132,11 +132,11 @@ mkdir -p "$TEAM/skills/quote"; printf -- '---\nname: quote\ndescription: 中文 
 kit list --json > "$T/list.json" 2>&1; rc=$?
 check "list --json: exit 0, valid JSON" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/list.json" > /dev/null'
 check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"0.1.0\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\"}" "$T/list.json"'
-check "list --json: required, used, unused" 'grep -qF "{\"kind\": \"rule\", \"name\": \"security\", \"status\": \"required\", \"new\": false, \"source\": \"team\", \"description\": \"\"}" "$T/list.json" &&
-    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"source\": \"team\", \"description\": \"review a change\"}" "$T/list.json" &&
-    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-workflow\", \"status\": \"unused\", \"new\": false, \"source\": \"third-party\", \"description\": \"upstream\"}" "$T/list.json"'
-check "list --json: agent with its description" 'grep -qF "{\"kind\": \"agent\", \"name\": \"gerrit\", \"status\": \"agent\", \"new\": false, \"source\": \"team\", \"description\": \"Gerrit helper\"}" "$T/list.json"'
-check "list --json: new item, text escaped (UTF-8 kept)" 'grep -qF "{\"kind\": \"skill\", \"name\": \"quote\", \"status\": \"unused\", \"new\": true, \"source\": \"team\", \"description\": \"中文 \\\"引號\\\" \\\\ 和\\ttab\"}" "$T/list.json"'
+check "list --json: required, used, unused" 'grep -qF "{\"kind\": \"rule\", \"name\": \"security\", \"status\": \"required\", \"new\": false, \"source\": \"team\", \"description\": \"\", \"path\": " "$T/list.json" &&
+    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"source\": \"team\", \"description\": \"review a change\", \"path\": " "$T/list.json" &&
+    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-workflow\", \"status\": \"unused\", \"new\": false, \"source\": \"third-party\", \"description\": \"upstream\", \"path\": " "$T/list.json"'
+check "list --json: agent with its description" 'grep -qF "{\"kind\": \"agent\", \"name\": \"gerrit\", \"status\": \"agent\", \"new\": false, \"source\": \"team\", \"description\": \"Gerrit helper\", \"path\": " "$T/list.json"'
+check "list --json: new item, text escaped (UTF-8 kept)" 'grep -qF "{\"kind\": \"skill\", \"name\": \"quote\", \"status\": \"unused\", \"new\": true, \"source\": \"team\", \"description\": \"中文 \\\"引號\\\" \\\\ 和\\ttab\", \"path\": " "$T/list.json"'
 check "list --json: tools and no version wanted" 'grep -q "^  \"tools\": \[\"claude\"" "$T/list.json" && [ "$(jget "$T/list.json" kit_version_wanted)" = "\"\"" ]'
 check "list --json does not mark items seen" '[ "$(kit list --json | grep -c "\"new\": true")" = 1 ]'
 if command -v pwsh >/dev/null 2>&1; then

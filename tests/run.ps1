@@ -166,11 +166,11 @@ $teamJ = (Resolve-Path -LiteralPath $TEAM).ProviderPath.Replace('\', '\\')
 Check 'list --json: exit 0, valid JSON' { $ljrc -eq 0 -and $null -ne (JGet "$T/list.json" 'kit') }
 Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq '"0.1.0"' -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`"}") }
 Check 'list --json: required, used, unused' {
-    $lj.Contains('{"kind": "rule", "name": "security", "status": "required", "new": false, "source": "team", "description": ""}') -and
-    $lj.Contains('{"kind": "skill", "name": "gerrit-review", "status": "used", "new": false, "source": "team", "description": "review a change"}') -and
-    $lj.Contains('{"kind": "skill", "name": "gerrit-workflow", "status": "unused", "new": false, "source": "third-party", "description": "upstream"}') }
-Check 'list --json: agent with its description' { $lj.Contains('{"kind": "agent", "name": "gerrit", "status": "agent", "new": false, "source": "team", "description": "Gerrit helper"}') }
-Check 'list --json: new item, text escaped (UTF-8 kept)' { $lj.Contains('{"kind": "skill", "name": "quote", "status": "unused", "new": true, "source": "team", "description": "中文 \"引號\" \\ 和\ttab"}') }
+    $lj.Contains('{"kind": "rule", "name": "security", "status": "required", "new": false, "source": "team", "description": "", "path": ') -and
+    $lj.Contains('{"kind": "skill", "name": "gerrit-review", "status": "used", "new": false, "source": "team", "description": "review a change", "path": ') -and
+    $lj.Contains('{"kind": "skill", "name": "gerrit-workflow", "status": "unused", "new": false, "source": "third-party", "description": "upstream", "path": ') }
+Check 'list --json: agent with its description' { $lj.Contains('{"kind": "agent", "name": "gerrit", "status": "agent", "new": false, "source": "team", "description": "Gerrit helper", "path": ') }
+Check 'list --json: new item, text escaped (UTF-8 kept)' { $lj.Contains('{"kind": "skill", "name": "quote", "status": "unused", "new": true, "source": "team", "description": "中文 \"引號\" \\ 和\ttab", "path": ') }
 Check 'list --json: tools (Claude only here), no version wanted' { $lj.Contains("`n  `"tools`": [`"claude`"],`n") -and (JGet "$T/list.json" 'kit_version_wanted') -eq '""' }
 Kit list --json
 Check 'list --json does not mark items seen' { ([regex]::Matches($out, '"new": true')).Count -eq 1 }
