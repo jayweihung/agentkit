@@ -432,13 +432,34 @@ function Check-Host([string]$url) { # refuse URLs whose host is not allowed
     $real = (Git-Safe ls-remote --get-url $url | Select-Object -First 1)
     if ($real -and $real -ne $url) { $h = Url-Host $real; if ($hosts -notcontains $h) { Die "git 設定把網址改到 ${h}，不在允許的主機清單" } }
 }
+function Push-Urls([string]$dir, [string]$remote) { # every URL git may push REMOTE to (pushurl else url, insteadOf applied; pushInsteadOf too)
+    $rules = @(Git-Q -C $dir config --get-regexp '^url\..*\.pushinsteadof$')
+    foreach ($u in @(Git-Q -C $dir remote get-url --push --all $remote)) {
+        if (-not $u) { continue }
+        $u
+        foreach ($r in $rules) {
+            $i = $r.IndexOf(' '); if ($i -lt 0) { continue }
+            $k = $r.Substring(0, $i); $v = $r.Substring($i + 1)
+            if ($v -and $u.StartsWith($v)) { $k = $k.Substring(4); $k.Substring(0, $k.Length - 14) + $u.Substring($v.Length) }
+        }
+    }
+}
+function Check-PushUrls([string]$dir, [string]$remote) { foreach ($u in @(Push-Urls $dir $remote)) { Check-Host $u } }   # refuse when git would push REMOTE to a host that is not allowed
+function Pull-Why([string]$d) { # why git pull --ff-only did not work there
+    [void](Git-Safe -C $d fetch --quiet --no-recurse-submodules)
+    if ($LASTEXITCODE -ne 0) { return '沒網路？' }
+    if (@(Git-Q -C $d status --porcelain | Where-Object { $_ }).Count -gt 0) { return "$d 裡有自己改過、還沒送出的檔案；先送出或拿掉" }
+    $n = "$(@(Git-Q -C $d rev-list --count '@{u}..HEAD') -join '')"
+    if ($LASTEXITCODE -eq 0 -and $n -match '^[0-9]+$' -and $n -ne '0') { return "$d 有 $n 個來源沒有的 commit，跟來源分岔了" }
+    "到 $d 打 git pull 看原因"
+}
 function Fetch-Source([string]$s) { # clone or fast-forward one source
     if (-not (Is-Url $s)) { if (-not (Test-Path -LiteralPath $s -PathType Container)) { Die "找不到來源資料夾：$s" }; return }
     Check-Host $s
     $d = Src-Dir $s
     if (Test-Path -LiteralPath (Join-Path $d '.git')) {
         [void](Git-Safe -C $d pull --ff-only --quiet --no-recurse-submodules)
-        if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 $(Src-Name $s)（沒網路？）" }
+        if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 $(Src-Name $s)（$(Pull-Why $d)）" }
     } else {
         Ensure-Dir $KitSrc
         [void](Git-Safe clone --quiet --no-recurse-submodules $s $d)
@@ -817,7 +838,11 @@ function Here-Rows([string]$dir) { # what an agent started in DIR gets that kit 
     $f = Join-Path $dir '.mcp.json'
     if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('mcpServers')) { $rows.Add(@('dir', 'mcp', $n, $f, 'claude')) } }
     if (Test-Path -LiteralPath $ClaudeJson -PathType Leaf) {
-        foreach ($n in Json-Keys $ClaudeJson @('projects', $dir, 'mcpServers')) { $rows.Add(@('dir', 'mcp', $n, $ClaudeJson, 'claude')) }
+        $pks = @($dir); if ($dir.Contains('\')) { $pks += $dir.Replace('\', '/') }
+        $seenMcp = @{}
+        foreach ($pk in $pks) {
+            foreach ($n in Json-Keys $ClaudeJson @('projects', $pk, 'mcpServers')) { if (-not $seenMcp.ContainsKey($n)) { $seenMcp[$n] = 1; $rows.Add(@('dir', 'mcp', $n, $ClaudeJson, 'claude')) } }
+        }
     }
     $sd = Join-Path $ClaudeDir 'skills'
     if (Test-Path -LiteralPath $sd -PathType Container) {
@@ -847,9 +872,43 @@ function Other-User([string]$top) { # the user of a process under PID that is no
     }
     ''
 }
+function Pid-Tree([string]$top) { # TOP and every process under it
+    $p = @{}
+    if ($OnWindows) { foreach ($x in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) { $p["$($x.ProcessId)"] = "$($x.ParentProcessId)" } }
+    else { foreach ($l in @(& ps -A -o pid= -o ppid= 2>$null)) { $f = @("$l".Trim() -split '\s+'); if ($f.Count -ge 2 -and $f[0] -match '^[0-9]+$') { $p[$f[0]] = $f[1] } } }
+    $out = New-Object System.Collections.Generic.List[string]; $out.Add($top)
+    foreach ($x in $p.Keys) {
+        $y = $x; $i = 0
+        while ($i -lt 64 -and $y -ne $top -and $p.ContainsKey($y)) { $y = $p[$y]; $i++ }
+        if ($y -eq $top -and $x -ne $top) { $out.Add($x) }
+    }
+    $out.ToArray()
+}
+function Run-Agent([string]$top) { # the agent that kit run started at or under TOP (kit run leaves a marker), if any
+    $d = Join-Path $KitConf 'run'
+    if (-not (Test-Path -LiteralPath $d -PathType Container)) { return '' }
+    $tree = @(Pid-Tree $top)
+    $names = [string[]]@(Get-ChildItem -LiteralPath $d -File | ForEach-Object { $_.Name } | Where-Object { $_ -match '^[0-9]+$' })
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $found = ''
+    foreach ($p in $names) {
+        $f = Join-Path $d $p; $alive = $false
+        try { $alive = [bool](Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue) } catch { }
+        if (-not $alive) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; continue }   # that kit run has ended
+        if (-not $found -and $tree -contains $p) { $found = $f }
+    }
+    if ($found) { return @((Read-Text $found) -split "`n")[0].TrimEnd("`r") }
+    ''
+}
+function Agent-Json([string]$n) { # {"name", "source", "rules", "skills", "mcp"} of a kit agent
+    $f = Find-Item 'agent' $n; $src = ''; $fm = @()
+    if ($f) { $src = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $f)); try { $fm = Yaml-Lines $f -Frontmatter } catch { $fm = @() } }
+    "{`"name`": $(Json-S $n), `"source`": $(Json-S $src), `"rules`": $(Json-Arr (YGet-From $fm 'rules')), `"skills`": $(Json-Arr (YGet-From $fm 'skills')), `"mcp`": $(Json-Arr (YGet-From $fm 'mcp'))}"
+}
 function Here-Json([string]$dir, [string]$hpid) { # the "here" part of kit list --json --dir
-    $user = if ($hpid) { Other-User $hpid } else { '' }
-    $out = ",`n  `"here`": {`"dir`": $(Json-S $dir), `"user`": $(if ($user) { Json-S $user } else { 'null' })"
+    $user = ''; $agent = ''
+    if ($hpid) { $user = Other-User $hpid; $agent = Run-Agent $hpid }
+    $out = ",`n  `"here`": {`"dir`": $(Json-S $dir), `"user`": $(if ($user) { Json-S $user } else { 'null' }), `"agent`": $(if ($agent) { Agent-Json $agent } else { 'null' })"
     if ($user) { return $out + ', "items": []}' }
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $out + ", `"error`": $(Json-S '找不到這個資料夾'), `"items`": []}" }
     $out += ', "items": ['
@@ -865,6 +924,7 @@ function Here-Json([string]$dir, [string]$hpid) { # the "here" part of kit list 
     }
     $out + "`n  ]}"
 }
+function Push-Mode([string]$dir) { $m = @(YGet (Join-Path $dir 'kit.yaml') 'push'); if ($m.Count -gt 0 -and $m[0]) { [string]$m[0] } else { 'pr' } }   # pr (the default) or direct
 function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit list shows, as JSON for programs (the Herdr panel); unix/kit prints the same
     $want = Wanted; $req = Kit-Items 'required'
     $sb = New-Object System.Text.StringBuilder
@@ -873,7 +933,7 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
     foreach ($s in @(M-Sources)) {
         if (-not $s) { continue }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
-        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S $s), `"dir`": $(Json-S (Src-Dir $s))}")
+        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S $s), `"dir`": $(Json-S (Src-Dir $s)), `"push`": $(Json-S (Push-Mode (Src-Dir $s)))}")
     }
     $tools = '"claude"'; if (Has-Codex) { $tools += ', "codex"' }; if (Has-Omp) { $tools += ', "omp"' }
     [void]$sb.Append("`n  ],`n  `"tools`": [$tools],`n  `"items`": [")
@@ -956,11 +1016,11 @@ function Cmd-Run($rest) {
     $rest = @($rest)
     if ($rest.Count -lt 1) { Die '用法：kit run <agent> [--tool claude|codex|omp] [工具的參數...]' }
     Need-Init
-    $name = $rest[0]; $extra = if ($rest.Count -gt 1) { @($rest[1..($rest.Count - 1)]) } else { @() }
+    $name = $rest[0]; $extra = @(if ($rest.Count -gt 1) { $rest[1..($rest.Count - 1)] })   # @(if ...): an empty else would be $null
     $tool = 'claude'
     if ($extra.Count -gt 0 -and $extra[0] -eq '--tool') {
         if ($extra.Count -lt 2) { Die '--tool 後面要接 claude、codex 或 omp' }
-        $tool = $extra[1]; $extra = if ($extra.Count -gt 2) { @($extra[2..($extra.Count - 1)]) } else { @() }
+        $tool = $extra[1]; $extra = @(if ($extra.Count -gt 2) { $extra[2..($extra.Count - 1)] })
     }
     if (@('claude', 'codex', 'omp') -notcontains $tool) { Die '--tool 只能是 claude、codex 或 omp' }
     $f = Find-Item 'agent' $name; if (-not $f) { Die "找不到 agent ${name}（打 kit list 看有哪些）" }
@@ -1037,9 +1097,13 @@ function Cmd-Run($rest) {
     if ($env:KIT_DRY_RUN) { Say $tool; foreach ($x in $a) { Say $x }; Say "tmp=$tmp"; return }
     # the same quoting rules on PowerShell 5.1 and 7 (Arg-TomlStr is written for them)
     $PSNativeCommandArgumentPassing = 'Legacy'
+    # a marker (this process -> agent name), so the Herdr pane can tell which agent runs in it
+    $mark = Join-Path (Join-Path $KitConf 'run') "$PID"
+    try { Ensure-Dir (Join-Path $KitConf 'run'); Write-Text $mark "$name`n" } catch { }
     & $tool @($a.ToArray())
     $rc = $LASTEXITCODE
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue
     exit $rc
 }
 function Cmd-Uninstall($rest) {
@@ -1290,7 +1354,10 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
             if (@(YGet-From $fm 'name')[0] -ne $n) { Problem "${rel}: name 要寫 $n" }
             if (-not @(YGet-From $fm 'description')[0]) { Problem "${rel}: 少了 description" }
             if ($rel.StartsWith('agents/')) {
-                foreach ($k in 'rule', 'skill', 'mcp') { foreach ($r in @(YGet-From $fm "${k}s")) { if ($r -and -not $where.Contains("${k}:$r")) { Problem "${rel}: 找不到 ${k}:$r" } } }
+                foreach ($k in 'rule', 'skill', 'mcp') {      # the keys: rules, skills, mcp
+                    $key = if ($k -eq 'mcp') { 'mcp' } else { "${k}s" }
+                    foreach ($r in @(YGet-From $fm $key)) { if ($r -and -not $where.Contains("${k}:$r")) { Problem "${rel}: 找不到 ${k}:$r" } }
+                }
             }
         }
         foreach ($n in Names-In (Join-Path $d 'rules') '*.md') {
@@ -1307,6 +1374,7 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
             }
         }
         if (Test-Path -LiteralPath $kitYaml -PathType Leaf) {
+            if (@('pr', 'direct') -cnotcontains (Push-Mode $d)) { Problem 'kit.yaml: push 只能是 pr 或 direct' }
             foreach ($k in 'rule', 'skill', 'mcp') {
                 foreach ($r in @(YGet $kitYaml "required.${k}s") + @(YGet $kitYaml "recommended.${k}s")) {
                     if (-not $r -or $where.Contains("${k}:$r")) { continue }
@@ -1545,23 +1613,31 @@ function Push-Items([string]$dir, $files) { # changed item files -> @(verb, kind
         , @($v, "${k}:$n")
     }
 }
-function Push-Direct($dir, $leaf, $files, $msg, $dry) { # a source without origin: commit on this branch, push to every remote
+function Rev-Count([string]$dir, [string]$range) { $n = "$(@(Git-Q -C $dir rev-list --count $range) -join '')"; if ($LASTEXITCODE -ne 0 -or $n -notmatch '^[0-9]+$') { return '1' }; $n }
+function Push-Direct($dir, $leaf, $files, $msg, $dry) { # kit.yaml says push: direct: commit on this branch, push to every remote
     $remotes = @(Git-Q -C $dir remote | Where-Object { $_ })
     if ($remotes.Count -eq 0) { Die "$leaf 沒有 remote，不知道要送到哪" }
     $cur = "$(@(Git-Q -C $dir symbolic-ref --short -q HEAD) -join '')"
     if (-not $cur) { Die "$leaf 現在不在分支上，什麼都沒送" }
-    foreach ($r in $remotes) { Check-Host "$(@(Git-Q -C $dir remote get-url $r) -join '')" }
+    foreach ($r in $remotes) { Check-PushUrls $dir $r }
+    # only the new commit may go out: every remote has this branch already, with nothing unpushed here or new there
+    foreach ($r in $remotes) {
+        [void](Git-Safe -C $dir fetch -q --no-recurse-submodules $r "+refs/heads/${cur}:refs/remotes/$r/$cur")
+        if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 $r/${cur}（沒網路？），用上次拿到的" }
+        [void](Git-Q -C $dir rev-parse -q --verify "refs/remotes/$r/$cur")
+        if ($LASTEXITCODE -ne 0) { Die "$r 上沒有 ${cur}，什麼都沒送（第一次請自己  git push $r ${cur}）" }
+        $n = Rev-Count $dir "refs/remotes/$r/${cur}..HEAD"
+        if ($n -ne '0') { Die "${cur} 有 ${n} 個 commit 還沒推到 ${r}，什麼都沒送（先自己  git push $r ${cur}）" }
+        $n = Rev-Count $dir "HEAD..refs/remotes/$r/$cur"
+        if ($n -ne '0') { Die "$r 的 ${cur} 有 ${n} 個你這裡沒有的 commit，什麼都沒送（先  git pull $r ${cur}）" }
+    }
     Say "要送的檔案（$leaf）："
     foreach ($f in $files) { Say "  $f" }
-    Say "沒有 origin（你自己的來源）：直接 commit 到 ${cur}，推到 $($remotes -join ' ')，不開 PR"
+    Say "kit.yaml 寫 push: direct：直接 commit 到 ${cur}，推到 $($remotes -join ' ')，不開 PR"
     Say "commit：$msg"
-    foreach ($r in $remotes) {
-        $ahead = "$(@(Git-Q -C $dir rev-list --count "refs/remotes/$r/${cur}..HEAD") -join '')"
-        if ($LASTEXITCODE -eq 0 -and $ahead -match '^[0-9]+$' -and [int]$ahead -gt 0) { Warn "${cur} 有 ${ahead} 個 commit 還沒推到 ${r}，會一起送出" }
-    }
     if ($dry) { Say '（--dry-run：沒有 commit，沒有送）'; return }
-    [void](Git-Q -C $dir add -A -- @files); $ok = $LASTEXITCODE -eq 0
-    if ($ok) { [void](Git-Q -C $dir commit -q -m $msg -- @files); $ok = $LASTEXITCODE -eq 0 }
+    [void](Git-Q -C $dir add -A '--' @files); $ok = $LASTEXITCODE -eq 0
+    if ($ok) { [void](Git-Q -C $dir commit -q -m $msg '--' @files); $ok = $LASTEXITCODE -eq 0 }
     if (-not $ok) { Die 'commit 失敗，什麼都沒送' }
     $fail = $false
     foreach ($r in $remotes) {
@@ -1601,10 +1677,13 @@ function Cmd-Push($rest) {
     }
     $parts = @(foreach ($v in 'add', 'update', 'remove') { $l = @($items | Where-Object { $_[0] -eq $v } | ForEach-Object { $_[1] }); if ($l.Count -gt 0) { "$v $($l -join ', ')" } })
     $msg = "kit: $($parts -join '; ')"
-    # no origin: your own source (not the team's Gitea): commit here and push to its remotes, no PR
+    # kit.yaml push: pr (the default): a branch on origin + a PR; push: direct (your own source): commit here, push to every remote
+    $mode = Push-Mode $dir
+    if ($mode -ceq 'direct') { Push-Direct $dir $leaf $files $msg $dry; return }
+    if ($mode -cne 'pr') { Die "kit.yaml 的 push 只能是 pr 或 direct（現在是 ${mode}）" }
     $origin = "$(@(Git-Q -C $dir remote get-url origin) -join '')"
-    if ($LASTEXITCODE -ne 0 -or -not $origin) { Push-Direct $dir $leaf $files $msg $dry; return }
-    Check-Host $origin
+    if ($LASTEXITCODE -ne 0 -or -not $origin) { Die "$leaf 沒有 origin，不知道要開 PR 到哪，什麼都沒送（團隊來源要有 origin；自己的來源想直接推到它的 remote，在 kit.yaml 加一行  push: direct）" }
+    Check-Host $origin; Check-PushUrls $dir 'origin'
     $ownerRepo = Url-Path $origin
     $api = ''; $web = ''
     if ($env:KIT_GITEA_API) { $api = $env:KIT_GITEA_API.TrimEnd('/'); Check-Host $api; $web = $api -replace '/api/v1$', '' }
@@ -1638,8 +1717,8 @@ function Cmd-Push($rest) {
     [void](Git-Q -C $dir rev-parse -q --verify "refs/remotes/origin/$into"); if ($LASTEXITCODE -eq 0) { $start = "refs/remotes/origin/$into" }
     [void](Git-Q -C $dir checkout -q -b $b $start)
     if ($LASTEXITCODE -ne 0) { Die "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送" }
-    [void](Git-Q -C $dir add -A -- @files); $ok = $LASTEXITCODE -eq 0
-    if ($ok) { [void](Git-Q -C $dir commit -q -m $msg -- @files); $ok = $LASTEXITCODE -eq 0 }
+    [void](Git-Q -C $dir add -A '--' @files); $ok = $LASTEXITCODE -eq 0
+    if ($ok) { [void](Git-Q -C $dir commit -q -m $msg '--' @files); $ok = $LASTEXITCODE -eq 0 }
     if (-not $ok) { [void](Git-Q -C $dir checkout -q $orig); [void](Git-Q -C $dir branch -q -D $b); Die 'commit 失敗，什麼都沒送' }
     [void](Git-Q -C $dir checkout -q $orig)
     if ($LASTEXITCODE -ne 0) { Warn "沒辦法切回 ${orig}，你現在在 $b" }
@@ -1834,6 +1913,9 @@ function Cmd-Outdated($rest) {
 $script:ShippedLayouts = @('main', 'terminals', 'win98')     # Herdr's own layouts: Herdr puts them back when edited
 $script:PanelToggle = '{"id":"kit-toggle","type":"block","content":{"mod":"kit","props":{"role":"toggle"}},"size":{"px":56}}'
 $script:PanelNode = '{"id":"kit-panel","type":"column","children":[{"id":"kit","type":"block","content":{"mod":"kit"}}],"size":{"px":420},"min":320,"max":800}'
+# Agents stand beside Kit: their own tab-bar button (before Kit's) and their own panel (hidden until clicked)
+$script:AgentsToggle = '{"id":"kit-agents-toggle","type":"block","content":{"mod":"kit-agents","props":{"role":"toggle"}},"size":{"px":66}}'
+$script:AgentsNode = '{"id":"kit-agents-panel","type":"column","children":[{"id":"kit-agents","type":"block","content":{"mod":"kit-agents"}}],"size":{"px":420},"min":320,"max":800,"hidden":true}'
 function Herdr-Home { # the same rule as Herdr: $HERDR_APP_HOME, else $XDG_CONFIG_HOME/herdr-app, else ~/.config/herdr-app (also on Windows)
     if ($env:HERDR_APP_HOME) { return $env:HERDR_APP_HOME }
     if ($env:XDG_CONFIG_HOME) { return (Join-Path $env:XDG_CONFIG_HOME 'herdr-app') }
@@ -1845,10 +1927,18 @@ function Panel-Src { # the panel's files: next to the installed kit, else in the
     foreach ($d in $cands) { if (Test-Path -LiteralPath (Join-Path $d 'main.js') -PathType Leaf) { return $d } }
     $null
 }
-function Layout-Edit([string]$f, $ops) { # the layout text with OPS applied (the panel's old blocks removed first)
+function Layout-Edit([string]$f, $ops, [switch]$Clean) { # the layout text with OPS applied (-Clean: kit's blocks all taken out first)
     $text = Read-Text $f
     $root = Json-Parse $text
-    Json-Apply $root (@(@('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel'), @('swapwhere', 'content.mod', 'kit-pane', 'pane')) + @($ops | Where-Object { $_ }))
+    $ops = @($ops | Where-Object { $_ })
+    if (-not $Clean -and $text.Contains('"kit-toggle"') -and $text.Contains('"kit-panel"')) {
+        # Kit's button and panel already there (maybe moved or resized by hand): keep them, only add what is missing
+        $ops = @($ops | Where-Object { -not ($_[0] -eq 'addnear' -and $_[3] -match '^\{"id":"([^"]+)"' -and $text.Contains('"' + $Matches[1] + '"')) })
+    }
+    else { # start clean: old or half-placed blocks taken out first
+        $ops = @(@('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel'), @('rmwhere', 'content.mod', 'kit-agents'), @('rmwhere', 'id', 'kit-agents-toggle'), @('rmwhere', 'id', 'kit-agents-panel'), @('swapwhere', 'content.mod', 'kit-pane', 'pane')) + $ops
+    }
+    Json-Apply $root $ops
     Json-Text $root $text
 }
 function Swap-Layout([string]$f, [string]$text) { # FILE (backed up first) gets TEXT
@@ -1868,6 +1958,10 @@ function Cmd-HerdrPanel($rest) {
         $src = Panel-Src; if (-not $src) { Die '找不到 panel 的檔案（herdr/kit-panel）；請重裝 kit' }
         if (-not (Test-Path -LiteralPath $mods -PathType Container)) { Die "找不到 Herdr 的 mods 資料夾：${mods}（Herdr 有裝、開過一次嗎？）" }
         if ((Test-Path -LiteralPath $dest) -and -not $mine) { Die "$dest 已經有東西，不是 kit 放的，不動它" }
+        foreach ($xm in 'kit-pane', 'kit-agents') {      # every conflict before anything is written
+            $xDest = Join-Path $mods $xm
+            if ((Test-Path -LiteralPath $xDest) -and -not (Test-Path -LiteralPath (Join-Path $xDest '.kit-panel'))) { Die "$xDest 已經有東西，不是 kit 放的，不動它" }
+        }
         # where the panel goes: a button in the tab bar of the shown layout + the panel beside the work area
         $name = ''
         try { $v = Json-Get (Join-Path $hh 'shared.json') 'layout'; if ($v -and $v.StartsWith('"')) { $name = $v.Trim('"') } } catch { }
@@ -1880,7 +1974,7 @@ function Cmd-HerdrPanel($rest) {
         else {
             # the button and panel, and each pane's header with kit's button (the pane header mod "kit-pane")
             $t = $null
-            try { $t = Layout-Edit $lf @(@('addnear', 'content.mod', 'tabs', $PanelToggle), @('addnear', 'content.tab', 'active', $PanelNode), @('swapwhere', 'content.mod', 'pane', 'kit-pane')) } catch { if ($env:KIT_DEBUG) { Warn "$($_.Exception.Message) $($_.ScriptStackTrace)" }; $t = $null }
+            try { $t = Layout-Edit $lf @(@('addnear', 'content.mod', 'tabs', $AgentsToggle), @('addnear', 'content.mod', 'tabs', $PanelToggle), @('addnear', 'content.tab', 'active', $PanelNode), @('addnear', 'content.tab', 'active', $AgentsNode), @('swapwhere', 'content.mod', 'pane', 'kit-pane')) } catch { if ($env:KIT_DEBUG) { Warn "$($_.Exception.Message) $($_.ScriptStackTrace)" }; $t = $null }
             if ($t -and $t.Contains('"kit-toggle"') -and $t.Contains('"kit-panel"')) {
                 if ($t -cne (Read-Text $lf)) { $newLayout = $t }     # already like this: no backup, no write
             }
@@ -1894,7 +1988,6 @@ function Cmd-HerdrPanel($rest) {
         foreach ($xm in 'kit-pane', 'kit-agents') {
             $xSrc = Join-Path (Split-Path -Parent $src) $xm; $xDest = Join-Path $mods $xm
             if (-not (Test-Path -LiteralPath (Join-Path $xSrc 'main.js') -PathType Leaf)) { continue }
-            if ((Test-Path -LiteralPath $xDest) -and -not (Test-Path -LiteralPath (Join-Path $xDest '.kit-panel'))) { Die "$xDest 已經有東西，不是 kit 放的，不動它" }
             Ensure-Dir $xDest
             Copy-Item -Path (Join-Path $xSrc '*') -Destination $xDest -Recurse -Force
             Write-Text (Join-Path $xDest 'mod.json') "$($extra[$xm])`n"
@@ -1929,8 +2022,8 @@ function Cmd-HerdrPanel($rest) {
             foreach ($f in @(Get-ChildItem -LiteralPath $ld -File -Filter '*.json' | Where-Object { $_.Extension -eq '.json' })) {
                 if ($ShippedLayouts -contains [IO.Path]::GetFileNameWithoutExtension($f.Name)) { continue }
                 $text = Read-Text $f.FullName
-                if (-not ($text.Contains('"kit-toggle"') -or $text.Contains('"kit-panel"') -or $text.Contains('"mod": "kit"') -or $text.Contains('"mod": "kit-pane"'))) { continue }
-                try { $t = Layout-Edit $f.FullName @() } catch { Warn "沒辦法讀 $($f.FullName)，沒改它"; continue }
+                try { $t = Layout-Edit $f.FullName @() -Clean; $same = Json-Text (Json-Parse $text) $text } catch { Warn "沒辦法讀 $($f.FullName)，沒改它"; continue }
+                if ($t -ceq $same) { continue }      # nothing of kit's in it (the same as the file only re-read)
                 Swap-Layout $f.FullName $t
             }
         }
@@ -1949,7 +2042,7 @@ function Git-State([string]$dir, [string]$file) { # "new", "changed" or "" (or "
 }
 function Agent-Body([string]$f) { # the lines after the frontmatter
     $lines = (Read-Text $f) -split "`n"; $c = 0; $out = @()
-    foreach ($l in $lines) { if ($c -ge 2) { $out += $l }; if ($l -eq '---') { $c++ } }
+    foreach ($l in $lines) { $l = $l.TrimEnd("`r"); if ($c -ge 2) { $out += $l }; if ($l -eq '---') { $c++ } }
     ($out -join "`n").TrimEnd("`n")
 }
 function Cmd-Agents($rest) {
@@ -1976,17 +2069,25 @@ function Cmd-Agents($rest) {
     Say $sb.ToString()
 }
 function Fm-SetList([string]$f, [string]$key, [string]$val) { # KEY: [val] in the frontmatter (block lists replaced, added if missing)
+    # a block list: the indented lines after KEY go, up to the next key or ---; blank and comment lines
+    # in between stay only when the block goes on after them. Line ends (LF or CRLF) are kept.
     $text = Read-Text $f; $nl = $text.EndsWith("`n")
     $lines = $text -split "`n"; if ($nl) { $lines = $lines[0..($lines.Count - 2)] }
+    $eol = if ($lines.Count -gt 0 -and $lines[0].EndsWith("`r")) { "`r" } else { '' }
     $out = New-Object System.Collections.Generic.List[string]
+    $held = New-Object System.Collections.Generic.List[string]
     $infm = $false; $skip = $false; $done = $false; $i = 0
-    foreach ($l in $lines) {
-        $i++
-        if ($i -eq 1 -and $l -eq '---') { $infm = $true; $out.Add($l); continue }
-        if ($infm -and $skip) { if ($l -match '^[ \t]*-([ \t]|$)') { continue }; $skip = $false }
-        if ($infm -and $l -eq '---') { if (-not $done) { $out.Add("${key}: [$val]") }; $done = $true; $infm = $false; $out.Add($l); continue }
-        if ($infm -and $l.StartsWith("${key}:")) { $out.Add("${key}: [$val]"); $done = $true; if ($l.Substring($key.Length + 1) -match '^[ \t]*$') { $skip = $true }; continue }
-        $out.Add($l)
+    foreach ($raw in $lines) {
+        $i++; $l = $raw.TrimEnd("`r")
+        if ($i -eq 1 -and $l -eq '---') { $infm = $true; $out.Add($raw); continue }
+        if ($infm -and $skip) {
+            if ($l -match '^[ \t]*(#.*)?$') { $held.Add($raw); continue }
+            if ($l -match '^[ \t]') { $held.Clear(); continue }
+            $skip = $false; $out.AddRange($held); $held.Clear()
+        }
+        if ($infm -and $l -eq '---') { if (-not $done) { $out.Add("${key}: [$val]$eol") }; $done = $true; $infm = $false; $out.Add($raw); continue }
+        if ($infm -and $l.StartsWith("${key}:")) { $out.Add("${key}: [$val]$eol"); $done = $true; if ($l.Substring($key.Length + 1) -match '^[ \t]*(#.*)?$') { $skip = $true }; continue }
+        $out.Add($raw)
     }
     Write-Text $f (($out -join "`n") + $(if ($nl) { "`n" } else { '' }))
 }
@@ -2001,7 +2102,8 @@ function Cmd-Agent($rest) { # kit agent <name> add|rm rule|skill|mcp <item>
     if (-not $key) { Die '種類只能是 rule、skill、mcp' }
     $f = Find-Item 'agent' $n; if (-not $f) { Die "找不到 agent ${n}（打 kit list 看有哪些）" }
     if (((Read-Text $f) -split "`n")[0].TrimEnd("`r") -ne '---') { Die "$f 沒有開頭的 --- 區塊" }
-    $cur = @(); try { $cur = @(YGet-From (Yaml-Lines $f -Frontmatter) $key | Where-Object { $_ }) } catch { }
+    $fm = $null; try { $fm = Yaml-Lines $f -Frontmatter } catch { Die "$f 開頭的 --- 區塊讀不懂，沒改（打 kit check 看哪裡錯）" }
+    $cur = @(YGet-From $fm $key | Where-Object { $_ })
     if ($verb -eq 'add') {
         if (-not (Find-Item $k $item)) { Die "找不到 ${k}:${item}（kit 的來源裡沒有）" }
         if ($cur -contains $item) { Say "agent $n 已經有 ${k}:${item}"; return }
@@ -2011,7 +2113,11 @@ function Cmd-Agent($rest) { # kit agent <name> add|rm rule|skill|mcp <item>
         $new = @($cur | Where-Object { $_ -ne $item })
     }
     Fm-SetList $f $key ($new -join ', ')
-    Say "agent ${n}：$(if ($verb -eq 'add') { '加上' } else { '拿掉' }) ${k}:${item}（改了 ${f}，還沒送出：用 kit push 開 PR）"
+    $d = Split-Path -Parent (Split-Path -Parent $f)
+    Say "agent ${n}：$(if ($verb -eq 'add') { '加上' } else { '拿掉' }) ${k}:${item}（改了 ${f}，還沒送出：打  kit push --to $(Split-Path -Leaf $d)）"
+    $sep = [IO.Path]::DirectorySeparatorChar
+    if (($d + $sep).StartsWith($KitSrc.TrimEnd('/', '\') + $sep)) { Warn "這個檔案在 kit 自己同步用的資料夾（${KitSrc}）裡：沒送出前，kit sync 可能沒辦法更新它；最好在你自己 clone 的來源改" }
+    if (@(YGet $Machine 'approvals' | Where-Object { $_ }).Count -gt 0) { Warn '這台只用簽過的版本（approvals）：改的要送出、合併、再簽過，這台才會用到' }
 }
 
 function Usage {
@@ -2020,12 +2126,12 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
   kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
+     --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（給 Herdr 的 Agent 面板）
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
-     --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
-  kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent
+  kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
 
 寫內容的人用（只吃本機資料夾，不連網）：
@@ -2041,7 +2147,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml
-  kit push [--to 來源] [--dry-run]  檢查後把改的東西送到 Gitea 開 PR
+  kit push [--to 來源] [--dry-run]  檢查後送出改的東西：開 PR（預設），或 kit.yaml 寫 push: direct 就直接推
 
   kit herdr-panel install|uninstall 在 Herdr 加上（或拿掉）kit 的面板
   kit self-update                   更新 kit 本身

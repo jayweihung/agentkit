@@ -164,7 +164,7 @@ Kit list --json; $lj = $out; $ljrc = $rc
 W "$T/list.json" "$lj`n"
 $teamJ = (Resolve-Path -LiteralPath $TEAM).ProviderPath.Replace('\', '\\')
 Check 'list --json: exit 0, valid JSON' { $ljrc -eq 0 -and $null -ne (JGet "$T/list.json" 'kit') }
-Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq '"0.1.0"' -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`"}") }
+Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq '"0.1.0"' -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`", `"push`": `"pr`"}") }
 Check 'list --json: required, used, unused' {
     $lj.Contains('{"kind": "rule", "name": "security", "status": "required", "new": false, "source": "team", "description": "", "path": ') -and
     $lj.Contains('{"kind": "skill", "name": "gerrit-review", "status": "used", "new": false, "source": "team", "description": "review a change", "path": ') -and
@@ -177,6 +177,49 @@ Check 'list --json does not mark items seen' { ([regex]::Matches($out, '"new": t
 Kit list --bad
 Check 'list with a wrong option: usage' { $rc -ne 0 -and $out.Contains('kit list [--json') }
 Remove-Item -Recurse -Force "$TEAM/skills/quote"
+
+# ---------- agent add|rm, here.agent (kit.ps1) ----------
+$gBak = ReadT "$TEAM/agents/gerrit.md"
+W "$TEAM/agents/gerrit.md" "---`nname: gerrit`ndescription: Gerrit helper`nskills:`n  - gerrit-review`n`n  # the team one`n  - team-build`n`n# next`nrules: [gerrit-flow]`n---`nbody`n"
+Kit agent gerrit rm skill team-build
+Check 'agent rm: a block list with blank and comment lines in it is replaced whole' { $rc -eq 0 -and (ReadT "$TEAM/agents/gerrit.md") -ceq "---`nname: gerrit`ndescription: Gerrit helper`nskills: [gerrit-review]`n`n# next`nrules: [gerrit-flow]`n---`nbody`n" -and $out.Contains('kit push --to team') }
+W "$TEAM/agents/gerrit.md" "---`r`nname: gerrit`r`ndescription: Gerrit helper`r`nskills: [gerrit-review]`r`nrules: [gerrit-flow]`r`n---`r`nYou are the Gerrit helper.`r`n"
+Kit agent gerrit add skill gerrit-workflow; $rc1 = $rc
+Kit agent gerrit add mcp gerrit
+Check 'agent add: a CRLF file is read and stays CRLF' { $rc1 -eq 0 -and $rc -eq 0 -and (ReadT "$TEAM/agents/gerrit.md") -ceq "---`r`nname: gerrit`r`ndescription: Gerrit helper`r`nskills: [gerrit-review, gerrit-workflow]`r`nrules: [gerrit-flow]`r`nmcp: [gerrit]`r`n---`r`nYou are the Gerrit helper.`r`n" }
+Kit agents --json
+Check "agents --json: a CRLF agent's prompt without CR" { $out.Contains('"prompt": "You are the Gerrit helper."}') }
+Kit check $TEAM
+Check "check: a CRLF agent's header is read" { -not $out.Contains('agents/gerrit.md: 開頭要有') }
+$bad = "---`nname: gerrit`ndescription: Gerrit helper`njust words`nskills: [gerrit-review]`n---`nbody`n"
+W "$TEAM/agents/gerrit.md" $bad
+Kit agent gerrit add skill gerrit-workflow
+Check 'agent add: a header kit cannot read stops it, the file is not changed' { $rc -ne 0 -and $out.Contains('讀不懂') -and (ReadT "$TEAM/agents/gerrit.md") -ceq $bad }
+W "$TEAM/agents/gerrit.md" "---`nname: gerrit`ndescription: Gerrit helper`nmcp: [nope]`n---`nbody`n"
+Kit check $TEAM
+Check "check: an agent's missing MCP is reported" { $out.Contains('agents/gerrit.md: 找不到 mcp:nope') }
+W "$TEAM/agents/gerrit.md" $gBak
+# kit run leaves a marker (process -> agent): kit list --json --pid tells the pane's agent
+$rund = Join-Path $H '.config/agentkit/run'; W (Join-Path $rund "$PID") "gerrit`n"
+$sp = @{ FilePath = $Exe; ArgumentList = @('-NoProfile', '-Command', 'exit 0'); PassThru = $true }; if ($OnWindows) { $sp['WindowStyle'] = 'Hidden' }
+$dead = Start-Process @sp
+$dead.WaitForExit(); W (Join-Path $rund "$($dead.Id)") "gone`n"
+Kit list --json --dir $T --pid $PID
+Check 'list --json --pid: the agent kit run started there' { $out.Contains('"agent": {"name": "gerrit", "source": "team", "rules": ["gerrit-flow"], "skills": ["gerrit-review"], "mcp": ["gerrit"]}, "items": [') }
+Check 'list --json --pid: the marker of a kit run that ended is dropped' { -not (Test-Path (Join-Path $rund "$($dead.Id)")) -and (Test-Path (Join-Path $rund "$PID")) }
+Remove-Item -LiteralPath (Join-Path $rund "$PID")
+Kit list --json --dir $T --pid $PID
+Check 'list --json --pid: no agent there' { $out.Contains('"user": null, "agent": null, "items": [') }
+if (-not $OnWindows) {
+    W "$T/fakebin/claude" "#!/bin/sh`n`"`$FAKE_EXE`" -NoProfile -File `"`$FAKE_KIT`" list --json --dir `"`$PWD`" --pid `$PPID > `"`$FAKE_OUT`" 2>&1`n"
+    & chmod +x "$T/fakebin/claude"
+    $env:FAKE_EXE = $Exe; $env:FAKE_KIT = $Kit; $env:FAKE_OUT = "$T/fake.json"; $oldPath = $env:PATH; $env:PATH = "$T/fakebin" + [IO.Path]::PathSeparator + $env:PATH
+    Kit run gerrit
+    $env:PATH = $oldPath; Remove-Item env:FAKE_EXE, env:FAKE_KIT, env:FAKE_OUT
+    Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
+}
+Kit help
+Check 'help: --json --dir is under kit list' { $out -match "(?m)^  kit list .*`n     --json --dir" -and $out -notmatch "(?m)^  kit agent .*`n     --json --dir" }
 
 # ---------- kit_version: tell once when the team wants a newer kit ----------
 $teamYaml = ReadT "$TEAM/kit.yaml"
@@ -480,24 +523,50 @@ Pop-Location
 }
 }
 
-# ---------- push without origin: your own source, straight to every remote, no PR ----------
+# ---------- push: direct (kit.yaml): your own source, straight to every remote, no PR ----------
 $D = Join-Path $T 'pushdirect'; $DW = Join-Path $D 'work'; $R1 = Join-Path $D 'one.git'; $R2 = Join-Path $D 'two.git'
 & git -c init.defaultBranch=main init -q --bare $R1; & git -c init.defaultBranch=main init -q --bare $R2
 & git -c init.defaultBranch=main init -q $DW
-W "$DW/kit.yaml" "name: mine`n"; W "$DW/rules/mine.md" "Mine.`n"
-& git -C $DW config user.name tester; & git -C $DW config user.email me@home.example
+W "$DW/kit.yaml" "name: mine`npush: direct`nallowed_hosts: [gitea.example]`n"; W "$DW/rules/mine.md" "Mine.`n"
+& git -C $DW config user.name tester; & git -C $DW config user.email me@home.example; & git -C $DW config core.autocrlf false
 & git -C $DW add -A; & git -C $DW commit -qm init
 & git -C $DW remote add one $R1; & git -C $DW remote add two $R2
 & git -C $DW push -q one main 2>$null; & git -C $DW push -q two main 2>$null; & git -C $DW fetch -q one 2>$null; & git -C $DW fetch -q two 2>$null
 Push-Location $DW
 W "$DW/rules/mine.md" "Mine, changed.`n"; W "$DW/notes.txt" "not an item`n"
 $dh0 = & git -C $DW rev-parse HEAD
+W "$DW/kit.yaml" "name: mine`n"
 Kit push --dry-run
-Check 'push without origin --dry-run: straight to the remotes, nothing sent' { $rc -eq 0 -and $out.Contains('沒有 origin') -and $out.Contains('one two') -and $out.Contains('rules/mine.md') -and (& git -C $DW rev-parse HEAD) -eq $dh0 -and (& git --git-dir=$R1 rev-parse main) -eq $dh0 }
+Check 'push (pr, the default) without origin: stops and says to write push: direct' { $rc -ne 0 -and $out.Contains('沒有 origin') -and $out.Contains('push: direct') -and (& git -C $DW rev-parse HEAD) -eq $dh0 }
+W "$DW/kit.yaml" "name: mine`npush: maybe`n"
+Kit check .
+Check 'check: push is pr or direct' { $rc -ne 0 -and $out.Contains('kit.yaml: push 只能是 pr 或 direct') }
+& git -C $DW checkout -q -- kit.yaml
+& git -C $DW config remote.one.pushurl https://evil.example/one.git
+Kit push --dry-run
+Check 'push direct: a push URL to a host not allowed stops it' { $rc -ne 0 -and $out.Contains('evil.example 不在允許的主機清單') }
+& git -C $DW config --unset remote.one.pushurl
+& git -C $DW config 'url.https://evil.example/.pushInsteadOf' ($D + [IO.Path]::DirectorySeparatorChar)
+Kit push --dry-run
+Check 'push direct: pushInsteadOf to a host not allowed stops it' { $rc -ne 0 -and $out.Contains('evil.example 不在允許的主機清單') }
+& git -C $DW config --remove-section 'url.https://evil.example/'
+Kit push --dry-run
+Check 'push direct --dry-run: straight to the remotes, nothing sent' { $rc -eq 0 -and $out.Contains('push: direct') -and $out.Contains('one two') -and $out.Contains('rules/mine.md') -and (& git -C $DW rev-parse HEAD) -eq $dh0 -and (& git --git-dir=$R1 rev-parse main) -eq $dh0 }
 Kit push
 $dh1 = & git -C $DW rev-parse HEAD
-Check 'push without origin: commit on main, pushed to every remote' { $rc -eq 0 -and (& git --git-dir=$R1 rev-parse main) -eq $dh1 -and (& git --git-dir=$R2 rev-parse main) -eq $dh1 -and (& git -C $DW log -1 --format=%s) -eq 'kit: update rule:mine' -and (& git -C $DW symbolic-ref --short HEAD) -eq 'main' }
-Check 'push without origin: only the item is committed' { (& git -C $DW show --name-only --format= HEAD | Where-Object { $_ }) -eq 'rules/mine.md' -and "$(& git -C $DW status --porcelain)" -eq '?? notes.txt' }
+Check 'push direct: commit on main, pushed to every remote' { $rc -eq 0 -and (& git --git-dir=$R1 rev-parse main) -eq $dh1 -and (& git --git-dir=$R2 rev-parse main) -eq $dh1 -and (& git -C $DW log -1 --format=%s) -eq 'kit: update rule:mine' -and (& git -C $DW symbolic-ref --short HEAD) -eq 'main' }
+Check 'push direct: only the item is committed' { (& git -C $DW show --name-only --format= HEAD | Where-Object { $_ }) -eq 'rules/mine.md' -and "$(& git -C $DW status --porcelain)" -eq '?? notes.txt' }
+& git -C $DW commit -q --allow-empty -m unpushed; W "$DW/rules/mine.md" "Mine, again.`n"; $dh2 = & git -C $DW rev-parse HEAD
+Kit push
+Check 'push direct: a commit not on a remote yet stops it, nothing committed' { $rc -ne 0 -and $out.Contains('還沒推到 one') -and (& git -C $DW rev-parse HEAD) -eq $dh2 -and (& git --git-dir=$R1 rev-parse main) -eq $dh1 }
+& git -C $DW reset -q --soft HEAD~1
+& git -c init.defaultBranch=main init -q --bare (Join-Path $D 'three.git'); & git -C $DW remote add three (Join-Path $D 'three.git')
+Kit push
+Check 'push direct: a remote without this branch stops it' { $rc -ne 0 -and $out.Contains('three 上沒有 main') -and (& git -C $DW rev-parse HEAD) -eq $dh1 }
+& git -C $DW remote remove three
+& git clone -q $R1 (Join-Path $D 'other') 2>$null; & git -C (Join-Path $D 'other') -c user.name=t -c user.email=t@t commit -q --allow-empty -m theirs; & git -C (Join-Path $D 'other') push -q origin HEAD:main 2>$null
+Kit push
+Check 'push direct: new commits on a remote stop it (pull first)' { $rc -ne 0 -and $out.Contains('git pull one main') -and "$(& git -C $DW status --porcelain rules)" -eq ' M rules/mine.md' }
 Pop-Location
 
 # ---------- uninstall ----------
@@ -614,11 +683,16 @@ $kitJ = if ($OnWindows) { '"kit.cmd"' } else { '"' + $Exe.Replace('\', '\\') + '
 Check 'herdr-panel install: mod files, config with the kit command' { $rc -eq 0 -and (Test-Path "$HH/mods/kit/main.js") -and (Test-Path "$HH/mods/kit/.kit-panel") -and $cfg.Contains("`"kit`": [$kitJ]") -and $cfg.Contains('"env": {}') }
 $ml = ReadT "$HH/layouts/mine.json"
 Check 'herdr-panel install: button in the tab bar, panel beside the work area' { ([regex]::Matches($ml, '"kit-toggle"')).Count -eq 1 -and $ml.Contains('"kit-panel"') -and (ReadT "$HH/mods/kit/mod.json").Contains('"place": "none"') }
+$flat = $ml -replace '\s', ''
+Check "herdr-panel install: an Agents button before Kit's, its panel hidden beside Kit's" { $flat -match '"kit-agents-toggle".*"kit-toggle"' -and $flat -match '"kit-panel".*"kit-agents-panel".*"hidden":true' }
 Check 'herdr-panel install: the Agents window (mods/kit-agents)' { (Test-Path "$HH/mods/kit-agents/main.js") -and (Test-Path "$HH/mods/kit-agents/.kit-panel") -and (ReadT "$HH/mods/kit-agents/mod.json").Contains('"kind": "window"') }
 Check "herdr-panel install: each pane's header is kit's (mods/kit-pane)" { $ml.Contains('"mod": "kit-pane"') -and -not $ml.Contains('"mod": "pane"') -and (Test-Path "$HH/mods/kit-pane/main.js") -and (Test-Path "$HH/mods/kit-pane/.kit-panel") -and (ReadT "$HH/mods/kit-pane/mod.json").Contains('"place": "none"') }
 Check 'herdr-panel install: layout backed up first' { @(Backups).Count -eq 1 -and (ReadT @(Backups)[0].FullName) -ceq $mineOrig }
 Kit herdr-panel install
 Check 'herdr-panel install again: layout not changed twice' { $rc -eq 0 -and ([regex]::Matches((ReadT "$HH/layouts/mine.json"), '"kit-toggle"')).Count -eq 1 -and @(Backups).Count -eq 1 }
+$moved = (ReadT "$HH/layouts/mine.json").Replace('"px": 56', '"px": 42'); W "$HH/layouts/mine.json" $moved
+Kit herdr-panel install
+Check 'herdr-panel install again: a hand-arranged layout is kept' { $rc -eq 0 -and (ReadT "$HH/layouts/mine.json") -ceq $moved }
 W "$HH/mods/kit/main.js" 'old'; W "$HH/mods/kit-pane/main.js" 'old'; $pcfg = ReadT "$HH/mods/kit/config.json"
 $env:AGENTKIT_HOME = Join-Path $T 'inst-p'; & $Exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'windows/install.ps1') -Quiet; Remove-Item env:AGENTKIT_HOME
 Check 'reinstall / self-update refreshes an installed panel, keeps its settings' { (SameBytes "$HH/mods/kit/main.js" (Join-Path $Repo 'herdr/kit-panel/main.js')) -and (ReadT "$HH/mods/kit/config.json") -ceq $pcfg }
@@ -640,6 +714,16 @@ Kit herdr-panel install
 Check "herdr-panel: someone else's mods/kit is left alone" { $rc -ne 0 -and $out.Contains('不是 kit 放的') -and (ReadT "$HH/mods/kit/main.js") -eq 'mine' }
 Kit herdr-panel uninstall
 Check "herdr-panel uninstall: someone else's mods/kit is left alone" { $rc -ne 0 -and (Test-Path "$HH/mods/kit/main.js") }
+Remove-Item -Recurse -Force "$HH/mods/kit"; W "$HH/mods/kit-agents/main.js" 'theirs'
+W "$HH/shared.json" "{`n  `"layout`": `"mine`"`n}`n"; $mineBefore = ReadT "$HH/layouts/mine.json"
+Kit herdr-panel install
+Check "herdr-panel: someone else's mods/kit-agents stops it before anything is written" { $rc -ne 0 -and $out.Contains('kit-agents 已經有東西') -and -not (Test-Path "$HH/mods/kit") -and -not (Test-Path "$HH/mods/kit-pane") -and (ReadT "$HH/layouts/mine.json") -ceq $mineBefore -and (ReadT "$HH/mods/kit-agents/main.js") -eq 'theirs' }
+Remove-Item -Recurse -Force "$HH/mods/kit-agents"
+W "$HH/layouts/compact.json" "{`"id`":`"root`",`"children`":[{`"id`":`"main`",`"content`":{`"tab`":`"active`",`"pane`":{`"header`":{`"content`":{`"mod`":`"kit-pane`"}}}}}]}`n"
+$plain = "{`"id`":`"root`",`"children`":[{`"id`":`"tabs`",`"content`":{`"mod`":`"tabs`"}}]}`n"; W "$HH/layouts/plain.json" $plain
+Kit herdr-panel uninstall
+Check "herdr-panel uninstall: kit's parts go however the layout is written" { $rc -eq 0 -and -not (ReadT "$HH/layouts/compact.json").Contains('kit-pane') -and (ReadT "$HH/layouts/compact.json").Contains('"mod": "pane"') }
+Check "herdr-panel uninstall: a layout without kit's parts is not touched" { (ReadT "$HH/layouts/plain.json") -ceq $plain -and @(Get-ChildItem -LiteralPath "$HH/layouts" -File | Where-Object { $_.Name -like 'plain.json.kit-backup-*' }).Count -eq 0 }
 $env:HERDR_APP_HOME = Join-Path $T 'no-herdr'
 Kit herdr-panel install
 Check 'herdr-panel without Herdr: says so' { $rc -ne 0 -and $out.Contains('找不到 Herdr') }
@@ -654,6 +738,26 @@ Kit ci-template
 Check 'installed kit has the ci template' { $rc -eq 0 -and $out -ceq $tmpl }
 Check 'installed kit has the Herdr panel' { (Test-Path (Join-Path $T 'inst/lib/herdr/kit-panel/main.js')) -and (Test-Path (Join-Path $T 'inst/lib/herdr/kit-pane/main.js')) }
 $Kit = $realKit
+
+# ---------- sync: why a source could not be updated ----------
+$SY = Join-Path $T 'syncwhy'; $SW = Join-Path $SY 'w'
+& git -c init.defaultBranch=main init -q $SW
+W "$SW/kit.yaml" "name: s`n"; W "$SW/rules/a.md" "v1`n"
+G -C $SW add -A; G -C $SW -c user.name=t -c user.email=t@t commit -qm v1; G clone -q --bare $SW (Join-Path $SY 's.git')
+$oldH = $H; Set-Home (Join-Path $SY 'home')
+Kit init (FileUrl (Join-Path $SY 's.git'))
+$C = Join-Path $H 'agentkit/s'
+W "$SW/rules/a.md" "v2`n"; G -C $SW -c user.name=t -c user.email=t@t commit -qam v2; G -C $SW push -q (Join-Path $SY 's.git') HEAD:main
+W "$C/rules/a.md" "mine`n"
+Kit sync
+Check 'sync: a source with your own changes in the way says so' { $out -match '沒辦法更新 s（.*自己改過' }
+G -C $C checkout -q -- rules/a.md; G -C $C -c user.name=t -c user.email=t@t commit -q --allow-empty -m local
+Kit sync
+Check 'sync: a source with its own commits says it went its own way' { $out -match '沒辦法更新 s（.*分岔' }
+G -C $C remote set-url origin (FileUrl (Join-Path $SY 'gone.git'))
+Kit sync
+Check 'sync: no network is told apart' { $out.Contains('沒辦法更新 s（沒網路？）') }
+Set-Home $oldH
 
 # ---------- the script files themselves ----------
 Check 'kit.ps1 and install.ps1 start with a UTF-8 BOM (needed by PowerShell 5.1)' {

@@ -63,9 +63,9 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 
 不想打指令的話，可以在 Herdr 裡用（Windows、Mac、Linux 都一樣）：
 
-- **每個 agent 視窗上的 kit 按鈕**：這個 agent 在用哪些規則、skill、MCP，加上或拿掉。
+- **每個 agent 視窗上的 Kit 按鈕**：這個 agent 在用哪些規則、skill、MCP，加上或拿掉。
 - **右上角的倉庫**：看、改、新增規則、skill、MCP，改好按「送出」（`kit push`）。
-- **Agents 視窗**：kit 做好的 agent 用了哪些東西，用 Claude、Codex 或 omp 開起來。
+- **上排的 Agents**：kit 做好的 agent 用了哪些東西，用 Claude、Codex 或 omp 開起來。
 
     kit herdr-panel install       裝進 Herdr
     kit herdr-panel uninstall     拿掉，Herdr 回到原本的樣子
@@ -91,7 +91,8 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
     kit push [--to 來源] [--dry-run]   檢查後開分支、push、在 Gitea 開 PR
 
 `kit push` 只送改過的 rule、skill、mcp、agent，只 push `kit/...` 分支，不動 main。
-來源沒有 `origin`（自己的來源，不是團隊的 Gitea）時，改成直接 commit 到現在的分支、推到它所有的 remote，不開 PR。
+來源的 `kit.yaml` 寫 `push: direct`（只有自己用的來源）時，改成直接 commit 到現在的分支、推到它所有的 remote，不開 PR。
+不寫就是 `push: pr`。團隊的來源一定要用 `push: pr`。
 檢查（`kit check`、`author_domains`、`allowed_hosts`）有一項不過就什麼都不送。
 要自動開 PR 就放 Gitea token：環境變數 `KIT_GITEA_TOKEN`，或檔案
 `~/.config/agentkit/gitea-token`（`chmod 600`）。沒有 token 時會印出網址讓你自己開。

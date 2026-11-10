@@ -131,7 +131,7 @@ check "list shows agent" 'echo "$out" | grep -q "agent:gerrit"'
 mkdir -p "$TEAM/skills/quote"; printf -- '---\nname: quote\ndescription: 中文 "引號" \\ 和\ttab\n---\nx\n' > "$TEAM/skills/quote/SKILL.md"
 kit list --json > "$T/list.json" 2>&1; rc=$?
 check "list --json: exit 0, valid JSON" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/list.json" > /dev/null'
-check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"0.1.0\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\"}" "$T/list.json"'
+check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"0.1.0\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\", \"push\": \"pr\"}" "$T/list.json"'
 check "list --json: required, used, unused" 'grep -qF "{\"kind\": \"rule\", \"name\": \"security\", \"status\": \"required\", \"new\": false, \"source\": \"team\", \"description\": \"\", \"path\": " "$T/list.json" &&
     grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"source\": \"team\", \"description\": \"review a change\", \"path\": " "$T/list.json" &&
     grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-workflow\", \"status\": \"unused\", \"new\": false, \"source\": \"third-party\", \"description\": \"upstream\", \"path\": " "$T/list.json"'
@@ -156,7 +156,7 @@ cp "$HOME/.claude.json" "$T/cj.bak"
 printf 'set\tprojects|%s|mcpServers|lm\t{"command": "y"}\nset\tmcpServers|um\t{"command": "z"}\n' "$PP" > "$T/cj.ops"
 LC_ALL=C awk -f "$JA" -v ops="$T/cj.ops" -v sep="|" "$T/cj.bak" > "$HOME/.claude.json"
 kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here.json" 2>&1; rc=$?
-check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"items\": [" "$T/here.json"'
+check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"agent\": null, \"items\": [" "$T/here.json"'
 check "list --json --dir: rules here and above, AGENTS.md for codex/omp" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"CLAUDE.md\", \"path\": \"$PP/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \".claude/rules/r1.md\", \"path\": \"$PP/.claude/rules/r1.md\", \"tools\": \"claude\", \"description\": \"Rule one\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"$PU/CLAUDE.md\", \"path\": \"$PU/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"Project rules\"}" "$T/here.json" &&
@@ -170,9 +170,22 @@ if command -v pwsh >/dev/null 2>&1; then
     check "list --json --dir: kit.ps1 prints the same" 'pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json --dir "$T/proj/sub" --pid $$ > /tmp/here-ps.json 2>&1; cmp -s /tmp/here-ps.json "$T/here.json"'
 fi
 out=$(kit list --json --dir "$T/nope" 2>&1)
-check "list --json --dir: a folder that is not there" 'echo "$out" | grep -qF "\"here\": {\"dir\": \"$T/nope\", \"user\": null, \"error\": \"找不到這個資料夾\", \"items\": []}"'
+check "list --json --dir: a folder that is not there" 'echo "$out" | grep -qF "\"here\": {\"dir\": \"$T/nope\", \"user\": null, \"agent\": null, \"error\": \"找不到這個資料夾\", \"items\": []}"'
 out=$(kit list --json --pid x 2>&1); rc=$?
 check "list --json --pid: numbers only" '[ $rc -ne 0 ] && echo "$out" | grep -q "數字"'
+RUND="$HOME/.config/agentkit/run"; mkdir -p "$RUND"; echo gerrit > "$RUND/$$"
+( : ) & dp=$!; wait $dp; echo gone > "$RUND/$dp"
+kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here2.json" 2>&1
+check "list --json --pid: the agent kit run started there" 'grep -qF "\"user\": null, \"agent\": {\"name\": \"gerrit\", \"source\": \"team\", \"rules\": [\"gerrit-flow\"], \"skills\": [\"gerrit-review\"], \"mcp\": [\"gerrit\"]}, \"items\": [" "$T/here2.json"'
+check "list --json --pid: the marker of a kit run that ended is dropped" '[ ! -e "$RUND/$dp" ] && [ -e "$RUND/$$" ]'
+if command -v pwsh >/dev/null 2>&1; then
+    echo gone > "$RUND/$dp"
+    check "list --json --pid: kit.ps1 finds the same agent" 'pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json --dir "$T/proj/sub" --pid $$ 2>&1 | cmp -s - "$T/here2.json" && [ ! -e "$RUND/$dp" ]'
+fi
+rm -f "$RUND/$$"
+mkdir -p "$T/fakebin"; printf '#!/bin/sh\n"$FAKE_KIT" list --json --dir "$PWD" --pid $PPID > "$FAKE_OUT" 2>&1\n' > "$T/fakebin/claude"; chmod +x "$T/fakebin/claude"
+FAKE_KIT=$KIT FAKE_OUT="$T/fake.json" PATH="$T/fakebin:$PATH" kit run gerrit >/dev/null 2>&1; rc=$?
+check "kit run: the agent in the pane is known while it runs, the marker goes after" '[ $rc -eq 0 ] && grep -qF "\"agent\": {\"name\": \"gerrit\", \"source\": \"team\"," "$T/fake.json" && [ -z "$(ls "$RUND")" ]'
 cp "$T/cj.bak" "$HOME/.claude.json"; rm -rf "$T/proj" "$HOME/.claude/skills/mine"
 
 # ---------- agents --json / agent add|rm (the Herdr agent panel) ----------
@@ -186,7 +199,7 @@ if command -v pwsh >/dev/null 2>&1; then
     check "agents --json: kit.ps1 prints the same" 'pwsh -NoProfile -File "$HERE/../windows/kit.ps1" agents --json 2>&1 | cmp -s - "$T/agents.json"'
 fi
 out=$(kit agent gerrit add skill gerrit-workflow 2>&1); rc=$?
-check "agent add: list grows, the rest of the file kept" '[ $rc -eq 0 ] && grep -qx "skills: \[gerrit-review, gerrit-workflow\]" "$TEAM/agents/gerrit.md" && grep -qx "  deny: \[mcp__gerrit__submit_change\]" "$TEAM/agents/gerrit.md" && grep -qx "You are the Gerrit helper." "$TEAM/agents/gerrit.md" && echo "$out" | grep -q "kit push"'
+check "agent add: list grows, the rest of the file kept" '[ $rc -eq 0 ] && grep -qx "skills: \[gerrit-review, gerrit-workflow\]" "$TEAM/agents/gerrit.md" && grep -qx "  deny: \[mcp__gerrit__submit_change\]" "$TEAM/agents/gerrit.md" && grep -qx "You are the Gerrit helper." "$TEAM/agents/gerrit.md" && echo "$out" | grep -qF "kit push --to team"'
 out=$(kit agent gerrit rm mcp gerrit 2>&1); rc=$?
 check "agent rm: empty list" '[ $rc -eq 0 ] && grep -qx "mcp: \[\]" "$TEAM/agents/gerrit.md"'
 out=$(kit agent gerrit add mcp nope 2>&1); rc=$?
@@ -203,6 +216,41 @@ if command -v pwsh >/dev/null 2>&1; then
     pwsh -NoProfile -File "$HERE/../windows/kit.ps1" agent gerrit add skill gerrit-workflow >/dev/null 2>&1
     check "agent add: kit.ps1 writes the same file" 'cmp -s "$TEAM/agents/gerrit.md" "$T/g2"'
 fi
+# a block list with blank and comment lines in it
+printf -- '---\nname: gerrit\ndescription: Gerrit helper\nskills:\n  - gerrit-review\n\n  # the team one\n  - team-build\n\n# next\nrules: [gerrit-flow]\n---\nbody\n' > "$T/blk.md"
+printf -- '---\nname: gerrit\ndescription: Gerrit helper\nskills: [gerrit-review]\n\n# next\nrules: [gerrit-flow]\n---\nbody\n' > "$T/blk.want"
+cp "$T/blk.md" "$TEAM/agents/gerrit.md"; out=$(kit agent gerrit rm skill team-build 2>&1); rc=$?
+check "agent rm: a block list with blank and comment lines in it is replaced whole" '[ $rc -eq 0 ] && cmp -s "$TEAM/agents/gerrit.md" "$T/blk.want"'
+if command -v pwsh >/dev/null 2>&1; then
+    cp "$T/blk.md" "$TEAM/agents/gerrit.md"; pwsh -NoProfile -File "$HERE/../windows/kit.ps1" agent gerrit rm skill team-build >/dev/null 2>&1
+    check "agent rm: kit.ps1 replaces the block list the same" 'cmp -s "$TEAM/agents/gerrit.md" "$T/blk.want"'
+fi
+# a CRLF file (from a Windows editor)
+printf -- '---\r\nname: gerrit\r\ndescription: Gerrit helper\r\nskills: [gerrit-review]\r\nrules: [gerrit-flow]\r\n---\r\nYou are the Gerrit helper.\r\n' > "$T/crlf.md"
+cp "$T/crlf.md" "$TEAM/agents/gerrit.md"
+out=$(kit agent gerrit add skill gerrit-workflow 2>&1); rc=$?
+out2=$(kit agent gerrit add mcp gerrit 2>&1); rc2=$?
+check "agent add: a CRLF file is read and stays CRLF" '[ $rc -eq 0 ] && [ $rc2 -eq 0 ] && grep -qx "skills: \[gerrit-review, gerrit-workflow\]$(printf "\r")" "$TEAM/agents/gerrit.md" && grep -qx "mcp: \[gerrit\]$(printf "\r")" "$TEAM/agents/gerrit.md" && [ "$(tr -cd "\r" < "$TEAM/agents/gerrit.md" | wc -c | tr -d " ")" = 8 ] && [ "$(wc -l < "$TEAM/agents/gerrit.md" | tr -d " ")" = 8 ]'
+cp "$TEAM/agents/gerrit.md" "$T/crlf.bash"
+check "agents --json: a CRLF agent's prompt without CR" 'kit agents --json 2>&1 | grep -qF "\"prompt\": \"You are the Gerrit helper.\"}"'
+check "check: a CRLF agent's header is read" '! kit check "$TEAM" 2>&1 | grep -q "agents/gerrit.md: 開頭要有"'
+if command -v pwsh >/dev/null 2>&1; then
+    cp "$T/crlf.md" "$TEAM/agents/gerrit.md"
+    pwsh -NoProfile -File "$HERE/../windows/kit.ps1" agent gerrit add skill gerrit-workflow >/dev/null 2>&1; pwsh -NoProfile -File "$HERE/../windows/kit.ps1" agent gerrit add mcp gerrit >/dev/null 2>&1
+    check "agent add: kit.ps1 keeps CRLF the same" 'cmp -s "$TEAM/agents/gerrit.md" "$T/crlf.bash"'
+fi
+# a header kit cannot read: stop, change nothing
+printf -- '---\nname: gerrit\ndescription: Gerrit helper\njust words\nskills: [gerrit-review]\n---\nbody\n' > "$T/bad.md"; cp "$T/bad.md" "$TEAM/agents/gerrit.md"
+out=$(kit agent gerrit add skill gerrit-workflow 2>&1); rc=$?
+check "agent add: a header kit cannot read stops it, the file is not changed" '[ $rc -ne 0 ] && echo "$out" | grep -q 讀不懂 && cmp -s "$TEAM/agents/gerrit.md" "$T/bad.md"'
+if command -v pwsh >/dev/null 2>&1; then
+    out=$(pwsh -NoProfile -File "$HERE/../windows/kit.ps1" agent gerrit add skill gerrit-workflow 2>&1); rc=$?
+    check "agent add: kit.ps1 stops too" '[ $rc -ne 0 ] && echo "$out" | grep -q 讀不懂 && cmp -s "$TEAM/agents/gerrit.md" "$T/bad.md"'
+fi
+# kit check: what an agent uses must exist (rules, skills and mcp)
+printf -- '---\nname: gerrit\ndescription: Gerrit helper\nmcp: [nope]\n---\nbody\n' > "$TEAM/agents/gerrit.md"
+out=$(kit check "$TEAM" 2>&1)
+check "check: an agent's missing MCP is reported" 'echo "$out" | grep -qF "agents/gerrit.md: 找不到 mcp:nope"'
 cp "$T/gerrit.bak" "$TEAM/agents/gerrit.md"
 rm -rf "$TEAM/skills/quote"
 
@@ -490,11 +538,11 @@ rm -f "$HOME/.config/agentkit/gitea-token"
 kill $FAKE 2>/dev/null; unset KIT_GITEA_API
 cd "$T"
 
-# ---------- push without origin: your own source, straight to every remote, no PR ----------
+# ---------- push: direct (kit.yaml): your own source, straight to every remote, no PR ----------
 D="$T/pushdirect"; DW="$D/work"; R1="$D/one.git"; R2="$D/two.git"
 git -c init.defaultBranch=main init -q --bare "$R1"; git -c init.defaultBranch=main init -q --bare "$R2"
 git -c init.defaultBranch=main init -q "$DW"
-printf 'name: mine\n' > "$DW/kit.yaml"; mkdir -p "$DW/rules"; echo "Mine." > "$DW/rules/mine.md"
+printf 'name: mine\npush: direct\nallowed_hosts: [gitea.example]\n' > "$DW/kit.yaml"; mkdir -p "$DW/rules"; echo "Mine." > "$DW/rules/mine.md"
 git -C "$DW" config user.name tester; git -C "$DW" config user.email me@home.example
 git -C "$DW" add -A; git -C "$DW" commit -qm init
 git -C "$DW" remote add one "$R1"; git -C "$DW" remote add two "$R2"
@@ -502,11 +550,37 @@ git -C "$DW" push -q one main 2>/dev/null; git -C "$DW" push -q two main 2>/dev/
 cd "$DW"
 echo "Mine, changed." > rules/mine.md; echo "not an item" > notes.txt
 dh0=$(git rev-parse HEAD)
+printf 'name: mine\n' > kit.yaml
 out=$(kit push --dry-run 2>&1); rc=$?
-check "push without origin --dry-run: straight to the remotes, nothing sent" '[ $rc -eq 0 ] && echo "$out" | grep -q "沒有 origin" && echo "$out" | grep -q "one two" && echo "$out" | grep -q "rules/mine.md" && [ "$(git rev-parse HEAD)" = "$dh0" ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$dh0" ]'
+check "push (pr, the default) without origin: stops and says to write push: direct" '[ $rc -ne 0 ] && echo "$out" | grep -q "沒有 origin" && echo "$out" | grep -qF "push: direct" && [ "$(git rev-parse HEAD)" = "$dh0" ]'
+printf 'name: mine\npush: maybe\n' > kit.yaml
+out=$(kit check . 2>&1); rc=$?
+check "check: push is pr or direct" '[ $rc -ne 0 ] && echo "$out" | grep -qF "kit.yaml: push 只能是 pr 或 direct"'
+git checkout -q -- kit.yaml
+git config remote.one.pushurl https://evil.example/one.git
+out=$(kit push --dry-run 2>&1); rc=$?
+check "push direct: a push URL to a host not allowed stops it" '[ $rc -ne 0 ] && echo "$out" | grep -q "evil.example 不在允許的主機清單"'
+git config --unset remote.one.pushurl
+git config "url.https://evil.example/.pushInsteadOf" "$D/"
+out=$(kit push --dry-run 2>&1); rc=$?
+check "push direct: pushInsteadOf to a host not allowed stops it" '[ $rc -ne 0 ] && echo "$out" | grep -q "evil.example 不在允許的主機清單"'
+git config --remove-section "url.https://evil.example/"
+out=$(kit push --dry-run 2>&1); rc=$?
+check "push direct --dry-run: straight to the remotes, nothing sent" '[ $rc -eq 0 ] && echo "$out" | grep -qF "push: direct" && echo "$out" | grep -q "one two" && echo "$out" | grep -q "rules/mine.md" && [ "$(git rev-parse HEAD)" = "$dh0" ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$dh0" ]'
 out=$(kit push 2>&1); rc=$?
-check "push without origin: commit on main, pushed to every remote" '[ $rc -eq 0 ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$(git rev-parse HEAD)" ] && [ "$(git --git-dir="$R2" rev-parse main)" = "$(git rev-parse HEAD)" ] && [ "$(git log -1 --format=%s)" = "kit: update rule:mine" ] && [ "$(git symbolic-ref --short HEAD)" = main ]'
-check "push without origin: only the item is committed" '[ "$(git show --name-only --format= HEAD)" = rules/mine.md ] && [ "$(git status --porcelain)" = "?? notes.txt" ]'
+check "push direct: commit on main, pushed to every remote" '[ $rc -eq 0 ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$(git rev-parse HEAD)" ] && [ "$(git --git-dir="$R2" rev-parse main)" = "$(git rev-parse HEAD)" ] && [ "$(git log -1 --format=%s)" = "kit: update rule:mine" ] && [ "$(git symbolic-ref --short HEAD)" = main ]'
+check "push direct: only the item is committed" '[ "$(git show --name-only --format= HEAD)" = rules/mine.md ] && [ "$(git status --porcelain)" = "?? notes.txt" ]'
+git commit -q --allow-empty -m unpushed; echo "Mine, again." > rules/mine.md; dh1=$(git rev-parse HEAD)
+out=$(kit push 2>&1); rc=$?
+check "push direct: a commit not on a remote yet stops it, nothing committed" '[ $rc -ne 0 ] && echo "$out" | grep -q "還沒推到 one" && [ "$(git rev-parse HEAD)" = "$dh1" ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$(git rev-parse HEAD~1)" ]'
+git reset -q --soft HEAD~1
+git -c init.defaultBranch=main init -q --bare "$D/three.git"; git remote add three "$D/three.git"
+out=$(kit push 2>&1); rc=$?
+check "push direct: a remote without this branch stops it" '[ $rc -ne 0 ] && echo "$out" | grep -q "three 上沒有 main" && [ "$(git rev-parse HEAD)" = "$(git --git-dir="$R1" rev-parse main)" ]'
+git remote remove three
+git clone -q "$R1" "$D/other" 2>/dev/null; git -C "$D/other" -c user.name=t -c user.email=t@t commit -q --allow-empty -m theirs; git -C "$D/other" push -q origin HEAD:main 2>/dev/null
+out=$(kit push 2>&1); rc=$?
+check "push direct: new commits on a remote stop it (pull first)" '[ $rc -ne 0 ] && echo "$out" | grep -qF "git pull one main" && [ "$(git status --porcelain rules)" = " M rules/mine.md" ]'
 cd "$T"
 
 # ---------- uninstall ----------
@@ -697,6 +771,7 @@ hp() { HERDR_APP_HOME="$HH" kit herdr-panel "$@"; }
 out=$(hp install 2>&1); rc=$?
 check "herdr-panel install: mod files, config with the kit command" '[ $rc -eq 0 ] && [ -f "$HH/mods/kit/main.js" ] && [ -f "$HH/mods/kit/.kit-panel" ] && grep -qF "\"kit\": [\"$(cd "$HERE/../unix" && pwd)/kit\"]" "$HH/mods/kit/config.json" && grep -qF "\"env\": {}" "$HH/mods/kit/config.json"'
 check "herdr-panel install: button in the tab bar, panel beside the work area" '[ "$(jget "$HH/layouts/mine.json" children | grep -c "\"kit-toggle\"")" = 1 ] && grep -q "\"kit-panel\"" "$HH/layouts/mine.json" && grep -q "\"place\": \"none\"" "$HH/mods/kit/mod.json"'
+check "herdr-panel install: an Agents button before Kit's, its panel hidden beside Kit's" 'tr -d " \n" < "$HH/layouts/mine.json" | grep -q "\"kit-agents-toggle\".*\"kit-toggle\"" && tr -d " \n" < "$HH/layouts/mine.json" | grep -q "\"kit-panel\".*\"kit-agents-panel\".*\"hidden\":true"'
 check "herdr-panel install: the Agents window (mods/kit-agents)" '[ -f "$HH/mods/kit-agents/main.js" ] && [ -f "$HH/mods/kit-agents/.kit-panel" ] && grep -q "\"kind\": \"window\"" "$HH/mods/kit-agents/mod.json"'
 check "herdr-panel install: each pane's header is kit's (mods/kit-pane)" 'grep -q "\"mod\": \"kit-pane\"" "$HH/layouts/mine.json" && ! grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json" && [ -f "$HH/mods/kit-pane/main.js" ] && [ -f "$HH/mods/kit-pane/.kit-panel" ] && grep -q "\"place\": \"none\"" "$HH/mods/kit-pane/mod.json"'
 if command -v pwsh >/dev/null 2>&1; then
@@ -707,6 +782,9 @@ fi
 check "herdr-panel install: layout backed up first" 'cmp -s "$(ls "$HH"/layouts/mine.json.kit-backup-* | head -n 1)" "$T/mine.orig"'
 out=$(hp install --keep-env 2>&1); rc=$?
 check "herdr-panel install again: layout not changed twice" '[ $rc -eq 0 ] && [ "$(grep -c "\"kit-toggle\"" "$HH/layouts/mine.json")" = 1 ] && [ "$(ls "$HH"/layouts/ | grep -c kit-backup)" = 1 ]'
+sed 's/"px": 56/"px": 42/' "$HH/layouts/mine.json" > "$T/mine.moved" && cp "$T/mine.moved" "$HH/layouts/mine.json"
+out=$(hp install --keep-env 2>&1); rc=$?
+check "herdr-panel install again: a hand-arranged layout is kept" '[ $rc -eq 0 ] && grep -q "\"px\": 42" "$HH/layouts/mine.json" && cmp -s "$T/mine.moved" "$HH/layouts/mine.json"'
 check "herdr-panel --keep-env: the panel runs kit with this HOME" 'grep -qF "\"HOME\": \"$HOME\"" "$HH/mods/kit/config.json"'
 echo old > "$HH/mods/kit/main.js"; echo old > "$HH/mods/kit-pane/main.js"; cp "$HH/mods/kit/config.json" "$T/panel-cfg"
 HERDR_APP_HOME="$HH" AGENTKIT_HOME="$T/inst-p" sh "$HERE/../unix/install.sh" --quiet >/dev/null 2>&1
@@ -716,7 +794,7 @@ out=$(hp uninstall 2>&1); rc=$?
 check "herdr-panel uninstall: mod and layout blocks gone" '[ $rc -eq 0 ] && [ ! -e "$HH/mods/kit" ] && ! grep -q "kit" "$HH/layouts/mine.json" && grep -q "\"tabs\"" "$HH/layouts/mine.json"'
 check "herdr-panel uninstall: Herdr's own pane header is back, Agents window gone" '[ ! -e "$HH/mods/kit-pane" ] && [ ! -e "$HH/mods/kit-agents" ] && grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json"'
 printf '{\n  "layout": "main"\n}\n' > "$HH/shared.json"
-out=$(hp install 2>&1); rc=$?
+out=$(hp install --keep-env 2>&1); rc=$?
 check "herdr-panel on a Herdr layout: not edited, panel docks on the right" '[ $rc -eq 0 ] && [ "$(cat "$HH/layouts/main.json")" = "{\"main\":1}" ] && grep -q "\"place\": \"right\"" "$HH/mods/kit/mod.json" && echo "$out" | grep -q 放進上排'
 hp uninstall >/dev/null 2>&1
 mkdir -p "$HH/mods/kit"; echo mine > "$HH/mods/kit/main.js"
@@ -726,8 +804,45 @@ HERDR_APP_HOME="$HH" AGENTKIT_HOME="$T/inst-p" sh "$HERE/../unix/install.sh" --q
 check "reinstall leaves someone else's mods/kit alone" '[ "$(cat "$HH/mods/kit/main.js")" = mine ]'
 out=$(hp uninstall 2>&1); rc=$?
 check "herdr-panel uninstall: someone else's mods/kit is left alone" '[ $rc -ne 0 ] && [ -f "$HH/mods/kit/main.js" ]'
+rm -rf "$HH/mods/kit"; mkdir -p "$HH/mods/kit-agents"; echo theirs > "$HH/mods/kit-agents/main.js"
+printf '{\n  "layout": "mine"\n}\n' > "$HH/shared.json"; cp "$HH/layouts/mine.json" "$T/mine.before"
+out=$(hp install 2>&1); rc=$?
+check "herdr-panel: someone else's mods/kit-agents stops it before anything is written" '[ $rc -ne 0 ] && echo "$out" | grep -q "kit-agents 已經有東西" && [ ! -e "$HH/mods/kit" ] && [ ! -e "$HH/mods/kit-pane" ] && cmp -s "$HH/layouts/mine.json" "$T/mine.before" && ! ls "$HH/layouts" | grep -q "\.kit\." && [ "$(cat "$HH/mods/kit-agents/main.js")" = theirs ]'
+rm -rf "$HH/mods/kit-agents"
+printf '{"id":"root","children":[{"id":"main","content":{"tab":"active","pane":{"header":{"content":{"mod":"kit-pane"}}}}}]}\n' > "$HH/layouts/compact.json"
+printf '{"id":"root","children":[{"id":"tabs","content":{"mod":"tabs"}}]}\n' > "$HH/layouts/plain.json"; cp "$HH/layouts/plain.json" "$T/plain.orig"
+out=$(hp uninstall 2>&1); rc=$?
+check "herdr-panel uninstall: kit's parts go however the layout is written" '[ $rc -eq 0 ] && ! grep -q kit-pane "$HH/layouts/compact.json" && grep -q "\"mod\": \"pane\"" "$HH/layouts/compact.json"'
+check "herdr-panel uninstall: a layout without kit's parts is not touched" 'cmp -s "$HH/layouts/plain.json" "$T/plain.orig" && ! ls "$HH/layouts" | grep -q "plain.json.kit-backup"'
+if command -v pwsh >/dev/null 2>&1; then
+    printf '{"id":"root","children":[{"id":"main","content":{"tab":"active","pane":{"header":{"content":{"mod":"kit-pane"}}}}}]}\n' > "$HH/layouts/compact.json"
+    cp "$HH/layouts/compact.json" "$T/compact.orig"; hp uninstall >/dev/null 2>&1; cp "$HH/layouts/compact.json" "$T/compact.bash"; cp "$T/compact.orig" "$HH/layouts/compact.json"
+    HERDR_APP_HOME="$HH" pwsh -NoProfile -File "$HERE/../windows/kit.ps1" herdr-panel uninstall >/dev/null 2>&1
+    check "herdr-panel uninstall: kit.ps1 the same (and a plain layout untouched)" 'cmp -s "$HH/layouts/compact.json" "$T/compact.bash" && cmp -s "$HH/layouts/plain.json" "$T/plain.orig" && ! ls "$HH/layouts" | grep -q "plain.json.kit-backup"'
+fi
 out=$(HERDR_APP_HOME="$T/no-herdr" kit herdr-panel install 2>&1); rc=$?
 check "herdr-panel without Herdr: says so" '[ $rc -ne 0 ] && echo "$out" | grep -q "找不到 Herdr"'
+
+# ---------- help ----------
+out=$(kit help 2>&1)
+check "help: --json --dir is under kit list" 'echo "$out" | grep -A1 "^  kit list" | grep -q -- "--json --dir" && ! echo "$out" | grep -A1 "^  kit agent " | grep -q -- "--json --dir"'
+
+# ---------- sync: why a source could not be updated ----------
+SY="$T/syncwhy"; git -c init.defaultBranch=main init -q "$SY/w"
+printf 'name: s\n' > "$SY/w/kit.yaml"; mkdir -p "$SY/w/rules"; echo v1 > "$SY/w/rules/a.md"
+git -C "$SY/w" add -A; git -C "$SY/w" -c user.name=t -c user.email=t@t commit -qm v1; git clone -q --bare "$SY/w" "$SY/s.git"
+sk() { HOME="$SY/home" AGENTKIT_CONFIG="$SY/home/.config/agentkit" AGENTKIT_SOURCES="$SY/home/agentkit" "$KIT" "$@"; }
+sk init "file://$SY/s.git" >/dev/null 2>&1; C="$SY/home/agentkit/s"
+echo v2 > "$SY/w/rules/a.md"; git -C "$SY/w" -c user.name=t -c user.email=t@t commit -qam v2; git -C "$SY/w" push -q "$SY/s.git" HEAD:main 2>/dev/null
+echo mine > "$C/rules/a.md"
+out=$(sk sync 2>&1)
+check "sync: a source with your own changes in the way says so" 'echo "$out" | grep -q "沒辦法更新 s（.*自己改過"'
+git -C "$C" checkout -q -- rules/a.md; git -C "$C" -c user.name=t -c user.email=t@t commit -q --allow-empty -m local
+out=$(sk sync 2>&1)
+check "sync: a source with its own commits says it went its own way" 'echo "$out" | grep -q "沒辦法更新 s（.*分岔"'
+git -C "$C" remote set-url origin "file://$SY/gone.git"
+out=$(sk sync 2>&1)
+check "sync: no network is told apart" 'echo "$out" | grep -qF "沒辦法更新 s（沒網路？）"'
 
 # ---------- code checks ----------
 check "no \$var directly before non-ASCII (bash 3.2 reads it as part of the name)" '! LC_ALL=C grep -nE "\\\$[A-Za-z_][A-Za-z0-9_]*[^ -~]" "$KIT" "$HERE/../unix/install.sh"'

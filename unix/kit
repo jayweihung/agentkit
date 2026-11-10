@@ -143,6 +143,24 @@ check_host() { # refuse URLs whose host is not allowed
     [ -z "$real" ] || [ "$real" = "$url" ] || { h=$(url_host "$real"); printf '%s\n' "$hosts" | grep -qxF "$h" || die "git 設定把網址改到 ${h}，不在允許的主機清單"; }
     return 0
 }
+push_urls() { # push_urls REMOTE : every URL git may push REMOTE to (pushurl else url, insteadOf applied; pushInsteadOf too)
+    local u k v
+    git remote get-url --push --all "$1" 2>/dev/null | while IFS= read -r u; do
+        [ -n "$u" ] || continue
+        printf '%s\n' "$u"
+        git config --get-regexp '^url\..*\.pushinsteadof$' 2>/dev/null | while read -r k v; do
+            [ -n "$v" ] || continue
+            case $u in "$v"*) k=${k#url.}; printf '%s%s\n' "${k%.[pP][uU][sS][hH][iI][nN][sS][tT][eE][aA][dD][oO][fF]}" "${u#"$v"}";; esac
+        done
+    done
+}
+check_push_urls() { # check_push_urls REMOTE : refuse when git would push REMOTE to a host that is not allowed
+    local u
+    while IFS= read -r u; do [ -z "$u" ] || check_host "$u"; done <<EOF
+$(push_urls "$1")
+EOF
+    return 0
+}
 
 git_safe() { # git without prompts, submodules or LFS downloads
     GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 git "$@"
@@ -197,6 +215,14 @@ fetch_approved() { # fetch_approved URL DIR : check out the approved commit of a
     say "kit：$n 換到核准的版本 $(printf %.12s "$sha")"
 }
 
+pull_why() { # pull_why DIR : why git pull --ff-only did not work there
+    local n
+    git_safe -C "$1" fetch --quiet --no-recurse-submodules 2>/dev/null || { echo "沒網路？"; return; }
+    [ -z "$(git -C "$1" status --porcelain 2>/dev/null)" ] || { echo "$1 裡有自己改過、還沒送出的檔案；先送出或拿掉"; return; }
+    n=$(git -C "$1" rev-list --count '@{u}..HEAD' 2>/dev/null) || n=0
+    [ "$n" = 0 ] || { echo "$1 有 $n 個來源沒有的 commit，跟來源分岔了"; return; }
+    echo "到 $1 打 git pull 看原因"
+}
 fetch_source() { # clone or fast-forward one source
     local s=$1 d
     is_url "$s" || { [ -d "$s" ] || die "找不到來源資料夾：$s"; return 0; }
@@ -204,7 +230,7 @@ fetch_source() { # clone or fast-forward one source
     d=$(src_dir "$s")
     [ -n "$M_APPROVALS" ] && { fetch_approved "$s" "$d"; return 0; }
     if [ -d "$d/.git" ]; then
-        git_safe -C "$d" pull --ff-only --quiet --no-recurse-submodules || warn "沒辦法更新 $(src_name "$s")（沒網路？）"
+        git_safe -C "$d" pull --ff-only --quiet --no-recurse-submodules 2>/dev/null || warn "沒辦法更新 $(src_name "$s")（$(pull_why "$d")）"
     else
         mkdir -p "$KIT_SRC"
         git_safe clone --quiet --no-recurse-submodules "$s" "$d" || die "沒辦法 clone $s"
@@ -632,10 +658,37 @@ other_user() { # other_user PID : the user of a process under PID that is not me
         END { for (x in p) { y = x; for (i = 0; i < 64 && y != top && (y in p); i++) y = p[y]
                              if (y == top && x != top && u[x] != me) { print u[x]; exit } } }'
 }
+pid_tree() { # pid_tree PID : PID and every process under it
+    { ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid,ppid 2>/dev/null; } | awk -v top="$1" '
+        $1 ~ /^[0-9]+$/ { p[$1] = $2 }
+        END { print top; for (x in p) { y = x; for (i = 0; i < 64 && y != top && (y in p); i++) y = p[y]
+                                        if (y == top && x != top) print x } }'
+}
+run_agent() { # run_agent PID : the agent that kit run started at or under PID (kit run leaves a marker), if any
+    local d="$KIT_CONF/run" f p tree found=""
+    [ -d "$d" ] || return 0
+    tree=$(pid_tree "$1")
+    for f in "$d"/*; do
+        [ -f "$f" ] || continue
+        p=${f##*/}
+        case $p in *[!0-9]*) continue;; esac
+        ps -p "$p" >/dev/null 2>&1 || { rm -f "$f"; continue; }       # that kit run has ended
+        [ -z "$found" ] && printf '%s\n' "$tree" | grep -qxF "$p" && found=$f
+    done
+    [ -z "$found" ] || head -n 1 "$found"
+    return 0
+}
+agent_json() { # agent_json NAME : {"name", "source", "rules", "skills", "mcp"} of a kit agent
+    local f fm="" src=""
+    f=$(find_item agent "$1") && { fm=$(fm_of "$f"); src=$(basename "${f%/agents/*}"); }
+    printf '{"name": %s, "source": %s, "rules": %s, "skills": %s, "mcp": %s}' "$(json_s "$1")" "$(json_s "$src")" \
+        "$(fm_val "$fm" rules | json_arr)" "$(fm_val "$fm" skills | json_arr)" "$(fm_val "$fm" mcp | json_arr)"
+}
 here_json() { # here_json DIR PID : the "here" part of kit list --json --dir
-    local dir=$1 user="" first=1 sc k n f t d
-    [ -n "$2" ] && user=$(other_user "$2")
-    printf ',\n  "here": {"dir": %s, "user": %s' "$(json_s "$dir")" "$( [ -n "$user" ] && json_s "$user" || echo null)"
+    local dir=$1 user="" agent="" first=1 sc k n f t d
+    [ -n "$2" ] && { user=$(other_user "$2"); agent=$(run_agent "$2"); }
+    printf ',\n  "here": {"dir": %s, "user": %s, "agent": %s' "$(json_s "$dir")" "$( [ -n "$user" ] && json_s "$user" || echo null)" \
+        "$( [ -n "$agent" ] && agent_json "$agent" || echo null)"
     if [ -n "$user" ]; then printf ', "items": []}'; return; fi
     if [ ! -d "$dir" ]; then printf ', "error": %s, "items": []}' "$(json_s "找不到這個資料夾")"; return; fi
     printf ', "items": ['
@@ -662,7 +715,7 @@ cmd_list_json() { # what kit list shows, as JSON for programs (the Herdr panel);
     while IFS= read -r s; do
         [ -n "$s" ] || continue
         [ $first = 1 ] || printf ','; first=0
-        printf '\n    {"name": %s, "source": %s, "dir": %s}' "$(json_s "$(src_name "$s")")" "$(json_s "$s")" "$(json_s "$(src_dir "$s")")"
+        printf '\n    {"name": %s, "source": %s, "dir": %s, "push": %s}' "$(json_s "$(src_name "$s")")" "$(json_s "$s")" "$(json_s "$(src_dir "$s")")" "$(json_s "$(push_mode "$(src_dir "$s")")")"
     done <<EOF
 $(m_sources)
 EOF
@@ -793,7 +846,7 @@ cmd_run() {
             p=$(find_item rule "$n") || { warn "rule $n not found"; continue; }
             cat "$p"; echo
         done
-        awk 'c >= 2 { print } /^---$/ { c++ }' "$f"
+        fm_body "$f"
         if [ $tool = codex ] && [ -n "$(ls "$skdir")" ]; then
             # Codex cannot load skills from an extra folder: list them, it reads one when needed
             echo; echo "## Skills"
@@ -848,9 +901,11 @@ EOF
     esac
     set -- "${args[@]}" "$@"
     [ -n "${KIT_DRY_RUN:-}" ] && { printf '%s\n' "$tool" "$@"; printf 'tmp=%s\n' "$tmp"; return 0; }
+    # a marker (this process -> agent name), so the Herdr pane can tell which agent runs in it
+    mkdir -p "$KIT_CONF/run" 2>/dev/null && printf '%s\n' "$name" > "$KIT_CONF/run/$$"
     "$tool" "$@"
     local rc=$?
-    rm -rf "$tmp"
+    rm -rf "$tmp"; rm -f "$KIT_CONF/run/$$"
     return $rc
 }
 
@@ -1039,6 +1094,9 @@ cmd_diff_update() { # cmd_diff_update diff|update ARGS...
 # ---------- check ----------
 problem() { printf '%s\n' "$*" >> "$PROBLEM_FILE"; printf '%s: %s\n' "${PROBLEM_TAG:-kit check}" "$*" >&2; }
 fm_of() { LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$1" 2>/dev/null; }
+fm_starts() { head -n 1 "$1" | tr -d '\r' | grep -qx -- '---'; }   # the file starts with a --- line
+fm_body() { awk '{ l = $0; sub(/\r$/, "", l) } c >= 2 { print l; next } l == "---" { c++ }' "$1"; }   # the lines after the frontmatter
+push_mode() { local m; m=$(yget "$1/kit.yaml" push); printf '%s\n' "${m:-pr}"; }   # push_mode DIR : pr (the default) or direct
 fm_val() { printf '%s\n' "$1" | awk -F'\t' -v p="$2" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
 private_words() { # private_words OUT [DIR...] : nonblank lines of the private word lists (this machine, sources, DIRs) into OUT
     local out=$1 d; shift
@@ -1073,12 +1131,13 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
             rel=${f#"$d"/}
             case $f in */SKILL.md) n=$(basename "$(dirname "$f")");; *) n=$(basename "$f" .md);; esac
             valid_name "$n" || problem "$rel: 名字只能用小寫英文、數字和 -"
-            head -n 1 "$f" | grep -qx -- '---' && fm=$(fm_of "$f") || { problem "$rel: 開頭要有 --- 包起來的 name、description"; continue; }
+            fm_starts "$f" && fm=$(fm_of "$f") || { problem "$rel: 開頭要有 --- 包起來的 name、description"; continue; }
             [ "$(fm_val "$fm" name)" = "$n" ] || problem "$rel: name 要寫 $n"
             [ -n "$(fm_val "$fm" description)" ] || problem "$rel: 少了 description"
             case $f in */agents/*)
-                for k in rule skill mcp; do
-                    for ref in $(fm_val "$fm" "${k}s"); do grep -q "^$k:$ref$TAB" "$names" || problem "$rel: 找不到 $k:$ref"; done
+                for k in rule skill mcp; do      # the keys: rules, skills, mcp
+                    v=${k}s; [ $k = mcp ] && v=mcp
+                    for ref in $(fm_val "$fm" "$v"); do grep -q "^$k:$ref$TAB" "$names" || problem "$rel: 找不到 $k:$ref"; done
                 done;;
             esac
         done
@@ -1092,6 +1151,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
             done
         done
         if [ -f "$d/kit.yaml" ]; then
+            case $(push_mode "$d") in pr|direct) ;; *) problem "kit.yaml: push 只能是 pr 或 direct";; esac
             for k in rule skill mcp; do
                 for ref in $(yget "$d/kit.yaml" "required.${k}s") $(yget "$d/kit.yaml" "recommended.${k}s"); do
                     grep -q "^$k:$ref$TAB" "$names" || { if [ -n "${CHECK_CI:-}" ] && [ -n "$(yget "$d/kit.yaml" include)" ]; then warn "kit.yaml: $k:$ref 不在這個 repo（應該在 include 的來源）"; else problem "kit.yaml: 找不到 $k:$ref"; fi; }
@@ -1315,20 +1375,25 @@ token_file_ok() { # warn when the token file can be read by others
     local m; m=$(ls -l "$1" 2>/dev/null | cut -c5-10)
     [ "$m" = "------" ] || warn "${1} 的權限太開放了，請打  chmod 600 $1"
 }
-push_direct() { # push_direct DIR FILES MSG DRY : a source without origin: commit on this branch, push to every remote
-    local dir=$1 files=$2 msg=$3 dry=$4 remotes cur r ahead list=() f fail=0
+push_direct() { # push_direct DIR FILES MSG DRY : kit.yaml says push: direct: commit on this branch, push to every remote
+    local dir=$1 files=$2 msg=$3 dry=$4 remotes cur r n list=() f fail=0
     remotes=$(git remote)
     [ -n "$remotes" ] || die "$(basename "$dir") 沒有 remote，不知道要送到哪"
     cur=$(git symbolic-ref --short -q HEAD) || die "$(basename "$dir") 現在不在分支上，什麼都沒送"
-    for r in $remotes; do check_host "$(git remote get-url "$r")"; done
+    for r in $remotes; do check_push_urls "$r"; done
+    # only the new commit may go out: every remote has this branch already, with nothing unpushed here or new there
+    for r in $remotes; do
+        git_safe fetch -q --no-recurse-submodules "$r" "+refs/heads/$cur:refs/remotes/$r/$cur" 2>/dev/null || warn "沒辦法更新 $r/${cur}（沒網路？），用上次拿到的"
+        git rev-parse -q --verify "refs/remotes/$r/$cur" >/dev/null || die "$r 上沒有 ${cur}，什麼都沒送（第一次請自己  git push $r ${cur}）"
+        n=$(git rev-list --count "refs/remotes/$r/$cur..HEAD" 2>/dev/null) || n=1
+        [ "$n" = 0 ] || die "${cur} 有 ${n} 個 commit 還沒推到 ${r}，什麼都沒送（先自己  git push $r ${cur}）"
+        n=$(git rev-list --count "HEAD..refs/remotes/$r/$cur" 2>/dev/null) || n=1
+        [ "$n" = 0 ] || die "$r 的 ${cur} 有 ${n} 個你這裡沒有的 commit，什麼都沒送（先  git pull $r ${cur}）"
+    done
     say "要送的檔案（$(basename "$dir")）："
     printf '%s\n' "$files" | sed 's/^/  /'
-    say "沒有 origin（你自己的來源）：直接 commit 到 ${cur}，推到 $(printf '%s' "$remotes" | paste -sd' ' -)，不開 PR"
+    say "kit.yaml 寫 push: direct：直接 commit 到 ${cur}，推到 $(printf '%s' "$remotes" | paste -sd' ' -)，不開 PR"
     say "commit：${msg}"
-    for r in $remotes; do
-        ahead=$(git rev-list --count "refs/remotes/$r/$cur..HEAD" 2>/dev/null) || ahead=0
-        [ "$ahead" -gt 0 ] && warn "${cur} 有 ${ahead} 個 commit 還沒推到 ${r}，會一起送出"
-    done
     [ -n "$dry" ] && { say "（--dry-run：沒有 commit，沒有送）"; return 0; }
     while IFS= read -r f; do [ -n "$f" ] && list+=("$f"); done <<< "$files"
     { git add -A -- "${list[@]}" && git commit -q -m "$msg" -- "${list[@]}"; } || die "commit 失敗，什麼都沒送"
@@ -1376,9 +1441,16 @@ cmd_push() {
         [ -n "$l" ] && msg="${msg:+$msg; }$v $l"
     done
     msg="kit: $msg"
-    # no origin: your own source (not the team's Gitea): commit here and push to its remotes, no PR
-    local origin; origin=$(git remote get-url origin 2>/dev/null) || { push_direct "$dir" "$files" "$msg" "$dry"; return; }
-    check_host "$origin"
+    # kit.yaml push: pr (the default): a branch on origin + a PR; push: direct (your own source): commit here, push to every remote
+    local mode; mode=$(push_mode .)
+    case $mode in
+        pr) ;;
+        direct) push_direct "$dir" "$files" "$msg" "$dry"; return;;
+        *) die "kit.yaml 的 push 只能是 pr 或 direct（現在是 ${mode}）";;
+    esac
+    local origin; origin=$(git remote get-url origin 2>/dev/null) ||
+        die "$(basename "$dir") 沒有 origin，不知道要開 PR 到哪，什麼都沒送（團隊來源要有 origin；自己的來源想直接推到它的 remote，在 kit.yaml 加一行  push: direct）"
+    check_host "$origin"; check_push_urls origin
     local api web owner_repo
     owner_repo=$(url_path "$origin")
     if [ -n "${KIT_GITEA_API:-}" ]; then api=${KIT_GITEA_API%/}; check_host "$api"; web=${api%/api/v1}
@@ -1633,6 +1705,9 @@ cmd_approve() { # kit approve <approvals repo> <source clone>... --key <ssh key>
 SHIPPED_LAYOUTS="main terminals win98"     # Herdr's own layouts: Herdr puts them back when edited
 PANEL_TOGGLE='{"id":"kit-toggle","type":"block","content":{"mod":"kit","props":{"role":"toggle"}},"size":{"px":56}}'
 PANEL_NODE='{"id":"kit-panel","type":"column","children":[{"id":"kit","type":"block","content":{"mod":"kit"}}],"size":{"px":420},"min":320,"max":800}'
+# Agents stand beside Kit: their own tab-bar button (before Kit's) and their own panel (hidden until clicked)
+AGENTS_TOGGLE='{"id":"kit-agents-toggle","type":"block","content":{"mod":"kit-agents","props":{"role":"toggle"}},"size":{"px":66}}'
+AGENTS_NODE='{"id":"kit-agents-panel","type":"column","children":[{"id":"kit-agents","type":"block","content":{"mod":"kit-agents"}}],"size":{"px":420},"min":320,"max":800,"hidden":true}'
 herdr_home() { # the same rule as Herdr: $HERDR_APP_HOME, else $XDG_CONFIG_HOME/herdr-app, else ~/.config/herdr-app
     if [ -n "${HERDR_APP_HOME:-}" ]; then printf '%s\n' "$HERDR_APP_HOME"
     elif [ -n "${XDG_CONFIG_HOME:-}" ]; then printf '%s/herdr-app\n' "$XDG_CONFIG_HOME"
@@ -1646,7 +1721,7 @@ panel_src() { # the panel's files: next to the installed kit, else in the repo k
     return 1
 }
 layout_without_panel() { # layout_without_panel FILE OUT : FILE without the panel's blocks
-    printf 'rmwhere\tcontent.mod\tkit\nrmwhere\tid\tkit-toggle\nrmwhere\tid\tkit-panel\nswapwhere\tcontent.mod\tkit-pane\tpane\n' > "$2.ops"
+    printf 'rmwhere\tcontent.mod\tkit\nrmwhere\tid\tkit-toggle\nrmwhere\tid\tkit-panel\nrmwhere\tcontent.mod\tkit-agents\nrmwhere\tid\tkit-agents-toggle\nrmwhere\tid\tkit-agents-panel\nswapwhere\tcontent.mod\tkit-pane\tpane\n' > "$2.ops"
     LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$2.ops" "$1" > "$2"; local rc=$?
     rm -f "$2.ops"; return $rc
 }
@@ -1665,6 +1740,10 @@ cmd_herdr_panel() {
         src=$(panel_src) || die "找不到 panel 的檔案（herdr/kit-panel）；請重裝 kit"
         [ -d "$mods" ] || die "找不到 Herdr 的 mods 資料夾：${mods}（Herdr 有裝、開過一次嗎？）"
         [ ! -e "$dest" ] || [ -f "$dest/.kit-panel" ] || die "$dest 已經有東西，不是 kit 放的，不動它"
+        local xm mj
+        for xm in kit-pane kit-agents; do      # every conflict before anything is written
+            [ ! -e "$mods/$xm" ] || [ -f "$mods/$xm/.kit-panel" ] || die "$mods/$xm 已經有東西，不是 kit 放的，不動它"
+        done
         # where the panel goes: a button in the tab bar of the shown layout + the panel beside the work area
         name=$(json_get "$hh/shared.json" layout | sed 's/^"//; s/"$//'); [ -n "$name" ] || name=main
         lf="$hh/layouts/$name.json"; tmp=""
@@ -1675,8 +1754,15 @@ cmd_herdr_panel() {
             else
                 # the button and panel, and each pane's header with kit's button (the pane header mod "kit-pane")
                 tmp=$(mktemp "$lf.kit.XXXXXX")
-                layout_without_panel "$lf" "$tmp.1" &&
-                    printf 'addnear\tcontent.mod\ttabs\t%s\naddnear\tcontent.tab\tactive\t%s\nswapwhere\tcontent.mod\tpane\tkit-pane\n' "$PANEL_TOGGLE" "$PANEL_NODE" > "$tmp.ops" &&
+                # Kit's button and panel already there (maybe moved or resized by hand): keep them where they are,
+                # only add what is missing. Otherwise start clean (old or half-placed blocks taken out first).
+                if grep -q '"kit-toggle"' "$lf" && grep -q '"kit-panel"' "$lf"; then cp "$lf" "$tmp.1"
+                else layout_without_panel "$lf" "$tmp.1"; fi &&
+                    { grep -q '"kit-agents-toggle"' "$tmp.1" || printf 'addnear\tcontent.mod\ttabs\t%s\n' "$AGENTS_TOGGLE"
+                      grep -q '"kit-toggle"' "$tmp.1" || printf 'addnear\tcontent.mod\ttabs\t%s\n' "$PANEL_TOGGLE"
+                      grep -q '"kit-panel"' "$tmp.1" || printf 'addnear\tcontent.tab\tactive\t%s\n' "$PANEL_NODE"
+                      grep -q '"kit-agents-panel"' "$tmp.1" || printf 'addnear\tcontent.tab\tactive\t%s\n' "$AGENTS_NODE"
+                      printf 'swapwhere\tcontent.mod\tpane\tkit-pane\n'; } > "$tmp.ops" &&
                     LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$tmp.ops" "$tmp.1" > "$tmp"
                 rm -f "$tmp.1" "$tmp.ops"
                 if ! grep -q '"kit-toggle"' "$tmp" || ! grep -q '"kit-panel"' "$tmp"; then
@@ -1687,14 +1773,12 @@ cmd_herdr_panel() {
             fi;;
         esac
         # the files (main.js etc.), then mod.json and the panel's config (how to run kit here)
-        mkdir -p "$dest" || die "沒辦法建立 $dest"
-        cp -R "$src"/. "$dest"/ || die "沒辦法複製 panel 到 $dest"
+        mkdir -p "$dest" || { rm -f "$tmp"; die "沒辦法建立 $dest"; }
+        cp -R "$src"/. "$dest"/ || { rm -f "$tmp"; die "沒辦法複製 panel 到 $dest"; }
         # the other mods next to it: each pane's header (kit-pane) and the Agents window (kit-agents)
-        local xm mj
         for xm in kit-pane kit-agents; do
             [ -f "$(dirname "$src")/$xm/main.js" ] || continue
-            [ ! -e "$mods/$xm" ] || [ -f "$mods/$xm/.kit-panel" ] || die "$mods/$xm 已經有東西，不是 kit 放的，不動它"
-            mkdir -p "$mods/$xm" && cp -R "$(dirname "$src")/$xm"/. "$mods/$xm"/ || die "沒辦法複製到 $mods/$xm"
+            mkdir -p "$mods/$xm" && cp -R "$(dirname "$src")/$xm"/. "$mods/$xm"/ || { rm -f "$tmp"; die "沒辦法複製到 $mods/$xm"; }
             case $xm in
                 kit-pane) mj='{ "place": "none", "title": "Pane header (kit)" }';;
                 *) mj='{ "place": "none", "title": "kit Agents", "overlay": { "kind": "window", "width": 520, "height": 640 } }';;
@@ -1723,9 +1807,12 @@ cmd_herdr_panel() {
         for lf in "$hh"/layouts/*.json; do
             [ -f "$lf" ] || continue
             case " $SHIPPED_LAYOUTS " in *" $(basename "$lf" .json) "*) continue;; esac
-            grep -q '"kit-toggle"\|"kit-panel"\|"mod": "kit"\|"mod": "kit-pane"' "$lf" || continue
             tmp=$(mktemp "$lf.kit.XXXXXX")
             layout_without_panel "$lf" "$tmp" || { rm -f "$tmp"; warn "沒辦法讀 ${lf}，沒改它"; continue; }
+            # nothing of kit's in it: the same as the file only re-read (json.awk lays JSON out its own way)
+            : > "$tmp.none"; LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$tmp.none" "$lf" > "$tmp.same" 2>/dev/null
+            if cmp -s "$tmp" "$tmp.same"; then rm -f "$tmp" "$tmp.none" "$tmp.same"; continue; fi
+            rm -f "$tmp.none" "$tmp.same"
             swap_layout "$tmp" "$lf"
         done
         say "kit：Herdr 的 kit panel 拿掉了"
@@ -1763,28 +1850,35 @@ cmd_agents() {
             "$(json_s "$n")" "$(json_s "$(fm_val "$fm" description | head -n 1)")" "$(json_s "$(basename "$d")")" "$(json_s "$f")" "$(json_s "$st")" \
             "$(fm_val "$fm" rules | json_arr)" "$(fm_val "$fm" skills | json_arr)" "$(fm_val "$fm" mcp | json_arr)" \
             "$(fm_val "$fm" tools.only | json_arr)" "$(fm_val "$fm" tools.deny | json_arr)" \
-            "$(json_s "$(awk 'c >= 2 { print } /^---$/ { c++ }' "$f")")"
+            "$(json_s "$(fm_body "$f")")"
     done
     printf '\n  ]\n}\n'
 }
 fm_set_list() { # fm_set_list FILE KEY "a, b" : KEY: [a, b] in the file's frontmatter (block lists replaced, added if missing)
     local tmp; tmp=$(mktemp "$1.kit.XXXXXX")
+    # a block list: the indented lines after KEY go, up to the next key or ---; blank and comment lines
+    # in between stay only when the block goes on after them. Line ends (LF or CRLF) are kept.
     awk -v key="$2" -v val="[$3]" '
-        NR == 1 && $0 == "---" { infm = 1; print; next }
-        infm && skip { if ($0 ~ /^[ \t]*-([ \t]|$)/) next; skip = 0 }
-        infm && $0 == "---" { if (!done) print key ": " val; done = 1; infm = 0; print; next }
-        infm && index($0, key ":") == 1 { print key ": " val; done = 1; rest = substr($0, length(key) + 2); if (rest ~ /^[ \t]*$/) skip = 1; next }
+        { l = $0; cr = sub(/\r$/, "", l) ? "\r" : "" }
+        NR == 1 { eol = cr }
+        NR == 1 && l == "---" { infm = 1; print; next }
+        infm && skip { if (l ~ /^[ \t]*(#.*)?$/) { held = held $0 "\n"; next }
+                       if (l ~ /^[ \t]/) { held = ""; next }
+                       skip = 0; printf "%s", held; held = "" }
+        infm && l == "---" { if (!done) print key ": " val eol; done = 1; infm = 0; print; next }
+        infm && index(l, key ":") == 1 { print key ": " val eol; done = 1; if (substr(l, length(key) + 2) ~ /^[ \t]*(#.*)?$/) skip = 1; next }
         { print }' "$1" > "$tmp" && mv "$tmp" "$1" || { rm -f "$tmp"; die "沒辦法改 $1"; }
 }
 cmd_agent() { # kit agent <name> add|rm rule|skill|mcp <item>
     [ $# -eq 4 ] || die "用法：kit agent <名字> add|rm rule|skill|mcp <東西>"
     need_init
-    local n=$1 verb=$2 k=$3 item=$4 f fm key cur new
+    local n=$1 verb=$2 k=$3 item=$4 f fm key cur new d
     case $verb in add|rm) ;; *) die "用法：kit agent <名字> add|rm rule|skill|mcp <東西>";; esac
     case $k in rule) key=rules;; skill) key=skills;; mcp) key=mcp;; *) die "種類只能是 rule、skill、mcp";; esac
     f=$(find_item agent "$n") || die "找不到 agent ${n}（打 kit list 看有哪些）"
-    head -n 1 "$f" | grep -qx -- '---' || die "$f 沒有開頭的 --- 區塊"
-    fm=$(fm_of "$f"); cur=$(fm_val "$fm" "$key")
+    fm_starts "$f" || die "$f 沒有開頭的 --- 區塊"
+    fm=$(fm_of "$f") || die "$f 開頭的 --- 區塊讀不懂，沒改（打 kit check 看哪裡錯）"
+    cur=$(fm_val "$fm" "$key")
     if [ "$verb" = add ]; then
         find_item "$k" "$item" >/dev/null || die "找不到 ${k}:${item}（kit 的來源裡沒有）"
         printf '%s\n' "$cur" | grep -qxF "$item" && { say "agent $n 已經有 ${k}:${item}"; return 0; }
@@ -1794,7 +1888,10 @@ cmd_agent() { # kit agent <name> add|rm rule|skill|mcp <item>
         new=$(printf '%s\n' "$cur" | grep -vxF "$item" | awk 'NF' | paste -sd, - | sed 's/,/, /g')
     fi
     fm_set_list "$f" "$key" "$new"
-    say "agent ${n}：$( [ "$verb" = add ] && echo 加上 || echo 拿掉) ${k}:${item}（改了 ${f}，還沒送出：用 kit push 開 PR）"
+    d=${f%/agents/*}
+    say "agent ${n}：$( [ "$verb" = add ] && echo 加上 || echo 拿掉) ${k}:${item}（改了 ${f}，還沒送出：打  kit push --to $(basename "$d")）"
+    case $d/ in "$KIT_SRC"/*) warn "這個檔案在 kit 自己同步用的資料夾（${KIT_SRC}）裡：沒送出前，kit sync 可能沒辦法更新它；最好在你自己 clone 的來源改";; esac
+    [ -z "$M_APPROVALS" ] || warn "這台只用簽過的版本（approvals）：改的要送出、合併、再簽過，這台才會用到"
 }
 
 usage() {
@@ -1803,9 +1900,9 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
   kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
+     --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（給 Herdr 的 Agent 面板）
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
-     --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
@@ -1824,7 +1921,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml
-  kit push [--to 來源] [--dry-run]  檢查後把改的東西送到 Gitea 開 PR
+  kit push [--to 來源] [--dry-run]  檢查後送出改的東西：開 PR（預設），或 kit.yaml 寫 push: direct 就直接推
 
   kit approve <核准紀錄> <來源 clone>... --key <金鑰>   簽章核准這些版本（給 root 這類只用核准版本的帳號）
   kit herdr-panel install|uninstall 在 Herdr 加上（或拿掉）kit 的面板
