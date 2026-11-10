@@ -3,6 +3,8 @@
 #
 #   awk -f json.awk -v ops=OPSFILE input.json > output.json
 #   awk -f json.awk -v get=PATH input.json        # print the raw value at PATH
+#   awk -f json.awk -v keys=PATH input.json       # print the keys of the object at PATH, one per line
+#                                                 # (PATH "" = the top; -v sep=X joins PATH with X, not ".")
 #
 # Output is formatted like JSON.stringify(value, null, 2): 2-space indent,
 # key order kept, strings copied byte for byte. A trailing newline is kept
@@ -53,6 +55,13 @@ END {
     root = parse_value()
     if (pos <= ntok) fail("extra data after JSON")
 
+    if (sep == "") sep = "."
+    if (keys != "" || keys_top) {
+        n = (keys == "") ? root : find_path(root, keys)
+        if (n == 0 || T[n] != "o") exit 1
+        for (i = 1; i <= N[n]; i++) if (C[n, i] != 0) printf "%s\n", substr(K[n, i], 2, length(K[n, i]) - 2)
+        exit 0
+    }
     if (get != "") {
         n = find_path(root, get)
         if (n == 0) exit 1
@@ -164,7 +173,7 @@ function child(n, key,    i) {
 }
 
 function find_path(n, path,    parts, cnt, i, j) {
-    cnt = split(path, parts, ".")
+    cnt = split(path, parts, (sep == "" ? "." : sep))
     for (i = 1; i <= cnt; i++) {
         j = child(n, parts[i]); if (j == 0) return 0
         n = C[n, j]
@@ -174,7 +183,7 @@ function find_path(n, path,    parts, cnt, i, j) {
 
 # Walk to the parent of PATH, creating objects on the way. Sets LASTKEY.
 function make_parent(path,    parts, cnt, i, j, n, m) {
-    cnt = split(path, parts, ".")
+    cnt = split(path, parts, (sep == "" ? "." : sep))
     n = root
     for (i = 1; i < cnt; i++) {
         if (T[n] != "o") fail("not an object at " parts[i])

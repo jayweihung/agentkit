@@ -765,7 +765,101 @@ function Item-Desc([string]$kind, [string]$f) { # the description of a skill or 
     } catch { return '' }
     if ($v.Count -gt 0) { [string]$v[0] } else { '' }
 }
-function Cmd-ListJson { # what kit list shows, as JSON for programs (the Herdr panel); unix/kit prints the same
+function Json-Keys([string]$file, [string[]]$path) { # the keys of the object at PATH (a list of keys), one per item
+    try { $n = Json-Parse (Read-Text $file) } catch { return @() }
+    foreach ($part in $path) { $i = Json-Child $n $part; if ($i -lt 0) { return @() }; $n = $n.v[$i] }
+    if ($n.t -ne 'o') { return @() }
+    @(foreach ($k in $n.k) { $k.Substring(1, $k.Length - 2) })
+}
+function Real-Dir([string]$d) { # the folder with links resolved (like pwd -P), as Claude names its projects
+    $f = Full-Path $d
+    if (-not $OnWindows) { $r = "$(& /bin/sh -c 'cd "$1" && pwd -P' sh $f 2>$null)".Trim(); if ($r) { return $r } }
+    $f
+}
+function Here-Short([string]$dir, [string]$f) { # inside DIR relative to it, else with ~ for the home folder
+    $sep = [IO.Path]::DirectorySeparatorChar
+    if ($f.StartsWith($dir + $sep)) { return $f.Substring($dir.Length + 1) }
+    if ($f.StartsWith($UserHome + $sep)) { return '~' + $f.Substring($UserHome.Length) }
+    $f
+}
+function Sorted-Names($items) { $a = [string[]]@($items | ForEach-Object { $_.Name }); [Array]::Sort($a, [StringComparer]::Ordinal); $a }
+function Here-Rows([string]$dir) { # what an agent started in DIR gets that kit does not manage: @(scope, kind, name, path, tools)
+    $rows = New-Object System.Collections.Generic.List[object]
+    $cd = Join-Path $ClaudeDir 'CLAUDE.md'
+    $a = $dir
+    while ($a) {
+        foreach ($f in @((Join-Path $a 'CLAUDE.md'), (Join-Path $a 'CLAUDE.local.md'), (Join-Path (Join-Path $a '.claude') 'CLAUDE.md'))) {
+            if ((Test-Path -LiteralPath $f -PathType Leaf) -and $f -ne $cd) { $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, 'claude')) }
+        }
+        $dc = Join-Path $a '.claude'
+        if ($dc -ne $ClaudeDir) {
+            $rd = Join-Path $dc 'rules'
+            if (Test-Path -LiteralPath $rd -PathType Container) {
+                foreach ($n in Sorted-Names (Get-ChildItem -LiteralPath $rd -File -Filter '*.md')) { $f = Join-Path $rd $n; $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, 'claude')) }
+            }
+            $sd = Join-Path $dc 'skills'
+            if (Test-Path -LiteralPath $sd -PathType Container) {
+                foreach ($n in Sorted-Names (Get-ChildItem -LiteralPath $sd -Directory)) { $f = Join-Path (Join-Path $sd $n) 'SKILL.md'; if (Test-Path -LiteralPath $f -PathType Leaf) { $rows.Add(@('dir', 'skill', $n, $f, 'claude')) } }
+            }
+        }
+        $f = Join-Path $a 'AGENTS.md'
+        if (Test-Path -LiteralPath $f -PathType Leaf) { $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, 'codex omp')) }
+        $up = Split-Path -Parent $a
+        if (-not $up -or $up -eq $a) { break }
+        $a = $up
+    }
+    $f = Join-Path $dir '.mcp.json'
+    if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('mcpServers')) { $rows.Add(@('dir', 'mcp', $n, $f, 'claude')) } }
+    if (Test-Path -LiteralPath $ClaudeJson -PathType Leaf) {
+        foreach ($n in Json-Keys $ClaudeJson @('projects', $dir, 'mcpServers')) { $rows.Add(@('dir', 'mcp', $n, $ClaudeJson, 'claude')) }
+    }
+    $sd = Join-Path $ClaudeDir 'skills'
+    if (Test-Path -LiteralPath $sd -PathType Container) {
+        foreach ($n in Sorted-Names (Get-ChildItem -LiteralPath $sd -Directory)) {
+            $f = Join-Path (Join-Path $sd $n) 'SKILL.md'
+            if ((Test-Path -LiteralPath $f -PathType Leaf) -and $null -eq (State-Get 'skill' $n)) { $rows.Add(@('user', 'skill', $n, $f, 'claude')) }
+        }
+    }
+    if (Test-Path -LiteralPath $ClaudeJson -PathType Leaf) {
+        foreach ($n in Json-Keys $ClaudeJson @('mcpServers')) { if ($null -eq (State-Get 'mcp' $n)) { $rows.Add(@('user', 'mcp', $n, $ClaudeJson, 'claude')) } }
+    }
+    $rows
+}
+function Other-User([string]$top) { # the user of a process under PID that is not me (an agent started with sudo -i), if any
+    if ($OnWindows) { return '' }
+    $me = "$(& id -un 2>$null)".Trim(); if (-not $me) { return '' }
+    $u = @{}; $p = @{}
+    foreach ($l in @(& ps -A -o user= -o pid= -o ppid= -o comm= 2>$null)) {
+        $f = @("$l".Trim() -split '\s+')
+        if ($f.Count -lt 4 -or $f[1] -notmatch '^[0-9]+$' -or $f[3] -match '(^|/)ps$') { continue }
+        $u[$f[1]] = $f[0]; $p[$f[1]] = $f[2]
+    }
+    foreach ($x in $p.Keys) {
+        $y = $x; $i = 0
+        while ($i -lt 64 -and $y -ne $top -and $p.ContainsKey($y)) { $y = $p[$y]; $i++ }
+        if ($y -eq $top -and $x -ne $top -and $u[$x] -ne $me) { return $u[$x] }
+    }
+    ''
+}
+function Here-Json([string]$dir, [string]$hpid) { # the "here" part of kit list --json --dir
+    $user = if ($hpid) { Other-User $hpid } else { '' }
+    $out = ",`n  `"here`": {`"dir`": $(Json-S $dir), `"user`": $(if ($user) { Json-S $user } else { 'null' })"
+    if ($user) { return $out + ', "items": []}' }
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $out + ", `"error`": $(Json-S '找不到這個資料夾'), `"items`": []}" }
+    $out += ', "items": ['
+    $first = $true
+    foreach ($r in Here-Rows $dir) {
+        $d = ''
+        if ($r[1] -eq 'skill') { $d = Item-Desc 'skill' $r[3] }
+        elseif ($r[1] -eq 'rule') {
+            try { $h = @((Read-Text $r[3]) -split "`n" | Where-Object { $_.StartsWith('# ') } | Select-Object -First 1); if ($h.Count) { $d = $h[0] -replace '^# *', '' } } catch { }
+        }
+        if (-not $first) { $out += ',' }; $first = $false
+        $out += "`n    {`"scope`": $(Json-S $r[0]), `"kind`": $(Json-S $r[1]), `"name`": $(Json-S $r[2]), `"path`": $(Json-S $r[3]), `"tools`": $(Json-S $r[4]), `"description`": $(Json-S $d)}"
+    }
+    $out + "`n  ]}"
+}
+function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit list shows, as JSON for programs (the Herdr panel); unix/kit prints the same
     $want = Wanted; $req = Kit-Items 'required'
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"sources`": [")
@@ -791,13 +885,25 @@ function Cmd-ListJson { # what kit list shows, as JSON for programs (the Herdr p
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
         [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p))}")
     }
-    [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))`n}")
+    [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))")
+    if ($hereDir) { [void]$sb.Append((Here-Json $hereDir $herePid)) }
+    [void]$sb.Append("`n}")
     Say $sb.ToString()
 }
 function Cmd-List($rest) {
     $rest = @($rest | Where-Object { $null -ne $_ })
-    if ($rest.Count -eq 1 -and $rest[0] -eq '--json') { Need-Init; Cmd-ListJson; return }
-    if ($rest.Count -gt 0) { Die '用法：kit list [--json]' }
+    if ($rest.Count -ge 1 -and $rest[0] -eq '--json') {
+        $hd = ''; $hp = ''
+        for ($i = 1; $i -lt $rest.Count; $i++) {
+            switch -CaseSensitive ($rest[$i]) {
+                '--dir' { if ($i + 1 -ge $rest.Count) { Die '--dir 後面要接資料夾' }; $i++; $hd = $rest[$i]; if (Test-Path -LiteralPath $hd -PathType Container) { $hd = Real-Dir $hd } }
+                '--pid' { if ($i + 1 -ge $rest.Count -or $rest[$i + 1] -notmatch '^[0-9]+$') { Die '--pid 後面要接數字' }; $i++; $hp = $rest[$i] }
+                default { Die '用法：kit list --json [--dir 資料夾] [--pid 程式編號]' }
+            }
+        }
+        Need-Init; Cmd-ListJson $hd $hp; return
+    }
+    if ($rest.Count -gt 0) { Die '用法：kit list [--json [--dir 資料夾] [--pid 程式編號]]' }
     Need-Init
     $want = Wanted; $req = Kit-Items 'required'
     foreach ($i in Available) {
@@ -1782,6 +1888,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
   kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
+     --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent

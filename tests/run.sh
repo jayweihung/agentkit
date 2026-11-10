@@ -143,7 +143,37 @@ if command -v pwsh >/dev/null 2>&1; then
     check "list --json: kit.ps1 prints the same" 'pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json 2>&1 | cmp -s - "$T/list.json"'
 fi
 out=$(kit list --bad 2>&1); rc=$?
-check "list with a wrong option: usage" '[ $rc -ne 0 ] && echo "$out" | grep -qF "kit list [--json]"'
+check "list with a wrong option: usage" '[ $rc -ne 0 ] && echo "$out" | grep -qF "kit list [--json"'
+# --dir: what an agent started in a folder reads besides kit's (the panel follows the agent you click)
+mkdir -p "$T/proj/sub/.claude/rules" "$T/proj/sub/.claude/skills/pskill" "$HOME/.claude/skills/mine"
+printf '# Project rules\nx\n' > "$T/proj/CLAUDE.md"; printf '# For codex\n' > "$T/proj/AGENTS.md"
+printf 'no heading\n' > "$T/proj/sub/CLAUDE.md"; printf '# Rule one\n' > "$T/proj/sub/.claude/rules/r1.md"
+printf -- '---\nname: pskill\ndescription: project skill\n---\nx\n' > "$T/proj/sub/.claude/skills/pskill/SKILL.md"
+printf -- '---\nname: mine\ndescription: my own\n---\nx\n' > "$HOME/.claude/skills/mine/SKILL.md"
+printf '{"mcpServers": {"pm": {"command": "x"}}}\n' > "$T/proj/sub/.mcp.json"
+PP=$(cd "$T/proj/sub" && pwd -P); PU=$(cd "$T/proj" && pwd -P)
+cp "$HOME/.claude.json" "$T/cj.bak"
+printf 'set\tprojects|%s|mcpServers|lm\t{"command": "y"}\nset\tmcpServers|um\t{"command": "z"}\n' "$PP" > "$T/cj.ops"
+LC_ALL=C awk -f "$JA" -v ops="$T/cj.ops" -v sep="|" "$T/cj.bak" > "$HOME/.claude.json"
+kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here.json" 2>&1; rc=$?
+check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"items\": [" "$T/here.json"'
+check "list --json --dir: rules here and above, AGENTS.md for codex/omp" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"CLAUDE.md\", \"path\": \"$PP/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"\"}" "$T/here.json" &&
+    grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \".claude/rules/r1.md\", \"path\": \"$PP/.claude/rules/r1.md\", \"tools\": \"claude\", \"description\": \"Rule one\"}" "$T/here.json" &&
+    grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"$PU/CLAUDE.md\", \"path\": \"$PU/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"Project rules\"}" "$T/here.json" &&
+    grep -qF "\"name\": \"$PU/AGENTS.md\", \"path\": \"$PU/AGENTS.md\", \"tools\": \"codex omp\"" "$T/here.json"'
+check "list --json --dir: project skill, .mcp.json and local MCP" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"skill\", \"name\": \"pskill\", \"path\": \"$PP/.claude/skills/pskill/SKILL.md\", \"tools\": \"claude\", \"description\": \"project skill\"}" "$T/here.json" &&
+    grep -qF "{\"scope\": \"dir\", \"kind\": \"mcp\", \"name\": \"pm\", \"path\": \"$PP/.mcp.json\"" "$T/here.json" &&
+    grep -qF "{\"scope\": \"dir\", \"kind\": \"mcp\", \"name\": \"lm\", \"path\": \"$HOME/.claude.json\"" "$T/here.json"'
+check "list --json --dir: this account's own skill and MCP, not kit's" 'grep -qF "{\"scope\": \"user\", \"kind\": \"skill\", \"name\": \"mine\"" "$T/here.json" && grep -qF "{\"scope\": \"user\", \"kind\": \"mcp\", \"name\": \"um\"" "$T/here.json" &&
+    ! grep -q "\"scope\": \"user\", \"kind\": \"skill\", \"name\": \"gerrit-review\"" "$T/here.json" && ! grep -q "\"scope\": \"user\", \"kind\": \"mcp\", \"name\": \"gerrit\"" "$T/here.json"'
+if command -v pwsh >/dev/null 2>&1; then
+    check "list --json --dir: kit.ps1 prints the same" 'pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json --dir "$T/proj/sub" --pid $$ > /tmp/here-ps.json 2>&1; cmp -s /tmp/here-ps.json "$T/here.json"'
+fi
+out=$(kit list --json --dir "$T/nope" 2>&1)
+check "list --json --dir: a folder that is not there" 'echo "$out" | grep -qF "\"here\": {\"dir\": \"$T/nope\", \"user\": null, \"error\": \"找不到這個資料夾\", \"items\": []}"'
+out=$(kit list --json --pid x 2>&1); rc=$?
+check "list --json --pid: numbers only" '[ $rc -ne 0 ] && echo "$out" | grep -q "數字"'
+cp "$T/here.json" /tmp/here-dbg.json; cp "$T/cj.bak" "$HOME/.claude.json"; rm -rf "$T/proj" "$HOME/.claude/skills/mine"
 rm -rf "$TEAM/skills/quote"
 
 # ---------- kit_version: tell once when the team wants a newer kit ----------

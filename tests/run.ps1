@@ -175,7 +175,7 @@ Check 'list --json: tools (Claude only here), no version wanted' { $lj.Contains(
 Kit list --json
 Check 'list --json does not mark items seen' { ([regex]::Matches($out, '"new": true')).Count -eq 1 }
 Kit list --bad
-Check 'list with a wrong option: usage' { $rc -ne 0 -and $out.Contains('kit list [--json]') }
+Check 'list with a wrong option: usage' { $rc -ne 0 -and $out.Contains('kit list [--json') }
 Remove-Item -Recurse -Force "$TEAM/skills/quote"
 
 # ---------- kit_version: tell once when the team wants a newer kit ----------

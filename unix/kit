@@ -584,6 +584,76 @@ item_desc() { # item_desc KIND FILE : the description of a skill or agent (front
         mcp) yget "$2" description 2>/dev/null | head -n 1;;
     esac
 }
+json_keys() { # json_keys FILE PATH : the keys of the object at PATH (keys joined by TAB), one per line
+    LC_ALL=C awk -f "$KIT_LIB/json.awk" -v keys="$2" -v sep="$TAB" "$1" 2>/dev/null
+}
+here_short() { # a path as the panel shows it: inside DIR relative to it, else with ~ for the home folder
+    case $2 in
+        "$1"/*) printf '%s' "${2#"$1"/}";;
+        "$HOME"/*) printf '~/%s' "${2#"$HOME"/}";;
+        *) printf '%s' "$2";;
+    esac
+}
+here_rows() { # here_rows DIR : what an agent started in DIR gets that kit does not manage
+    # lines: scope<TAB>kind<TAB>name<TAB>path<TAB>tools   (scope dir = DIR and the folders above it, user = this account)
+    local dir=$1 a f n LC_ALL=C
+    a=$dir
+    while :; do
+        for f in "$a/CLAUDE.md" "$a/CLAUDE.local.md" "$a/.claude/CLAUDE.md"; do
+            [ -f "$f" ] && [ "$f" != "$CLAUDE_DIR/CLAUDE.md" ] && printf 'dir\trule\t%s\t%s\tclaude\n' "$(here_short "$dir" "$f")" "$f"
+        done
+        if [ "$a/.claude" != "$CLAUDE_DIR" ]; then
+            for f in "$a"/.claude/rules/*.md; do [ -f "$f" ] && printf 'dir\trule\t%s\t%s\tclaude\n' "$(here_short "$dir" "$f")" "$f"; done
+            for f in "$a"/.claude/skills/*/SKILL.md; do
+                [ -f "$f" ] && printf 'dir\tskill\t%s\t%s\tclaude\n' "$(basename "$(dirname "$f")")" "$f"
+            done
+        fi
+        [ -f "$a/AGENTS.md" ] && printf 'dir\trule\t%s\t%s\tcodex omp\n' "$(here_short "$dir" "$a/AGENTS.md")" "$a/AGENTS.md"
+        [ "$a" = / ] && break
+        a=$(dirname "$a")
+    done
+    [ -f "$dir/.mcp.json" ] && json_keys "$dir/.mcp.json" mcpServers | while IFS= read -r n; do
+        printf 'dir\tmcp\t%s\t%s\tclaude\n' "$n" "$dir/.mcp.json"; done
+    [ -f "$CLAUDE_JSON" ] && json_keys "$CLAUDE_JSON" "projects$TAB$dir${TAB}mcpServers" | while IFS= read -r n; do
+        printf 'dir\tmcp\t%s\t%s\tclaude\n' "$n" "$CLAUDE_JSON"; done
+    for f in "$CLAUDE_DIR"/skills/*/SKILL.md; do
+        [ -f "$f" ] || continue; n=$(basename "$(dirname "$f")")
+        [ -n "$(state_get skill "$n")" ] || printf 'user\tskill\t%s\t%s\tclaude\n' "$n" "$f"
+    done
+    [ -f "$CLAUDE_JSON" ] && json_keys "$CLAUDE_JSON" mcpServers | while IFS= read -r n; do
+        [ -n "$(state_get mcp "$n")" ] || printf 'user\tmcp\t%s\t%s\tclaude\n' "$n" "$CLAUDE_JSON"; done
+    return 0
+}
+other_user() { # other_user PID : the user of a process under PID that is not me (an agent started with sudo -i), if any
+    local me; me=$(id -un 2>/dev/null) || return 0
+    # (ps itself may run as root on macOS: not counted)
+    { ps -A -o user= -o pid= -o ppid= -o comm= 2>/dev/null || ps -o user,pid,ppid,comm 2>/dev/null; } | awk -v top="$1" -v me="$me" '
+        $2 ~ /^[0-9]+$/ && $4 !~ /(^|\/)ps$/ { u[$2] = $1; p[$2] = $3 }
+        END { for (x in p) { y = x; for (i = 0; i < 64 && y != top && (y in p); i++) y = p[y]
+                             if (y == top && x != top && u[x] != me) { print u[x]; exit } } }'
+}
+here_json() { # here_json DIR PID : the "here" part of kit list --json --dir
+    local dir=$1 user="" first=1 sc k n f t d
+    [ -n "$2" ] && user=$(other_user "$2")
+    printf ',\n  "here": {"dir": %s, "user": %s' "$(json_s "$dir")" "$( [ -n "$user" ] && json_s "$user" || echo null)"
+    if [ -n "$user" ]; then printf ', "items": []}'; return; fi
+    if [ ! -d "$dir" ]; then printf ', "error": %s, "items": []}' "$(json_s "找不到這個資料夾")"; return; fi
+    printf ', "items": ['
+    while IFS="$TAB" read -r sc k n f t; do
+        [ -n "$k" ] || continue
+        d=""
+        case $k in
+            skill) d=$(item_desc skill "$f");;
+            rule) d=$(grep -m 1 '^# ' "$f" 2>/dev/null | sed 's/^# *//');;
+        esac
+        [ $first = 1 ] || printf ','; first=0
+        printf '\n    {"scope": %s, "kind": %s, "name": %s, "path": %s, "tools": %s, "description": %s}' \
+            "$(json_s "$sc")" "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$f")" "$(json_s "$t")" "$(json_s "$d")"
+    done <<EOF
+$(here_rows "$dir")
+EOF
+    printf '\n  ]}'
+}
 cmd_list_json() { # what kit list shows, as JSON for programs (the Herdr panel); kit.ps1 prints the same
     local want req i k n p d status new first s tools
     want=$(wanted); req=$(required_items)
@@ -612,14 +682,27 @@ EOF
         printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "source": %s, "description": %s}' \
             "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")"
     done
-    printf '\n  ],\n  "kit_version_wanted": %s\n}\n' "$(json_s "$(wanted_version)")"
+    printf '\n  ],\n  "kit_version_wanted": %s' "$(json_s "$(wanted_version)")"
+    [ -n "${HERE_DIR:-}" ] && here_json "$HERE_DIR" "${HERE_PID:-}"
+    printf '\n}\n'
 }
 
 cmd_list() {
     case ${1:-} in
-        --json) need_init; cmd_list_json; return;;
+        --json) shift
+            HERE_DIR=""; HERE_PID=""
+            while [ $# -gt 0 ]; do
+                case $1 in
+                    --dir) [ $# -ge 2 ] || die "--dir 後面要接資料夾"; HERE_DIR=$2; shift 2
+                        [ -d "$HERE_DIR" ] && HERE_DIR=$(cd "$HERE_DIR" && pwd -P);;
+                    --pid) [ $# -ge 2 ] || die "--pid 後面要接數字"; HERE_PID=$2; shift 2
+                        case $HERE_PID in ""|*[!0-9]*) die "--pid 後面要接數字";; esac;;
+                    *) die "用法：kit list --json [--dir 資料夾] [--pid 程式編號]";;
+                esac
+            done
+            need_init; cmd_list_json; return;;
         "") ;;
-        *) die "用法：kit list [--json]";;
+        *) die "用法：kit list [--json [--dir 資料夾] [--pid 程式編號]]";;
     esac
     need_init
     local want req i mark
@@ -1612,6 +1695,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
   kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
+     --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
