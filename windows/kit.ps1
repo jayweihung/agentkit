@@ -835,6 +835,288 @@ function Cmd-SelfUpdate { # pull the clone kit was installed from, then reinstal
     if ($LASTEXITCODE -ne 0) { Die '重新安裝失敗' }
     Say "kit：已更新到 $((Read-Text (Join-Path $KitLib 'VERSION')).Trim())"
 }
+# ---------- authoring: new / diff / update (local folders only, never the network) ----------
+$script:Kinds = @('rule', 'skill', 'mcp', 'agent')
+function Valid-Name([string]$n) { $n -cmatch '^[a-z0-9][a-z0-9-]*$' }
+function Is-Link($e) { [bool]($e.Attributes -band [IO.FileAttributes]::ReparsePoint) }
+function Walk-Tree([string]$base) { # every entry under BASE; .git folders and links are listed but not entered
+    $stack = New-Object System.Collections.Stack; $stack.Push($base)
+    while ($stack.Count -gt 0) {
+        $d = $stack.Pop()
+        foreach ($e in @(Get-ChildItem -LiteralPath $d -Force)) {
+            $e
+            if ($e.PSIsContainer -and $e.Name -ne '.git' -and -not (Is-Link $e)) { $stack.Push($e.FullName) }
+        }
+    }
+}
+function Full-Path([string]$p) { (Get-Item -LiteralPath $p -Force).FullName.TrimEnd('\', '/') }
+function Rel-Path([string]$base, [string]$full) { $full.Substring($base.Length + 1).Replace('\', '/') }
+function File-Hash([string]$f) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($f)))).Replace('-', '').Substring(0, 16)
+}
+function Item-Hash([string]$kind, [string]$file) { if ($kind -eq 'skill') { Dir-Hash (Split-Path -Parent $file) } else { File-Hash $file } }
+function Target-Dir([string]$to) { # --to <source name|folder>, else the folder you are in if it has kit.yaml, else the first source
+    if ($to) {
+        if (Test-Path -LiteralPath $Machine) { foreach ($d in Src-Dirs) { if ((Split-Path -Leaf $d) -eq $to) { return $d } } }
+        if (-not (Test-Path -LiteralPath $to -PathType Container)) { Die "找不到 --to ${to}（要是來源名字或資料夾）" }
+        return (Full-Path $to)
+    }
+    if (Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) { return (Get-Location).ProviderPath }
+    Need-Init
+    @(Src-Dirs)[0]
+}
+function Stage-From([string]$kind, [string]$name, [string]$from, [string]$out) { # copy what kit accepts into OUT; returns the item file
+    if (Is-Url $from) { Die '--from 只吃本機的資料夾或檔案（先自己 git clone 到暫存資料夾）' }
+    if (-not (Test-Path -LiteralPath $from)) { Die "找不到 $from" }
+    $from = Full-Path $from
+    if ($kind -eq 'skill') {
+        $sk = Join-Path $from 'SKILL.md'
+        if (-not (Test-Path -LiteralPath $from -PathType Container) -or -not (Test-Path -LiteralPath $sk -PathType Leaf)) { Die "$from 要是有 SKILL.md 的資料夾" }
+        $scripts = (Read-Text $sk).Contains('scripts/')
+        $dst = Join-Path $out $name; Ensure-Dir $dst
+        $skipped = 0
+        foreach ($e in @(Walk-Tree $from)) {
+            if ($e.Name -eq '.git' -or $e.Name -eq '.DS_Store') { continue }
+            $link = Is-Link $e
+            if ($e.PSIsContainer -and -not $link) { continue }
+            $rel = Rel-Path $from $e.FullName
+            if ($link -or $e.Name -cmatch '^(LICENSE|LICENCE|COPYING|README|CHANGELOG)') { $skipped++; continue }
+            if ($rel.StartsWith('scripts/')) { if (-not $scripts) { $skipped++; continue } }
+            elseif (-not $rel.EndsWith('.md', [StringComparison]::Ordinal)) { $skipped++; continue }
+            $t = Join-Path $dst $rel; Ensure-Dir (Split-Path -Parent $t)
+            Copy-Item -LiteralPath $e.FullName -Destination $t
+        }
+        if ($skipped -gt 0) { Warn ("跳過 $skipped 個檔案（只帶 .md" + $(if ($scripts) { '、scripts/' } else { '' }) + '；不帶 LICENSE、README、.git）') }
+        return (Join-Path $dst 'SKILL.md')
+    }
+    $ext = if ($kind -eq 'mcp') { 'yaml' } else { 'md' }
+    $f = $from; if (Test-Path -LiteralPath $f -PathType Container) { $f = Join-Path $from "$name.$ext" }
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf) -or (Is-Link (Get-Item -LiteralPath $f -Force)) -or -not $f.EndsWith(".$ext")) { Die "$from 要是一個 .$ext 檔（或有 $name.$ext 的資料夾）" }
+    $t = Join-Path $out "$name.$ext"; Copy-Item -LiteralPath $f -Destination $t
+    $t
+}
+function Put-Item([string]$kind, [string]$name, [string]$staged, [string]$dir) { # replace the item in DIR with the staged copy
+    $dst = Item-Path $dir $kind $name
+    if ($kind -eq 'skill') {
+        $dd = Split-Path -Parent $dst
+        if (Test-Path -LiteralPath $dd) { Remove-Item -LiteralPath $dd -Recurse -Force }
+        Ensure-Dir (Split-Path -Parent $dd)
+        Copy-Item -LiteralPath (Split-Path -Parent $staged) -Destination $dd -Recurse
+    } else { Ensure-Dir (Split-Path -Parent $dst); Copy-Item -LiteralPath $staged -Destination $dst -Force }
+    $dst
+}
+function Skeleton([string]$kind, [string]$name) {
+    switch ($kind) {
+        'rule' { "# $name`n`n（在這裡寫規則，一條一行。）`n" }
+        'skill' { "---`nname: $name`ndescription: （什麼時候用這個 skill，一句話）`n---`n`n（在這裡寫步驟。）`n" }
+        'mcp' { "command: （啟動 MCP server 的程式，例如 uvx）`nargs: []`n# env:`n#   KEY: value      # 不要放密碼`n" }
+        'agent' { "---`nname: $name`ndescription: （這個 agent 做什麼）`nrules: []`nskills: []`nmcp: []`n# tools:`n#   only: [Read, Grep, Glob]`n#   deny: []`n---`n（在這裡寫 agent 的角色和做法。）`n" }
+    }
+}
+function Parse-ItemArgs($rest) {
+    $o = @{ Kind = ''; Name = ''; From = ''; To = ''; Force = $false }
+    $rest = @($rest)
+    for ($i = 0; $i -lt $rest.Count; $i++) {
+        $a = [string]$rest[$i]
+        switch -CaseSensitive ($a) {
+            '--from' { if ($i + 1 -ge $rest.Count) { Die '--from 後面要接資料夾' }; $i++; $o.From = [string]$rest[$i] }
+            '--to' { if ($i + 1 -ge $rest.Count) { Die '--to 後面要接來源' }; $i++; $o.To = [string]$rest[$i] }
+            '--force' { $o.Force = $true }
+            default {
+                if (-not $o.Name -and -not $o.Kind -and ($Kinds -ccontains $a)) { $o.Kind = $a }
+                elseif (-not $o.Name) { $o.Name = $a }
+                else { Die "多了一個參數：$a" }
+            }
+        }
+    }
+    $o
+}
+function Guess-Kind([string]$dir, [string]$name) {
+    $found = @(foreach ($k in $Kinds) { if (Test-Path -LiteralPath (Item-Path $dir $k $name) -PathType Leaf) { $k } })
+    if ($found.Count -eq 0) { Die "$(Split-Path -Leaf $dir) 裡沒有 $name" }
+    if ($found.Count -gt 1) { Die "$name 有好幾種（$($found -join ' ')），請寫出種類，例：kit diff skill $name" }
+    $found[0]
+}
+function New-TempDir([string]$prefix) { $t = Join-Path ([IO.Path]::GetTempPath()) ($prefix + [IO.Path]::GetRandomFileName()); Ensure-Dir $t; $t }
+
+function Cmd-New($rest) {
+    $o = Parse-ItemArgs $rest
+    if (-not $o.Kind -or -not $o.Name) { Die '用法：kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]' }
+    if (-not (Valid-Name $o.Name)) { Die "名字只能用小寫英文、數字和 -：$($o.Name)" }
+    $dir = Target-Dir $o.To
+    $dst = Item-Path $dir $o.Kind $o.Name
+    if (Test-Path -LiteralPath $dst) { Die "$(Split-Path -Leaf $dir) 已經有 $($o.Kind):$($o.Name)（要更新用 kit update）" }
+    if (Test-Path -LiteralPath $Machine) { $f = Find-Item $o.Kind $o.Name; if ($f) { Die "名字重複：別的來源已經有 $($o.Kind):$($o.Name)（$f）" } }
+    if ($o.From) {
+        $tmp = New-TempDir 'kit-new.'
+        try { $f = Stage-From $o.Kind $o.Name $o.From $tmp; $dst = Put-Item $o.Kind $o.Name $f $dir }
+        finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+        State-Set 'from' "$($o.Kind):$($o.Name)@$dir" (Item-Hash $o.Kind $dst)
+        Say "已從 $($o.From) 帶進 $(Rel-Path $dir $dst)（在 $(Split-Path -Leaf $dir)）"
+        Say "記得刪掉暫存的資料夾：$($o.From)"
+    } else {
+        Ensure-Dir (Split-Path -Parent $dst); Write-Text $dst (Skeleton $o.Kind $o.Name)
+        Say "已建立 $(Rel-Path $dir $dst)（在 $(Split-Path -Leaf $dir)），打開它寫內容"
+    }
+    $script:Quiet2 = $true
+    if (-not (Check-Dirs @($dir) $false)) { Warn 'kit check 有問題，送出前請先打  kit check  看看' }
+}
+function Cmd-DiffUpdate([string]$mode, $rest) {
+    $o = Parse-ItemArgs $rest
+    if (-not $o.Name -or -not $o.From) { Die "用法：kit $mode [種類] <名字> --from 本機資料夾 [--to 來源]" }
+    $dir = Target-Dir $o.To
+    $kind = if ($o.Kind) { $o.Kind } else { Guess-Kind $dir $o.Name }
+    $dst = Item-Path $dir $kind $o.Name
+    if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) { Die "$(Split-Path -Leaf $dir) 裡沒有 ${kind}:$($o.Name)（新的用 kit new）" }
+    $tmp = New-TempDir 'kit-diff.'
+    try {
+        $f = Stage-From $kind $o.Name $o.From $tmp
+        $a = $dst; $b = $f; if ($kind -eq 'skill') { $a = Split-Path -Parent $dst; $b = Split-Path -Parent $f }
+        $same = (Item-Hash $kind $dst) -eq (Item-Hash $kind $f)
+        if ($mode -eq 'diff') {
+            if ($same) { Say '一樣，沒有要更新的' } else { & git --no-pager diff --no-index --no-color -- $a $b | ForEach-Object { Say "$_" } }
+            return
+        }
+        $old = State-Get 'from' "${kind}:$($o.Name)@$dir"; $now = Item-Hash $kind $dst
+        if (-not $o.Force -and $old -ne $now) {
+            if (-not $old) { Die "${kind}:$($o.Name) 不是這台用 kit new --from 帶進來的，不知道有沒有人改過。先 kit diff 看清楚，確定要蓋掉再加 --force" }
+            Die "${kind}:$($o.Name) 在 $(Split-Path -Leaf $dir) 被改過（跟上次帶進來的不一樣）。先 kit diff 看差在哪；要保留別人的修改就手動合併，確定要蓋掉再加 --force"
+        }
+        if ($same) { Say '一樣，沒有要更新的'; return }
+        $dst = Put-Item $kind $o.Name $f $dir
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    State-Set 'from' "${kind}:$($o.Name)@$dir" (Item-Hash $kind $dst)
+    Say "已更新 $(Rel-Path $dir $dst)（在 $(Split-Path -Leaf $dir)）。記得刪掉暫存的資料夾：$($o.From)"
+}
+
+# ---------- check ----------
+$script:Problems = $null
+$script:CheckCi = $false
+$script:Quiet2 = $false
+function Problem([string]$msg) { $script:Problems.Add($msg); if (-not $script:Quiet2) { [Console]::Error.WriteLine("kit check: $msg") } }
+function Is-Binary([string]$f) { $b = [IO.File]::ReadAllBytes($f); [Array]::IndexOf($b, [byte]0) -ge 0 }
+function Private-Words {
+    $files = @(Join-Path $KitConf 'private-words.txt')
+    if (Test-Path -LiteralPath $Machine) { $files += @(foreach ($d in Src-Dirs) { Join-Path $d 'private-words.txt' }) }
+    Uniq @(foreach ($f in $files) { if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($l in (Read-Text $f) -split "`n") { ($l -replace '#.*$', '').Trim() } } })
+}
+function Has-Word([string]$text, $words) { foreach ($w in $words) { if ($text.IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true } }; $false }
+function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when there are none
+    $script:Problems = New-Object System.Collections.Generic.List[string]
+    if ($loud) { $script:Quiet2 = $false }
+    $dirs = @($dirs)
+    # every item name, from the folders checked and the configured sources
+    $all = @($dirs); if (Test-Path -LiteralPath $Machine) { $all += @(Src-Dirs) }
+    $where = [ordered]@{}; $seenDir = @{}
+    foreach ($d in $all) {
+        if (-not (Test-Path -LiteralPath $d -PathType Container) -or $seenDir.ContainsKey($d)) { continue }; $seenDir[$d] = 1
+        $items = @(foreach ($n in Names-In (Join-Path $d 'rules') '*.md') { "rule:$n" }
+                   foreach ($n in Names-In (Join-Path $d 'skills') '' -Dirs) { "skill:$n" }
+                   foreach ($n in Names-In (Join-Path $d 'mcp') '*.yaml') { "mcp:$n" }
+                   foreach ($n in Names-In (Join-Path $d 'agents') '*.md') { "agent:$n" })
+        foreach ($i in $items) { if (-not $where.Contains($i)) { $where[$i] = New-Object System.Collections.Generic.List[string] }; $where[$i].Add($d) }
+    }
+    foreach ($k in $where.Keys) { if ($where[$k].Count -gt 1) { Problem "名字重複：$k 在 $($where[$k] -join ' ')" } }
+    $pw = @(Private-Words)
+    foreach ($d0 in $dirs) {
+        if (-not (Test-Path -LiteralPath $d0 -PathType Container)) { Problem "找不到資料夾 $d0"; continue }
+        $d = Full-Path $d0
+        $kitYaml = Join-Path $d 'kit.yaml'
+        # format of each item
+        $heads = @(foreach ($n in Names-In (Join-Path $d 'skills') '' -Dirs) { ,@("skills/$n/SKILL.md", $n) }) + @(foreach ($n in Names-In (Join-Path $d 'agents') '*.md') { ,@("agents/$n.md", $n) })
+        foreach ($h in $heads) {
+            $rel = $h[0]; $n = $h[1]; $f = Join-Path $d $rel
+            if (-not (Valid-Name $n)) { Problem "${rel}: 名字只能用小寫英文、數字和 -" }
+            $first = ((Read-Text $f) -split "`n")[0].TrimEnd("`r")
+            $fm = $null
+            if ($first -eq '---') { try { $fm = Yaml-Lines $f -Frontmatter } catch { $fm = $null } }
+            if ($null -eq $fm) { Problem "${rel}: 開頭要有 --- 包起來的 name、description"; continue }
+            if (@(YGet-From $fm 'name')[0] -ne $n) { Problem "${rel}: name 要寫 $n" }
+            if (-not @(YGet-From $fm 'description')[0]) { Problem "${rel}: 少了 description" }
+            if ($rel.StartsWith('agents/')) {
+                foreach ($k in 'rule', 'skill', 'mcp') { foreach ($r in @(YGet-From $fm "${k}s")) { if ($r -and -not $where.Contains("${k}:$r")) { Problem "${rel}: 找不到 ${k}:$r" } } }
+            }
+        }
+        foreach ($n in Names-In (Join-Path $d 'rules') '*.md') {
+            if (-not (Valid-Name $n)) { Problem "rules/${n}.md: 名字只能用小寫英文、數字和 -" }
+            if ((Get-Item -LiteralPath (Join-Path $d "rules/$n.md")).Length -eq 0) { Problem "rules/${n}.md: 是空的" }
+        }
+        foreach ($n in Names-In (Join-Path $d 'mcp') '*.yaml') {
+            $rel = "mcp/$n.yaml"; $f = Join-Path $d $rel
+            if (-not (Valid-Name $n)) { Problem "${rel}: 名字只能用小寫英文、數字和 -" }
+            $cmd = @(YGet $f 'command')
+            if ($cmd.Count -eq 0 -or -not $cmd[0]) { Problem "${rel}: 少了 command" }
+            foreach ($v in @($cmd) + @(YGet $f 'args')) {
+                if ($v -match '^(git\+|github:|git@)' -or $v.Contains('://')) { Problem "${rel}: MCP 只能從公司允許的套件來源裝，不能用 $v 這種寫法" }
+            }
+        }
+        if (Test-Path -LiteralPath $kitYaml -PathType Leaf) {
+            foreach ($k in 'rule', 'skill', 'mcp') {
+                foreach ($r in @(YGet $kitYaml "required.${k}s") + @(YGet $kitYaml "recommended.${k}s")) {
+                    if (-not $r -or $where.Contains("${k}:$r")) { continue }
+                    if ($script:CheckCi -and @(YGet $kitYaml 'include').Count -gt 0) { Warn "kit.yaml: ${k}:$r 不在這個 repo（應該在 include 的來源）" } else { Problem "kit.yaml: 找不到 ${k}:$r" }
+                }
+            }
+        }
+        # files: no git inside, no links, text only
+        $entries = @(Walk-Tree $d)
+        $textFiles = New-Object System.Collections.Generic.List[object]
+        foreach ($e in $entries) {
+            $rel = Rel-Path $d $e.FullName
+            if ($e.Name -eq '.git') { if ($rel -ne '.git') { Problem "${rel}: 裡面不能有別的 git repo" }; continue }
+            if (Is-Link $e) { Problem "${rel}: 不能放捷徑（symlink）"; continue }
+            if ($e.PSIsContainer) { continue }
+            if ($e.Name -eq '.gitmodules') { Problem "${rel}: 不能用 git submodule" }
+            if ($e.Length -gt 0 -and (Is-Binary $e.FullName)) { Problem "${rel}: 只能放文字檔"; continue }
+            $textFiles.Add(@($rel, $e.FullName))
+        }
+        # URLs only to content_hosts (when the sources list them)
+        $hosts = @(YGet $kitYaml 'content_hosts'); if (Test-Path -LiteralPath $Machine) { foreach ($sd in Src-Dirs) { $hosts += @(YGet (Join-Path $sd 'kit.yaml') 'content_hosts') } }
+        $hosts = @(Uniq $hosts)
+        foreach ($tf in $textFiles) {
+            $lines = (Read-Text $tf[1]) -split "`n"
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($hosts.Count -gt 0) {
+                    foreach ($m in [regex]::Matches($lines[$i], '(https?|ssh|git)://[^\]\[ "<>()`'']+|git@[A-Za-z0-9.-]+:')) {
+                        $h = Url-Host $m.Value
+                        if ($hosts -notcontains $h) { Problem "$($tf[0]):$($i + 1): 網址 $h 不在 content_hosts" }
+                    }
+                }
+                if ($pw.Count -gt 0 -and (Split-Path -Leaf $tf[1]) -ne 'private-words.txt' -and (Has-Word $lines[$i] $pw)) { Problem "$($tf[0]):$($i + 1): 有不該公開的字" }
+            }
+        }
+        if ($pw.Count -gt 0) { foreach ($e in $entries) { $rel = Rel-Path $d $e.FullName; if (Has-Word $rel $pw) { Problem "${rel}: 檔名有不該公開的字" } } }
+        # --ci: commit author emails
+        if ($script:CheckCi -and (Test-Path -LiteralPath (Join-Path $d '.git'))) {
+            $doms = @(YGet $kitYaml 'author_domains')
+            if ($doms.Count -gt 0) {
+                $range = if ($env:KIT_CI_BASE) { "$($env:KIT_CI_BASE)..HEAD" } else { '-1' }
+                foreach ($l in @(& git -C $d log --format='%h %ae' $range 2>$null)) {
+                    $parts = "$l".Split(' '); if ($parts.Count -lt 2) { continue }
+                    $dom = $parts[1].Substring($parts[1].LastIndexOf('@') + 1)
+                    if ($doms -notcontains $dom) { Problem "commit $($parts[0]): 作者 email 不是公司網域" }
+                }
+            }
+        }
+    }
+    $script:Problems.Count -eq 0
+}
+function Cmd-Check($rest) {
+    $dirs = @()
+    foreach ($a in @($rest | Where-Object { $_ })) {
+        if ($a -eq '--ci') { $script:CheckCi = $true }
+        elseif ("$a".StartsWith('-')) { Die "不認得 $a" }
+        else { $dirs += $(if (Test-Path -LiteralPath $a) { Full-Path $a } else { $a }) }
+    }
+    if ($dirs.Count -eq 0) {
+        if ((Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) -or $script:CheckCi) { $dirs = @((Get-Location).ProviderPath) }
+        else { Need-Init; $dirs = @(Src-Dirs) }
+    }
+    if (Check-Dirs $dirs) { Say "kit check：沒問題（$($dirs.Count) 個來源）" }
+    else { [Console]::Error.WriteLine("kit check：$($script:Problems.Count) 個問題"); exit 1 }
+}
+
 function Usage {
     Say @'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -845,6 +1127,13 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent
   kit sync [--force]                現在更新（kit run 會自動做）
+
+寫內容的人用（只吃本機資料夾，不連網）：
+  kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]
+  kit diff   [種類] <名字> --from 本機資料夾   比較
+  kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
+  kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
+
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
@@ -867,6 +1156,10 @@ try {
         'add' { Cmd-AddRm 'add' $rest }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
         'run' { Cmd-Run $rest }
+        'new' { Cmd-New $rest }
+        'diff' { Cmd-DiffUpdate 'diff' $rest }
+        'update' { Cmd-DiffUpdate 'update' $rest }
+        'check' { Cmd-Check $rest }
         'uninstall' { Cmd-Uninstall $rest }
         'self-update' { Cmd-SelfUpdate }
         { $_ -in '--version', 'version' } { Say "kit $KitVersion" }
@@ -875,6 +1168,7 @@ try {
         default { Die "沒有這個指令：${cmd}（打 kit help）" }
     }
 } catch {
+    if ($env:KIT_DEBUG) { Warn $_.ScriptStackTrace }
     Die $_.Exception.Message
 }
 exit 0
