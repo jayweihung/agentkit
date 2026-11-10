@@ -1497,7 +1497,10 @@ cmd_approve() { # kit approve <approvals repo> <source clone>... --key <ssh key>
         awk -v n="$n" '$1 != n' "$tmp" > "$tmp.2"; printf '%s %s\n' "$n" "$sha" >> "$tmp.2"; mv "$tmp.2" "$tmp"
     done
     if [ -z "$yes" ]; then
-        printf '\n核准上面這些版本？[y/N] ' > /dev/tty; read -r a < /dev/tty
+        local a=""
+        if ! { printf '\n核准上面這些版本？[y/N] ' > /dev/tty && read -r a < /dev/tty; } 2>/dev/null; then
+            rm -f "$tmp"; die "沒辦法在這裡問你（沒有終端機）。看過上面的內容、確定要核准，就加 --yes 再打一次"
+        fi
         case $a in y|Y|yes) ;; *) rm -f "$tmp"; die "沒有核准";; esac
     fi
     { echo "# agentkit approvals - signed with kit approve; do not edit by hand"
