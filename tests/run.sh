@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# End-to-end tests for the bash kit. Everything runs in a throwaway HOME,
+# so your real ~/.claude is never touched.
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+KIT="$HERE/../unix/kit"
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+export HOME="$T/home"; mkdir -p "$HOME"
+unset CLAUDE_CONFIG_DIR AGENTKIT_CONFIG AGENTKIT_SOURCES
+pass=0; fail=0
+check() { if eval "$2"; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: $1"; fi; }
+kit() { "$KIT" "$@"; }
+JA="$HERE/../unix/json.awk"
+jget() { LC_ALL=C awk -f "$JA" -v get="$2" "$1" 2>/dev/null; }
+
+# ---------- fixture sources ----------
+TP="$T/third-party"; TEAM="$T/team"
+mkdir -p "$TP/skills/gerrit-workflow" "$TEAM/rules" "$TEAM/skills/gerrit-review" "$TEAM/mcp" "$TEAM/agents"
+printf -- '---\nname: gerrit-workflow\ndescription: upstream\n---\nupstream body\n' > "$TP/skills/gerrit-workflow/SKILL.md"
+echo "Apache-2.0" > "$TP/skills/gerrit-workflow/LICENSE"
+cat > "$TEAM/kit.yaml" <<EOF
+name: team
+include: [$TP]
+allowed_hosts: [gitea.example]
+required:
+  rules: [security]
+  tools:
+    deny: [mcp__gerrit__submit_change]
+recommended:
+  rules:  [coding-style]
+  skills: [gerrit-workflow]
+EOF
+echo "Never paste secrets." > "$TEAM/rules/security.md"
+echo "Use 4 spaces." > "$TEAM/rules/coding-style.md"
+echo "Only comment, never submit." > "$TEAM/rules/gerrit-flow.md"
+printf -- '---\nname: gerrit-review\ndescription: review a change\n---\nhow to review\n' > "$TEAM/skills/gerrit-review/SKILL.md"
+cat > "$TEAM/mcp/gerrit.yaml" <<'EOF'
+name: gerrit
+command: uvx
+args: [--index-url, "https://pypi.example/simple", gerrit-mcp-server==1.0]
+env:
+  GERRIT_CONFIG: ${HOME}/.config/gerrit/gerrit_config.json   # expanded by Claude, not kit
+EOF
+cat > "$TEAM/agents/gerrit.md" <<'EOF'
+---
+name: gerrit
+description: Gerrit helper
+rules:  [gerrit-flow]
+skills: [gerrit-review]
+mcp:    [gerrit]
+tools:
+  only: [Read, Grep, Glob]
+  deny: [mcp__gerrit__submit_change]
+---
+You are the Gerrit helper.
+EOF
+
+# ---------- the user's own files, which kit must keep ----------
+mkdir -p "$HOME/.claude/skills/my-own"
+echo "my own skill" > "$HOME/.claude/skills/my-own/SKILL.md"
+printf '# My notes\nBe brief.\n' > "$HOME/.claude/CLAUDE.md"
+printf '{\n  "model": "opus",\n  "permissions": {\n    "deny": [\n      "Bash(rm -rf:*)"\n    ]\n  }\n}\n' > "$HOME/.claude/settings.json"
+printf '{\n  "numStartups": 5,\n  "projects": {\n    "/x": {\n      "note": "中文 \\"q\\""\n    }\n  }\n}' > "$HOME/.claude.json"
+chmod 600 "$HOME/.claude.json"; cp -p "$HOME/.claude.json" "$T/claude.json.orig"
+
+# ---------- init ----------
+out=$(kit init "$TEAM" 2>&1); rc=$?
+check "init exit 0" '[ $rc -eq 0 ]'
+check "include pulled third-party" 'grep -qF "$TP" "$HOME/.config/agentkit/machine.yaml"'
+check "recommended added" 'grep -q "added: \[rule:coding-style, skill:gerrit-workflow\]" "$HOME/.config/agentkit/machine.yaml"'
+check "CLAUDE.md keeps user text" 'head -2 "$HOME/.claude/CLAUDE.md" | grep -q "Be brief."'
+check "CLAUDE.md imports required rule" 'grep -qxF "@$TEAM/rules/security.md" "$HOME/.claude/CLAUDE.md"'
+check "CLAUDE.md imports recommended rule" 'grep -qxF "@$TEAM/rules/coding-style.md" "$HOME/.claude/CLAUDE.md"'
+check "third-party skill copied with LICENSE" '[ -f "$HOME/.claude/skills/gerrit-workflow/LICENSE" ]'
+check "own skill untouched" '[ "$(cat "$HOME/.claude/skills/my-own/SKILL.md")" = "my own skill" ]'
+check "deny added, user deny kept" '[ "$(jget "$HOME/.claude/settings.json" permissions.deny | tr -d " \n")" = "[\"Bash(rm-rf:*)\",\"mcp__gerrit__submit_change\"]" ]'
+check "settings other keys kept" '[ "$(jget "$HOME/.claude/settings.json" model)" = "\"opus\"" ]'
+check "claude.json untouched (no mcp yet)" 'cmp -s "$HOME/.claude.json" "$T/claude.json.orig"'
+
+# ---------- add ----------
+kit add skill gerrit-review >/dev/null 2>&1
+check "add skill" '[ -f "$HOME/.claude/skills/gerrit-review/SKILL.md" ]'
+kit add mcp gerrit >/dev/null 2>&1
+check "mcp written" '[ "$(jget "$HOME/.claude.json" mcpServers.gerrit.command)" = "\"uvx\"" ]'
+check "claude.json stays private (600)" '[ "$(ls -l "$HOME/.claude.json" | cut -c1-10)" = "-rw-------" ]'
+check "no temp files left" '[ -z "$(ls -a "$HOME" | grep kit\\.)" ]'
+check "mcp env not expanded" 'jget "$HOME/.claude.json" mcpServers.gerrit.env | grep -qF "\${HOME}/.config/gerrit"'
+check "claude.json other data kept" 'jget "$HOME/.claude.json" projects | grep -qF "中文 \\\"q\\\""'
+out=$(kit add skill nope 2>&1); check "add unknown fails" '[ $? -ne 0 ] || echo "$out" | grep -q 找不到'
+
+# ---------- rm ----------
+out=$(kit rm rule security 2>&1); rc=$?
+check "required cannot be removed" '[ $rc -ne 0 ] && echo "$out" | grep -q 團隊必備'
+kit rm skill gerrit-workflow >/dev/null 2>&1
+check "rm skill deletes copy" '[ ! -e "$HOME/.claude/skills/gerrit-workflow" ]'
+kit sync >/dev/null 2>&1
+check "removed stays removed after sync" '[ ! -e "$HOME/.claude/skills/gerrit-workflow" ]'
+
+# ---------- hand edits and new items ----------
+echo "my change" >> "$HOME/.claude/skills/gerrit-review/SKILL.md"
+echo "team change" >> "$TEAM/skills/gerrit-review/SKILL.md"
+out=$(kit sync 2>&1)
+check "hand-edited skill not overwritten" 'grep -q "my change" "$HOME/.claude/skills/gerrit-review/SKILL.md" && echo "$out" | grep -q 手動改過'
+kit sync --force >/dev/null 2>&1
+check "--force overwrites" 'grep -q "team change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
+mkdir -p "$TEAM/skills/team-build"; printf -- '---\nname: team-build\ndescription: b\n---\nx\n' > "$TEAM/skills/team-build/SKILL.md"
+out=$(kit sync 2>&1)
+check "new item announced" 'echo "$out" | grep -q "新： skill:team-build"'
+out=$(kit sync 2>&1)
+check "announced only once" '! echo "$out" | grep -q "新："'
+
+# ---------- list ----------
+out=$(kit list 2>&1)
+check "list marks required" 'echo "$out" | grep -q "^R  rule:security"'
+check "list marks in use" 'echo "$out" | grep -q "^\*  skill:gerrit-review"'
+check "list shows unused" 'echo "$out" | grep -q "^   skill:gerrit-workflow"'
+check "list shows agent" 'echo "$out" | grep -q "agent:gerrit"'
+
+# ---------- run (dry run: show the claude command) ----------
+out=$(KIT_DRY_RUN=1 kit run gerrit --model sonnet 2>&1)
+tmp=$(echo "$out" | sed -n 's/^tmp=//p')
+check "run passes --tools" 'echo "$out" | grep -qx -- "Read,Grep,Glob"'
+check "run passes deny" 'echo "$out" | grep -qx "mcp__gerrit__submit_change"'
+check "run keeps user args" 'echo "$out" | grep -qx "sonnet"'
+check "run skill in temp dir" '[ -f "$tmp/.claude/skills/gerrit-review/SKILL.md" ]'
+check "run prompt has rule and body" 'grep -q "Only comment" "$tmp/prompt.md" && grep -q "Gerrit helper" "$tmp/prompt.md" && ! grep -q "^name:" "$tmp/prompt.md"'
+check "run mcp json valid" 'LC_ALL=C awk -f "$JA" "$tmp/mcp.json" >/dev/null && grep -q gerrit-mcp-server "$tmp/mcp.json"'
+rm -rf "$tmp"
+
+# ---------- allowed_hosts ----------
+out=$(kit init "$TEAM" https://github.com/someone/agentkit-library.git 2>&1); rc=$?
+check "host outside allowed_hosts refused" '[ $rc -ne 0 ] && echo "$out" | grep -q "github.com 不在允許的主機清單"'
+kit init "$TEAM" >/dev/null 2>&1
+
+# ---------- uninstall ----------
+kit add skill gerrit-review >/dev/null 2>&1; kit add mcp gerrit >/dev/null 2>&1
+kit uninstall >/dev/null 2>&1
+check "uninstall restores CLAUDE.md" '[ "$(cat "$HOME/.claude/CLAUDE.md")" = "$(printf "# My notes\nBe brief.")" ]'
+check "uninstall removes kit skills" '[ ! -e "$HOME/.claude/skills/gerrit-review" ] && [ -f "$HOME/.claude/skills/my-own/SKILL.md" ]'
+check "uninstall removes only kit deny" '[ "$(jget "$HOME/.claude/settings.json" permissions.deny | tr -d " \n")" = "[\"Bash(rm-rf:*)\"]" ]'
+check "uninstall leaves no empty deny" '[ "$(jget "$HOME/.claude/settings.json" permissions.deny | tr -d " \n")" = "[\"Bash(rm-rf:*)\"]" ]'
+printf '{\n  "model": "opus"\n}\n' > "$T/s.orig"; cp "$T/s.orig" "$HOME/.claude/settings.json"
+kit init "$TEAM" >/dev/null 2>&1; kit uninstall >/dev/null 2>&1
+check "settings.json byte-identical after init+uninstall" 'cmp -s "$T/s.orig" "$HOME/.claude/settings.json"'
+check "uninstall leaves no empty mcpServers" '! grep -q mcpServers "$HOME/.claude.json"'
+check "claude.json byte-identical after everything" 'cmp -s "$HOME/.claude.json" "$T/claude.json.orig"'
+check "uninstall removes mcp" '! jget "$HOME/.claude.json" mcpServers.gerrit >/dev/null'
+
+# ---------- install / self-update / uninstall --self ----------
+R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../VERSION" "$R/"
+( cd "$R" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm v1 )
+U="$T/clone2"; git clone -q "$R" "$U"
+touch "$HOME/.bashrc"
+out=$(PATH=/usr/bin:/bin sh "$U/unix/install.sh" 2>&1)
+check "install puts kit in ~/.local/bin" '[ -x "$HOME/.local/bin/kit" ] && "$HOME/.local/bin/kit" --version | grep -q "kit 0.1.0"'
+check "install adds PATH once" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc")" = 1 ]'
+PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
+check "reinstall does not add PATH twice" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc")" = 1 ]'
+check "installed kit works" '"$HOME/.local/bin/kit" init "$TEAM" >/dev/null 2>&1 && grep -q agentkit:begin "$HOME/.claude/CLAUDE.md"'
+( cd "$R" && echo 0.1.1 > VERSION && git commit -qam v2 )
+out=$("$HOME/.local/bin/kit" self-update 2>&1)
+check "self-update pulls new version" '"$HOME/.local/bin/kit" --version | grep -q "kit 0.1.1"'
+"$HOME/.local/bin/kit" uninstall --self >/dev/null 2>&1
+# a new Mac: zsh, no startup files at all
+H2="$T/home2"; mkdir -p "$H2"
+HOME="$H2" SHELL=/bin/zsh PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
+check "zsh user without rc gets ~/.zshrc" 'grep -q "added by agentkit" "$H2/.zshrc"'
+check "zsh PATH line works" '[ "$(HOME="$H2" PATH=/usr/bin:/bin zsh -c ". \"$H2/.zshrc\"; command -v kit")" = "$H2/.local/bin/kit" ]'
+H3="$T/home3"; mkdir -p "$H3"
+HOME="$H3" SHELL=/bin/bash PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
+if [ "$(uname)" = Darwin ]; then check "mac bash user gets ~/.bash_profile" 'grep -q "added by agentkit" "$H3/.bash_profile"'
+else check "linux bash user gets ~/.bashrc" 'grep -q "added by agentkit" "$H3/.bashrc"'; fi
+check "uninstall --self removes kit" '[ ! -e "$HOME/.local/bin/kit" ] && [ ! -e "$HOME/.local/share/agentkit" ] && ! grep -q agentkit:begin "$HOME/.claude/CLAUDE.md"'
+
+echo "kit: $pass passed, $fail failed"
+[ $fail -eq 0 ]

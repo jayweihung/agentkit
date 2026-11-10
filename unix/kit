@@ -1,0 +1,484 @@
+#!/usr/bin/env bash
+# kit - manage rules, skills, MCP servers, tool permissions and agents
+# for AI coding tools. Linux and macOS version (bash 3.2+, POSIX awk).
+#
+# No network access except the git URLs you give it, and only to hosts
+# allowed by the sources' kit.yaml (allowed_hosts).
+
+set -u
+KIT_LIB=$(cd "$(dirname "$0")" && pwd)
+[ -f "$KIT_LIB/json.awk" ] || KIT_LIB=$(cd "$(dirname "$(readlink "$0" 2>/dev/null || echo "$0")")" && pwd)
+KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
+KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
+KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
+MACHINE="$KIT_CONF/machine.yaml"
+STATE="$KIT_CONF/state.tsv"
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    CLAUDE_DIR=$CLAUDE_CONFIG_DIR; CLAUDE_JSON=$CLAUDE_CONFIG_DIR/.claude.json
+else
+    CLAUDE_DIR=$HOME/.claude; CLAUDE_JSON=$HOME/.claude.json
+fi
+TAB=$(printf '\t')
+BEGIN_MARK='<!-- agentkit:begin (managed by kit, do not edit) -->'
+END_MARK='<!-- agentkit:end -->'
+KINDS="rule skill mcp agent"
+
+# ---------- small helpers ----------
+die()  { printf 'kit: %s\n' "$*" >&2; exit 1; }
+say()  { [ -n "${QUIET:-}" ] || printf '%s\n' "$*"; }
+warn() { printf 'kit: %s\n' "$*" >&2; }
+
+yaml()     { LC_ALL=C awk -f "$KIT_LIB/yaml.awk" "$@"; }
+# yget FILE PATH -> values (one per line) for PATH or PATH[]
+yget() { [ -f "$1" ] || return 0; yaml "$1" | awk -F'\t' -v p="$2" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
+
+json_edit() { # json_edit FILE OPSFILE : edit FILE, keep a backup
+    # Other programs (a running Claude) may write FILE at any time, so:
+    # edit a snapshot, and only swap the result in (atomic rename) if FILE did
+    # not change meanwhile; otherwise try again.
+    local f=$1 ops=$2 snap tmp try
+    [ -f "$f" ] || printf '{}\n' > "$f"
+    snap=$(mktemp "$f.kit.XXXXXX") || die "cannot write next to $f"
+    tmp=$(mktemp "$f.kit.XXXXXX") || { rm -f "$snap"; die "cannot write next to $f"; }
+    for try in 1 2 3 4 5; do
+        cp -p "$f" "$snap" && cp -p "$f" "$tmp" || break     # tmp gets f's permissions
+        if ! { LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$ops" "$snap" > "$tmp" &&
+               LC_ALL=C awk -f "$KIT_LIB/json.awk" "$tmp" > /dev/null; }; then
+            rm -f "$snap" "$tmp"; die "沒辦法更新 $f（檔案沒有被改動）"
+        fi
+        if cmp -s "$snap" "$f"; then
+            cp -p "$snap" "$f.kit-backup" 2>/dev/null
+            if [ -L "$f" ]; then cat "$tmp" > "$f"; rm -f "$tmp"; else mv -f "$tmp" "$f"; fi
+            rm -f "$snap"; return 0
+        fi
+        sleep 1                                             # someone else wrote it; retry
+    done
+    rm -f "$snap" "$tmp"; die "沒辦法更新 $f：別的程式一直在寫它（檔案沒有被改動）"
+}
+prune_empty() { # prune_empty FILE PATH... : delete each PATH whose value is [] or {} (in order)
+    local f=$1 p v ops; shift
+    [ -f "$f" ] || return 0
+    ops=$(mktemp)
+    for p in "$@"; do
+        v=$(json_get "$f" "$p" | tr -d ' \n')
+        if [ "$v" = "[]" ] || [ "$v" = "{}" ]; then printf 'del\t%s\n' "$p" > "$ops"; json_edit "$f" "$ops"; fi
+    done
+    rm -f "$ops"
+}
+prune_deny() { prune_empty "$CLAUDE_DIR/settings.json" permissions.deny permissions; }
+
+json_get() { LC_ALL=C awk -f "$KIT_LIB/json.awk" -v get="$2" "$1" 2>/dev/null; }
+
+json_str() { # quote a string for JSON
+    local s=$1
+    s=${s//\\/\\\\}; s=${s//\"/\\\"}
+    s=${s//$TAB/\\t}
+    printf '"%s"' "$s"
+}
+
+dir_hash() { # content hash of a directory (portable: cksum)
+    ( cd "$1" && find . -type f ! -name '.DS_Store' | LC_ALL=C sort | while IFS= read -r f; do printf '%s ' "$f"; cksum < "$f"; done ) | cksum | awk '{print $1}'
+}
+
+# ---------- state ----------
+# state.tsv lines: kind<TAB>name<TAB>detail
+state_get() { [ -f "$STATE" ] && awk -F'\t' -v k="$1" -v n="$2" '$1 == k && $2 == n { print $3; exit }' "$STATE"; }
+state_list() { [ -f "$STATE" ] && awk -F'\t' -v k="$1" '$1 == k { print $2 }' "$STATE"; }
+state_set() {
+    mkdir -p "$KIT_CONF"; touch "$STATE"
+    awk -F'\t' -v k="$1" -v n="$2" '!($1 == k && $2 == n)' "$STATE" > "$STATE.tmp"
+    [ $# -ge 3 ] && printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$STATE.tmp"
+    mv "$STATE.tmp" "$STATE"
+}
+state_del() { [ -f "$STATE" ] || return 0; awk -F'\t' -v k="$1" -v n="$2" '!($1 == k && $2 == n)' "$STATE" > "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
+
+# ---------- machine.yaml ----------
+m_sources() { yget "$MACHINE" sources; }
+m_added()   { yget "$MACHINE" added; }
+m_removed() { yget "$MACHINE" removed; }
+
+write_machine() { # write_machine SOURCES ADDED REMOVED (newline separated lists)
+    mkdir -p "$KIT_CONF"
+    {
+        echo "# written by kit - use kit add / kit rm instead of editing"
+        echo "sources:            # earlier sources win when names repeat"
+        printf '%s\n' "$1" | awk 'NF { print "  - " $0 }'
+        printf 'added: [%s]\n'   "$(printf '%s\n' "$2" | awk 'NF' | paste -sd, - | sed 's/,/, /g')"
+        printf 'removed: [%s]    # kit rm; sync will not add these back\n' "$(printf '%s\n' "$3" | awk 'NF' | paste -sd, - | sed 's/,/, /g')"
+    } > "$MACHINE.tmp" && mv "$MACHINE.tmp" "$MACHINE"
+}
+
+# ---------- sources ----------
+is_url() { case $1 in *://*|*@*:*) return 0;; *) return 1;; esac; }
+url_host() { printf '%s\n' "$1" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#[:/].*$##'; }
+src_name() { basename "$1" .git; }
+src_dir() { # local checkout of a source
+    if is_url "$1"; then printf '%s/%s\n' "$KIT_SRC" "$(src_name "$1")"; else (cd "$1" 2>/dev/null && pwd) || printf '%s\n' "$1"; fi
+}
+src_dirs() { m_sources | while IFS= read -r s; do src_dir "$s"; done; }
+
+allowed_hosts() { src_dirs | while IFS= read -r d; do yget "$d/kit.yaml" allowed_hosts; done | awk 'NF && !seen[$0]++'; }
+
+check_host() { # refuse URLs whose host is not allowed
+    local url=$1 hosts h
+    is_url "$url" || return 0
+    hosts=$(allowed_hosts)
+    [ -n "$hosts" ] || return 0
+    h=$(url_host "$url")
+    printf '%s\n' "$hosts" | grep -qxF "$h" || die "$h 不在允許的主機清單：$(printf '%s' "$hosts" | paste -sd' ' -)"
+    # git config "insteadOf" rules can rewrite a URL; check where git really goes
+    local real; real=$(git ls-remote --get-url "$url" 2>/dev/null)
+    [ -z "$real" ] || [ "$real" = "$url" ] || { h=$(url_host "$real"); printf '%s\n' "$hosts" | grep -qxF "$h" || die "git 設定把網址改到 $h，不在允許的主機清單"; }
+    return 0
+}
+
+git_safe() { # git without prompts, submodules or LFS downloads
+    GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 git "$@"
+}
+
+fetch_source() { # clone or fast-forward one source
+    local s=$1 d
+    is_url "$s" || { [ -d "$s" ] || die "找不到來源資料夾：$s"; return 0; }
+    check_host "$s"
+    d=$(src_dir "$s")
+    if [ -d "$d/.git" ]; then
+        git_safe -C "$d" pull --ff-only --quiet --no-recurse-submodules || warn "沒辦法更新 $(src_name "$s")（沒網路？）"
+    else
+        mkdir -p "$KIT_SRC"
+        git_safe clone --quiet --no-recurse-submodules "$s" "$d" || die "沒辦法 clone $s"
+    fi
+}
+
+item_path() { # item_path DIR KIND NAME
+    case $2 in
+        rule)  printf '%s/rules/%s.md\n' "$1" "$3";;
+        skill) printf '%s/skills/%s/SKILL.md\n' "$1" "$3";;
+        mcp)   printf '%s/mcp/%s.yaml\n' "$1" "$3";;
+        agent) printf '%s/agents/%s.md\n' "$1" "$3";;
+    esac
+}
+find_item() { # find_item KIND NAME -> path of the first source that has it
+    local d p
+    while IFS= read -r d; do
+        p=$(item_path "$d" "$1" "$2")
+        [ -f "$p" ] && { printf '%s\n' "$p"; return 0; }
+    done <<EOF
+$(src_dirs)
+EOF
+    return 1
+}
+available() { # all kind:name in all sources
+    src_dirs | while IFS= read -r d; do
+        for f in "$d"/rules/*.md;          do [ -f "$f" ] && echo "rule:$(basename "$f" .md)"; done
+        for f in "$d"/skills/*/SKILL.md;   do [ -f "$f" ] && echo "skill:$(basename "$(dirname "$f")")"; done
+        for f in "$d"/mcp/*.yaml;          do [ -f "$f" ] && echo "mcp:$(basename "$f" .yaml)"; done
+        for f in "$d"/agents/*.md;         do [ -f "$f" ] && echo "agent:$(basename "$f" .md)"; done
+    done | awk '!seen[$0]++'
+}
+required_items() {
+    src_dirs | while IFS= read -r d; do
+        for k in rule skill mcp; do yget "$d/kit.yaml" "required.${k}s" | sed "s/^/$k:/"; done
+    done | awk 'NF && !seen[$0]++'
+}
+recommended_items() {
+    src_dirs | while IFS= read -r d; do
+        for k in rule skill mcp; do yget "$d/kit.yaml" "recommended.${k}s" | sed "s/^/$k:/"; done
+    done | awk 'NF && !seen[$0]++'
+}
+required_deny() { src_dirs | while IFS= read -r d; do yget "$d/kit.yaml" required.tools.deny; done | awk 'NF && !seen[$0]++'; }
+
+wanted() { # required + added - removed(non-required)
+    { required_items; m_added | grep -vxF -f <(m_removed; echo '##none##'); } | awk 'NF && !seen[$0]++'
+}
+
+# ---------- MCP yaml -> JSON ----------
+mcp_json() { # mcp_json FILE -> {"command":..,"args":[..],"env":{..}}
+    local f=$1 out cmd first a
+    cmd=$(yget "$f" command)
+    [ -n "$cmd" ] || { warn "$f has no command"; return 1; }
+    out="{\"command\":$(json_str "$cmd"),\"args\":["
+    first=1
+    while IFS= read -r a; do
+        [ -n "$a" ] || continue
+        [ $first = 1 ] || out="$out,"; first=0; out="$out$(json_str "$a")"
+    done <<EOF
+$(yget "$f" args)
+EOF
+    out="$out]"
+    local envs
+    envs=$(yaml "$f" | awk -F'\t' '$1 ~ /^env\./ { k = substr($1, 5); sub(/^[^\t]*\t/, ""); print k "\t" $0 }')
+    if [ -n "$envs" ]; then
+        out="$out,\"env\":{"; first=1
+        while IFS="$TAB" read -r k v; do
+            [ $first = 1 ] || out="$out,"; first=0; out="$out$(json_str "$k"):$(json_str "$v")"
+        done <<EOF
+$envs
+EOF
+        out="$out}"
+    fi
+    printf '%s}\n' "$out"
+}
+
+# ---------- apply to Claude Code ----------
+claude_rules_block() { # rewrite the kit block in CLAUDE.md
+    local f="$CLAUDE_DIR/CLAUDE.md" block="" p n
+    mkdir -p "$CLAUDE_DIR"; touch "$f"
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        p=$(find_item rule "$n") || { warn "rule $n not found in any source"; continue; }
+        block="$block@$p
+"
+    done
+    # the block has newlines, which "awk -v" refuses on BSD awk; pass it via the environment
+    KIT_BLOCK="$block" awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+        $0 == b { skip = 1; next }
+        $0 == e { skip = 0; next }
+        !skip { lines[++n] = $0 }
+        END {
+            body = ENVIRON["KIT_BLOCK"]
+            while (n > 0 && lines[n] == "") n--
+            for (i = 1; i <= n; i++) print lines[i]
+            if (body != "") { if (n > 0) print ""; print b; printf "%s", body; print e }
+        }' "$f" > "$f.kit.tmp" && mv "$f.kit.tmp" "$f"
+}
+
+apply_claude() {
+    local want n p dst h old ops k
+    want=$(wanted)
+
+    # rules
+    printf '%s\n' "$want" | sed -n 's/^rule://p' | claude_rules_block
+
+    # skills
+    mkdir -p "$CLAUDE_DIR/skills"
+    for n in $(printf '%s\n' "$want" | sed -n 's/^skill://p'); do
+        p=$(find_item skill "$n") || { warn "skill $n not found in any source"; continue; }
+        p=$(dirname "$p"); dst="$CLAUDE_DIR/skills/$n"; h=$(dir_hash "$p")
+        old=$(state_get skill "$n")
+        if [ -e "$dst" ] && [ -z "$old" ]; then warn "$dst 已經存在，不是 kit 放的，跳過"; continue; fi
+        if [ -n "$old" ] && [ -d "$dst" ] && [ "$(dir_hash "$dst")" != "$old" ] && [ -z "${FORCE:-}" ]; then
+            warn "skill $n 被手動改過，跳過（kit sync --force 會蓋掉）"; continue
+        fi
+        [ "$h" = "$old" ] && [ -d "$dst" ] && continue
+        rm -rf "$dst"; cp -R "$p" "$dst"; state_set skill "$n" "$h"; say "  skill $n"
+    done
+    for n in $(state_list skill); do
+        printf '%s\n' "$want" | grep -qxF "skill:$n" && continue
+        rm -rf "$CLAUDE_DIR/skills/$n"; state_del skill "$n"; say "  removed skill $n"
+    done
+
+    # MCP servers -> ~/.claude.json
+    ops=$(mktemp); : > "$ops"
+    for n in $(printf '%s\n' "$want" | sed -n 's/^mcp://p'); do
+        p=$(find_item mcp "$n") || { warn "mcp $n not found in any source"; continue; }
+        k=$(mcp_json "$p") || continue
+        [ "$(state_get mcp "$n")" = "$(printf '%s' "$k" | cksum | awk '{print $1}')" ] && continue
+        printf 'set\tmcpServers.%s\t%s\n' "$n" "$k" >> "$ops"
+        state_set mcp "$n" "$(printf '%s' "$k" | cksum | awk '{print $1}')"; say "  mcp $n"
+    done
+    for n in $(state_list mcp); do
+        printf '%s\n' "$want" | grep -qxF "mcp:$n" && continue
+        printf 'del\tmcpServers.%s\n' "$n" >> "$ops"; state_del mcp "$n"; say "  removed mcp $n"
+    done
+    [ -s "$ops" ] && { json_edit "$CLAUDE_JSON" "$ops"; prune_empty "$CLAUDE_JSON" mcpServers; }
+
+    # tool deny rules -> ~/.claude/settings.json
+    : > "$ops"
+    local deny; deny=$(required_deny)
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        [ -n "$(state_get deny "$n")" ] && continue
+        printf 'addstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; state_set deny "$n" 1; say "  deny $n"
+    done <<EOF
+$deny
+EOF
+    for n in $(state_list deny); do
+        printf '%s\n' "$deny" | grep -qxF "$n" && continue
+        printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; state_del deny "$n"; say "  removed deny $n"
+    done
+    [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
+    rm -f "$ops"
+}
+
+# ---------- commands ----------
+need_init() { [ -f "$MACHINE" ] || die "還沒設定：先打  kit init <網址或資料夾>"; }
+
+cmd_init() {
+    [ $# -ge 1 ] || die "用法：kit init <網址或資料夾> [更多來源...]"
+    local s srcs="" more d
+    for s in "$@"; do
+        is_url "$s" || s=$(cd "$s" 2>/dev/null && pwd) || die "找不到資料夾：$s"
+        srcs="$srcs$s
+"
+    done
+    write_machine "$srcs" "" ""
+    for s in $(m_sources); do fetch_source "$s"; done
+    # sources may include more sources (for example the third-party repo)
+    more=$(src_dirs | while IFS= read -r d; do yget "$d/kit.yaml" include; done | awk 'NF')
+    if [ -n "$more" ]; then
+        srcs=$(printf '%s%s\n' "$srcs" "$more" | awk 'NF && !seen[$0]++')
+        write_machine "$srcs" "" ""
+        for s in $more; do fetch_source "$s"; done
+    fi
+    write_machine "$(m_sources)" "$(recommended_items)" ""
+    say "kit：設定好 $(m_sources | wc -l | tr -d ' ') 個來源"
+    apply_claude
+    seen_all
+    say "kit：完成。打  kit list  看有哪些"
+}
+
+seen_all() { for i in $(available); do state_set seen "$i" 1; done; }
+
+cmd_sync() {
+    need_init
+    local s
+    for s in $(m_sources); do fetch_source "$s"; done
+    apply_claude
+    local new=""
+    for i in $(available); do [ -n "$(state_get seen "$i")" ] || new="$new $i"; done
+    [ -n "$new" ] && say "kit：新：$new  （要用就 kit add <種類> <名字>）"
+    seen_all
+}
+
+cmd_list() {
+    need_init
+    local want req i mark
+    want=$(wanted); req=$(required_items)
+    for i in $(available); do
+        mark="  "
+        printf '%s\n' "$want" | grep -qxF "$i" && mark="* "
+        printf '%s\n' "$req" | grep -qxF "$i" && mark="R "
+        case $i in agent:*) mark="  ";; esac
+        [ -n "$(state_get seen "$i")" ] || mark="${mark%% }N"
+        printf '%s %s\n' "$mark" "$i"
+    done
+    say ""
+    say "* 在用   R 團隊必備   N 新的   agent 用  kit run <名字>  開"
+}
+
+cmd_add_rm() {
+    local verb=$1; shift
+    [ $# -eq 2 ] || die "用法：kit $verb rule|skill|mcp <名字>"
+    need_init
+    local k=$1 n=$2 i="$1:$2" added removed
+    case " rule skill mcp " in *" $k "*) ;; *) die "種類只能是 rule、skill、mcp";; esac
+    find_item "$k" "$n" > /dev/null || die "找不到 $i（打 kit list 看有哪些）"
+    added=$(m_added); removed=$(m_removed)
+    if [ "$verb" = add ]; then
+        added=$(printf '%s\n%s\n' "$added" "$i" | awk 'NF && !seen[$0]++')
+        removed=$(printf '%s\n' "$removed" | grep -vxF "$i")
+    else
+        required_items | grep -qxF "$i" && die "$i 是團隊必備，拿不掉"
+        added=$(printf '%s\n' "$added" | grep -vxF "$i")
+        removed=$(printf '%s\n%s\n' "$removed" "$i" | awk 'NF && !seen[$0]++')
+    fi
+    write_machine "$(m_sources)" "$added" "$removed"
+    apply_claude
+}
+
+cmd_run() {
+    [ $# -ge 1 ] || die "用法：kit run <agent> [claude 的參數...]"
+    need_init
+    local name=$1; shift
+    local f; f=$(find_item agent "$name") || die "找不到 agent $name（打 kit list 看有哪些）"
+    QUIET=1 cmd_sync 2>/dev/null || true
+
+    local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-run.XXXXXX")
+    mkdir -p "$tmp/.claude/skills"
+    local n p
+    local fm; fm=$(LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$f") || die "bad header in $f"
+    fmget() { printf '%s\n' "$fm" | awk -F'\t' -v p="$1" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
+
+    for n in $(fmget skills); do
+        p=$(find_item skill "$n") || { warn "skill $n not found"; continue; }
+        cp -R "$(dirname "$p")" "$tmp/.claude/skills/$n"
+    done
+    {
+        for n in $(fmget rules); do
+            p=$(find_item rule "$n") || { warn "rule $n not found"; continue; }
+            cat "$p"; echo
+        done
+        awk 'c >= 2 { print } /^---$/ { c++ }' "$f"
+    } > "$tmp/prompt.md"
+    local mcps="" k first=1
+    for n in $(fmget mcp); do
+        p=$(find_item mcp "$n") || { warn "mcp $n not found"; continue; }
+        k=$(mcp_json "$p") || continue
+        [ $first = 1 ] || mcps="$mcps,"; first=0
+        mcps="$mcps$(json_str "$n"):$k"
+    done
+    printf '{"mcpServers":{%s}}\n' "$mcps" > "$tmp/mcp.json"
+
+    local args=(--add-dir "$tmp" --append-system-prompt-file "$tmp/prompt.md" --mcp-config "$tmp/mcp.json")
+    local only; only=$(fmget tools.only | paste -sd, -)
+    [ -n "$only" ] && args+=(--tools "$only")
+    local d
+    while IFS= read -r d; do [ -n "$d" ] && args+=(--disallowedTools "$d"); done <<EOF
+$(fmget tools.deny)
+EOF
+    set -- "${args[@]}" "$@"
+    [ -n "${KIT_DRY_RUN:-}" ] && { printf '%s\n' claude "$@"; printf 'tmp=%s\n' "$tmp"; return 0; }
+    claude "$@"
+    local rc=$?
+    rm -rf "$tmp"
+    return $rc
+}
+
+cmd_uninstall() {
+    local self=0; [ "${1:-}" = "--self" ] && self=1
+    local n ops
+    claude_rules_block < /dev/null
+    for n in $(state_list skill); do rm -rf "$CLAUDE_DIR/skills/$n"; done
+    ops=$(mktemp); : > "$ops"
+    for n in $(state_list mcp); do printf 'del\tmcpServers.%s\n' "$n" >> "$ops"; done
+    [ -s "$ops" ] && { json_edit "$CLAUDE_JSON" "$ops"; prune_empty "$CLAUDE_JSON" mcpServers; }
+    : > "$ops"
+    while IFS="$TAB" read -r k n _; do [ "$k" = deny ] && printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; done < "${STATE:-/dev/null}" 2>/dev/null
+    [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
+    rm -f "$ops" "$STATE" "$MACHINE"
+    say "kit：已移除 kit 放進 Claude 的東西（你自己的檔案沒動）"
+    say "     來源的 clone 還留在 $KIT_SRC"
+    if [ $self = 1 ]; then
+        rm -f "$HOME/.local/bin/kit"; rm -rf "$HOME/.local/share/agentkit"
+        say "kit：kit 本身也移除了"
+    fi
+}
+
+cmd_self_update() { # pull the clone kit was installed from, then reinstall
+    local repo; repo=$(cat "$KIT_LIB/.repo" 2>/dev/null) || die "不知道 kit 是從哪個 clone 裝的；請到 clone 裡 git pull 後重跑 unix/install.sh"
+    [ -d "$repo/.git" ] || die "找不到 clone：$repo"
+    local url; url=$(git -C "$repo" remote get-url origin 2>/dev/null) && check_host "$url"
+    git_safe -C "$repo" pull --ff-only -q || die "沒辦法更新 $repo（沒網路，或 clone 裡有自己的改動？）"
+    sh "$repo/unix/install.sh" --quiet || die "重新安裝失敗"
+    say "kit：已更新到 $(cat "$KIT_LIB/VERSION" 2>/dev/null)"
+}
+
+usage() {
+    cat <<'EOF'
+kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
+
+  kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
+  kit list                          有哪些、你在用哪些、哪些是新的
+  kit add rule|skill|mcp <名字>     開始用
+  kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
+  kit run <agent> [claude 的參數]   開一個做好的 agent
+  kit sync [--force]                現在更新（kit run 會自動做）
+  kit self-update                   更新 kit 本身
+  kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
+  kit --version
+EOF
+}
+
+case ${1:-} in
+    init)      shift; cmd_init "$@";;
+    sync)      shift; [ "${1:-}" = --force ] && FORCE=1; cmd_sync;;
+    list|ls)   cmd_list;;
+    add)       shift; cmd_add_rm add "$@";;
+    rm|remove) shift; cmd_add_rm rm "$@";;
+    run)       shift; cmd_run "$@";;
+    uninstall) shift; cmd_uninstall "$@";;
+    self-update) cmd_self_update;;
+    --version|version) echo "kit $KIT_VERSION";;
+    ""|-h|--help|help) usage;;
+    *) die "沒有這個指令：$1（打 kit help）";;
+esac
