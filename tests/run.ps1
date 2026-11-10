@@ -582,7 +582,7 @@ Pop-Location
 # ---------- herdr-panel: the kit panel as a Herdr mod ----------
 $HH = Join-Path $T 'herdr-app'
 W "$HH/mods/.keep" ''
-W "$HH/layouts/mine.json" "{`"id`":`"root`",`"type`":`"row`",`"children`":[{`"id`":`"bar`",`"type`":`"row`",`"children`":[{`"id`":`"tabs`",`"type`":`"block`",`"content`":{`"mod`":`"tabs`"}}]},{`"id`":`"body`",`"type`":`"row`",`"children`":[{`"id`":`"main`",`"type`":`"block`",`"content`":{`"tab`":`"active`"}}]}]}`n"
+W "$HH/layouts/mine.json" "{`"id`":`"root`",`"type`":`"row`",`"children`":[{`"id`":`"bar`",`"type`":`"row`",`"children`":[{`"id`":`"tabs`",`"type`":`"block`",`"content`":{`"mod`":`"tabs`"}}]},{`"id`":`"body`",`"type`":`"row`",`"children`":[{`"id`":`"main`",`"type`":`"block`",`"content`":{`"tab`":`"active`",`"pane`":{`"header`":{`"content`":{`"mod`":`"pane`"},`"reveal`":`"always`"}}}}]}]}`n"
 $mineOrig = ReadT "$HH/layouts/mine.json"
 W "$HH/layouts/main.json" "{`"main`":1}`n"
 W "$HH/shared.json" "{`n  `"layout`": `"mine`"`n}`n"
@@ -594,12 +594,14 @@ $kitJ = if ($OnWindows) { '"kit.cmd"' } else { '"' + $Exe.Replace('\', '\\') + '
 Check 'herdr-panel install: mod files, config with the kit command' { $rc -eq 0 -and (Test-Path "$HH/mods/kit/main.js") -and (Test-Path "$HH/mods/kit/.kit-panel") -and $cfg.Contains("`"kit`": [$kitJ]") -and $cfg.Contains('"env": {}') }
 $ml = ReadT "$HH/layouts/mine.json"
 Check 'herdr-panel install: button in the tab bar, panel beside the work area' { ([regex]::Matches($ml, '"kit-toggle"')).Count -eq 1 -and $ml.Contains('"kit-panel"') -and (ReadT "$HH/mods/kit/mod.json").Contains('"place": "none"') }
+Check "herdr-panel install: each pane's header is kit's (mods/kit-pane)" { $ml.Contains('"mod": "kit-pane"') -and -not $ml.Contains('"mod": "pane"') -and (Test-Path "$HH/mods/kit-pane/main.js") -and (Test-Path "$HH/mods/kit-pane/.kit-panel") -and (ReadT "$HH/mods/kit-pane/mod.json").Contains('"place": "none"') }
 Check 'herdr-panel install: layout backed up first' { @(Backups).Count -eq 1 -and (ReadT @(Backups)[0].FullName) -ceq $mineOrig }
 Kit herdr-panel install
 Check 'herdr-panel install again: layout not changed twice' { $rc -eq 0 -and ([regex]::Matches((ReadT "$HH/layouts/mine.json"), '"kit-toggle"')).Count -eq 1 -and @(Backups).Count -eq 1 }
-W "$HH/mods/kit/main.js" 'old'; $pcfg = ReadT "$HH/mods/kit/config.json"
+W "$HH/mods/kit/main.js" 'old'; W "$HH/mods/kit-pane/main.js" 'old'; $pcfg = ReadT "$HH/mods/kit/config.json"
 $env:AGENTKIT_HOME = Join-Path $T 'inst-p'; & $Exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'windows/install.ps1') -Quiet; Remove-Item env:AGENTKIT_HOME
 Check 'reinstall / self-update refreshes an installed panel, keeps its settings' { (SameBytes "$HH/mods/kit/main.js" (Join-Path $Repo 'herdr/kit-panel/main.js')) -and (ReadT "$HH/mods/kit/config.json") -ceq $pcfg }
+Check 'reinstall / self-update refreshes the pane header too' { SameBytes "$HH/mods/kit-pane/main.js" (Join-Path $Repo 'herdr/kit-pane/main.js') }
 if (-not $OnWindows) {
     Kit herdr-panel install --keep-env
     Check 'herdr-panel --keep-env: the panel runs kit with this HOME' { (ReadT "$HH/mods/kit/config.json").Contains("`"HOME`": `"$H`"") }
@@ -607,6 +609,7 @@ if (-not $OnWindows) {
 Kit herdr-panel uninstall
 $ml = ReadT "$HH/layouts/mine.json"
 Check 'herdr-panel uninstall: mod and layout blocks gone' { $rc -eq 0 -and -not (Test-Path "$HH/mods/kit") -and -not $ml.Contains('kit') -and $ml.Contains('"tabs"') }
+Check "herdr-panel uninstall: Herdr's own pane header is back" { -not (Test-Path "$HH/mods/kit-pane") -and $ml.Contains('"mod": "pane"') }
 W "$HH/shared.json" "{`n  `"layout`": `"main`"`n}`n"
 Kit herdr-panel install
 Check 'herdr-panel on a Herdr layout: not edited, panel docks on the right' { $rc -eq 0 -and (ReadT "$HH/layouts/main.json") -eq "{`"main`":1}`n" -and (ReadT "$HH/mods/kit/mod.json").Contains('"place": "right"') -and $out.Contains('放進上排') }
@@ -628,7 +631,7 @@ Remove-Item env:AGENTKIT_HOME
 $Kit = Join-Path $T 'inst/lib/kit.ps1'
 Kit ci-template
 Check 'installed kit has the ci template' { $rc -eq 0 -and $out -ceq $tmpl }
-Check 'installed kit has the Herdr panel' { Test-Path (Join-Path $T 'inst/lib/herdr/kit-panel/main.js') }
+Check 'installed kit has the Herdr panel' { (Test-Path (Join-Path $T 'inst/lib/herdr/kit-panel/main.js')) -and (Test-Path (Join-Path $T 'inst/lib/herdr/kit-pane/main.js')) }
 $Kit = $realKit
 
 # ---------- the script files themselves ----------

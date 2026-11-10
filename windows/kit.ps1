@@ -276,6 +276,11 @@ function Json-AddNear($n, [string]$key, [string]$raw, [string]$json) { # anywher
     foreach ($x in $n.v) { if ((Json-Ser $x) -ceq $s) { return } }
     $n.v.Add($item)
 }
+function Json-SwapWhere($n, [string]$key, [string]$raw, [string]$new) { # anywhere: objects whose KEY is the string get NEW there
+    if ($n.t -eq 'v') { return }
+    if (Json-ItemIs $n $key $raw) { (Json-Find $n $key).raw = $new }
+    for ($i = 0; $i -lt $n.v.Count; $i++) { Json-SwapWhere $n.v[$i] $key $raw $new }
+}
 function Json-Apply($root, $ops) {
     foreach ($op in $ops) {
         switch ($op[0]) {
@@ -287,6 +292,7 @@ function Json-Apply($root, $ops) {
             'rmjson'  { Json-RmItem $root $op[1] (Json-Parse $op[2]) }
             'rmwhere' { Json-RmWhere $root $op[1] (Json-Str $op[2]) }
             'addnear' { Json-AddNear $root $op[1] (Json-Str $op[2]) $op[3] }
+            'swapwhere' { Json-SwapWhere $root $op[1] (Json-Str $op[2]) (Json-Str $op[3]) }
             default   { throw "json: unknown op $($op[0])" }
         }
     }
@@ -1810,7 +1816,7 @@ function Panel-Src { # the panel's files: next to the installed kit, else in the
 function Layout-Edit([string]$f, $ops) { # the layout text with OPS applied (the panel's old blocks removed first)
     $text = Read-Text $f
     $root = Json-Parse $text
-    Json-Apply $root (@(@('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel')) + @($ops | Where-Object { $_ }))
+    Json-Apply $root (@(@('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel'), @('swapwhere', 'content.mod', 'kit-pane', 'pane')) + @($ops | Where-Object { $_ }))
     Json-Text $root $text
 }
 function Swap-Layout([string]$f, [string]$text) { # FILE (backed up first) gets TEXT
@@ -1839,15 +1845,26 @@ function Cmd-HerdrPanel($rest) {
             $place = 'right'
             Say "kit：現在的版面（${name}）是 Herdr 內建的，不能直接改：panel 會先出現在右邊，按 panel 上的「放進上排」會複製一份版面再放進去"
         } elseif (-not (Test-Path -LiteralPath $lf -PathType Leaf)) { $place = 'right' }
-        elseif (-not (Read-Text $lf).Contains('"kit-toggle"')) {
+        else {
+            # the button and panel, and each pane's header with kit's button (the pane header mod "kit-pane")
             $t = $null
-            try { $t = Layout-Edit $lf @(@('addnear', 'content.mod', 'tabs', $PanelToggle), @('addnear', 'content.tab', 'active', $PanelNode)) } catch { if ($env:KIT_DEBUG) { Warn "$($_.Exception.Message) $($_.ScriptStackTrace)" }; $t = $null }
-            if ($t -and $t.Contains('"kit-toggle"') -and $t.Contains('"kit-panel"')) { $newLayout = $t }
+            try { $t = Layout-Edit $lf @(@('addnear', 'content.mod', 'tabs', $PanelToggle), @('addnear', 'content.tab', 'active', $PanelNode), @('swapwhere', 'content.mod', 'pane', 'kit-pane')) } catch { if ($env:KIT_DEBUG) { Warn "$($_.Exception.Message) $($_.ScriptStackTrace)" }; $t = $null }
+            if ($t -and $t.Contains('"kit-toggle"') -and $t.Contains('"kit-panel"')) {
+                if ($t -cne (Read-Text $lf)) { $newLayout = $t }     # already like this: no backup, no write
+            }
             else { $place = 'right'; Say "kit：版面 $name 找不到分頁列（tabs）或工作區，沒改它：panel 會先出現在右邊" }
         }
         # the files (main.js etc.), then mod.json and the panel's config (how to run kit here)
         Ensure-Dir $dest
         Copy-Item -Path (Join-Path $src '*') -Destination $dest -Recurse -Force
+        $paneSrc = Join-Path (Split-Path -Parent $src) 'kit-pane'; $paneDest = Join-Path $mods 'kit-pane'
+        if (Test-Path -LiteralPath (Join-Path $paneSrc 'main.js') -PathType Leaf) {
+            if ((Test-Path -LiteralPath $paneDest) -and -not (Test-Path -LiteralPath (Join-Path $paneDest '.kit-panel'))) { Die "$paneDest 已經有東西，不是 kit 放的，不動它" }
+            Ensure-Dir $paneDest
+            Copy-Item -Path (Join-Path $paneSrc '*') -Destination $paneDest -Recurse -Force
+            Write-Text (Join-Path $paneDest 'mod.json') "{ `"place`": `"none`", `"title`": `"Pane header (kit)`" }`n"
+            Write-Text (Join-Path $paneDest '.kit-panel') ''
+        }
         Write-Text (Join-Path $dest 'mod.json') "{ `"place`": `"$place`", `"size`": 420, `"title`": `"kit`" }`n"
         if ($OnWindows) {
             $cmdPath = Join-Path (Split-Path -Parent $KitLib) 'kit.cmd'
@@ -1868,12 +1885,14 @@ function Cmd-HerdrPanel($rest) {
             if (-not $mine) { Die "$dest 不是 kit 放的，不動它" }
             Remove-Item -LiteralPath $dest -Recurse -Force
         }
+        $paneDest = Join-Path $mods 'kit-pane'
+        if (Test-Path -LiteralPath (Join-Path $paneDest '.kit-panel')) { Remove-Item -LiteralPath $paneDest -Recurse -Force }
         $ld = Join-Path $hh 'layouts'
         if (Test-Path -LiteralPath $ld) {
             foreach ($f in @(Get-ChildItem -LiteralPath $ld -File -Filter '*.json' | Where-Object { $_.Extension -eq '.json' })) {
                 if ($ShippedLayouts -contains [IO.Path]::GetFileNameWithoutExtension($f.Name)) { continue }
                 $text = Read-Text $f.FullName
-                if (-not ($text.Contains('"kit-toggle"') -or $text.Contains('"kit-panel"') -or $text.Contains('"mod": "kit"'))) { continue }
+                if (-not ($text.Contains('"kit-toggle"') -or $text.Contains('"kit-panel"') -or $text.Contains('"mod": "kit"') -or $text.Contains('"mod": "kit-pane"'))) { continue }
                 try { $t = Layout-Edit $f.FullName @() } catch { Warn "沒辦法讀 $($f.FullName)，沒改它"; continue }
                 Swap-Layout $f.FullName $t
             }

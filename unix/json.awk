@@ -20,6 +20,7 @@
 #   rmwhere KEY   STRING   anywhere in the file: remove array items (objects) whose KEY is "STRING"
 #   addnear KEY   STRING  JSON   anywhere in the file: append JSON to each array that has an
 #                                item (object) whose KEY is "STRING", if no equal item is there
+#   swapwhere KEY STRING  NEW    anywhere in the file: objects whose KEY is "STRING" get "NEW" there
 # PATH and KEY are keys joined by "." (keys must not contain "." or TAB).
 # STRING is plain text; " and \ are escaped by json.awk.
 #
@@ -290,6 +291,8 @@ function apply_ops(file,    line, f, cnt, n, p, j, a, i, s, found) {
             rm_where(root, f[2], json_str(f[3]))
         } else if (f[1] == "addnear") {
             add_near(root, f[2], json_str(f[3]), f[4])
+        } else if (f[1] == "swapwhere") {
+            swap_where(root, f[2], json_str(f[3]), json_str(f[4]))
         } else fail("unknown op " f[1])
     }
     close(file)
@@ -322,4 +325,10 @@ function add_near(n, key, s, js,    i, c, hit, item, t) {
     item = parse_text(js); t = ser(item, "")
     for (i = 1; i <= N[n]; i++) if (C[n, i] && ser(C[n, i], "") == t) return
     N[n]++; C[n, N[n]] = item
+}
+
+function swap_where(n, key, s, ns,    i, m) {
+    if (T[n] == "v") return
+    if (item_is(n, key, s)) { m = find_path(n, key); V[m] = ns }
+    for (i = 1; i <= N[n]; i++) if (C[n, i]) swap_where(C[n, i], key, s, ns)
 }

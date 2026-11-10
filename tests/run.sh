@@ -670,7 +670,7 @@ check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/age
 
 # ---------- herdr-panel: the kit panel as a Herdr mod ----------
 HH="$T/herdr-app"; mkdir -p "$HH/mods" "$HH/layouts"
-printf '{"id":"root","type":"row","children":[{"id":"bar","type":"row","children":[{"id":"tabs","type":"block","content":{"mod":"tabs"}}]},{"id":"body","type":"row","children":[{"id":"main","type":"block","content":{"tab":"active"}}]}]}\n' > "$HH/layouts/mine.json"
+printf '{"id":"root","type":"row","children":[{"id":"bar","type":"row","children":[{"id":"tabs","type":"block","content":{"mod":"tabs"}}]},{"id":"body","type":"row","children":[{"id":"main","type":"block","content":{"tab":"active","pane":{"header":{"content":{"mod":"pane"},"reveal":"always"}}}}]}]}\n' > "$HH/layouts/mine.json"
 cp "$HH/layouts/mine.json" "$T/mine.orig"
 printf '{"main":1}\n' > "$HH/layouts/main.json"
 printf '{\n  "layout": "mine"\n}\n' > "$HH/shared.json"
@@ -678,15 +678,23 @@ hp() { HERDR_APP_HOME="$HH" kit herdr-panel "$@"; }
 out=$(hp install 2>&1); rc=$?
 check "herdr-panel install: mod files, config with the kit command" '[ $rc -eq 0 ] && [ -f "$HH/mods/kit/main.js" ] && [ -f "$HH/mods/kit/.kit-panel" ] && grep -qF "\"kit\": [\"$(cd "$HERE/../unix" && pwd)/kit\"]" "$HH/mods/kit/config.json" && grep -qF "\"env\": {}" "$HH/mods/kit/config.json"'
 check "herdr-panel install: button in the tab bar, panel beside the work area" '[ "$(jget "$HH/layouts/mine.json" children | grep -c "\"kit-toggle\"")" = 1 ] && grep -q "\"kit-panel\"" "$HH/layouts/mine.json" && grep -q "\"place\": \"none\"" "$HH/mods/kit/mod.json"'
+check "herdr-panel install: each pane's header is kit's (mods/kit-pane)" 'grep -q "\"mod\": \"kit-pane\"" "$HH/layouts/mine.json" && ! grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json" && [ -f "$HH/mods/kit-pane/main.js" ] && [ -f "$HH/mods/kit-pane/.kit-panel" ] && grep -q "\"place\": \"none\"" "$HH/mods/kit-pane/mod.json"'
+if command -v pwsh >/dev/null 2>&1; then
+    mkdir -p "$T/hh2/mods" "$T/hh2/layouts"; cp "$T/mine.orig" "$T/hh2/layouts/mine.json"; cp "$HH/shared.json" "$T/hh2/"
+    HERDR_APP_HOME="$T/hh2" pwsh -NoProfile -File "$HERE/../windows/kit.ps1" herdr-panel install >/dev/null 2>&1
+    check "herdr-panel install: kit.ps1 edits the layout the same" 'cmp -s "$T/hh2/layouts/mine.json" "$HH/layouts/mine.json" && [ -f "$T/hh2/mods/kit-pane/.kit-panel" ]'
+fi
 check "herdr-panel install: layout backed up first" 'cmp -s "$(ls "$HH"/layouts/mine.json.kit-backup-* | head -n 1)" "$T/mine.orig"'
 out=$(hp install --keep-env 2>&1); rc=$?
 check "herdr-panel install again: layout not changed twice" '[ $rc -eq 0 ] && [ "$(grep -c "\"kit-toggle\"" "$HH/layouts/mine.json")" = 1 ] && [ "$(ls "$HH"/layouts/ | grep -c kit-backup)" = 1 ]'
 check "herdr-panel --keep-env: the panel runs kit with this HOME" 'grep -qF "\"HOME\": \"$HOME\"" "$HH/mods/kit/config.json"'
-echo old > "$HH/mods/kit/main.js"; cp "$HH/mods/kit/config.json" "$T/panel-cfg"
+echo old > "$HH/mods/kit/main.js"; echo old > "$HH/mods/kit-pane/main.js"; cp "$HH/mods/kit/config.json" "$T/panel-cfg"
 HERDR_APP_HOME="$HH" AGENTKIT_HOME="$T/inst-p" sh "$HERE/../unix/install.sh" --quiet >/dev/null 2>&1
 check "reinstall / self-update refreshes an installed panel, keeps its settings" 'cmp -s "$HH/mods/kit/main.js" "$HERE/../herdr/kit-panel/main.js" && cmp -s "$HH/mods/kit/config.json" "$T/panel-cfg"'
+check "reinstall / self-update refreshes the pane header too" 'cmp -s "$HH/mods/kit-pane/main.js" "$HERE/../herdr/kit-pane/main.js"'
 out=$(hp uninstall 2>&1); rc=$?
 check "herdr-panel uninstall: mod and layout blocks gone" '[ $rc -eq 0 ] && [ ! -e "$HH/mods/kit" ] && ! grep -q "kit" "$HH/layouts/mine.json" && grep -q "\"tabs\"" "$HH/layouts/mine.json"'
+check "herdr-panel uninstall: Herdr's own pane header is back" '[ ! -e "$HH/mods/kit-pane" ] && grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json"'
 printf '{\n  "layout": "main"\n}\n' > "$HH/shared.json"
 out=$(hp install 2>&1); rc=$?
 check "herdr-panel on a Herdr layout: not edited, panel docks on the right" '[ $rc -eq 0 ] && [ "$(cat "$HH/layouts/main.json")" = "{\"main\":1}" ] && grep -q "\"place\": \"right\"" "$HH/mods/kit/mod.json" && echo "$out" | grep -q 放進上排'

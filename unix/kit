@@ -1615,7 +1615,7 @@ panel_src() { # the panel's files: next to the installed kit, else in the repo k
     return 1
 }
 layout_without_panel() { # layout_without_panel FILE OUT : FILE without the panel's blocks
-    printf 'rmwhere\tcontent.mod\tkit\nrmwhere\tid\tkit-toggle\nrmwhere\tid\tkit-panel\n' > "$2.ops"
+    printf 'rmwhere\tcontent.mod\tkit\nrmwhere\tid\tkit-toggle\nrmwhere\tid\tkit-panel\nswapwhere\tcontent.mod\tkit-pane\tpane\n' > "$2.ops"
     LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$2.ops" "$1" > "$2"; local rc=$?
     rm -f "$2.ops"; return $rc
 }
@@ -1641,22 +1641,28 @@ cmd_herdr_panel() {
         *" $name "*) place=right
             say "kit：現在的版面（${name}）是 Herdr 內建的，不能直接改：panel 會先出現在右邊，按 panel 上的「放進上排」會複製一份版面再放進去";;
         *)  if [ ! -f "$lf" ]; then place=right
-            elif grep -q '"kit-toggle"' "$lf"; then :
             else
+                # the button and panel, and each pane's header with kit's button (the pane header mod "kit-pane")
                 tmp=$(mktemp "$lf.kit.XXXXXX")
                 layout_without_panel "$lf" "$tmp.1" &&
-                    printf 'addnear\tcontent.mod\ttabs\t%s\naddnear\tcontent.tab\tactive\t%s\n' "$PANEL_TOGGLE" "$PANEL_NODE" > "$tmp.ops" &&
+                    printf 'addnear\tcontent.mod\ttabs\t%s\naddnear\tcontent.tab\tactive\t%s\nswapwhere\tcontent.mod\tpane\tkit-pane\n' "$PANEL_TOGGLE" "$PANEL_NODE" > "$tmp.ops" &&
                     LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$tmp.ops" "$tmp.1" > "$tmp"
                 rm -f "$tmp.1" "$tmp.ops"
                 if ! grep -q '"kit-toggle"' "$tmp" || ! grep -q '"kit-panel"' "$tmp"; then
                     rm -f "$tmp"; tmp=""; place=right
                     say "kit：版面 $name 找不到分頁列（tabs）或工作區，沒改它：panel 會先出現在右邊"
+                elif cmp -s "$tmp" "$lf"; then rm -f "$tmp"; tmp=""     # already like this: no backup, no write
                 fi
             fi;;
         esac
         # the files (main.js etc.), then mod.json and the panel's config (how to run kit here)
         mkdir -p "$dest" || die "沒辦法建立 $dest"
         cp -R "$src"/. "$dest"/ || die "沒辦法複製 panel 到 $dest"
+        if [ -f "$(dirname "$src")/kit-pane/main.js" ]; then
+            [ ! -e "$mods/kit-pane" ] || [ -f "$mods/kit-pane/.kit-panel" ] || die "$mods/kit-pane 已經有東西，不是 kit 放的，不動它"
+            mkdir -p "$mods/kit-pane" && cp -R "$(dirname "$src")/kit-pane"/. "$mods/kit-pane"/ || die "沒辦法複製到 $mods/kit-pane"
+            printf '{ "place": "none", "title": "Pane header (kit)" }\n' > "$mods/kit-pane/mod.json"; : > "$mods/kit-pane/.kit-panel"
+        fi
         printf '{ "place": "%s", "size": 420, "title": "kit" }\n' "$place" > "$dest/mod.json"
         env=""; first=1
         if [ -n "$keep" ]; then
@@ -1675,10 +1681,11 @@ cmd_herdr_panel() {
             [ -f "$dest/.kit-panel" ] || die "$dest 不是 kit 放的，不動它"
             rm -rf "$dest"
         fi
+        [ -f "$mods/kit-pane/.kit-panel" ] && rm -rf "$mods/kit-pane"
         for lf in "$hh"/layouts/*.json; do
             [ -f "$lf" ] || continue
             case " $SHIPPED_LAYOUTS " in *" $(basename "$lf" .json) "*) continue;; esac
-            grep -q '"kit-toggle"\|"kit-panel"\|"mod": "kit"' "$lf" || continue
+            grep -q '"kit-toggle"\|"kit-panel"\|"mod": "kit"\|"mod": "kit-pane"' "$lf" || continue
             tmp=$(mktemp "$lf.kit.XXXXXX")
             layout_without_panel "$lf" "$tmp" || { rm -f "$tmp"; warn "沒辦法讀 ${lf}，沒改它"; continue; }
             swap_layout "$tmp" "$lf"

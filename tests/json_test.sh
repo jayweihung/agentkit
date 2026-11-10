@@ -133,6 +133,19 @@ sys.stdout.write(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
 P
 if [ $rc -eq 0 ] && cmp -s "$T/a" "$T/p"; then ok; else bad "rmwhere/addnear"; diff "$T/a" "$T/p" | head -20; fi
 
+# swapwhere: change KEY's value wherever it is STRING (a layout's pane header: "pane" -> "kit-pane"), and back
+cat > "$T/s.json" <<'J'
+{"children":[{"content":{"tab":"active","pane":{"header":{"content":{"mod":"pane"},"reveal":"always"}}}},{"content":{"mod":"panes"}},{"x":{"content":{"mod":"pane"}}}]}
+J
+printf 'swapwhere\tcontent.mod\tpane\tkit-pane\n' > "$T/ops7"
+LC_ALL=C $AWK -f "$JA" -v ops="$T/ops7" "$T/s.json" > "$T/s2"; rc=$?
+v=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]))["children"];print(d[0]["content"]["pane"]["header"]["content"]["mod"],d[1]["content"]["mod"],d[2]["x"]["content"]["mod"])' "$T/s2")
+[ $rc -eq 0 ] && [ "$v" = "kit-pane panes kit-pane" ] && ok || bad "swapwhere got: $v"
+printf 'swapwhere\tcontent.mod\tkit-pane\tpane\n' > "$T/ops8"
+LC_ALL=C $AWK -f "$JA" -v ops="$T/ops8" "$T/s2" > "$T/s3"
+python3 -c 'import json,sys;sys.stdout.write(json.dumps(json.load(open(sys.argv[1])),indent=2)+"\n")' "$T/s.json" > "$T/s4"
+cmp -s "$T/s3" "$T/s4" && ok || bad "swapwhere back"
+
 # empty file counts as {}
 : > "$T/empty.json"
 printf 'set\ta\t1\n' > "$T/ops3"

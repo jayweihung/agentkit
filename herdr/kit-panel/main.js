@@ -6,14 +6,15 @@
 //   kit list --json --dir <folder> --pid <pid>   what there is, what is in use, what the folder adds
 //   kit add|rm <kind> <name>
 //   kit sync             update                                kit run <agent> --tool <tool>  (in a new tab)
-// Roles (props.role): the panel (default) and "toggle", the tab-bar button that shows or hides "kit-panel".
+// Roles (props.role): the panel (default), "toggle" (the tab-bar button that shows or hides "kit-panel") and
+// "pane": a popup opened by the kit button in an agent's pane header (mod kit-pane) for that one agent (props.target).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, focused, terminals, spaces, props as blockProps } from "herdr";
+import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, focused, terminals, spaces, closeOverlay, props as blockProps } from "herdr";
 
 const TOGGLE = "kit-toggle", PANEL = "kit-panel";
 const SHIPPED = ["main", "terminals", "win98"]; // Herdr's own layouts: read-only, so "放進上排" clones one first
-const DATA = "kit.data.v2", BUSY = "kit.busy", MSG = "kit.msg", TARGET = "kit.target";
+const DATA = "kit.data.v2", BUSY = "kit.busy", MSG = "kit.msg", TARGET = "kit.target", PANE_CACHE = "kit.pane.v1", PANE_DATA = "kit.pane.data.v1";
 const TOGGLE_NODE = { id: TOGGLE, type: "block", content: { mod: "kit", props: { role: "toggle" } }, size: { px: 56 } };
 const PANEL_NODE = { id: PANEL, type: "column", children: [{ id: "kit", type: "block", content: { mod: "kit" } }],
   size: { px: 420 }, min: 320, max: 800 };
@@ -23,6 +24,7 @@ const KINDS = [
   { kind: "mcp", title: "MCP" },
   { kind: "agent", title: "Agents" },
 ];
+const POPUP_H = 560; // the "pane" popup (kit-pane opens it with this height too)
 const TOOL_NAMES = { claude: "Claude", codex: "Codex", omp: "omp" };
 const STATUS = { required: "團隊必備", used: "在用", unused: "沒用" };
 
@@ -120,13 +122,21 @@ function icon(p, size, color) {
 export default class KitPanel extends View {
   init(_p, cx) {
     const role = blockProps()?.role;
-    this.role = role === "toggle" ? role : "panel";
+    this.role = role === "toggle" || role === "pane" ? role : "panel";
     this.filter = "";
     this.tool = this.load("tool") || "claude";
     this.folded = {};
     try { this.folded = JSON.parse(this.load("folded") || "{}"); } catch { this.folded = {}; }
     // Both the button and the panel keep the shared list fresh (a hidden panel may not have started yet);
     // the background sync Claude starts may change things, so look again every minute.
+    if (this.role === "pane") {
+      // one agent, the one whose header button was clicked: its own list, not the panel's shared one
+      this.target = blockProps()?.target ?? currentTarget(null);
+      this.refresh(cx);
+      // until its list is there, look again (an overlay may not redraw on its own when shared changes)
+      cx.timer.every(500, (cx) => { if (!this.data) cx.notify(); });
+      return;
+    }
     this.target = currentTarget(shared(TARGET) ?? null);
     const stale = () => !this.data || this.data.key !== this.target.key || Date.now() - (this.data.at ?? 0) > 50000;
     if (this.role === "panel" || stale()) this.refresh(cx);
@@ -141,12 +151,18 @@ export default class KitPanel extends View {
   load(k) { try { return localStorage.getItem(`kit.${k}`); } catch { return null; } }
   save(k, v) { try { localStorage.setItem(`kit.${k}`, v); } catch {} }
 
-  get data() { return shared(DATA) ?? null; }
+  // the popup's list lives in shared too (per agent): it shows at once next time, and a stuck load can be seen from outside
+  get data() { return this.role === "pane" ? (shared(PANE_DATA) ?? {})[this.target?.key] ?? null : shared(DATA) ?? null; }
   get busy() { return shared(BUSY) ?? null; }
 
   refresh(cx) {
     const tg = this.target ?? currentTarget(null);
-    cx.spawn(async (cx) => { setShared(DATA, await loadFor(tg)); cx.notify(); });
+    cx.spawn(async (cx) => {
+      let d;
+      try { d = await loadFor(tg); } catch (e) { d = { error: `讀不到：${e?.message ?? e}`, key: tg.key, at: Date.now() }; }
+      if (this.role === "pane") setShared(PANE_DATA, { ...(shared(PANE_DATA) ?? {}), [tg.key]: d }); else setShared(DATA, d);
+      cx.notify();
+    });
   }
 
 
@@ -161,6 +177,11 @@ export default class KitPanel extends View {
       const text = clean([r.out, r.err].filter(Boolean).join("\n"));
       setShared(MSG, { ok: r.code === 0, label, text: text || (r.code === 0 ? "完成" : `失敗（${r.code}）`), at: Date.now() });
       setShared(BUSY, null);
+      // the pane headers' counts are out of date now: they ask kit again on their next look
+      const pc = shared(PANE_CACHE);
+      if (pc) setShared(PANE_CACHE, Object.fromEntries(Object.entries(pc).map(([k, v]) => [k, { ...v, at: 0, busy: false }])));
+      const sd = shared(DATA);
+      if (this.role === "pane" && sd) setShared(DATA, { ...sd, at: 0 });
       this.refresh(cx);
       cx.notify();
     });
@@ -203,9 +224,11 @@ export default class KitPanel extends View {
   render(cx) {
     if (this.role === "toggle") return this.renderToggle();
     const t = theme(), z = fs();
-    const root = v_flex().id("kit-root").size_full().bg(t.surface).text_size(z).text_color(t.foreground);
+    // a popup is as tall as its content, and the list (flex_1) has none of its own: give the popup a height
+    const root = v_flex().id("kit-root").size_full().bg(t.surface).text_size(z).text_color(t.foreground)
+      .when(this.role === "pane", (el) => el.h(POPUP_H).rounded(8));
     root.child(this.header(t, z));
-    if (!find(layout(), TOGGLE)) root.child(this.moveBanner(t, z));
+    if (this.role === "panel" && !find(layout(), TOGGLE)) root.child(this.moveBanner(t, z));
     const d = this.data, msg = shared(MSG);
     if (msg) root.child(this.message(t, z, msg));
     if (!d) return root.child(div().p(14).text_color(t.muted).child("讀取中…"));
@@ -233,7 +256,8 @@ export default class KitPanel extends View {
         .child(div().truncate().font_semibold().child(tg.title || "這台電腦"))
         .child(div().truncate().text_size(z - 1.5).text_color(t.muted).child(where)))
       .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
-      .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
+      .when(this.role === "pane", (el) => el.child(this.btn(t, z, "close", "✕", { small: true, on: () => closeOverlay(blockProps()?.overlay) })))
+      .when(this.role !== "pane" && inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
   }
 
   moveBanner(t, z) {
@@ -281,24 +305,15 @@ export default class KitPanel extends View {
     const more = items.filter((i) => i.kind !== "agent" && i.status === "unused");
     const news = more.filter((i) => i.new).length;
     if (more.length) {
-      const folded = this.folded.more ?? true;
+      // the popup is about this one agent: what it could add is the point, so open it there
+      const folded = this.role === "pane" ? (this.folded.paneMore ?? false) : (this.folded.more ?? true);
       body.child(div().mt(6).border_t(1).border_color(t.border));
-      body.child(this.secHead(t, z, "more", `可以加上的（${more.length}）`, folded, news ? `${news} 個新的` : ""));
+      body.child(this.secHead(t, z, this.role === "pane" ? "paneMore" : "more", `可以加上的（${more.length}）`, folded, news ? `${news} 個新的` : ""));
       if (!folded) body.child(v_flex().gap(2)
         .child(div().pl(18).text_size(z - 1.5).text_color(t.muted).child(`加上後，${d.machine ?? "這台電腦"} 這個帳號的每個 agent 都會有。來源：${(d.sources ?? []).map((s) => s.name).join("、")}`))
         .children(more.map((i) => this.row(t, z, i))));
     }
-    // 3. kit's agents: start one here
-    const ags = items.filter((i) => i.kind === "agent");
-    if (ags.length) {
-      const folded = this.folded.agents ?? true;
-      body.child(div().mt(6).border_t(1).border_color(t.border));
-      body.child(this.secHead(t, z, "agents", `用 kit 開新的 agent（${ags.length}）`, folded, ""));
-      if (!folded) {
-        if (tools.length > 1) body.child(this.toolPicker(t, z, tools));
-        body.child(v_flex().gap(2).children(ags.map((i) => this.row(t, z, i))));
-      }
-    }
+    // kit's agents (hello, ping, …) are not here: they get their own Agent panel
     if (!items.length && !here.length) body.child(div().text_color(t.muted).child("來源裡還沒有東西。"));
     return body;
   }
