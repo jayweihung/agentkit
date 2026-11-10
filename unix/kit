@@ -332,7 +332,12 @@ sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin
         p=$(find_item skill "$n") || { warn "skill $n not found in any source"; continue; }
         p=$(dirname "$p"); dst="$dir/$n"; h=$(dir_hash "$p")
         old=$(state_get "$kind" "$n")
-        if [ -e "$dst" ] && [ -z "$old" ]; then warn "$dst 已經存在，不是 kit 放的，跳過"; continue; fi
+        if [ -e "$dst" ] && [ -z "$old" ]; then
+            # someone else's folder: say it once, not at every sync
+            [ -n "$(state_get skipped "$dst")" ] || { warn "$dst 已經存在，不是 kit 放的，跳過（只提醒這一次）"; state_set skipped "$dst" 1; }
+            continue
+        fi
+        state_del skipped "$dst"
         if [ -n "$old" ] && [ -d "$dst" ] && [ "$(dir_hash "$dst")" != "$old" ] && [ -z "${FORCE:-}" ]; then
             warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉）"; continue
         fi

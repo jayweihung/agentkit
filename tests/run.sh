@@ -109,6 +109,17 @@ check "new item announced" 'echo "$out" | grep -q "新： skill:team-build"'
 out=$(kit sync 2>&1)
 check "announced only once" '! echo "$out" | grep -q "新："'
 
+# ---------- a skill folder that is not kit's ----------
+mkdir -p "$TEAM/skills/clash" "$HOME/.claude/skills/clash"
+printf -- '---\nname: clash\ndescription: team\n---\nteam clash\n' > "$TEAM/skills/clash/SKILL.md"; echo "mine" > "$HOME/.claude/skills/clash/SKILL.md"
+out=$(kit add skill clash 2>&1)
+check "someone else's skill folder: warned, not overwritten" 'echo "$out" | grep -q "不是 kit 放的" && [ "$(cat "$HOME/.claude/skills/clash/SKILL.md")" = mine ]'
+out=$(kit sync 2>&1)
+check "... and warned only once" '! echo "$out" | grep -q "不是 kit 放的"'
+rm -rf "$HOME/.claude/skills/clash"; kit sync >/dev/null 2>&1
+check "... kit puts it there once the folder is gone" 'grep -q "team clash" "$HOME/.claude/skills/clash/SKILL.md"'
+kit rm skill clash >/dev/null 2>&1; rm -rf "$TEAM/skills/clash"
+
 # ---------- list ----------
 out=$(kit list 2>&1)
 check "list marks required" 'echo "$out" | grep -q "^R  rule:security"'

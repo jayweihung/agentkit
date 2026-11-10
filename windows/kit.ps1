@@ -538,7 +538,12 @@ function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills
         $p = Find-Item 'skill' $n; if (-not $p) { Warn "skill $n not found in any source"; continue }
         $src = Split-Path -Parent $p; $dst = Join-Path $dir $n; $h = Dir-Hash $src
         $old = State-Get $kind $n
-        if ((Test-Path -LiteralPath $dst) -and -not $old) { Warn "$dst 已經存在，不是 kit 放的，跳過"; continue }
+        if ((Test-Path -LiteralPath $dst) -and -not $old) {
+            # someone else's folder: say it once, not at every sync
+            if ($null -eq (State-Get 'skipped' $dst)) { Warn "$dst 已經存在，不是 kit 放的，跳過（只提醒這一次）"; State-Set 'skipped' $dst 1 }
+            continue
+        }
+        if ($null -ne (State-Get 'skipped' $dst)) { State-Del 'skipped' $dst }
         if ($old -and (Test-Path -LiteralPath $dst) -and (Dir-Hash $dst) -ne $old -and -not $script:Force) {
             Warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉）"; continue
         }

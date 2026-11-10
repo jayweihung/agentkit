@@ -140,6 +140,16 @@ Check 'new item announced' { $out.Contains('新： skill:team-build') }
 Kit sync
 Check 'announced only once' { -not $out.Contains('新：') }
 
+# ---------- a skill folder that is not kit's ----------
+W "$TEAM/skills/clash/SKILL.md" "---`nname: clash`ndescription: team`n---`nteam clash`n"; W "$H/.claude/skills/clash/SKILL.md" "mine`n"
+Kit add skill clash
+Check "someone else's skill folder: warned, not overwritten" { $out.Contains('不是 kit 放的') -and (ReadT "$H/.claude/skills/clash/SKILL.md") -eq "mine`n" }
+Kit sync
+Check '... and warned only once' { -not $out.Contains('不是 kit 放的') }
+Remove-Item -Recurse -Force "$H/.claude/skills/clash"; Kit sync
+Check '... kit puts it there once the folder is gone' { (ReadT "$H/.claude/skills/clash/SKILL.md").Contains('team clash') }
+Kit rm skill clash; Remove-Item -Recurse -Force "$TEAM/skills/clash"
+
 # ---------- list ----------
 Kit list
 Check 'list marks required' { $out -match '(?m)^R  rule:security' }
