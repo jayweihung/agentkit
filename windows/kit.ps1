@@ -1005,11 +1005,13 @@ function Cmd-DiffUpdate([string]$mode, $rest) {
 $script:Problems = $null
 $script:CheckCi = $false
 $script:Quiet2 = $false
-function Problem([string]$msg) { $script:Problems.Add($msg); if (-not $script:Quiet2) { [Console]::Error.WriteLine("kit check: $msg") } }
+$script:ProblemTag = 'kit check'
+function Problem([string]$msg) { $script:Problems.Add($msg); if (-not $script:Quiet2) { [Console]::Error.WriteLine("$($script:ProblemTag): $msg") } }
 function Is-Binary([string]$f) { $b = [IO.File]::ReadAllBytes($f); [Array]::IndexOf($b, [byte]0) -ge 0 }
-function Private-Words {
+function Private-Words($extra) { # the private word lists of this machine, the sources and the folders in $extra
     $files = @(Join-Path $KitConf 'private-words.txt')
     if (Test-Path -LiteralPath $Machine) { $files += @(foreach ($d in Src-Dirs) { Join-Path $d 'private-words.txt' }) }
+    foreach ($d in @($extra | Where-Object { $_ })) { $files += @(Join-Path $d 'private-words.txt') }
     Uniq @(foreach ($f in $files) { if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($l in (Read-Text $f) -split "`n") { ($l -replace '#.*$', '').Trim() } } })
 }
 function Has-Word([string]$text, $words) { foreach ($w in $words) { if ($text.IndexOf($w, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true } }; $false }
@@ -1128,6 +1130,137 @@ function Cmd-Check($rest) {
     else { [Console]::Error.WriteLine("kit check：$($script:Problems.Count) 個問題"); exit 1 }
 }
 
+# ---------- export-self: a clean copy of kit's own source, for a company git server ----------
+function Kit-Repo { # the clone kit was installed from, else the repo this kit runs from
+    $rp = Join-Path $KitLib '.repo'
+    if (Test-Path -LiteralPath $rp -PathType Leaf) {
+        $d = (Read-Text $rp).Trim()
+        if ($d -and (Test-Path -LiteralPath (Join-Path $d 'unix/kit') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $d 'windows/kit.ps1') -PathType Leaf)) { return $d }
+    }
+    $d = $KitLib
+    while ($d) {
+        if ((Test-Path -LiteralPath (Join-Path $d 'unix/kit') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $d 'windows/kit.ps1') -PathType Leaf)) { return $d }
+        $p = Split-Path -Parent $d
+        if (-not $p -or $p -eq $d) { break }
+        $d = $p
+    }
+    $null
+}
+function Export-Skip([string]$rel) { # files that stay out of the export
+    if ("/$rel".Contains('/.github/')) { return $true }
+    $b = ($rel -split '/')[-1]
+    ($b -match '^(README|CHANGELOG)') -or $b -eq 'private-words.txt'
+}
+function Install-Md { # INSTALL.md of the export (no URLs; the same text as unix/kit writes)
+    $t = @'
+# 安裝 kit
+
+先把公司的 agentkit repo clone 下來（網址問管理這個 repo 的人），再照你的系統做。
+
+## Windows
+
+在 clone 的資料夾裡打：
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File windows\install.ps1
+
+不用管理員權限。開新的終端機後，在 cmd 和 PowerShell 都能打 `kit`。
+
+## Linux / Mac
+
+需要 bash、awk、git。Mac 還沒有 git 的話，先打 `xcode-select --install`。
+在 clone 的資料夾裡打：
+
+    sh unix/install.sh
+
+開新的終端機後就能打 `kit`。
+
+## 裝好以後
+
+    kit init <團隊來源的網址>
+    kit help
+'@
+    ($t -replace "`r`n", "`n") + "`n"
+}
+function Mask-Path([string]$rel, $words) { # each part of the path with a word in it shown as <不公開>
+    (@(foreach ($p in $rel.Split('/')) { if (Has-Word $p $words) { '<不公開>' } else { $p } })) -join '/'
+}
+function Cmd-ExportSelf($rest) {
+    $out = ''; $ver = ''
+    $a = @($rest | Where-Object { $null -ne $_ })
+    for ($i = 0; $i -lt $a.Count; $i++) {
+        $x = [string]$a[$i]
+        if ($x -eq '--version') { if ($i + 1 -ge $a.Count -or -not $a[$i + 1]) { Die '--version 後面要接版本，例：0.4.0+gitea.12' }; $i++; $ver = [string]$a[$i] }
+        elseif ($x.StartsWith('-')) { Die "不認得 $x" }
+        elseif ($out) { Die "多了一個參數：$x" }
+        else { $out = $x }
+    }
+    if (-not $out) { Die '用法：kit export-self <資料夾> [--version <版本>]' }
+    if ($ver -and $ver -notmatch '^[A-Za-z0-9.+_-]+$') { Die "版本只能用英文、數字和 . + - _：$ver" }
+    $repo = Kit-Repo
+    if (-not $repo) { Die '找不到 kit 的原始碼（有 unix/kit 和 windows/kit.ps1 的 git clone）' }
+    [void](Git-Safe -C $repo rev-parse --git-dir)
+    if ($LASTEXITCODE -ne 0) { Die "$repo 不是 git repo" }
+    if (Test-Path -LiteralPath $out) {
+        $e = Get-Item -LiteralPath $out -Force
+        if (-not $e.PSIsContainer -or (Is-Link $e) -or @(Get-ChildItem -LiteralPath $out -Force).Count -gt 0) { Die "$out 已經存在而且不是空的；請給一個新的資料夾" }
+    }
+    Ensure-Dir $out
+    $out = Full-Path $out
+    $dirty = @(Git-Safe -C $repo status --porcelain --untracked-files=no | Where-Object { $_ })
+    if ($dirty.Count -gt 0) { Warn "$repo 有還沒 commit 的改動，匯出的是資料夾裡現在的檔案" }
+
+    $script:Problems = New-Object System.Collections.Generic.List[string]
+    $script:Quiet2 = $false; $script:ProblemTag = 'kit export-self'
+    # only files git tracks (the index), taken from the working folder
+    $raw = (@(Git-Safe -C $repo -c core.quotepath=off ls-files -s -z) -join "`n")
+    if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $out -Recurse -Force; Die "沒辦法讀 $repo 的檔案清單" }
+    foreach ($line in $raw.Split([char]0)) {
+        if (-not $line) { continue }
+        $tab = $line.IndexOf("`t"); if ($tab -lt 0) { continue }
+        $mode = $line.Substring(0, $line.IndexOf(' ')); $rel = $line.Substring($tab + 1)
+        if (Export-Skip $rel) { continue }
+        if ($mode -eq '120000') { Problem "${rel}: 不能放捷徑（symlink）"; continue }
+        if ($mode -eq '160000') { Problem "${rel}: 不能用 git submodule"; continue }
+        $src = Join-Path $repo $rel
+        if (-not (Test-Path -LiteralPath $src -PathType Leaf) -or (Is-Link (Get-Item -LiteralPath $src -Force))) { Warn "$rel 在 git 裡有、資料夾裡沒有，跳過"; continue }
+        $dst = Join-Path $out $rel
+        Ensure-Dir (Split-Path -Parent $dst)
+        [IO.File]::Copy($src, $dst, $true)
+        if ($mode -eq '100755' -and -not $script:OnWindows) { & chmod 755 $dst }
+    }
+    Write-Text (Join-Path $out 'INSTALL.md') (Install-Md)
+    if ($ver) { Write-Text (Join-Path $out 'VERSION') "$ver`n" }
+
+    # nothing that points back to GitHub or names private things; text files only
+    $gh = @(('github' + '.com'), ('github' + 'usercontent'), ('noreply' + '.github'))   # split so the export does not flag itself
+    $pw = @(Private-Words @($repo))
+    $files = [string[]]@(Walk-Tree $out | Where-Object { -not $_.PSIsContainer } | ForEach-Object { Rel-Path $out $_.FullName })
+    [Array]::Sort($files, [StringComparer]::Ordinal)
+    $bad = '\.(exe|dll|so|dylib|msi|bin|jar|class|pyc|o|a|lib|zip|gz|tgz|7z|rar)$'
+    foreach ($rel in $files) {
+        $f = Join-Path $out $rel
+        if ($rel -match $bad) { Problem "${rel}: 不能放執行檔或壓縮檔"; continue }
+        if ((Get-Item -LiteralPath $f -Force).Length -gt 0 -and (Is-Binary $f)) { Problem "${rel}: 只能放文字檔"; continue }
+        $lines = (Read-Text $f) -split "`n"
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if (Has-Word $lines[$i] $gh) { Problem "${rel}:$($i + 1): 有 GitHub 的字" }
+        }
+        if ($pw.Count -gt 0) { for ($i = 0; $i -lt $lines.Count; $i++) { if (Has-Word $lines[$i] $pw) { Problem "${rel}:$($i + 1): 有不該公開的字" } } }
+    }
+    foreach ($rel in $files) { if (Has-Word $rel $gh) { Problem "$(Mask-Path $rel $gh): 檔名有 GitHub 的字" } }
+    if ($pw.Count -gt 0) { foreach ($rel in $files) { if (Has-Word $rel $pw) { Problem "$(Mask-Path $rel $pw): 檔名有不該公開的字" } } }
+    $script:ProblemTag = 'kit check'
+    if ($script:Problems.Count -gt 0) {
+        Remove-Item -LiteralPath $out -Recurse -Force
+        Die "匯出失敗：$($script:Problems.Count) 個問題，已刪掉 ${out}。在 kit 的 repo 改好再匯出一次"
+    }
+    if (-not $ver) { $vf = Join-Path $out 'VERSION'; if (Test-Path -LiteralPath $vf) { $ver = (Read-Text $vf).Trim() } }
+    if (-not $ver) { $ver = '（沒有 VERSION）' }
+    Say "kit：已匯出 $($files.Count) 個檔案到 ${out}（版本 ${ver}）"
+    Say '下一步（在公司）：在 Gitea 的 agentkit repo clone 裡，刪掉 .git 以外的舊檔案，'
+    Say "  放進這個資料夾的內容後 commit，訊息只寫：kit ${ver}"
+}
+
 function Usage {
     Say @'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -1144,6 +1277,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit diff   [種類] <名字> --from 本機資料夾   比較
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
+  kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
 
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
@@ -1171,6 +1305,7 @@ try {
         'diff' { Cmd-DiffUpdate 'diff' $rest }
         'update' { Cmd-DiffUpdate 'update' $rest }
         'check' { Cmd-Check $rest }
+        'export-self' { Cmd-ExportSelf $rest }
         'uninstall' { Cmd-Uninstall $rest }
         'self-update' { Cmd-SelfUpdate }
         { $_ -in '--version', 'version' } { Say "kit $KitVersion" }

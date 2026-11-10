@@ -162,8 +162,8 @@ check "hook runs at most every 10 minutes" '! grep -q "second change" "$HOME/.cl
 kit sync >/dev/null 2>&1
 
 # ---------- allowed_hosts ----------
-out=$(kit init "$TEAM" https://github.com/someone/agentkit-library.git 2>&1); rc=$?
-check "host outside allowed_hosts refused" '[ $rc -ne 0 ] && echo "$out" | grep -q "github.com 不在允許的主機清單"'
+out=$(kit init "$TEAM" https://public-git.example/someone/agentkit-library.git 2>&1); rc=$?
+check "host outside allowed_hosts refused" '[ $rc -ne 0 ] && echo "$out" | grep -q "public-git.example 不在允許的主機清單"'
 kit init "$TEAM" >/dev/null 2>&1
 
 # ---------- new / diff / update / check (authoring, local only) ----------
@@ -194,7 +194,7 @@ out=$(kit new skill gerrit-review 2>&1); rc=$?
 check "new refuses a name another source has" '[ $rc -ne 0 ] && echo "$out" | grep -q 名字重複'
 out=$(kit new skill Bad_Name 2>&1); rc=$?
 check "new refuses bad names" '[ $rc -ne 0 ]'
-for u in https://github.com/x/y git@github.com:x/y.git; do
+for u in https://public-git.example/x/y git@public-git.example:x/y.git; do
     out=$(kit new skill zz --from "$u" 2>&1); rc=$?
     check "--from refuses $u" '[ $rc -ne 0 ] && echo "$out" | grep -q 本機'
 done
@@ -242,6 +242,38 @@ git -C "$AU" -c user.name=a -c user.email=me@corp.example commit -q --amend --re
 out=$(kit check --ci 2>&1); rc=$?
 check "check --ci passes" '[ $rc -eq 0 ]'
 cd "$T"
+
+# ---------- export-self (a fake kit repo; the private word list of this HOME is still set) ----------
+FK="$T/fakekit"; EX="$T/export"; EX2="$T/export2"
+mkdir -p "$FK/unix" "$FK/windows" "$FK/.github/workflows" "$FK/tests" "$FK/docs"
+cp "$HERE/../unix/kit" "$HERE/../unix/json.awk" "$HERE/../unix/yaml.awk" "$FK/unix/"; cp "$HERE/../windows/kit.ps1" "$FK/windows/"
+echo 0.3.0 > "$FK/VERSION"; echo "# kit" > "$FK/README.md"; echo notes > "$FK/CHANGELOG.md"; echo "on: push" > "$FK/.github/workflows/ci.yml"
+echo "echo test" > "$FK/tests/t.sh"; echo "* text=auto" > "$FK/.gitattributes"; echo "*.tmp" > "$FK/.gitignore"; echo guide > "$FK/docs/guide.md"
+echo repoword > "$FK/private-words.txt"
+fkcommit() { git -C "$FK" add -A && git -C "$FK" -c user.name=t -c user.email=t@t commit -qm x; }
+git -C "$FK" init -q; fkcommit
+echo "not tracked" > "$FK/untracked.md"
+out=$("$FK/unix/kit" export-self "$EX" --version 0.4.0+gitea.12 2>&1); rc=$?
+check "export-self succeeds, says the commit message" '[ $rc -eq 0 ] && echo "$out" | grep -q "kit 0.4.0+gitea.12"'
+check "export-self drops README, CHANGELOG, .github, private-words.txt" '[ ! -e "$EX/README.md" ] && [ ! -e "$EX/CHANGELOG.md" ] && [ ! -e "$EX/.github" ] && [ ! -e "$EX/private-words.txt" ]'
+check "export-self keeps tests, .gitattributes, .gitignore, kit" '[ -f "$EX/tests/t.sh" ] && [ -f "$EX/.gitattributes" ] && [ -f "$EX/.gitignore" ] && [ -x "$EX/unix/kit" ] && [ -f "$EX/windows/kit.ps1" ]'
+check "export-self leaves out untracked files" '[ ! -e "$EX/untracked.md" ]'
+check "export-self writes VERSION" '[ "$(cat "$EX/VERSION")" = 0.4.0+gitea.12 ]'
+check "export-self INSTALL.md, no URL" 'grep -q "sh unix/install.sh" "$EX/INSTALL.md" && grep -qF "windows\\install.ps1" "$EX/INSTALL.md" && ! grep -qE "://|@[A-Za-z0-9.-]+:" "$EX/INSTALL.md"'
+out=$("$FK/unix/kit" export-self "$EX" 2>&1); rc=$?
+check "export-self stops when the folder is not empty" '[ $rc -ne 0 ] && echo "$out" | grep -q 不是空的 && [ -f "$EX/VERSION" ]'
+gh='github''.com'
+mkdir "$EX2"; echo "see https://$gh/x" >> "$FK/docs/guide.md"; fkcommit
+out=$("$FK/unix/kit" export-self "$EX2" 2>&1); rc=$?
+check "export-self: GitHub word fails, folder deleted" '[ $rc -ne 0 ] && echo "$out" | grep -q "docs/guide.md:2: 有 GitHub 的字" && [ ! -e "$EX2" ]'
+echo guide > "$FK/docs/guide.md"; echo "by TopSecretName" > "$FK/tests/t.sh"; echo x > "$FK/docs/my-repoword.md"; printf '\0\1' > "$FK/docs/logo.png"; fkcommit
+out=$("$FK/unix/kit" export-self "$EX2" 2>&1); rc=$?
+check "export-self: private words (this machine and the repo's list), file names, binaries" '[ $rc -ne 0 ] && echo "$out" | grep -q "tests/t.sh:1: 有不該公開的字" && echo "$out" | grep -q "docs/<不公開>: 檔名有不該公開的字" && echo "$out" | grep -q "docs/logo.png: 只能放文字檔" && [ ! -e "$EX2" ]'
+check "export-self never prints the private word" '! echo "$out" | grep -qi -e topsecret -e repoword'
+git -C "$FK" rm -q docs/my-repoword.md docs/logo.png; echo "echo test" > "$FK/tests/t.sh"; fkcommit
+mkdir -p "$T/inst"; cp "$HERE/../unix/kit" "$HERE/../unix/json.awk" "$HERE/../unix/yaml.awk" "$T/inst/"; echo "$FK" > "$T/inst/.repo"
+out=$("$T/inst/kit" export-self "$EX2" 2>&1); rc=$?
+check "export-self from an installed kit uses the clone in .repo" '[ $rc -eq 0 ] && [ "$(cat "$EX2/VERSION")" = 0.3.0 ] && [ -f "$EX2/docs/guide.md" ]'
 
 # ---------- uninstall ----------
 kit add skill gerrit-review >/dev/null 2>&1; kit add mcp gerrit >/dev/null 2>&1
