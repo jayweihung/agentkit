@@ -462,6 +462,9 @@ check "installed kit has the ci template" '"$HOME/.local/bin/kit" ci-template | 
 ( cd "$R" && echo 0.1.1 > VERSION && git -c user.name=t -c user.email=t@t commit -qam v2 )
 out=$("$HOME/.local/bin/kit" self-update 2>&1)
 check "self-update pulls new version" '"$HOME/.local/bin/kit" --version | grep -q "kit 0.1.1"'
+check "self-update shows the commit" 'echo "$out" | grep -qF "已更新到 0.1.1（$(git -C "$R" rev-parse --short=12 HEAD)）"'
+out=$("$HOME/.local/bin/kit" self-update 2>&1)
+check "self-update with nothing new says so" 'echo "$out" | grep -q "已經是最新"'
 "$HOME/.local/bin/kit" uninstall --self >/dev/null 2>&1
 # a new Mac: zsh, no startup files at all
 H2="$T/home2"; mkdir -p "$H2"

@@ -967,12 +967,14 @@ function Cmd-SelfUpdate { # pull the clone kit was installed from, then reinstal
     if (-not (Test-Path -LiteralPath (Join-Path $repo '.git'))) { Die "找不到 clone：$repo" }
     $url = (Git-Safe -C $repo remote get-url origin | Select-Object -First 1)
     if ($LASTEXITCODE -eq 0 -and $url) { Check-Host $url }
+    $before = "$(& git -C $repo rev-parse --short=12 HEAD 2>$null)".Trim()
     [void](Git-Safe -C $repo pull --ff-only -q)
     if ($LASTEXITCODE -ne 0) { Die "沒辦法更新 ${repo}（沒網路，或 clone 裡有自己的改動？）" }
     $exe = (Get-Process -Id $PID).Path
     & $exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'windows/install.ps1') -Quiet
     if ($LASTEXITCODE -ne 0) { Die '重新安裝失敗' }
-    Say "kit：已更新到 $((Read-Text (Join-Path $KitLib 'VERSION')).Trim())"
+    $ver = (Read-Text (Join-Path $KitLib 'VERSION')).Trim(); $now = "$(& git -C $repo rev-parse --short=12 HEAD 2>$null)".Trim()
+    if ($before -and $before -eq $now) { Say "kit：已經是最新（$ver，$now）" } else { Say "kit：已更新到 $ver（$now）" }
 }
 # ---------- authoring: new / diff / update (local folders only, never the network) ----------
 $script:Kinds = @('rule', 'skill', 'mcp', 'agent')

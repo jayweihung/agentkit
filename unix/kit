@@ -802,6 +802,7 @@ cmd_self_update() { # pull the clone kit was installed from, then reinstall
     local repo; repo=$(cat "$KIT_LIB/.repo" 2>/dev/null) || die "不知道 kit 是從哪個 clone 裝的；請到 clone 裡 git pull 後重跑 unix/install.sh"
     [ -d "$repo/.git" ] || die "找不到 clone：$repo"
     local url; url=$(git -C "$repo" remote get-url origin 2>/dev/null) && check_host "$url"
+    local before; before=$(git -C "$repo" rev-parse --short=12 HEAD 2>/dev/null)
     if [ -n "$M_APPROVALS" ]; then
         [ -n "$url" ] || die "$repo 沒有 origin"
         local sha; sha=$(approved_sha "$(src_name "$url")") || die "kit 本身（$(src_name "$url")）沒有有效的核准，不更新"
@@ -811,7 +812,9 @@ cmd_self_update() { # pull the clone kit was installed from, then reinstall
         git_safe -C "$repo" pull --ff-only -q || die "沒辦法更新 ${repo}（沒網路，或 clone 裡有自己的改動？）"
     fi
     sh "$repo/unix/install.sh" --quiet || die "重新安裝失敗"
-    say "kit：已更新到 $(cat "$KIT_LIB/VERSION" 2>/dev/null)"
+    local now; now=$(git -C "$repo" rev-parse --short=12 HEAD 2>/dev/null)
+    if [ -n "$before" ] && [ "$before" = "$now" ]; then say "kit：已經是最新（$(cat "$KIT_LIB/VERSION" 2>/dev/null)，${now}）"
+    else say "kit：已更新到 $(cat "$KIT_LIB/VERSION" 2>/dev/null)（${now}）"; fi
 }
 
 # ---------- authoring: new / diff / update (local folders only, never the network) ----------
