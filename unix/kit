@@ -41,8 +41,8 @@ json_edit() { # json_edit FILE OPSFILE : edit FILE, keep a backup
     # Other programs (a running Claude) may write FILE at any time, so:
     # edit a snapshot, and only swap the result in (atomic rename) if FILE did
     # not change meanwhile; otherwise try again.
-    local f=$1 ops=$2 snap tmp try
-    [ -f "$f" ] || printf '{}\n' > "$f"
+    local f=$1 ops=$2 snap tmp try new=0
+    [ -f "$f" ] || { printf '{}\n' > "$f"; new=1; }
     snap=$(mktemp "$f.kit.XXXXXX") || die "cannot write next to $f"
     tmp=$(mktemp "$f.kit.XXXXXX") || { rm -f "$snap"; die "cannot write next to $f"; }
     for try in 1 2 3 4 5; do
@@ -52,7 +52,7 @@ json_edit() { # json_edit FILE OPSFILE : edit FILE, keep a backup
             rm -f "$snap" "$tmp"; die "沒辦法更新 ${f}（檔案沒有被改動）"
         fi
         if cmp -s "$snap" "$f"; then
-            cp -p "$snap" "$f.kit-backup" 2>/dev/null
+            [ $new = 1 ] || cp -p "$snap" "$f.kit-backup" 2>/dev/null
             if [ -L "$f" ]; then cat "$tmp" > "$f"; rm -f "$tmp"; else mv -f "$tmp" "$f"; fi
             rm -f "$snap"; return 0
         fi
