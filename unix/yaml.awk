@@ -10,6 +10,8 @@
 #   key: [a, b, "c d"]      flow list on one line
 #   key:                    then indented "key: ..." lines (a map)
 #   key:                    then indented "- item" lines (a list)
+#   key: |   or   key: >-  then more-indented lines: a block of text, printed
+#                           joined into one line with spaces (kit only needs one line)
 #   # comment               whole-line comments and " # comment" at the end
 # Indent with spaces. Anything else is an error (exit 2).
 #
@@ -21,6 +23,15 @@ BEGIN { depth = 0; fm_state = frontmatter ? 0 : 1 }
 {
     line = $0
     sub(/\r$/, "", line)
+    if (in_block) {
+        match(line, /^ */)
+        if (line ~ /^[ \t]*$/ || RLENGTH > block_ind) {
+            t = trim(line)
+            if (t != "") block_text = block_text (block_text == "" ? "" : " ") t
+            next
+        }
+        end_block()
+    }
     if (frontmatter) {
         if (line == "---") { fm_state++; if (fm_state == 2) exit; next }
         if (fm_state == 0) { if (line ~ /^[ \t]*$/) next; err("expected --- at top") }
@@ -45,6 +56,8 @@ BEGIN { depth = 0; fm_state = frontmatter ? 0 : 1 }
     p = (depth > 0 ? path_at(depth) "." : "") key
     if (val == "") {
         depth++; IND[depth] = ind; KEY[depth] = p
+    } else if (val ~ /^[|>][-+]?[0-9]?$/) {
+        in_block = 1; block_ind = ind; block_path = p; block_text = ""
     } else if (substr(val, 1, 1) == "[") {
         if (substr(val, length(val), 1) != "]") err("list must end with ]")
         flow_list(p, substr(val, 2, length(val) - 2))
@@ -53,7 +66,9 @@ BEGIN { depth = 0; fm_state = frontmatter ? 0 : 1 }
     }
 }
 
-END { if (failed) exit 2 }
+END { if (failed) exit 2; if (in_block) end_block() }
+
+function end_block() { out(block_path, block_text); in_block = 0 }
 
 function path_at(d) { return d > 0 ? KEY[d] : "" }
 

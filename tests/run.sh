@@ -173,7 +173,7 @@ printf 'name: authoring\ncontent_hosts: [gitea.example]\nrequired:\n  rules: [se
 printf -- '---\nname: foo\ndescription: foo skill\n---\nRun scripts/x.sh, see https://gitea.example/doc\n' > "$LIB/skills/foo/SKILL.md"
 echo 'echo hi' > "$LIB/skills/foo/scripts/x.sh"; echo MIT > "$LIB/skills/foo/LICENSE"; echo readme > "$LIB/skills/foo/README.md"
 printf '\0\1\2' > "$LIB/skills/foo/logo.png"; echo x > "$LIB/skills/foo/.git/config"
-printf -- '---\nname: bar\ndescription: bar\n---\nbar\n' > "$LIB/skills/bar/SKILL.md"; echo 'echo no' > "$LIB/skills/bar/run.sh"
+printf -- '---\nname: bar\ndescription: >-\n  Use for bar.\n  Two lines # not a comment\n\nlicense: MIT\n---\nbar\n' > "$LIB/skills/bar/SKILL.md"; echo 'echo no' > "$LIB/skills/bar/run.sh"
 cd "$AU"
 out=$(kit new rule sec 2>&1); rc=$?
 check "new rule skeleton in the folder with kit.yaml" '[ $rc -eq 0 ] && [ -s "$AU/rules/sec.md" ]'
@@ -185,6 +185,9 @@ check "new --from skips LICENSE, README, binaries, .git" '[ ! -e "$AU/skills/foo
 check "new --from reminds to delete the temp folder" 'echo "$out" | grep -q 記得刪掉'
 kit new skill bar --from "$LIB/skills/bar" >/dev/null 2>&1
 check "undeclared extra files not copied" '[ ! -e "$AU/skills/bar/run.sh" ]'
+check "yaml block text joined into one line" '[ "$(LC_ALL=C awk -f "$HERE/../unix/yaml.awk" -v frontmatter=1 "$AU/skills/bar/SKILL.md" | tr "\t" "|")" = "name|bar
+description|Use for bar. Two lines # not a comment
+license|MIT" ]'
 out=$(kit new skill foo 2>&1); rc=$?
 check "new refuses an existing name" '[ $rc -ne 0 ]'
 out=$(kit new skill gerrit-review 2>&1); rc=$?

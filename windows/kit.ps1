@@ -81,9 +81,18 @@ function Yaml-StripComment([string]$s) {
 function Yaml-Lines([string]$path, [switch]$Frontmatter) {
     $out = New-Object System.Collections.Generic.List[string]
     $ind = @{}; $key = @{}; $depth = 0; $fm = if ($Frontmatter) { 0 } else { 1 }; $no = 0
+    $inBlock = $false; $blockInd = 0; $blockPath = ''; $blockText = ''   # key: | or key: >- (joined into one line)
     foreach ($raw in (Read-Text $path) -split "`n") {
         $no++
         $line = $raw.TrimEnd("`r")
+        if ($inBlock) {
+            $bi = $line.Length - $line.TrimStart(' ').Length
+            if ($line.Trim() -eq '' -or $bi -gt $blockInd) {
+                $t = $line.Trim(); if ($t) { if ($blockText) { $blockText += ' ' }; $blockText += $t }
+                continue
+            }
+            $out.Add("$blockPath`t$blockText"); $inBlock = $false
+        }
         if ($Frontmatter) {
             if ($line -eq '---') { $fm++; if ($fm -eq 2) { break }; continue }
             if ($fm -eq 0) { if ($line -match '^\s*$') { continue }; throw "yaml: ${path}:${no}: expected --- at top" }
@@ -104,6 +113,7 @@ function Yaml-Lines([string]$path, [switch]$Frontmatter) {
         $k = $text.Substring(0, $c).Trim(); $val = $text.Substring($c + 1).Trim()
         $p = if ($depth -gt 0) { "$parent.$k" } else { $k }
         if ($val -eq '') { $depth++; $ind[$depth] = $n; $key[$depth] = $p }
+        elseif ($val -match '^[|>][-+]?[0-9]?$') { $inBlock = $true; $blockInd = $n; $blockPath = $p; $blockText = '' }
         elseif ($val.StartsWith('[')) {
             if (-not $val.EndsWith(']')) { throw "yaml: ${path}:${no}: list must end with ]" }
             $body = $val.Substring(1, $val.Length - 2)
@@ -119,6 +129,7 @@ function Yaml-Lines([string]$path, [switch]$Frontmatter) {
         }
         else { $out.Add("$p`t" + (Yaml-Unquote $val)) }
     }
+    if ($inBlock) { $out.Add("$blockPath`t$blockText") }
     $out.ToArray()
 }
 function YGet-From($lines, [string]$path) {
