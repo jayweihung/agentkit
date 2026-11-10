@@ -24,6 +24,7 @@ for f in kit json.awk yaml.awk; do cp "$REPO/unix/$f" "$DEST/$f.new" && mv "$DES
 cp "$REPO/VERSION" "$DEST/VERSION"
 mkdir -p "$DEST/templates"
 for f in "$REPO"/templates/*; do cp "$f" "$DEST/templates/"; done
+rm -rf "$DEST/herdr"; mkdir -p "$DEST/herdr"; cp -R "$REPO/herdr/kit-panel" "$DEST/herdr/"   # kit herdr-panel install
 printf '%s\n' "$REPO" > "$DEST/.repo"      # where kit self-update pulls from
 chmod 755 "$DEST/kit"
 ln -sf "$DEST/kit" "$BIN/kit"

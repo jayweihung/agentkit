@@ -251,6 +251,31 @@ function Json-RmItem($root, [string]$path, $node) {
     $s = Json-Ser $node
     for ($i = $a.v.Count - 1; $i -ge 0; $i--) { if ((Json-Ser $a.v[$i]) -ceq $s) { $a.v.RemoveAt($i) } }
 }
+function Json-ItemIs($c, [string]$key, [string]$raw) { # is node c an object whose KEY is the raw string?
+    if ($c.t -ne 'o') { return $false }
+    $m = Json-Find $c $key
+    ($null -ne $m) -and $m.t -eq 'v' -and $m.raw -ceq $raw
+}
+function Json-RmWhere($n, [string]$key, [string]$raw) { # anywhere: remove array items whose KEY is the string
+    if ($n.t -eq 'v') { return }
+    for ($i = $n.v.Count - 1; $i -ge 0; $i--) {
+        if ($n.t -eq 'a' -and (Json-ItemIs $n.v[$i] $key $raw)) { $n.v.RemoveAt($i); continue }
+        Json-RmWhere $n.v[$i] $key $raw
+    }
+}
+function Json-AddNear($n, [string]$key, [string]$raw, [string]$json) { # anywhere: append JSON to each array with an item whose KEY is the string
+    if ($n.t -eq 'v') { return }
+    $hit = $false
+    $count = $n.v.Count
+    for ($i = 0; $i -lt $count; $i++) {
+        if ($n.t -eq 'a' -and (Json-ItemIs $n.v[$i] $key $raw)) { $hit = $true }
+        Json-AddNear $n.v[$i] $key $raw $json
+    }
+    if (-not $hit) { return }
+    $item = Json-Parse $json; $s = Json-Ser $item
+    foreach ($x in $n.v) { if ((Json-Ser $x) -ceq $s) { return } }
+    $n.v.Add($item)
+}
 function Json-Apply($root, $ops) {
     foreach ($op in $ops) {
         switch ($op[0]) {
@@ -260,6 +285,8 @@ function Json-Apply($root, $ops) {
             'rmstr'   { Json-RmItem $root $op[1] @{ t = 'v'; raw = (Json-Str $op[2]) } }
             'addjson' { Json-AddItem $root $op[1] (Json-Parse $op[2]) }
             'rmjson'  { Json-RmItem $root $op[1] (Json-Parse $op[2]) }
+            'rmwhere' { Json-RmWhere $root $op[1] (Json-Str $op[2]) }
+            'addnear' { Json-AddNear $root $op[1] (Json-Str $op[2]) $op[3] }
             default   { throw "json: unknown op $($op[0])" }
         }
     }
@@ -630,9 +657,8 @@ function Ver-Num([string]$v) { # sortable text for x.y.z ("+build" ignored); $nu
     $p = @($v.Split('.')) + @('0', '0')
     '{0:D9}{1:D9}{2:D9}' -f [long]$p[0], [long]$p[1], [long]$p[2]
 }
-function Version-Nag { # tell once when a source's kit.yaml wants a newer kit (not in the background, not when quiet)
-    if ($script:Quiet -or $script:LogPath) { return }
-    $best = Ver-Num $KitVersion; if (-not $best) { return }
+function Wanted-Version { # the newest kit_version the sources ask for, when it is newer than this kit ('' otherwise)
+    $best = Ver-Num $KitVersion; if (-not $best) { return '' }
     $need = ''
     foreach ($d in Src-Dirs) {
         foreach ($v in @(YGet (Join-Path $d 'kit.yaml') 'kit_version')) {
@@ -640,6 +666,11 @@ function Version-Nag { # tell once when a source's kit.yaml wants a newer kit (n
             if ($n -and [string]::CompareOrdinal($n, $best) -gt 0) { $best = $n; $need = $v.Trim() }
         }
     }
+    $need
+}
+function Version-Nag { # tell once when a source's kit.yaml wants a newer kit (not in the background, not when quiet)
+    if ($script:Quiet -or $script:LogPath) { return }
+    $need = Wanted-Version
     if (-not $need) { if ($null -ne (State-Get 'nag' 'kit_version')) { State-Del 'nag' 'kit_version' }; return }
     if ((State-Get 'nag' 'kit_version') -eq "${need} ${KitVersion}") { return }
     Say "kit：團隊要 kit ${need} 以上，你的是 ${KitVersion}。請打  kit self-update"
@@ -720,7 +751,53 @@ function Sync-Bg { # the background half of Sync-Hook
     finally { Remove-Item -LiteralPath $lock -Force -Recurse -ErrorAction SilentlyContinue }
 }
 
-function Cmd-List {
+function Json-S([string]$s) { # a JSON string: \ " TAB LF CR escaped, other control characters dropped (the same as unix/kit)
+    $s = [regex]::Replace($s, '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')
+    Json-Str $s
+}
+function Item-Desc([string]$kind, [string]$f) { # the description of a skill or agent (frontmatter) or of an MCP yaml
+    try {
+        if ($kind -eq 'skill' -or $kind -eq 'agent') {
+            if (((Read-Text $f) -split "`n")[0].TrimEnd("`r") -ne '---') { return '' }
+            $v = @(YGet-From (Yaml-Lines $f -Frontmatter) 'description')
+        } elseif ($kind -eq 'mcp') { $v = @(YGet $f 'description') }
+        else { return '' }
+    } catch { return '' }
+    if ($v.Count -gt 0) { [string]$v[0] } else { '' }
+}
+function Cmd-ListJson { # what kit list shows, as JSON for programs (the Herdr panel); unix/kit prints the same
+    $want = Wanted; $req = Kit-Items 'required'
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"sources`": [")
+    $first = $true
+    foreach ($s in @(M-Sources)) {
+        if (-not $s) { continue }
+        if (-not $first) { [void]$sb.Append(',') }; $first = $false
+        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S $s), `"dir`": $(Json-S (Src-Dir $s))}")
+    }
+    $tools = '"claude"'; if (Has-Codex) { $tools += ', "codex"' }; if (Has-Omp) { $tools += ', "omp"' }
+    [void]$sb.Append("`n  ],`n  `"tools`": [$tools],`n  `"items`": [")
+    $first = $true
+    foreach ($i in Available) {
+        $c = $i.IndexOf(':'); $k = $i.Substring(0, $c); $n = $i.Substring($c + 1)
+        $p = $null; $dir = $null
+        foreach ($d in Src-Dirs) { $q = Item-Path $d $k $n; if (Test-Path -LiteralPath $q -PathType Leaf) { $p = $q; $dir = $d; break } }
+        if (-not $p) { continue }
+        $status = 'unused'
+        if ($want -contains $i) { $status = 'used' }
+        if ($req -contains $i) { $status = 'required' }
+        if ($k -eq 'agent') { $status = 'agent' }
+        $new = if ($null -eq (State-Get 'seen' $i)) { 'true' } else { 'false' }
+        if (-not $first) { [void]$sb.Append(',') }; $first = $false
+        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p))}")
+    }
+    [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))`n}")
+    Say $sb.ToString()
+}
+function Cmd-List($rest) {
+    $rest = @($rest | Where-Object { $null -ne $_ })
+    if ($rest.Count -eq 1 -and $rest[0] -eq '--json') { Need-Init; Cmd-ListJson; return }
+    if ($rest.Count -gt 0) { Die '用法：kit list [--json]' }
     Need-Init
     $want = Wanted; $req = Kit-Items 'required'
     foreach ($i in Available) {
@@ -1450,12 +1527,102 @@ function Cmd-Push($rest) {
     if ($compare) { Say "開 PR：$compare" } else { Say "請到 Gitea 用分支 $b 開 PR" }
 }
 
+# ---------- the Herdr panel (a Herdr mod that runs kit list --json / add / rm / sync / run) ----------
+$script:ShippedLayouts = @('main', 'terminals', 'win98')     # Herdr's own layouts: Herdr puts them back when edited
+$script:PanelToggle = '{"id":"kit-toggle","type":"block","content":{"mod":"kit","props":{"role":"toggle"}},"size":{"px":56}}'
+$script:PanelNode = '{"id":"kit-panel","type":"column","children":[{"id":"kit","type":"block","content":{"mod":"kit"}}],"size":{"px":420},"min":320,"max":800}'
+function Herdr-Home { # the same rule as Herdr: $HERDR_APP_HOME, else $XDG_CONFIG_HOME/herdr-app, else ~/.config/herdr-app (also on Windows)
+    if ($env:HERDR_APP_HOME) { return $env:HERDR_APP_HOME }
+    if ($env:XDG_CONFIG_HOME) { return (Join-Path $env:XDG_CONFIG_HOME 'herdr-app') }
+    Join-Path $UserHome '.config/herdr-app'
+}
+function Panel-Src { # the panel's files: next to the installed kit, else in the repo kit runs from
+    $cands = @((Join-Path $KitLib 'herdr/kit-panel'))
+    $r = Kit-Repo; if ($r) { $cands += (Join-Path $r 'herdr/kit-panel') }
+    foreach ($d in $cands) { if (Test-Path -LiteralPath (Join-Path $d 'main.js') -PathType Leaf) { return $d } }
+    $null
+}
+function Layout-Edit([string]$f, $ops) { # the layout text with OPS applied (the panel's old blocks removed first)
+    $text = Read-Text $f
+    $root = Json-Parse $text
+    Json-Apply $root (@(@('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel')) + @($ops | Where-Object { $_ }))
+    Json-Text $root $text
+}
+function Swap-Layout([string]$f, [string]$text) { # FILE (backed up first) gets TEXT
+    $b = "$f.kit-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    Copy-Item -LiteralPath $f -Destination $b -Force
+    Write-Text $f $text
+    Say "kit：改了版面 $(Split-Path -Leaf $f)（原本的備份在 $(Split-Path -Leaf $b)）"
+}
+function Cmd-HerdrPanel($rest) {
+    $rest = @($rest | Where-Object { $null -ne $_ })
+    $hh = Herdr-Home; $mods = Join-Path $hh 'mods'; $dest = Join-Path $mods 'kit'
+    $mine = Test-Path -LiteralPath (Join-Path $dest '.kit-panel')
+    $verb = if ($rest.Count -gt 0) { $rest[0] } else { '' }
+    if ($verb -eq 'install') {
+        $keep = $rest -contains '--keep-env'
+        if ($keep -and $OnWindows) { Die '--keep-env 只能在 Mac／Linux 用（測試用）' }
+        $src = Panel-Src; if (-not $src) { Die '找不到 panel 的檔案（herdr/kit-panel）；請重裝 kit' }
+        if (-not (Test-Path -LiteralPath $mods -PathType Container)) { Die "找不到 Herdr 的 mods 資料夾：${mods}（Herdr 有裝、開過一次嗎？）" }
+        if ((Test-Path -LiteralPath $dest) -and -not $mine) { Die "$dest 已經有東西，不是 kit 放的，不動它" }
+        # where the panel goes: a button in the tab bar of the shown layout + the panel beside the work area
+        $name = ''
+        try { $v = Json-Get (Join-Path $hh 'shared.json') 'layout'; if ($v -and $v.StartsWith('"')) { $name = $v.Trim('"') } } catch { }
+        if (-not $name) { $name = 'main' }
+        $lf = Join-Path $hh "layouts/$name.json"; $newLayout = $null; $place = 'none'
+        if ($ShippedLayouts -contains $name) {
+            $place = 'right'
+            Say "kit：現在的版面（${name}）是 Herdr 內建的，不能直接改：panel 會先出現在右邊，按 panel 上的「放進上排」會複製一份版面再放進去"
+        } elseif (-not (Test-Path -LiteralPath $lf -PathType Leaf)) { $place = 'right' }
+        elseif (-not (Read-Text $lf).Contains('"kit-toggle"')) {
+            $t = $null
+            try { $t = Layout-Edit $lf @(@('addnear', 'content.mod', 'tabs', $PanelToggle), @('addnear', 'content.tab', 'active', $PanelNode)) } catch { if ($env:KIT_DEBUG) { Warn "$($_.Exception.Message) $($_.ScriptStackTrace)" }; $t = $null }
+            if ($t -and $t.Contains('"kit-toggle"') -and $t.Contains('"kit-panel"')) { $newLayout = $t }
+            else { $place = 'right'; Say "kit：版面 $name 找不到分頁列（tabs）或工作區，沒改它：panel 會先出現在右邊" }
+        }
+        # the files (main.js etc.), then mod.json and the panel's config (how to run kit here)
+        Ensure-Dir $dest
+        Copy-Item -Path (Join-Path $src '*') -Destination $dest -Recurse -Force
+        Write-Text (Join-Path $dest 'mod.json') "{ `"place`": `"$place`", `"size`": 420, `"title`": `"kit`" }`n"
+        if ($OnWindows) {
+            $cmdPath = Join-Path (Split-Path -Parent $KitLib) 'kit.cmd'
+            $kit = if ((Split-Path -Leaf $KitLib) -eq 'lib' -and (Test-Path -LiteralPath $cmdPath)) { @($cmdPath) } else { @('kit.cmd') }
+        } else { $kit = @((Get-Process -Id $PID).Path, '-NoProfile', '-File', $PSCommandPath) }
+        $envs = @()
+        if ($keep) {
+            foreach ($k in 'HOME', 'AGENTKIT_CONFIG', 'AGENTKIT_SOURCES', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR') {
+                $v = [Environment]::GetEnvironmentVariable($k); if ($v) { $envs += "$(Json-S $k): $(Json-S $v)" }
+            }
+        }
+        Write-Text (Join-Path $dest 'config.json') "{`n  `"kit`": [$((@($kit | ForEach-Object { Json-S $_ })) -join ', ')],`n  `"env`": {$($envs -join ', ')}`n}`n"
+        Write-Text (Join-Path $dest '.kit-panel') ''
+        if ($newLayout) { Swap-Layout $lf $newLayout }
+        Say "kit：Herdr 的 kit panel 裝好了（${dest}）"
+    } elseif ($verb -eq 'uninstall') {
+        if (Test-Path -LiteralPath $dest) {
+            if (-not $mine) { Die "$dest 不是 kit 放的，不動它" }
+            Remove-Item -LiteralPath $dest -Recurse -Force
+        }
+        $ld = Join-Path $hh 'layouts'
+        if (Test-Path -LiteralPath $ld) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $ld -File -Filter '*.json' | Where-Object { $_.Extension -eq '.json' })) {
+                if ($ShippedLayouts -contains [IO.Path]::GetFileNameWithoutExtension($f.Name)) { continue }
+                $text = Read-Text $f.FullName
+                if (-not ($text.Contains('"kit-toggle"') -or $text.Contains('"kit-panel"') -or $text.Contains('"mod": "kit"'))) { continue }
+                try { $t = Layout-Edit $f.FullName @() } catch { Warn "沒辦法讀 $($f.FullName)，沒改它"; continue }
+                Swap-Layout $f.FullName $t
+            }
+        }
+        Say 'kit：Herdr 的 kit panel 拿掉了'
+    } else { Die '用法：kit herdr-panel install|uninstall' }
+}
+
 function Usage {
     Say @'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
-  kit list                          有哪些、你在用哪些、哪些是新的
+  kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent
@@ -1471,6 +1638,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                       kit ci-template .gitea/workflows/kit-check.yaml
   kit push [--to 來源] [--dry-run]  檢查後把改的東西送到 Gitea 開 PR
 
+  kit herdr-panel install|uninstall 在 Herdr 加上（或拿掉）kit 的面板
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
@@ -1489,7 +1657,7 @@ try {
             if ($rest -contains '--bg') { Sync-Bg; exit 0 }
             Cmd-Sync
         }
-        { $_ -in 'list', 'ls' } { Cmd-List }
+        { $_ -in 'list', 'ls' } { Cmd-List $rest }
         'add' { Cmd-AddRm 'add' $rest }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
         'run' { Cmd-Run $rest }
@@ -1502,6 +1670,7 @@ try {
         'push' { Cmd-Push $rest }
         'uninstall' { Cmd-Uninstall $rest }
         'self-update' { Cmd-SelfUpdate }
+        'herdr-panel' { Cmd-HerdrPanel $rest }
         { $_ -in '--version', 'version' } { Say "kit $KitVersion" }
         { $_ -in '', '-h', '--help', 'help' } { Usage }
         '__json-get' { $v = Json-Get $rest[0] $rest[1]; if ($null -eq $v) { exit 1 }; Say $v }   # for tests

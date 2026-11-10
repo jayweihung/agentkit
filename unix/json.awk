@@ -15,7 +15,10 @@
 #   rmstr   PATH  STRING   remove "STRING" from the array at PATH
 #   addjson PATH  JSON     append JSON to the array at PATH if no equal item exists
 #   rmjson  PATH  JSON     remove items equal to JSON from the array at PATH
-# PATH is keys joined by "." (keys must not contain "." or TAB).
+#   rmwhere KEY   STRING   anywhere in the file: remove array items (objects) whose KEY is "STRING"
+#   addnear KEY   STRING  JSON   anywhere in the file: append JSON to each array that has an
+#                                item (object) whose KEY is "STRING", if no equal item is there
+# PATH and KEY are keys joined by "." (keys must not contain "." or TAB).
 # STRING is plain text; " and \ are escaped by json.awk.
 #
 # Exit status: 0 ok, 2 parse error (nothing is written to stdout).
@@ -274,7 +277,40 @@ function apply_ops(file,    line, f, cnt, n, p, j, a, i, s, found) {
                 found = i; if (f[1] == "rmjson") C[a, i] = 0
             }
             if (f[1] == "addjson" && !found) { N[a]++; C[a, N[a]] = n }
+        } else if (f[1] == "rmwhere") {
+            rm_where(root, f[2], json_str(f[3]))
+        } else if (f[1] == "addnear") {
+            add_near(root, f[2], json_str(f[3]), f[4])
         } else fail("unknown op " f[1])
     }
     close(file)
+}
+
+function item_is(c, key, s,    m) { # is node c an object whose KEY is the raw string s?
+    if (T[c] != "o") return 0
+    m = find_path(c, key)
+    return m != 0 && T[m] == "v" && V[m] == s
+}
+
+function rm_where(n, key, s,    i, c) {
+    if (T[n] == "v") return
+    for (i = 1; i <= N[n]; i++) {
+        c = C[n, i]; if (c == 0) continue
+        if (T[n] == "a" && item_is(c, key, s)) { C[n, i] = 0; continue }
+        rm_where(c, key, s)
+    }
+}
+
+function add_near(n, key, s, js,    i, c, hit, item, t) {
+    if (T[n] == "v") return
+    hit = 0
+    for (i = 1; i <= N[n]; i++) {
+        c = C[n, i]; if (c == 0) continue
+        if (T[n] == "a" && item_is(c, key, s)) hit = 1
+        add_near(c, key, s, js)
+    }
+    if (!hit) return
+    item = parse_text(js); t = ser(item, "")
+    for (i = 1; i <= N[n]; i++) if (C[n, i] && ser(C[n, i], "") == t) return
+    N[n]++; C[n, N[n]] = item
 }

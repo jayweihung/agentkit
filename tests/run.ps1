@@ -158,6 +158,26 @@ Check 'list shows unused' { $out -match '(?m)^   skill:gerrit-workflow' }
 Check 'list shows agent' { $out.Contains('agent:gerrit') }
 Check 'list shows targets (Claude only here)' { $out -match '(?m)^寫到：Claude$' }
 
+# ---------- list --json (for the Herdr panel) ----------
+W "$TEAM/skills/quote/SKILL.md" "---`nname: quote`ndescription: 中文 `"引號`" \ 和`ttab`n---`nx`n"
+Kit list --json; $lj = $out; $ljrc = $rc
+W "$T/list.json" "$lj`n"
+$teamJ = (Resolve-Path -LiteralPath $TEAM).ProviderPath.Replace('\', '\\')
+Check 'list --json: exit 0, valid JSON' { $ljrc -eq 0 -and $null -ne (JGet "$T/list.json" 'kit') }
+Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq '"0.1.0"' -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`"}") }
+Check 'list --json: required, used, unused' {
+    $lj.Contains('{"kind": "rule", "name": "security", "status": "required", "new": false, "source": "team", "description": ""}') -and
+    $lj.Contains('{"kind": "skill", "name": "gerrit-review", "status": "used", "new": false, "source": "team", "description": "review a change"}') -and
+    $lj.Contains('{"kind": "skill", "name": "gerrit-workflow", "status": "unused", "new": false, "source": "third-party", "description": "upstream"}') }
+Check 'list --json: agent with its description' { $lj.Contains('{"kind": "agent", "name": "gerrit", "status": "agent", "new": false, "source": "team", "description": "Gerrit helper"}') }
+Check 'list --json: new item, text escaped (UTF-8 kept)' { $lj.Contains('{"kind": "skill", "name": "quote", "status": "unused", "new": true, "source": "team", "description": "中文 \"引號\" \\ 和\ttab"}') }
+Check 'list --json: tools (Claude only here), no version wanted' { $lj.Contains("`n  `"tools`": [`"claude`"],`n") -and (JGet "$T/list.json" 'kit_version_wanted') -eq '""' }
+Kit list --json
+Check 'list --json does not mark items seen' { ([regex]::Matches($out, '"new": true')).Count -eq 1 }
+Kit list --bad
+Check 'list with a wrong option: usage' { $rc -ne 0 -and $out.Contains('kit list [--json]') }
+Remove-Item -Recurse -Force "$TEAM/skills/quote"
+
 # ---------- kit_version: tell once when the team wants a newer kit ----------
 $teamYaml = ReadT "$TEAM/kit.yaml"
 function Team-Version([string]$v) { W "$TEAM/kit.yaml" ($teamYaml.TrimEnd("`n") + "`nkit_version: $v`n") }
@@ -514,6 +534,45 @@ Check 'uninstall: omp mcp.json byte-identical' { SameBytes "$T/omp.orig" "$H/.om
 Check 'uninstall: omp AGENTS.md (made by kit) gone' { -not (Test-Path "$H/.omp/agent/AGENTS.md") }
 Check 'uninstall: ~/.agents/skills emptied' { @(Get-ChildItem -Force "$H/.agents/skills" -ErrorAction SilentlyContinue).Count -eq 0 }
 
+# ---------- herdr-panel: the kit panel as a Herdr mod ----------
+$HH = Join-Path $T 'herdr-app'
+W "$HH/mods/.keep" ''
+W "$HH/layouts/mine.json" "{`"id`":`"root`",`"type`":`"row`",`"children`":[{`"id`":`"bar`",`"type`":`"row`",`"children`":[{`"id`":`"tabs`",`"type`":`"block`",`"content`":{`"mod`":`"tabs`"}}]},{`"id`":`"body`",`"type`":`"row`",`"children`":[{`"id`":`"main`",`"type`":`"block`",`"content`":{`"tab`":`"active`"}}]}]}`n"
+$mineOrig = ReadT "$HH/layouts/mine.json"
+W "$HH/layouts/main.json" "{`"main`":1}`n"
+W "$HH/shared.json" "{`n  `"layout`": `"mine`"`n}`n"
+$env:HERDR_APP_HOME = $HH
+function Backups { @(Get-ChildItem -LiteralPath "$HH/layouts" -File | Where-Object { $_.Name -like 'mine.json.kit-backup-*' }) }
+Kit herdr-panel install
+$cfg = if (Test-Path "$HH/mods/kit/config.json") { ReadT "$HH/mods/kit/config.json" } else { '' }
+$kitJ = if ($OnWindows) { '"kit.cmd"' } else { '"' + $Exe.Replace('\', '\\') + '", "-NoProfile", "-File", "' + $Kit.Replace('\', '\\') + '"' }
+Check 'herdr-panel install: mod files, config with the kit command' { $rc -eq 0 -and (Test-Path "$HH/mods/kit/main.js") -and (Test-Path "$HH/mods/kit/.kit-panel") -and $cfg.Contains("`"kit`": [$kitJ]") -and $cfg.Contains('"env": {}') }
+$ml = ReadT "$HH/layouts/mine.json"
+Check 'herdr-panel install: button in the tab bar, panel beside the work area' { ([regex]::Matches($ml, '"kit-toggle"')).Count -eq 1 -and $ml.Contains('"kit-panel"') -and (ReadT "$HH/mods/kit/mod.json").Contains('"place": "none"') }
+Check 'herdr-panel install: layout backed up first' { @(Backups).Count -eq 1 -and (ReadT @(Backups)[0].FullName) -ceq $mineOrig }
+Kit herdr-panel install
+Check 'herdr-panel install again: layout not changed twice' { $rc -eq 0 -and ([regex]::Matches((ReadT "$HH/layouts/mine.json"), '"kit-toggle"')).Count -eq 1 -and @(Backups).Count -eq 1 }
+if (-not $OnWindows) {
+    Kit herdr-panel install --keep-env
+    Check 'herdr-panel --keep-env: the panel runs kit with this HOME' { (ReadT "$HH/mods/kit/config.json").Contains("`"HOME`": `"$H`"") }
+}
+Kit herdr-panel uninstall
+$ml = ReadT "$HH/layouts/mine.json"
+Check 'herdr-panel uninstall: mod and layout blocks gone' { $rc -eq 0 -and -not (Test-Path "$HH/mods/kit") -and -not $ml.Contains('kit') -and $ml.Contains('"tabs"') }
+W "$HH/shared.json" "{`n  `"layout`": `"main`"`n}`n"
+Kit herdr-panel install
+Check 'herdr-panel on a Herdr layout: not edited, panel docks on the right' { $rc -eq 0 -and (ReadT "$HH/layouts/main.json") -eq "{`"main`":1}`n" -and (ReadT "$HH/mods/kit/mod.json").Contains('"place": "right"') -and $out.Contains('放進上排') }
+Kit herdr-panel uninstall
+W "$HH/mods/kit/main.js" 'mine'
+Kit herdr-panel install
+Check "herdr-panel: someone else's mods/kit is left alone" { $rc -ne 0 -and $out.Contains('不是 kit 放的') -and (ReadT "$HH/mods/kit/main.js") -eq 'mine' }
+Kit herdr-panel uninstall
+Check "herdr-panel uninstall: someone else's mods/kit is left alone" { $rc -ne 0 -and (Test-Path "$HH/mods/kit/main.js") }
+$env:HERDR_APP_HOME = Join-Path $T 'no-herdr'
+Kit herdr-panel install
+Check 'herdr-panel without Herdr: says so' { $rc -ne 0 -and $out.Contains('找不到 Herdr') }
+Remove-Item env:HERDR_APP_HOME
+
 # ---------- install.ps1 ----------
 $env:AGENTKIT_HOME = Join-Path $T 'inst'
 & $Exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'windows/install.ps1') -Quiet
@@ -521,6 +580,7 @@ Remove-Item env:AGENTKIT_HOME
 $Kit = Join-Path $T 'inst/lib/kit.ps1'
 Kit ci-template
 Check 'installed kit has the ci template' { $rc -eq 0 -and $out -ceq $tmpl }
+Check 'installed kit has the Herdr panel' { Test-Path (Join-Path $T 'inst/lib/herdr/kit-panel/main.js') }
 $Kit = $realKit
 
 # ---------- the script files themselves ----------

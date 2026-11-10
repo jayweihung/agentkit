@@ -114,6 +114,25 @@ printf 'rmjson\thooks.SessionStart\t%s\n' "$H" > "$T/ops5"
 LC_ALL=C $AWK -f "$JA" -v ops="$T/ops5" "$T/h2" > "$T/h3"
 cmp -s "$T/h.json" "$T/h3" && ok || bad "rmjson did not restore"; 
 
+# rmwhere / addnear: find array items by a key anywhere in the tree (Herdr layouts)
+cat > "$T/l.json" <<'J'
+{"id":"root","type":"row","children":[
+  {"id":"bar","type":"row","children":[{"id":"tabs","content":{"mod":"tabs"}},{"id":"x","content":{"mod":"kit"}}]},
+  {"id":"body","type":"row","children":[{"id":"main","content":{"tab":"active"}},{"id":"old","children":[{"content":{"mod":"kit"}}]}]},
+  {"id":"keep","content":{"mod":"tabsx"}}]}
+J
+P='{"id":"kit-panel","type":"column","children":[{"id":"kit","type":"block","content":{"mod":"kit"}}],"hidden":true}'
+printf 'rmwhere\tcontent.mod\tkit\nrmwhere\tid\told\naddnear\tcontent.mod\ttabs\t{"id":"kit-toggle"}\naddnear\tcontent.tab\tactive\t%s\naddnear\tcontent.mod\ttabs\t{"id":"kit-toggle"}\naddnear\tcontent.mod\tnone\t{"id":"no"}\n' "$P" > "$T/ops6"
+LC_ALL=C $AWK -f "$JA" -v ops="$T/ops6" "$T/l.json" > "$T/a"; rc=$?
+python3 - "$T/l.json" "$P" > "$T/p" <<'P'
+import json,sys
+d=json.load(open(sys.argv[1])); bar,body,keep=d["children"]
+del bar["children"][1]; del body["children"][1]
+bar["children"].append({"id":"kit-toggle"}); body["children"].append(json.loads(sys.argv[2]))
+sys.stdout.write(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
+P
+if [ $rc -eq 0 ] && cmp -s "$T/a" "$T/p"; then ok; else bad "rmwhere/addnear"; diff "$T/a" "$T/p" | head -20; fi
+
 # empty file counts as {}
 : > "$T/empty.json"
 printf 'set\ta\t1\n' > "$T/ops3"

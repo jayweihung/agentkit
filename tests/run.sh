@@ -127,6 +127,25 @@ check "list marks in use" 'echo "$out" | grep -q "^\*  skill:gerrit-review"'
 check "list shows unused" 'echo "$out" | grep -q "^   skill:gerrit-workflow"'
 check "list shows agent" 'echo "$out" | grep -q "agent:gerrit"'
 
+# ---------- list --json (for the Herdr panel) ----------
+mkdir -p "$TEAM/skills/quote"; printf -- '---\nname: quote\ndescription: 中文 "引號" \\ 和\ttab\n---\nx\n' > "$TEAM/skills/quote/SKILL.md"
+kit list --json > "$T/list.json" 2>&1; rc=$?
+check "list --json: exit 0, valid JSON" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/list.json" > /dev/null'
+check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"0.1.0\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\"}" "$T/list.json"'
+check "list --json: required, used, unused" 'grep -qF "{\"kind\": \"rule\", \"name\": \"security\", \"status\": \"required\", \"new\": false, \"source\": \"team\", \"description\": \"\"}" "$T/list.json" &&
+    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"source\": \"team\", \"description\": \"review a change\"}" "$T/list.json" &&
+    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-workflow\", \"status\": \"unused\", \"new\": false, \"source\": \"third-party\", \"description\": \"upstream\"}" "$T/list.json"'
+check "list --json: agent with its description" 'grep -qF "{\"kind\": \"agent\", \"name\": \"gerrit\", \"status\": \"agent\", \"new\": false, \"source\": \"team\", \"description\": \"Gerrit helper\"}" "$T/list.json"'
+check "list --json: new item, text escaped (UTF-8 kept)" 'grep -qF "{\"kind\": \"skill\", \"name\": \"quote\", \"status\": \"unused\", \"new\": true, \"source\": \"team\", \"description\": \"中文 \\\"引號\\\" \\\\ 和\\ttab\"}" "$T/list.json"'
+check "list --json: tools and no version wanted" 'grep -q "^  \"tools\": \[\"claude\"" "$T/list.json" && [ "$(jget "$T/list.json" kit_version_wanted)" = "\"\"" ]'
+check "list --json does not mark items seen" '[ "$(kit list --json | grep -c "\"new\": true")" = 1 ]'
+if command -v pwsh >/dev/null 2>&1; then
+    check "list --json: kit.ps1 prints the same" 'pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json 2>&1 | cmp -s - "$T/list.json"'
+fi
+out=$(kit list --bad 2>&1); rc=$?
+check "list with a wrong option: usage" '[ $rc -ne 0 ] && echo "$out" | grep -qF "kit list [--json]"'
+rm -rf "$TEAM/skills/quote"
+
 # ---------- kit_version: tell once when the team wants a newer kit ----------
 cp "$TEAM/kit.yaml" "$T/kit.yaml.orig"
 echo "kit_version: 0.4.0" >> "$TEAM/kit.yaml"
@@ -429,7 +448,7 @@ check "claude.json byte-identical after everything" 'cmp -s "$HOME/.claude.json"
 check "uninstall removes mcp" '! jget "$HOME/.claude.json" mcpServers.gerrit >/dev/null'
 
 # ---------- install / self-update / uninstall --self ----------
-R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../templates" "$HERE/../VERSION" "$R/"
+R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../templates" "$HERE/../herdr" "$HERE/../VERSION" "$R/"
 ( cd "$R" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm v1 )
 U="$T/clone2"; git clone -q "$R" "$U"
 touch "$HOME/.bashrc"
@@ -542,6 +561,34 @@ out=$(rk sync 2>&1)
 check "local edits in the clone are reset to the approved commit" '! grep -q "local edit" "$RH/agentkit/srcA/rules/ar.md"'
 out=$(HOME="$RH" AGENTKIT_CONFIG="$RH/.config/agentkit" AGENTKIT_SOURCES="$RH/agentkit2" "$KIT" init "file://$SA/srcA.git" --approvals "$SA/nowhere" --signers "$SA/allowed_signers" 2>&1); rc=$?
 check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/agentkit2/srcA/rules" ]'
+
+# ---------- herdr-panel: the kit panel as a Herdr mod ----------
+HH="$T/herdr-app"; mkdir -p "$HH/mods" "$HH/layouts"
+printf '{"id":"root","type":"row","children":[{"id":"bar","type":"row","children":[{"id":"tabs","type":"block","content":{"mod":"tabs"}}]},{"id":"body","type":"row","children":[{"id":"main","type":"block","content":{"tab":"active"}}]}]}\n' > "$HH/layouts/mine.json"
+cp "$HH/layouts/mine.json" "$T/mine.orig"
+printf '{"main":1}\n' > "$HH/layouts/main.json"
+printf '{\n  "layout": "mine"\n}\n' > "$HH/shared.json"
+hp() { HERDR_APP_HOME="$HH" kit herdr-panel "$@"; }
+out=$(hp install 2>&1); rc=$?
+check "herdr-panel install: mod files, config with the kit command" '[ $rc -eq 0 ] && [ -f "$HH/mods/kit/main.js" ] && [ -f "$HH/mods/kit/.kit-panel" ] && grep -qF "\"kit\": [\"$(cd "$HERE/../unix" && pwd)/kit\"]" "$HH/mods/kit/config.json" && grep -qF "\"env\": {}" "$HH/mods/kit/config.json"'
+check "herdr-panel install: button in the tab bar, panel beside the work area" '[ "$(jget "$HH/layouts/mine.json" children | grep -c "\"kit-toggle\"")" = 1 ] && grep -q "\"kit-panel\"" "$HH/layouts/mine.json" && grep -q "\"place\": \"none\"" "$HH/mods/kit/mod.json"'
+check "herdr-panel install: layout backed up first" 'cmp -s "$(ls "$HH"/layouts/mine.json.kit-backup-* | head -n 1)" "$T/mine.orig"'
+out=$(hp install --keep-env 2>&1); rc=$?
+check "herdr-panel install again: layout not changed twice" '[ $rc -eq 0 ] && [ "$(grep -c "\"kit-toggle\"" "$HH/layouts/mine.json")" = 1 ] && [ "$(ls "$HH"/layouts/ | grep -c kit-backup)" = 1 ]'
+check "herdr-panel --keep-env: the panel runs kit with this HOME" 'grep -qF "\"HOME\": \"$HOME\"" "$HH/mods/kit/config.json"'
+out=$(hp uninstall 2>&1); rc=$?
+check "herdr-panel uninstall: mod and layout blocks gone" '[ $rc -eq 0 ] && [ ! -e "$HH/mods/kit" ] && ! grep -q "kit" "$HH/layouts/mine.json" && grep -q "\"tabs\"" "$HH/layouts/mine.json"'
+printf '{\n  "layout": "main"\n}\n' > "$HH/shared.json"
+out=$(hp install 2>&1); rc=$?
+check "herdr-panel on a Herdr layout: not edited, panel docks on the right" '[ $rc -eq 0 ] && [ "$(cat "$HH/layouts/main.json")" = "{\"main\":1}" ] && grep -q "\"place\": \"right\"" "$HH/mods/kit/mod.json" && echo "$out" | grep -q 放進上排'
+hp uninstall >/dev/null 2>&1
+mkdir -p "$HH/mods/kit"; echo mine > "$HH/mods/kit/main.js"
+out=$(hp install 2>&1); rc=$?
+check "herdr-panel: someone else's mods/kit is left alone" '[ $rc -ne 0 ] && echo "$out" | grep -q "不是 kit 放的" && [ "$(cat "$HH/mods/kit/main.js")" = mine ]'
+out=$(hp uninstall 2>&1); rc=$?
+check "herdr-panel uninstall: someone else's mods/kit is left alone" '[ $rc -ne 0 ] && [ -f "$HH/mods/kit/main.js" ]'
+out=$(HERDR_APP_HOME="$T/no-herdr" kit herdr-panel install 2>&1); rc=$?
+check "herdr-panel without Herdr: says so" '[ $rc -ne 0 ] && echo "$out" | grep -q "找不到 Herdr"'
 
 # ---------- code checks ----------
 check "no \$var directly before non-ASCII (bash 3.2 reads it as part of the name)" '! LC_ALL=C grep -nE "\\\$[A-Za-z_][A-Za-z0-9_]*[^ -~]" "$KIT" "$HERE/../unix/install.sh"'
