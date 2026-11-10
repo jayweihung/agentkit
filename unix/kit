@@ -947,7 +947,7 @@ kit_repo() { # the clone kit was installed from, else the repo this kit runs fro
 }
 export_skip() { # files that stay out of the export
     case /$1 in */.github/*) return 0;; esac
-    case $(basename "$1" | tr 'A-Z' 'a-z') in readme*|changelog*|private-words.txt) return 0;; esac
+    case $(basename "$1" | tr 'A-Z' 'a-z') in readme*|changelog*|license*|licence*|private-words.txt) return 0;; esac
     return 1
 }
 mask_paths() { # mask_paths WORDFILE : paths on stdin -> those with a word in them, each such part shown as <不公開>

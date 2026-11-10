@@ -1206,7 +1206,7 @@ function Kit-Repo { # the clone kit was installed from, else the repo this kit r
 function Export-Skip([string]$rel) { # files that stay out of the export
     if ("/$rel".Contains('/.github/')) { return $true }
     $b = ($rel -split '/')[-1]
-    ($b -match '^(README|CHANGELOG)') -or $b -eq 'private-words.txt'
+    ($b -match '^(README|CHANGELOG|LICENSE|LICENCE)') -or $b -eq 'private-words.txt'
 }
 function Install-Md { # INSTALL.md of the export (no URLs; the same text as unix/kit writes)
     $t = @'

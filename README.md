@@ -63,7 +63,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 
     kit export-self <新的資料夾> [--version 0.4.0+gitea.12]
 
-只帶 git 有追蹤的檔案，拿掉 `.github/`、`README*`、`CHANGELOG*`，加上一份沒有網址的 `INSTALL.md`。
+只帶 git 有追蹤的檔案，拿掉 `.github/`、`README*`、`CHANGELOG*`、`LICENSE*`，加上一份沒有網址的 `INSTALL.md`。
 有 GitHub 的字、不該公開的字（`~/.config/agentkit/private-words.txt` 和來源裡的 `private-words.txt`）
 或非文字檔就失敗，並刪掉輸出資料夾。成功後把資料夾內容 commit 到公司的 repo，訊息只寫 `kit <版本>`。
 

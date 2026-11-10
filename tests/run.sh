@@ -293,7 +293,7 @@ cd "$T"
 FK="$T/fakekit"; EX="$T/export"; EX2="$T/export2"
 mkdir -p "$FK/unix" "$FK/windows" "$FK/.github/workflows" "$FK/tests" "$FK/docs"
 cp "$HERE/../unix/kit" "$HERE/../unix/json.awk" "$HERE/../unix/yaml.awk" "$FK/unix/"; cp "$HERE/../windows/kit.ps1" "$FK/windows/"
-echo 0.3.0 > "$FK/VERSION"; echo "# kit" > "$FK/README.md"; echo notes > "$FK/CHANGELOG.md"; echo "on: push" > "$FK/.github/workflows/ci.yml"
+echo 0.3.0 > "$FK/VERSION"; echo "# kit" > "$FK/README.md"; echo notes > "$FK/CHANGELOG.md"; echo MIT > "$FK/LICENSE"; echo "on: push" > "$FK/.github/workflows/ci.yml"
 echo "echo test" > "$FK/tests/t.sh"; echo "* text=auto" > "$FK/.gitattributes"; echo "*.tmp" > "$FK/.gitignore"; echo guide > "$FK/docs/guide.md"
 echo repoword > "$FK/private-words.txt"
 fkcommit() { git -C "$FK" add -A && git -C "$FK" -c user.name=t -c user.email=t@t commit -qm x; }
@@ -301,7 +301,7 @@ git -C "$FK" init -q; fkcommit
 echo "not tracked" > "$FK/untracked.md"
 out=$("$FK/unix/kit" export-self "$EX" --version 0.4.0+gitea.12 2>&1); rc=$?
 check "export-self succeeds, says the commit message" '[ $rc -eq 0 ] && echo "$out" | grep -q "kit 0.4.0+gitea.12"'
-check "export-self drops README, CHANGELOG, .github, private-words.txt" '[ ! -e "$EX/README.md" ] && [ ! -e "$EX/CHANGELOG.md" ] && [ ! -e "$EX/.github" ] && [ ! -e "$EX/private-words.txt" ]'
+check "export-self drops README, CHANGELOG, LICENSE, .github, private-words.txt" '[ ! -e "$EX/README.md" ] && [ ! -e "$EX/LICENSE" ] && [ ! -e "$EX/CHANGELOG.md" ] && [ ! -e "$EX/.github" ] && [ ! -e "$EX/private-words.txt" ]'
 check "export-self keeps tests, .gitattributes, .gitignore, kit" '[ -f "$EX/tests/t.sh" ] && [ -f "$EX/.gitattributes" ] && [ -f "$EX/.gitignore" ] && [ -x "$EX/unix/kit" ] && [ -f "$EX/windows/kit.ps1" ]'
 check "export-self leaves out untracked files" '[ ! -e "$EX/untracked.md" ]'
 check "export-self writes VERSION" '[ "$(cat "$EX/VERSION")" = 0.4.0+gitea.12 ]'
