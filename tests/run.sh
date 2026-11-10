@@ -173,7 +173,37 @@ out=$(kit list --json --dir "$T/nope" 2>&1)
 check "list --json --dir: a folder that is not there" 'echo "$out" | grep -qF "\"here\": {\"dir\": \"$T/nope\", \"user\": null, \"error\": \"找不到這個資料夾\", \"items\": []}"'
 out=$(kit list --json --pid x 2>&1); rc=$?
 check "list --json --pid: numbers only" '[ $rc -ne 0 ] && echo "$out" | grep -q "數字"'
-cp "$T/here.json" /tmp/here-dbg.json; cp "$T/cj.bak" "$HOME/.claude.json"; rm -rf "$T/proj" "$HOME/.claude/skills/mine"
+cp "$T/cj.bak" "$HOME/.claude.json"; rm -rf "$T/proj" "$HOME/.claude/skills/mine"
+
+# ---------- agents --json / agent add|rm (the Herdr agent panel) ----------
+cp "$TEAM/agents/gerrit.md" "$T/gerrit.bak"
+kit agents --json > "$T/agents.json" 2>&1; rc=$?
+check "agents --json: valid JSON, what is available" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/agents.json" > /dev/null && grep -qF "\"rule\": [\"coding-style\", \"gerrit-flow\", \"security\"]" "$T/agents.json" && grep -q "\"skill\": \[.*\"gerrit-workflow\"\]" "$T/agents.json"'
+check "agents --json: an agent with its rules, skills, MCP, tools, prompt" 'grep -qF "{\"name\": \"gerrit\", \"description\": \"Gerrit helper\", \"source\": \"team\", \"path\": \"$TEAM/agents/gerrit.md\", \"git\": \"no-git\"," "$T/agents.json" &&
+    grep -qF "\"rules\": [\"gerrit-flow\"], \"skills\": [\"gerrit-review\"], \"mcp\": [\"gerrit\"], \"tools_only\": [\"Read\", \"Grep\", \"Glob\"], \"tools_deny\": [\"mcp__gerrit__submit_change\"]," "$T/agents.json" &&
+    grep -qF "\"prompt\": \"You are the Gerrit helper.\"}" "$T/agents.json"'
+if command -v pwsh >/dev/null 2>&1; then
+    check "agents --json: kit.ps1 prints the same" 'pwsh -NoProfile -File "$HERE/../windows/kit.ps1" agents --json 2>&1 | cmp -s - "$T/agents.json"'
+fi
+out=$(kit agent gerrit add skill gerrit-workflow 2>&1); rc=$?
+check "agent add: list grows, the rest of the file kept" '[ $rc -eq 0 ] && grep -qx "skills: \[gerrit-review, gerrit-workflow\]" "$TEAM/agents/gerrit.md" && grep -qx "  deny: \[mcp__gerrit__submit_change\]" "$TEAM/agents/gerrit.md" && grep -qx "You are the Gerrit helper." "$TEAM/agents/gerrit.md" && echo "$out" | grep -q "kit push"'
+out=$(kit agent gerrit rm mcp gerrit 2>&1); rc=$?
+check "agent rm: empty list" '[ $rc -eq 0 ] && grep -qx "mcp: \[\]" "$TEAM/agents/gerrit.md"'
+out=$(kit agent gerrit add mcp nope 2>&1); rc=$?
+check "agent add: only what the sources have" '[ $rc -ne 0 ] && echo "$out" | grep -q "找不到 mcp:nope"'
+out=$(kit agent gerrit add tool Bash 2>&1); rc=$?
+check "agent add: kinds checked" '[ $rc -ne 0 ] && echo "$out" | grep -q "種類只能是"'
+printf -- '---\nname: gerrit\ndescription: Gerrit helper\nskills:\n  - gerrit-review\n  - team-build\nrules: [gerrit-flow]\n---\nbody\n' > "$TEAM/agents/gerrit.md"
+out=$(kit agent gerrit rm skill team-build 2>&1); rc=$?
+check "agent rm: a block list becomes [..], other keys kept" '[ $rc -eq 0 ] && grep -qx "skills: \[gerrit-review\]" "$TEAM/agents/gerrit.md" && ! grep -q "^  - " "$TEAM/agents/gerrit.md" && grep -qx "rules: \[gerrit-flow\]" "$TEAM/agents/gerrit.md"'
+out=$(kit agent gerrit add mcp gerrit 2>&1); rc=$?
+check "agent add: a missing key is added to the header" '[ $rc -eq 0 ] && [ "$(sed -n 6p "$TEAM/agents/gerrit.md")" = "mcp: [gerrit]" ] && [ "$(sed -n 7p "$TEAM/agents/gerrit.md")" = "---" ]'
+if command -v pwsh >/dev/null 2>&1; then
+    cp "$TEAM/agents/gerrit.md" "$T/g1"; kit agent gerrit add skill gerrit-workflow >/dev/null 2>&1; cp "$TEAM/agents/gerrit.md" "$T/g2"; cp "$T/g1" "$TEAM/agents/gerrit.md"
+    pwsh -NoProfile -File "$HERE/../windows/kit.ps1" agent gerrit add skill gerrit-workflow >/dev/null 2>&1
+    check "agent add: kit.ps1 writes the same file" 'cmp -s "$TEAM/agents/gerrit.md" "$T/g2"'
+fi
+cp "$T/gerrit.bak" "$TEAM/agents/gerrit.md"
 rm -rf "$TEAM/skills/quote"
 
 # ---------- kit_version: tell once when the team wants a newer kit ----------

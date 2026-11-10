@@ -1882,12 +1882,90 @@ function Cmd-HerdrPanel($rest) {
     } else { Die '用法：kit herdr-panel install|uninstall' }
 }
 
+# ---------- agents: the definitions (agents/<name>.md), for the Herdr agent panel ----------
+function Json-Arr($vals) { '[' + ((@($vals | Where-Object { $_ }) | ForEach-Object { Json-S $_ }) -join ', ') + ']' }
+function Git-State([string]$dir, [string]$file) { # "new", "changed" or "" (or "no-git")
+    & git -C $dir rev-parse --git-dir *> $null; if ($LASTEXITCODE -ne 0) { return 'no-git' }
+    $st = "$(& git -C $dir status --porcelain --untracked-files=all -- $file 2>$null | Select-Object -First 1)"
+    if (-not $st) { return '' }
+    $c = $st.Substring(0, [Math]::Min(2, $st.Length))
+    if ($c -eq '??' -or $c.StartsWith('A')) { 'new' } else { 'changed' }
+}
+function Agent-Body([string]$f) { # the lines after the frontmatter
+    $lines = (Read-Text $f) -split "`n"; $c = 0; $out = @()
+    foreach ($l in $lines) { if ($c -ge 2) { $out += $l }; if ($l -eq '---') { $c++ } }
+    ($out -join "`n").TrimEnd("`n")
+}
+function Cmd-Agents($rest) {
+    $rest = @($rest | Where-Object { $null -ne $_ })
+    if ($rest.Count -ne 1 -or $rest[0] -ne '--json') { Die '用法：kit agents --json' }
+    Need-Init
+    $items = @(Available)
+    $pick = { param($k) @($items | Where-Object { $_.StartsWith("${k}:") } | ForEach-Object { $_.Substring($k.Length + 1) }) }
+    $tools = '"claude"'; if (Has-Codex) { $tools += ', "codex"' }; if (Has-Omp) { $tools += ', "omp"' }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"tools`": [$tools],`n  `"available`": {`"rule`": $(Json-Arr (& $pick 'rule')), `"skill`": $(Json-Arr (& $pick 'skill')), `"mcp`": $(Json-Arr (& $pick 'mcp'))},`n  `"agents`": [")
+    $first = $true
+    foreach ($n in (& $pick 'agent')) {
+        $f = Find-Item 'agent' $n; if (-not $f) { continue }
+        $d = Split-Path -Parent (Split-Path -Parent $f)
+        $fm = $null; try { $fm = Yaml-Lines $f -Frontmatter } catch { $fm = @() }
+        $desc = @(YGet-From $fm 'description'); $desc = if ($desc.Count) { [string]$desc[0] } else { '' }
+        if (-not $first) { [void]$sb.Append(',') }; $first = $false
+        [void]$sb.Append("`n    {`"name`": $(Json-S $n), `"description`": $(Json-S $desc), `"source`": $(Json-S (Split-Path -Leaf $d)), `"path`": $(Json-S $f), `"git`": $(Json-S (Git-State $d "agents/$n.md")),")
+        [void]$sb.Append("`n     `"rules`": $(Json-Arr (YGet-From $fm 'rules')), `"skills`": $(Json-Arr (YGet-From $fm 'skills')), `"mcp`": $(Json-Arr (YGet-From $fm 'mcp')), `"tools_only`": $(Json-Arr (YGet-From $fm 'tools.only')), `"tools_deny`": $(Json-Arr (YGet-From $fm 'tools.deny')),")
+        [void]$sb.Append("`n     `"prompt`": $(Json-S (Agent-Body $f))}")
+    }
+    [void]$sb.Append("`n  ]`n}")
+    Say $sb.ToString()
+}
+function Fm-SetList([string]$f, [string]$key, [string]$val) { # KEY: [val] in the frontmatter (block lists replaced, added if missing)
+    $text = Read-Text $f; $nl = $text.EndsWith("`n")
+    $lines = $text -split "`n"; if ($nl) { $lines = $lines[0..($lines.Count - 2)] }
+    $out = New-Object System.Collections.Generic.List[string]
+    $infm = $false; $skip = $false; $done = $false; $i = 0
+    foreach ($l in $lines) {
+        $i++
+        if ($i -eq 1 -and $l -eq '---') { $infm = $true; $out.Add($l); continue }
+        if ($infm -and $skip) { if ($l -match '^[ \t]*-([ \t]|$)') { continue }; $skip = $false }
+        if ($infm -and $l -eq '---') { if (-not $done) { $out.Add("${key}: [$val]") }; $done = $true; $infm = $false; $out.Add($l); continue }
+        if ($infm -and $l.StartsWith("${key}:")) { $out.Add("${key}: [$val]"); $done = $true; if ($l.Substring($key.Length + 1) -match '^[ \t]*$') { $skip = $true }; continue }
+        $out.Add($l)
+    }
+    Write-Text $f (($out -join "`n") + $(if ($nl) { "`n" } else { '' }))
+}
+function Cmd-Agent($rest) { # kit agent <name> add|rm rule|skill|mcp <item>
+    $r = @($rest | Where-Object { $null -ne $_ })
+    $use = '用法：kit agent <名字> add|rm rule|skill|mcp <東西>'
+    if ($r.Count -ne 4) { Die $use }
+    Need-Init
+    $n = $r[0]; $verb = $r[1]; $k = $r[2]; $item = $r[3]
+    if (@('add', 'rm') -notcontains $verb) { Die $use }
+    $key = switch -CaseSensitive ($k) { 'rule' { 'rules' } 'skill' { 'skills' } 'mcp' { 'mcp' } default { $null } }
+    if (-not $key) { Die '種類只能是 rule、skill、mcp' }
+    $f = Find-Item 'agent' $n; if (-not $f) { Die "找不到 agent ${n}（打 kit list 看有哪些）" }
+    if (((Read-Text $f) -split "`n")[0].TrimEnd("`r") -ne '---') { Die "$f 沒有開頭的 --- 區塊" }
+    $cur = @(); try { $cur = @(YGet-From (Yaml-Lines $f -Frontmatter) $key | Where-Object { $_ }) } catch { }
+    if ($verb -eq 'add') {
+        if (-not (Find-Item $k $item)) { Die "找不到 ${k}:${item}（kit 的來源裡沒有）" }
+        if ($cur -contains $item) { Say "agent $n 已經有 ${k}:${item}"; return }
+        $new = @($cur + $item)
+    } else {
+        if ($cur -notcontains $item) { Say "agent $n 本來就沒有 ${k}:${item}"; return }
+        $new = @($cur | Where-Object { $_ -ne $item })
+    }
+    Fm-SetList $f $key ($new -join ', ')
+    Say "agent ${n}：$(if ($verb -eq 'add') { '加上' } else { '拿掉' }) ${k}:${item}（改了 ${f}，還沒送出：用 kit push 開 PR）"
+}
+
 function Usage {
     Say @'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
   kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
+  kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（給 Herdr 的 Agent 面板）
+  kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
      --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
@@ -1932,6 +2010,8 @@ try {
         'add' { Cmd-AddRm 'add' $rest }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
         'run' { Cmd-Run $rest }
+        'agents' { Cmd-Agents $rest }
+        'agent' { Cmd-Agent $rest }
         'new' { Cmd-New $rest }
         'diff' { Cmd-DiffUpdate 'diff' $rest }
         'update' { Cmd-DiffUpdate 'update' $rest }

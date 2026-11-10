@@ -1689,12 +1689,77 @@ cmd_herdr_panel() {
     esac
 }
 
+# ---------- agents: the definitions (agents/<name>.md), for the Herdr agent panel ----------
+json_arr() { # lines -> ["a", "b"]
+    local first=1 v out="["
+    while IFS= read -r v; do [ -n "$v" ] || continue; [ $first = 1 ] || out="$out, "; first=0; out="$out$(json_s "$v")"; done
+    printf '%s]' "$out"
+}
+git_state() { # git_state DIR FILE : "new", "changed" or "" (or "no-git")
+    git -C "$1" rev-parse --git-dir >/dev/null 2>&1 || { echo no-git; return; }
+    case $(git -C "$1" status --porcelain --untracked-files=all -- "$2" 2>/dev/null | cut -c1-2) in
+        "") ;; "??"|A*) echo new;; *) echo changed;;
+    esac
+}
+cmd_agents() {
+    [ "${1:-}" = --json ] || die "用法：kit agents --json"
+    need_init
+    local i n f d fm first=1 st items
+    items=$(available)
+    printf '{\n  "kit": %s,\n  "tools": [%s],\n  "available": {"rule": %s, "skill": %s, "mcp": %s},\n  "agents": [' "$(json_s "$KIT_VERSION")" \
+        "$(t='"claude"'; has_codex && t="$t, \"codex\""; has_omp && t="$t, \"omp\""; printf '%s' "$t")" \
+        "$(printf '%s\n' "$items" | sed -n 's/^rule://p' | json_arr)" "$(printf '%s\n' "$items" | sed -n 's/^skill://p' | json_arr)" "$(printf '%s\n' "$items" | sed -n 's/^mcp://p' | json_arr)"
+    for i in $(printf '%s\n' "$items" | grep '^agent:'); do
+        n=${i#agent:}; f=$(find_item agent "$n") || continue
+        d=${f%/agents/*}; fm=$(fm_of "$f")
+        st=$(git_state "$d" "agents/$n.md")
+        [ $first = 1 ] || printf ','; first=0
+        printf '\n    {"name": %s, "description": %s, "source": %s, "path": %s, "git": %s,\n     "rules": %s, "skills": %s, "mcp": %s, "tools_only": %s, "tools_deny": %s,\n     "prompt": %s}' \
+            "$(json_s "$n")" "$(json_s "$(fm_val "$fm" description | head -n 1)")" "$(json_s "$(basename "$d")")" "$(json_s "$f")" "$(json_s "$st")" \
+            "$(fm_val "$fm" rules | json_arr)" "$(fm_val "$fm" skills | json_arr)" "$(fm_val "$fm" mcp | json_arr)" \
+            "$(fm_val "$fm" tools.only | json_arr)" "$(fm_val "$fm" tools.deny | json_arr)" \
+            "$(json_s "$(awk 'c >= 2 { print } /^---$/ { c++ }' "$f")")"
+    done
+    printf '\n  ]\n}\n'
+}
+fm_set_list() { # fm_set_list FILE KEY "a, b" : KEY: [a, b] in the file's frontmatter (block lists replaced, added if missing)
+    local tmp; tmp=$(mktemp "$1.kit.XXXXXX")
+    awk -v key="$2" -v val="[$3]" '
+        NR == 1 && $0 == "---" { infm = 1; print; next }
+        infm && skip { if ($0 ~ /^[ \t]*-([ \t]|$)/) next; skip = 0 }
+        infm && $0 == "---" { if (!done) print key ": " val; done = 1; infm = 0; print; next }
+        infm && index($0, key ":") == 1 { print key ": " val; done = 1; rest = substr($0, length(key) + 2); if (rest ~ /^[ \t]*$/) skip = 1; next }
+        { print }' "$1" > "$tmp" && mv "$tmp" "$1" || { rm -f "$tmp"; die "沒辦法改 $1"; }
+}
+cmd_agent() { # kit agent <name> add|rm rule|skill|mcp <item>
+    [ $# -eq 4 ] || die "用法：kit agent <名字> add|rm rule|skill|mcp <東西>"
+    need_init
+    local n=$1 verb=$2 k=$3 item=$4 f fm key cur new
+    case $verb in add|rm) ;; *) die "用法：kit agent <名字> add|rm rule|skill|mcp <東西>";; esac
+    case $k in rule) key=rules;; skill) key=skills;; mcp) key=mcp;; *) die "種類只能是 rule、skill、mcp";; esac
+    f=$(find_item agent "$n") || die "找不到 agent ${n}（打 kit list 看有哪些）"
+    head -n 1 "$f" | grep -qx -- '---' || die "$f 沒有開頭的 --- 區塊"
+    fm=$(fm_of "$f"); cur=$(fm_val "$fm" "$key")
+    if [ "$verb" = add ]; then
+        find_item "$k" "$item" >/dev/null || die "找不到 ${k}:${item}（kit 的來源裡沒有）"
+        printf '%s\n' "$cur" | grep -qxF "$item" && { say "agent $n 已經有 ${k}:${item}"; return 0; }
+        new=$(printf '%s\n%s\n' "$cur" "$item" | awk 'NF' | paste -sd, - | sed 's/,/, /g')
+    else
+        printf '%s\n' "$cur" | grep -qxF "$item" || { say "agent $n 本來就沒有 ${k}:${item}"; return 0; }
+        new=$(printf '%s\n' "$cur" | grep -vxF "$item" | awk 'NF' | paste -sd, - | sed 's/,/, /g')
+    fi
+    fm_set_list "$f" "$key" "$new"
+    say "agent ${n}：$( [ "$verb" = add ] && echo 加上 || echo 拿掉) ${k}:${item}（改了 ${f}，還沒送出：用 kit push 開 PR）"
+}
+
 usage() {
     cat <<'EOF'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
   kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
+  kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（給 Herdr 的 Agent 面板）
+  kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
      --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
@@ -1733,6 +1798,8 @@ case ${1:-} in
     add)       shift; cmd_add_rm add "$@";;
     rm|remove) shift; cmd_add_rm rm "$@";;
     run)       shift; cmd_run "$@";;
+    agents)    shift; cmd_agents "$@";;
+    agent)     shift; cmd_agent "$@";;
     new)       shift; cmd_new "$@";;
     diff)      shift; cmd_diff_update diff "$@";;
     update)    shift; cmd_diff_update update "$@";;
