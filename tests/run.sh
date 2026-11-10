@@ -268,7 +268,7 @@ check "install adds PATH once" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc"
 PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
 check "reinstall does not add PATH twice" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc")" = 1 ]'
 check "installed kit works" '"$HOME/.local/bin/kit" init "$TEAM" >/dev/null 2>&1 && grep -q agentkit:begin "$HOME/.claude/CLAUDE.md"'
-( cd "$R" && echo 0.1.1 > VERSION && git commit -qam v2 )
+( cd "$R" && echo 0.1.1 > VERSION && git -c user.name=t -c user.email=t@t commit -qam v2 )
 out=$("$HOME/.local/bin/kit" self-update 2>&1)
 check "self-update pulls new version" '"$HOME/.local/bin/kit" --version | grep -q "kit 0.1.1"'
 "$HOME/.local/bin/kit" uninstall --self >/dev/null 2>&1
@@ -276,7 +276,7 @@ check "self-update pulls new version" '"$HOME/.local/bin/kit" --version | grep -
 H2="$T/home2"; mkdir -p "$H2"
 HOME="$H2" SHELL=/bin/zsh PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
 check "zsh user without rc gets ~/.zshrc" 'grep -q "added by agentkit" "$H2/.zshrc"'
-check "zsh PATH line works" '[ "$(HOME="$H2" PATH=/usr/bin:/bin zsh -c ". \"$H2/.zshrc\"; command -v kit")" = "$H2/.local/bin/kit" ]'
+command -v zsh >/dev/null && check "zsh PATH line works" '[ "$(HOME="$H2" PATH=/usr/bin:/bin zsh -c ". \"$H2/.zshrc\"; command -v kit")" = "$H2/.local/bin/kit" ]' || echo "skip: zsh not installed"
 H3="$T/home3"; mkdir -p "$H3"
 HOME="$H3" SHELL=/bin/bash PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
 if [ "$(uname)" = Darwin ]; then check "mac bash user gets ~/.bash_profile" 'grep -q "added by agentkit" "$H3/.bash_profile"'
