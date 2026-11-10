@@ -502,7 +502,7 @@ read pass fail < "$T/sub"
 UP="$T/upstream"; CO="$T/collector"
 mkdir -p "$UP/skills/foo/scripts" "$CO"
 printf -- '---\nname: foo\ndescription: >-\n  Upstream foo.\n---\nfoo v1\n' > "$UP/skills/foo/SKILL.md"
-echo 'echo hi' > "$UP/skills/foo/scripts/run.sh"; printf '\0\1' > "$UP/skills/foo/logo.png"; ln -s SKILL.md "$UP/skills/foo/link.md"
+echo 'echo hi' > "$UP/skills/foo/scripts/run.sh"; mkdir -p "$UP/skills/foo/.github"; echo x > "$UP/skills/foo/.github/ci.yml"; printf '\0\1' > "$UP/skills/foo/logo.png"; ln -s SKILL.md "$UP/skills/foo/link.md"
 printf 'MIT License\n\nPermission is hereby granted, free of charge, ...\n' > "$UP/LICENSE"
 ( cd "$UP" && git init -q && git config user.name a && git config user.email a@a && git add -A && git commit -qm v1 )
 mkdir -p "$T/nolic/skills/bar"; printf -- '---\nname: bar\ndescription: b\n---\nb\n' > "$T/nolic/skills/bar/SKILL.md"
@@ -511,7 +511,7 @@ printf 'name: collector\ncollect_sources: [file://%s, file://%s]\n' "$UP" "$T/no
 cd "$CO"
 out=$(kit collect "file://$UP" --path skills/foo 2>&1); rc=$?
 check "collect copies the skill with the repo's LICENSE" '[ $rc -eq 0 ] && [ -f "$CO/skills/foo/SKILL.md" ] && grep -q "MIT License" "$CO/skills/foo/LICENSE" && [ -f "$CO/skills/foo/scripts/run.sh" ]'
-check "collect skips binaries and links" '[ ! -e "$CO/skills/foo/logo.png" ] && [ ! -e "$CO/skills/foo/link.md" ]'
+check "collect skips binaries, links and dot folders" '[ ! -e "$CO/skills/foo/logo.png" ] && [ ! -e "$CO/skills/foo/link.md" ] && [ ! -e "$CO/skills/foo/.github" ]'
 check "collect points at files that run" 'echo "$out" | grep -q "會執行的檔案" && echo "$out" | grep -q scripts/run.sh'
 v1=$(git -C "$UP" rev-parse HEAD)
 check "third_party.lock records author, commit, license" 'awk -F"\t" -v u="file://$UP" -v s="$v1" "\$1 == \"foo\" && \$2 == u && \$3 == \"skills/foo\" && \$5 == s && \$6 == \"MIT\"" "$CO/third_party.lock" | grep -q .'

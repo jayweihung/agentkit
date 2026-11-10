@@ -1373,6 +1373,7 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
     mkdir -p "$tmp/out"
     while IFS= read -r f; do
         local rel=${f#"$src"/}
+        case /$rel in */.*) continue;; esac       # .github/, .claude-plugin/ ...: for other tools, not the skill
         if [ -L "$f" ]; then skipped=$((skipped+1)); warn "跳過捷徑 $rel"; continue; fi
         if [ -s "$f" ] && ! LC_ALL=C grep -qI . "$f"; then skipped=$((skipped+1)); warn "跳過非文字檔 $rel"; continue; fi
         mkdir -p "$(dirname "$tmp/out/$rel")"; cp "$f" "$tmp/out/$rel"
