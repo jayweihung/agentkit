@@ -1207,6 +1207,12 @@ install_md() { # INSTALL.md of the export (no URLs; the same text as kit.ps1 wri
 
     kit init <團隊來源的網址>
     kit help
+
+## Herdr
+
+    kit herdr-panel install
+
+用法看 docs/herdr.md。
 EOF
 }
 cmd_export_self() {

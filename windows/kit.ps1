@@ -1432,6 +1432,12 @@ function Install-Md { # INSTALL.md of the export (no URLs; the same text as unix
 
     kit init <團隊來源的網址>
     kit help
+
+## Herdr
+
+    kit herdr-panel install
+
+用法看 docs/herdr.md。
 '@
     ($t -replace "`r`n", "`n") + "`n"
 }

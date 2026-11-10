@@ -61,15 +61,17 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 
 ## Herdr 的 kit 面板
 
-不想打指令的話，可以在 Herdr 裡用面板：看到所有的 rule、skill、MCP、agent（團隊必備／在用／新的／沒用），
-按一下加上、拿掉、同步，agent 按「開啟」會在新分頁用 `kit run` 開（有裝 Codex、omp 的話可以選）。
+不想打指令的話，可以在 Herdr 裡用（Windows、Mac、Linux 都一樣）：
 
-    kit herdr-panel install       裝進 Herdr（mods/kit），在上排加一顆 kit 按鈕
-    kit herdr-panel uninstall     拿掉
+- **每個 agent 視窗上的 kit 按鈕**：這個 agent 在用哪些規則、skill、MCP，加上或拿掉。
+- **右上角的倉庫**：看、改、新增規則、skill、MCP，改好按「送出」（`kit push`）。
+- **Agents 視窗**：kit 做好的 agent 用了哪些東西，用 Claude、Codex 或 omp 開起來。
 
-改版面前會留一份 `layouts/<版面>.json.kit-backup-<時間>`。Herdr 內建的版面（main 等）不能改：
-面板會先出現在右邊，按面板上的「放進上排」會複製一份版面再放進去。
-面板讀的是 `kit list --json`（給程式讀的 JSON：kit 版本、來源、每個項目的種類、名字、狀態、說明、是不是新的）。
+    kit herdr-panel install       裝進 Herdr
+    kit herdr-panel uninstall     拿掉，Herdr 回到原本的樣子
+
+畫面和每顆按鈕的說明（附示意圖）：[docs/herdr.md](docs/herdr.md)。
+面板讀的是 `kit list --json`、`kit agents --json`（給程式讀的 JSON：來源、每個項目的種類、名字、狀態、說明、檔案位置、是不是新的）。
 
 ## 把 kit 帶進公司的 git server
 
@@ -86,9 +88,10 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
     kit new skill <名字> [--from 本機資料夾]   新增
     kit update <名字> --from 本機資料夾       更新
     kit check                     送出前檢查
-    kit push [--dry-run]          檢查後開分支、push、在 Gitea 開 PR
+    kit push [--to 來源] [--dry-run]   檢查後開分支、push、在 Gitea 開 PR
 
 `kit push` 只送改過的 rule、skill、mcp、agent，只 push `kit/...` 分支，不動 main。
+來源沒有 `origin`（自己的來源，不是團隊的 Gitea）時，改成直接 commit 到現在的分支、推到它所有的 remote，不開 PR。
 檢查（`kit check`、`author_domains`、`allowed_hosts`）有一項不過就什麼都不送。
 要自動開 PR 就放 Gitea token：環境變數 `KIT_GITEA_TOKEN`，或檔案
 `~/.config/agentkit/gitea-token`（`chmod 600`）。沒有 token 時會印出網址讓你自己開。
