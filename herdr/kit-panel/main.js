@@ -10,7 +10,7 @@
 // "pane": a popup opened by the kit button in an agent's pane header (mod kit-pane) for that one agent (props.target).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Editor, EditorState } from "gpui-base";
-import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, writeTextFile, focused, terminals, spaces, closeOverlay, props as blockProps } from "herdr";
+import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, writeTextFile, focused, terminals, spaces, closeOverlay, openOverlay, props as blockProps } from "herdr";
 
 const TOGGLE = "kit-toggle", PANEL = "kit-panel";
 const SHIPPED = ["main", "terminals", "win98"]; // Herdr's own layouts: read-only, so "放進上排" clones one first
@@ -160,13 +160,21 @@ function icon(p, size, color) {
 export default class KitPanel extends View {
   init(_p, cx) {
     const role = blockProps()?.role;
-    this.role = role === "toggle" || role === "pane" ? role : "panel";
+    this.role = role === "toggle" || role === "pane" || role === "editor" ? role : "panel";
     this.filter = "";
     this.tool = this.load("tool") || "claude";
     this.folded = {};
     try { this.folded = JSON.parse(this.load("folded") || "{}"); } catch { this.folded = {}; }
     // Both the button and the panel keep the shared list fresh (a hidden panel may not have started yet);
     // the background sync Claude starts may change things, so look again every minute.
+    if (this.role === "editor") {
+      // 放大: one file in its own big window (props: the item, and the text as the panel had it, saved or not)
+      const p = blockProps() ?? {};
+      this.target = { key: "repo" };
+      this.edit = null;
+      if (p.item) cx.spawn(async (cx) => { await this.openItem(p.item, cx, p.value, p.orig); cx.notify(); });
+      return;
+    }
     if (this.role === "pane") {
       // one agent, the one whose header button was clicked: its own list, not the panel's shared one
       this.target = blockProps()?.target ?? currentTarget(null);
@@ -287,6 +295,12 @@ export default class KitPanel extends View {
   render(cx) {
     if (this.role === "toggle") return this.renderToggle();
     const t = theme(), z = fs();
+    if (this.role === "editor") {
+      const msg = shared(MSG);
+      return v_flex().id("kit-editor").size_full().bg(t.surface).text_size(z).text_color(t.foreground)
+        .when(Boolean(msg && !msg.ok), (el) => el.child(this.message(t, z, msg)))
+        .child(this.edit ? this.editor(t, z) : div().p(14).text_color(t.muted).child("讀取中…"));
+    }
     // a popup is as tall as its content, and the list (flex_1) has none of its own: give the popup a height
     const root = v_flex().id("kit-root").size_full().bg(t.surface).text_size(z).text_color(t.foreground)
       .when(this.role === "pane", (el) => el.h(POPUP_H).rounded(8));
@@ -397,20 +411,29 @@ export default class KitPanel extends View {
       .child(div().flex_none().text_color(t.dim).child("›"));
   }
 
-  async openItem(i, cx) {
-    const text = await readTextFile(i.path).catch(() => null);
+  async openItem(i, cx, value, orig) {
+    const text = orig ?? await readTextFile(i.path).catch(() => null);
     if (text === null) { setShared(MSG, { ok: false, label: "打開", text: `讀不到 ${shortDir(i.path)}`, at: Date.now() }); return; }
     this.code?.release();
     const th = theme();
-    this.code = EditorState.new({ language: i.kind === "mcp" ? "yaml" : "md", value: text, soft_wrap: true,
+    this.code = EditorState.new({ language: i.kind === "mcp" ? "yaml" : "md", value: value ?? text, soft_wrap: true,
       font_family: settings().font_family, font_size: 12,
       syntax: { keyword: th.ansi5, string: th.ansi2, comment: th.dim, function: th.ansi4, type: th.ansi3, number: th.ansi1, constant: th.ansi6 } });
-    this.edit = { item: i, orig: text, dirty: false, err: null };
+    this.edit = { item: i, orig: text, dirty: value != null && value !== text, err: null };
     this.code.on("change", (_e, cx) => {
       const dirty = this.code.value() !== this.edit?.orig;
       if (this.edit && dirty !== this.edit.dirty) { this.edit.dirty = dirty; cx.notify(); }
     });
     setShared(MSG, null);
+  }
+
+  // the open file moves to a big window (what you typed goes along, saved or not); the panel goes back to its list
+  enlarge(cx) {
+    const e = this.edit;
+    if (!e) return;
+    openOverlay({ mod: "kit", kind: "window", key: "kit-editor", width: 0.7, height: 0.85,
+      props: { role: "editor", item: e.item, orig: e.orig, value: this.code.value() } });
+    this.closeItem(cx);
   }
 
   closeItem(cx) {
@@ -438,13 +461,19 @@ export default class KitPanel extends View {
 
   // one file open: its name and source, 存檔 / 用編輯器開 / 重新讀取, then the editor
   editor(t, z) {
-    const e = this.edit, i = e.item;
+    const e = this.edit, i = e.item, big = this.role === "editor";
+    const dir = slash((this.data?.sources ?? []).find((x) => x.name === i.source)?.dir ?? "");
+    const rel = dir && slash(i.path).startsWith(dir + "/") ? slash(i.path).slice(dir.length + 1) : shortDir(i.path);
+    const leave = big
+      ? this.btn(t, z, "back", e.dirty ? "✕ 不存，關掉" : "✕ 關掉", { small: true, on: () => { this.code?.release(); closeOverlay(blockProps()?.overlay); } })
+      : this.btn(t, z, "back", e.dirty ? "← 不存，回去" : "← 回去", { small: true, on: (cx) => this.closeItem(cx) });
     return v_flex().flex_1().min_h(0)
       .child(h_flex().flex_none().px(10).py(8).gap(6).items_center().border_b(1).border_color(t.border)
-        .child(this.btn(t, z, "back", e.dirty ? "← 不存，回去" : "← 回去", { small: true, on: (cx) => this.closeItem(cx) }))
+        .child(leave)
         .child(v_flex().flex_1().min_w(0)
           .child(div().truncate().font_semibold().child(i.name))
-          .child(div().truncate().text_size(z - 2).text_color(t.muted).child(`${i.source} · ${shortDir(i.path)}`)))
+          .child(div().truncate().text_size(z - 2).text_color(t.muted).child(`${i.source} · ${rel}`)))
+        .when(!big, (el) => el.child(this.btn(t, z, "bigger", "⤢ 放大", { small: true, on: (cx) => this.enlarge(cx) })))
         .child(this.btn(t, z, "save", e.dirty ? "存檔" : "已存", { small: true, kind: "primary", off: !e.dirty, on: (cx) => this.saveItem(cx) })))
       .when(Boolean(e.err), (el) => el.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked).child(e.err)))
       .child(Editor.new(this.code).flex_1().min_h(0))
