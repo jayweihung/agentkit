@@ -6,11 +6,10 @@
 //   kit list --json --dir <folder> --pid <pid>   what there is, what is in use, what the folder adds
 //   kit add|rm <kind> <name>
 //   kit sync             update                                kit run <agent> --tool <tool>  (in a new tab)
-// Roles (props.role): the panel (default), "toggle" (the tab-bar button that shows or hides "kit-panel") and
-// "agents" (a tab: every agent on the left, what the chosen one uses and what needs you on the right).
+// Roles (props.role): the panel (default) and "toggle", the tab-bar button that shows or hides "kit-panel".
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, focused, terminals, spaces, agents, props as blockProps } from "herdr";
+import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, focused, terminals, spaces, props as blockProps } from "herdr";
 
 const TOGGLE = "kit-toggle", PANEL = "kit-panel";
 const SHIPPED = ["main", "terminals", "win98"]; // Herdr's own layouts: read-only, so "放進上排" clones one first
@@ -89,7 +88,8 @@ function currentTarget(prev) {
   const sp = spaces().find((s) => s.id === f.space);
   const machine = sp?.machine ?? null, cwd = f.cwd ?? t.cwd ?? null;
   return { key: `${machine ?? ""}|${cwd ?? ""}|${f.terminal}`, term: f.terminal, machine, space: f.space, cwd,
-    title: t.title || t.name || t.program?.name || f.terminal, agent: Boolean(f.agent || t.program?.agent) };
+    title: t.title || t.name || t.program?.name || f.terminal, agent: Boolean(f.agent || t.program?.agent),
+    program: t.program ?? null, status: t.status ?? null };
 }
 // a folder with ~ for this computer's home (other machines' paths stay as they are)
 const shortDir = (d) => { const h = String(home() ?? "").replace(/\\/g, "/"); return d && h && (d + "/").startsWith(h + "/") ? "~" + d.slice(h.length) : d; };
@@ -112,27 +112,6 @@ async function loadFor(tg) {
   try { return { ...JSON.parse(r.out), key: tg.key, warn, machine: warn ? null : tg.machine, at: Date.now() }; }
   catch { return { error: "kit list --json 的輸出讀不懂（kit 太舊？請打 kit self-update）", key: tg.key, at: Date.now() }; }
 }
-// An agent as a target, like currentTarget does for the focused terminal.
-function agentTarget(a) {
-  const t = terminals().find((x) => x.address === a.address) ?? {};
-  const sp = spaces().find((s) => s.id === a.space);
-  const machine = sp?.machine ?? null, cwd = t.cwd ?? null;
-  return { key: `${machine ?? ""}|${cwd ?? ""}|${a.address}`, term: a.address, machine, space: a.space, cwd,
-    title: a.title || t.name || a.program?.name || a.address, agent: true, report: t.report ?? null };
-}
-// What needs you about an agent (Herdr's status and kit's answer), most urgent first.
-function needs(a, d) {
-  const out = [];
-  if (a.status === "blocked") out.push({ level: "blocked", text: "等你回應" });
-  if (d?.error) out.push({ level: "blocked", text: /連不到/.test(d.error) ? "連不到那台" : "kit 出錯" });
-  else if (d?.warn) out.push({ level: "blocked", text: "連不到那台" });
-  if (d?.kit_version_wanted) out.push({ level: "warn", text: "kit 要更新" });
-  const news = (d?.items ?? []).filter((i) => i.new).length;
-  if (news && !d?.here?.user) out.push({ level: "info", text: `${news} 個新的` });
-  if (d?.here?.user) out.push({ level: "info", text: `${d.here.user} 唯讀` });
-  if (!d) out.push({ level: "dim", text: "讀取中" });
-  return out;
-}
 function icon(p, size, color) {
   if (!p?.icon) return null;
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
@@ -141,8 +120,7 @@ function icon(p, size, color) {
 export default class KitPanel extends View {
   init(_p, cx) {
     const role = blockProps()?.role;
-    this.role = role === "toggle" || role === "agents" ? role : "panel";
-    if (this.role === "agents") return this.initAgents(cx);
+    this.role = role === "toggle" ? role : "panel";
     this.filter = "";
     this.tool = this.load("tool") || "claude";
     this.folded = {};
@@ -171,100 +149,6 @@ export default class KitPanel extends View {
     cx.spawn(async (cx) => { setShared(DATA, await loadFor(tg)); cx.notify(); });
   }
 
-  // ---------- the agents tab ----------
-  initAgents(cx) {
-    this.cache = new Map();   // agent address -> kit's answer for it
-    this.sel = null;
-    this.loading = false;
-    const sweep = (cx) => {   // ask kit about every agent, one at a time (the chosen one first)
-      if (this.loading) return;
-      this.loading = true;
-      cx.spawn(async (cx) => {
-        const list = agents();
-        const order = [...list.filter((a) => a.address === this.sel), ...list.filter((a) => a.address !== this.sel)];
-        for (const a of order) {
-          const tg = agentTarget(a), old = this.cache.get(a.address);
-          if (old && old.key === tg.key && Date.now() - old.at < 50000) continue;
-          this.cache.set(a.address, await loadFor(tg));
-          cx.notify();
-        }
-        this.loading = false;
-      });
-    };
-    sweep(cx);
-    cx.timer.every(5000, (cx) => sweep(cx));
-  }
-
-  renderAgents(cx) {
-    const t = theme(), z = fs();
-    const list = agents();
-    if (!this.sel || !list.some((a) => a.address === this.sel)) this.sel = (list.find((a) => a.focused) ?? list[0])?.address ?? null;
-    const left = v_flex().id("agents-list").w(300).flex_none().h_full().overflow_y_scrollbar().border_r(1).border_color(t.border).py(6);
-    left.child(div().px(12).pb(6).font_semibold().child(`Agents（${list.length}）`));
-    let lastSpace = null;
-    for (const a of list) {
-      if (a.space !== lastSpace) { lastSpace = a.space; left.child(div().px(12).pt(8).pb(2).text_size(z - 2).text_color(t.muted).child(a.space_name)); }
-      const tg = agentTarget(a), d = this.cache.get(a.address), n = needs(a, d), on = a.address === this.sel;
-      const where = [tg.machine ?? "這台電腦", shortDir(tg.cwd)].filter(Boolean).join(" · ");
-      left.child(h_flex().id(`ag-${a.address}`).mx(6).px(8).py(6).gap(8).items_center().rounded(6).cursor_pointer()
-        .bg(on ? t.selected : t.surface).hover((s) => s.bg(on ? t.selected : t.hover)).on_mouse_down("left", stop)
-        .on_click((_e, cx) => { this.sel = a.address; cx.notify(); })
-        .child(div().size(28).flex_none().rounded(14).bg(t.raised).flex().items_center().justify_center().child(icon(a.program, 16, t.foreground) ?? div().child("•")))
-        .child(v_flex().flex_1().min_w(0)
-          .child(div().truncate().font_semibold().child(a.title || tg.title))
-          .child(div().truncate().text_size(z - 2).text_color(t.muted).child(where)))
-        .when(n.length > 0, (el) => el.child(this.chip(t, z, n[0]))));
-    }
-    if (!list.length) left.child(div().px(12).text_color(t.muted).child("現在沒有 agent。"));
-    const a = list.find((x) => x.address === this.sel);
-    return h_flex().id("agents-root").size_full().bg(t.surface).text_size(z).text_color(t.foreground)
-      .child(left)
-      .child(a ? this.agentDetail(t, z, a) : div().flex_1().p(16).text_color(t.muted).child("選左邊一個 agent。"));
-  }
-
-  chip(t, z, n) {
-    const c = n.level === "blocked" ? t.blocked : n.level === "warn" ? t.ansi3 ?? t.blocked : n.level === "dim" ? t.muted : t.done;
-    return div().flex_none().px(6).h(18).rounded(5).bg(c + "26").text_size(z - 3).font_semibold().text_color(c).flex().items_center().child(n.text);
-  }
-
-  agentDetail(t, z, a) {
-    const tg = agentTarget(a), d = this.cache.get(a.address), n = needs(a, d);
-    const box = v_flex().id("agent-detail").flex_1().min_w(0).h_full().overflow_y_scrollbar().p(16).gap(12);
-    box.child(h_flex().gap(10).items_center()
-      .child(div().size(40).flex_none().rounded(20).bg(t.raised).flex().items_center().justify_center().child(icon(a.program, 22, t.foreground) ?? div().child("•")))
-      .child(v_flex().flex_1().min_w(0)
-        .child(div().truncate().text_size(z + 3).font_semibold().child(a.title || tg.title))
-        .child(div().truncate().text_size(z - 1).text_color(t.muted).child([a.program?.name, tg.machine ?? "這台電腦", shortDir(tg.cwd)].filter(Boolean).join(" · "))))
-      .child(this.btn(t, z, "go-agent", "切到這個 agent", { kind: "primary", on: () => run("agent.focus", { terminal: a.address }) })));
-    const urgent = n.filter((x) => x.level === "blocked" || x.level === "warn" || (x.level === "info" && /新的/.test(x.text)));
-    if (urgent.length) box.child(v_flex().gap(6).p(10).rounded(8).bg(t.raised)
-      .child(div().font_semibold().child("要處理"))
-      .children(urgent.map((x) => h_flex().gap(8).items_center().child(this.chip(t, z, x)).child(div().text_size(z - 1).text_color(t.muted).child(this.needHelp(x, d))))));
-    if (tg.report) box.child(div().text_size(z - 1).text_color(t.muted).child(`它最後說：${typeof tg.report === "string" ? tg.report : tg.report.msg ?? JSON.stringify(tg.report)}`));
-    if (!d) return box.child(div().text_color(t.muted).child("讀取中…"));
-    if (d.error) return box.child(this.problem(t, z, d.error));
-    if (d.here?.user) return box.child(div().text_size(z - 1).text_color(t.muted)
-      .child(`這個 agent 用 ${d.here.user} 帳號跑${d.here.user === "root" ? "，只用你在 Mac 上簽過的版本。" : "。"}這裡看不到也不能改。`));
-    const kitUsed = (d.items ?? []).filter((i) => i.status === "used" || i.status === "required");
-    const dir = (d.here?.items ?? []).filter((i) => i.scope === "dir"), mine = (d.here?.items ?? []).filter((i) => i.scope === "user");
-    const group = (title, rows, render) => {
-      box.child(div().mt(4).font_semibold().child(`${title}（${rows.length}）`));
-      if (!rows.length) box.child(div().text_size(z - 1).text_color(t.muted).child("沒有"));
-      else box.child(v_flex().gap(2).children(rows.map(render)));
-    };
-    group("kit 給的（帳號共用）", kitUsed, (i) => this.hereRow(t, z, { kind: i.kind, name: i.name, description: i.description || i.source, tools: "claude", scope: "kit", path: i.name }));
-    group("這個目錄自己的", dir, (i) => this.hereRow(t, z, i));
-    if (mine.length) group("帳號裡另外有的（不是 kit 管的）", mine, (i) => this.hereRow(t, z, i));
-    return box.child(div().text_size(z - 1.5).text_color(t.dim).child("要加上或拿掉 kit 的東西：切到這個 agent，用右邊的 kit 面板。"));
-  }
-
-  needHelp(x, d) {
-    if (x.text === "等你回應") return "它停下來在等你，切過去看。";
-    if (x.text === "連不到那台") return d?.warn ?? d?.error ?? "";
-    if (x.text === "kit 出錯") return d?.error ?? "";
-    if (x.text === "kit 要更新") return `團隊要 kit ${d?.kit_version_wanted} 以上；在那台打  kit self-update`;
-    return "來源裡有新東西，切過去在 kit 面板按「⟳ 同步」看。";
-  }
 
   // add / rm / sync: one at a time, the result (kit's own words) shown above the list
   act(label, args, cx) {
@@ -318,7 +202,6 @@ export default class KitPanel extends View {
 
   render(cx) {
     if (this.role === "toggle") return this.renderToggle();
-    if (this.role === "agents") return this.renderAgents(cx);
     const t = theme(), z = fs();
     const root = v_flex().id("kit-root").size_full().bg(t.surface).text_size(z).text_color(t.foreground);
     root.child(this.header(t, z));
@@ -342,17 +225,15 @@ export default class KitPanel extends View {
   header(t, z) {
     const d = this.data, busy = this.busy, tg = this.target ?? {};
     const inBar = Boolean(find(layout(), TOGGLE));
-    const where = [tg.title || "這台電腦", d?.machine ?? tg.machine ?? "這台電腦", shortDir(d?.here?.dir ?? tg.cwd)].filter(Boolean).join(" · ");
-    return v_flex().flex_none().border_b(1).border_color(t.border)
-      .child(h_flex().px(10).py(6).gap(6).items_center()
-        .child(div().flex_1().min_w(0).truncate().font_semibold().child(d?.kit ? `kit ${d.kit}` : "kit"))
-        .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { kind: "primary", off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
-        .child(this.btn(t, z, "reload", "↻", { off: Boolean(busy), on: (cx) => this.refresh(cx) }))
-        .child(this.btn(t, z, "all-agents", "全部 agent", { on: () => run("tab.new", { name: "Agents", mod: "kit", props: { role: "agents" } }) }))
-        .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { on: () => run("layout.hide", { id: PANEL }) }))))
-      .child(div().px(12).pb(3).text_size(z - 1).truncate().text_color(t.foreground).child(`跟著：${where}`))
-      .when(Boolean(d?.sources?.length), (el) => el.child(div().px(12).pb(5).text_size(z - 1.5).truncate().text_color(t.muted)
-        .child(`來源：${d.sources.map((s) => s.name).join("、")}`)));
+    const where = [d?.machine ?? tg.machine ?? "這台電腦", shortDir(d?.here?.dir ?? tg.cwd)].filter(Boolean).join(" · ");
+    const pic = icon(tg.program, 18, t.foreground);
+    return h_flex().flex_none().px(10).py(8).gap(8).items_center().border_b(1).border_color(t.border)
+      .child(div().size(32).flex_none().rounded(16).bg(t.raised).flex().items_center().justify_center().child(pic ?? div().text_color(t.muted).child("•")))
+      .child(v_flex().flex_1().min_w(0)
+        .child(div().truncate().font_semibold().child(tg.title || "這台電腦"))
+        .child(div().truncate().text_size(z - 1.5).text_color(t.muted).child(where)))
+      .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
+      .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
   }
 
   moveBanner(t, z) {
@@ -380,57 +261,61 @@ export default class KitPanel extends View {
   }
 
   list(t, z, d) {
-    const items = d.items ?? [];
-    const tools = d.tools ?? ["claude"];
-    const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(10);
-    const news = items.filter((i) => i.new).length;
-    if (news) body.child(div().text_size(z - 1).text_color(t.done).child(`有 ${news} 個新的（標「新」）。按「⟳ 同步」後就不再標新。`));
-    for (const { kind, title } of KINDS) {
-      const rows = items.filter((i) => i.kind === kind);
-      if (!rows.length) continue;
-      const folded = Boolean(this.folded[kind]);
-      const used = rows.filter((i) => i.status === "used" || i.status === "required").length;
-      body.child(h_flex().id(`sec-${kind}`).gap(6).items_center().cursor_pointer().on_mouse_down("left", stop)
-        .on_click((_e, cx) => { this.folded[kind] = !folded; this.save("folded", JSON.stringify(this.folded)); cx.notify(); })
-        .child(div().w(12).text_color(t.muted).child(folded ? "▸" : "▾"))
-        .child(div().font_semibold().child(title))
-        .child(div().text_size(z - 1.5).text_color(t.muted).child(kind === "agent" ? `${rows.length} 個` : `在用 ${used} / ${rows.length}`)));
-      if (kind === "agent" && tools.length > 1 && !folded) body.child(this.toolPicker(t, z, tools));
-      if (!folded) body.child(v_flex().gap(4).children(rows.map((i) => this.row(t, z, i))));
+    const items = d.items ?? [], tools = d.tools ?? ["claude"], here = d.here?.items ?? [];
+    const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(8);
+    const kindName = { rule: "規則", skill: "Skills", mcp: "MCP" };
+    // 1. what this agent uses: kit's (can be taken off) and its folder's / this account's own (look only)
+    body.child(div().font_semibold().child("這個 agent 在用的"));
+    for (const kind of ["rule", "skill", "mcp"]) {
+      const kitRows = items.filter((i) => i.kind === kind && (i.status === "used" || i.status === "required"));
+      const ownRows = here.filter((i) => i.kind === kind);
+      const n = kitRows.length + ownRows.length;
+      const folded = this.folded[`use-${kind}`] ?? n > 8;
+      body.child(this.secHead(t, z, `use-${kind}`, `${kindName[kind]}（${n}）`, folded, ""));
+      if (folded) continue;
+      if (!n) { body.child(div().pl(18).text_size(z - 1.5).text_color(t.dim).child("沒有")); continue; }
+      body.child(v_flex().gap(2).children([...kitRows.map((i) => this.row(t, z, i)), ...ownRows.map((i) => this.hereRow(t, z, i))]));
     }
-    if (!items.length) body.child(div().text_color(t.muted).child("來源裡還沒有東西。"));
-    if (d.here) this.hereSections(t, z, d.here, body);
+    if (d.here?.error) body.child(div().text_size(z - 1.5).text_color(t.muted).child(`${shortDir(d.here.dir)}：${d.here.error}`));
+    // 2. what kit has that this agent does not use yet
+    const more = items.filter((i) => i.kind !== "agent" && i.status === "unused");
+    const news = more.filter((i) => i.new).length;
+    if (more.length) {
+      const folded = this.folded.more ?? true;
+      body.child(div().mt(6).border_t(1).border_color(t.border));
+      body.child(this.secHead(t, z, "more", `可以加上的（${more.length}）`, folded, news ? `${news} 個新的` : ""));
+      if (!folded) body.child(v_flex().gap(2)
+        .child(div().pl(18).text_size(z - 1.5).text_color(t.muted).child(`加上後，${d.machine ?? "這台電腦"} 這個帳號的每個 agent 都會有。來源：${(d.sources ?? []).map((s) => s.name).join("、")}`))
+        .children(more.map((i) => this.row(t, z, i))));
+    }
+    // 3. kit's agents: start one here
+    const ags = items.filter((i) => i.kind === "agent");
+    if (ags.length) {
+      const folded = this.folded.agents ?? true;
+      body.child(div().mt(6).border_t(1).border_color(t.border));
+      body.child(this.secHead(t, z, "agents", `用 kit 開新的 agent（${ags.length}）`, folded, ""));
+      if (!folded) {
+        if (tools.length > 1) body.child(this.toolPicker(t, z, tools));
+        body.child(v_flex().gap(2).children(ags.map((i) => this.row(t, z, i))));
+      }
+    }
+    if (!items.length && !here.length) body.child(div().text_color(t.muted).child("來源裡還沒有東西。"));
     return body;
   }
 
-  // what the agent reads besides kit's: its folder (and the ones above), and this account's own (not kit's)
-  hereSections(t, z, here, body) {
-    const groups = [
-      { id: "here-dir", title: "這個目錄自己的（只看）", rows: (here.items ?? []).filter((i) => i.scope === "dir") },
-      { id: "here-user", title: "帳號裡另外有的（不是 kit 管的）", rows: (here.items ?? []).filter((i) => i.scope === "user") },
-    ];
-    body.child(div().mt(4).border_t(1).border_color(t.border));
-    if (here.error) body.child(div().text_size(z - 1).text_color(t.muted).child(`${shortDir(here.dir)}：${here.error}`));
-    for (const g of groups) {
-      if (!g.rows.length) continue;
-      const folded = this.folded[g.id] ?? g.rows.length > 8;
-      const count = ["rule", "skill", "mcp"].map((k) => [k, g.rows.filter((i) => i.kind === k).length]).filter(([, n]) => n)
-        .map(([k, n]) => `${k === "rule" ? "規則" : k === "skill" ? "skill" : "MCP"} ${n}`).join(" · ");
-      body.child(h_flex().id(`sec-${g.id}`).gap(6).items_center().cursor_pointer().on_mouse_down("left", stop)
-        .on_click((_e, cx) => { this.folded[g.id] = !folded; this.save("folded", JSON.stringify(this.folded)); cx.notify(); })
-        .child(div().w(12).text_color(t.muted).child(folded ? "▸" : "▾"))
-        .child(div().font_semibold().child(g.title))
-        .child(div().text_size(z - 1.5).text_color(t.muted).child(count)));
-      if (!folded) body.child(v_flex().gap(4).children(g.rows.map((i) => this.hereRow(t, z, i))));
-    }
-    if (!groups.some((g) => g.rows.length) && !here.error) body.child(div().text_size(z - 1).text_color(t.muted).child("這個目錄沒有自己的規則、skill、MCP。"));
+  secHead(t, z, id, title, folded, note) {
+    return h_flex().id(`sec-${id}`).gap(6).items_center().cursor_pointer().on_mouse_down("left", stop)
+      .on_click((_e, cx) => { this.folded[id] = !folded; this.save("folded", JSON.stringify(this.folded)); cx.notify(); })
+      .child(div().w(12).text_color(t.muted).child(folded ? "▸" : "▾"))
+      .child(div().text_size(z - 0.5).child(title))
+      .when(Boolean(note), (el) => el.child(div().px(5).rounded(4).text_size(z - 3).bg(t.done).text_color(t.background).child(note)));
   }
 
   hereRow(t, z, i) {
     const badge = (text) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(t.muted).child(text);
-    const kind = i.kind === "rule" ? "規則" : i.kind === "skill" ? "skill" : "MCP";
-    const head = h_flex().gap(5).items_center().min_w(0).child(badge(kind))
-      .child(div().min_w(0).truncate().font_semibold().child(shortDir(i.name)));
+    const head = h_flex().gap(5).items_center().min_w(0)
+      .child(div().min_w(0).truncate().font_semibold().child(shortDir(i.name)))
+      .child(badge(i.scope === "user" ? "這個帳號" : "這個目錄"));
     if (i.tools && i.tools !== "claude") head.child(badge(i.tools === "codex omp" ? "Codex／omp" : i.tools));
     const sub = i.description || shortDir(i.path);
     return v_flex().id(`here-${i.scope}-${i.kind}-${i.path}-${i.name}`).px(8).py(4).gap(1).rounded(6).hover((s) => s.bg(t.hover))
@@ -455,8 +340,8 @@ export default class KitPanel extends View {
     const badge = (text, color) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(color).child(text);
     const head = h_flex().gap(5).items_center().min_w(0)
       .child(div().min_w(0).truncate().font_semibold().text_color(i.status === "unused" ? t.muted : t.foreground).child(i.name));
-    if (i.status === "required") head.child(badge("必備", t.accent));
-    if (i.status === "used") head.child(badge("在用", t.working));
+    if (i.status === "required") head.child(badge("kit · 必備", t.accent));
+    if (i.status === "used") head.child(badge("kit", t.working));
     if (i.new) head.child(badge("新", t.done));
     let action;
     if (i.kind === "agent") action = this.btn(t, z, `run-${i.name}`, "開啟", { small: true, on: (cx) => this.openAgent(i.name, cx) });
