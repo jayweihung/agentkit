@@ -531,6 +531,7 @@ export default class KitPanel extends View {
         .child(div().truncate().font_semibold().child("倉庫"))
         .child(div().truncate().text_size(z - 1.5).text_color(n ? t.working : t.muted).child(n ? `改過 ${n} 個檔案，還沒送出` : sub)))
       .when(n > 0, (el) => el.child(this.btn(t, z, "push", busy === "送出" ? "送出中…" : "送出", { small: true, kind: "primary", off: Boolean(busy), on: (cx) => this.pushAll(cx) })))
+      .child(this.btn(t, z, "agents", "Agents", { small: true, on: () => { run("mod.open", { name: "kit-agents" }).catch(() => {}); } }))
       .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
       .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
   }

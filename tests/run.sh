@@ -490,6 +490,25 @@ rm -f "$HOME/.config/agentkit/gitea-token"
 kill $FAKE 2>/dev/null; unset KIT_GITEA_API
 cd "$T"
 
+# ---------- push without origin: your own source, straight to every remote, no PR ----------
+D="$T/pushdirect"; DW="$D/work"; R1="$D/one.git"; R2="$D/two.git"
+git -c init.defaultBranch=main init -q --bare "$R1"; git -c init.defaultBranch=main init -q --bare "$R2"
+git -c init.defaultBranch=main init -q "$DW"
+printf 'name: mine\n' > "$DW/kit.yaml"; mkdir -p "$DW/rules"; echo "Mine." > "$DW/rules/mine.md"
+git -C "$DW" config user.name tester; git -C "$DW" config user.email me@home.example
+git -C "$DW" add -A; git -C "$DW" commit -qm init
+git -C "$DW" remote add one "$R1"; git -C "$DW" remote add two "$R2"
+git -C "$DW" push -q one main 2>/dev/null; git -C "$DW" push -q two main 2>/dev/null; git -C "$DW" fetch -q one; git -C "$DW" fetch -q two
+cd "$DW"
+echo "Mine, changed." > rules/mine.md; echo "not an item" > notes.txt
+dh0=$(git rev-parse HEAD)
+out=$(kit push --dry-run 2>&1); rc=$?
+check "push without origin --dry-run: straight to the remotes, nothing sent" '[ $rc -eq 0 ] && echo "$out" | grep -q "沒有 origin" && echo "$out" | grep -q "one two" && echo "$out" | grep -q "rules/mine.md" && [ "$(git rev-parse HEAD)" = "$dh0" ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$dh0" ]'
+out=$(kit push 2>&1); rc=$?
+check "push without origin: commit on main, pushed to every remote" '[ $rc -eq 0 ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$(git rev-parse HEAD)" ] && [ "$(git --git-dir="$R2" rev-parse main)" = "$(git rev-parse HEAD)" ] && [ "$(git log -1 --format=%s)" = "kit: update rule:mine" ] && [ "$(git symbolic-ref --short HEAD)" = main ]'
+check "push without origin: only the item is committed" '[ "$(git show --name-only --format= HEAD)" = rules/mine.md ] && [ "$(git status --porcelain)" = "?? notes.txt" ]'
+cd "$T"
+
 # ---------- uninstall ----------
 kit add skill gerrit-review >/dev/null 2>&1; kit add mcp gerrit >/dev/null 2>&1
 kit uninstall >/dev/null 2>&1
@@ -678,6 +697,7 @@ hp() { HERDR_APP_HOME="$HH" kit herdr-panel "$@"; }
 out=$(hp install 2>&1); rc=$?
 check "herdr-panel install: mod files, config with the kit command" '[ $rc -eq 0 ] && [ -f "$HH/mods/kit/main.js" ] && [ -f "$HH/mods/kit/.kit-panel" ] && grep -qF "\"kit\": [\"$(cd "$HERE/../unix" && pwd)/kit\"]" "$HH/mods/kit/config.json" && grep -qF "\"env\": {}" "$HH/mods/kit/config.json"'
 check "herdr-panel install: button in the tab bar, panel beside the work area" '[ "$(jget "$HH/layouts/mine.json" children | grep -c "\"kit-toggle\"")" = 1 ] && grep -q "\"kit-panel\"" "$HH/layouts/mine.json" && grep -q "\"place\": \"none\"" "$HH/mods/kit/mod.json"'
+check "herdr-panel install: the Agents window (mods/kit-agents)" '[ -f "$HH/mods/kit-agents/main.js" ] && [ -f "$HH/mods/kit-agents/.kit-panel" ] && grep -q "\"kind\": \"window\"" "$HH/mods/kit-agents/mod.json"'
 check "herdr-panel install: each pane's header is kit's (mods/kit-pane)" 'grep -q "\"mod\": \"kit-pane\"" "$HH/layouts/mine.json" && ! grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json" && [ -f "$HH/mods/kit-pane/main.js" ] && [ -f "$HH/mods/kit-pane/.kit-panel" ] && grep -q "\"place\": \"none\"" "$HH/mods/kit-pane/mod.json"'
 if command -v pwsh >/dev/null 2>&1; then
     mkdir -p "$T/hh2/mods" "$T/hh2/layouts"; cp "$T/mine.orig" "$T/hh2/layouts/mine.json"; cp "$HH/shared.json" "$T/hh2/"
@@ -694,7 +714,7 @@ check "reinstall / self-update refreshes an installed panel, keeps its settings"
 check "reinstall / self-update refreshes the pane header too" 'cmp -s "$HH/mods/kit-pane/main.js" "$HERE/../herdr/kit-pane/main.js"'
 out=$(hp uninstall 2>&1); rc=$?
 check "herdr-panel uninstall: mod and layout blocks gone" '[ $rc -eq 0 ] && [ ! -e "$HH/mods/kit" ] && ! grep -q "kit" "$HH/layouts/mine.json" && grep -q "\"tabs\"" "$HH/layouts/mine.json"'
-check "herdr-panel uninstall: Herdr's own pane header is back" '[ ! -e "$HH/mods/kit-pane" ] && grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json"'
+check "herdr-panel uninstall: Herdr's own pane header is back, Agents window gone" '[ ! -e "$HH/mods/kit-pane" ] && [ ! -e "$HH/mods/kit-agents" ] && grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json"'
 printf '{\n  "layout": "main"\n}\n' > "$HH/shared.json"
 out=$(hp install 2>&1); rc=$?
 check "herdr-panel on a Herdr layout: not edited, panel docks on the right" '[ $rc -eq 0 ] && [ "$(cat "$HH/layouts/main.json")" = "{\"main\":1}" ] && grep -q "\"place\": \"right\"" "$HH/mods/kit/mod.json" && echo "$out" | grep -q 放進上排'

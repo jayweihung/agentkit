@@ -480,6 +480,26 @@ Pop-Location
 }
 }
 
+# ---------- push without origin: your own source, straight to every remote, no PR ----------
+$D = Join-Path $T 'pushdirect'; $DW = Join-Path $D 'work'; $R1 = Join-Path $D 'one.git'; $R2 = Join-Path $D 'two.git'
+& git -c init.defaultBranch=main init -q --bare $R1; & git -c init.defaultBranch=main init -q --bare $R2
+& git -c init.defaultBranch=main init -q $DW
+W "$DW/kit.yaml" "name: mine`n"; W "$DW/rules/mine.md" "Mine.`n"
+& git -C $DW config user.name tester; & git -C $DW config user.email me@home.example
+& git -C $DW add -A; & git -C $DW commit -qm init
+& git -C $DW remote add one $R1; & git -C $DW remote add two $R2
+& git -C $DW push -q one main 2>$null; & git -C $DW push -q two main 2>$null; & git -C $DW fetch -q one 2>$null; & git -C $DW fetch -q two 2>$null
+Push-Location $DW
+W "$DW/rules/mine.md" "Mine, changed.`n"; W "$DW/notes.txt" "not an item`n"
+$dh0 = & git -C $DW rev-parse HEAD
+Kit push --dry-run
+Check 'push without origin --dry-run: straight to the remotes, nothing sent' { $rc -eq 0 -and $out.Contains('沒有 origin') -and $out.Contains('one two') -and $out.Contains('rules/mine.md') -and (& git -C $DW rev-parse HEAD) -eq $dh0 -and (& git --git-dir=$R1 rev-parse main) -eq $dh0 }
+Kit push
+$dh1 = & git -C $DW rev-parse HEAD
+Check 'push without origin: commit on main, pushed to every remote' { $rc -eq 0 -and (& git --git-dir=$R1 rev-parse main) -eq $dh1 -and (& git --git-dir=$R2 rev-parse main) -eq $dh1 -and (& git -C $DW log -1 --format=%s) -eq 'kit: update rule:mine' -and (& git -C $DW symbolic-ref --short HEAD) -eq 'main' }
+Check 'push without origin: only the item is committed' { (& git -C $DW show --name-only --format= HEAD | Where-Object { $_ }) -eq 'rules/mine.md' -and "$(& git -C $DW status --porcelain)" -eq '?? notes.txt' }
+Pop-Location
+
 # ---------- uninstall ----------
 Kit add skill gerrit-review; Kit add mcp gerrit
 Kit uninstall
@@ -594,6 +614,7 @@ $kitJ = if ($OnWindows) { '"kit.cmd"' } else { '"' + $Exe.Replace('\', '\\') + '
 Check 'herdr-panel install: mod files, config with the kit command' { $rc -eq 0 -and (Test-Path "$HH/mods/kit/main.js") -and (Test-Path "$HH/mods/kit/.kit-panel") -and $cfg.Contains("`"kit`": [$kitJ]") -and $cfg.Contains('"env": {}') }
 $ml = ReadT "$HH/layouts/mine.json"
 Check 'herdr-panel install: button in the tab bar, panel beside the work area' { ([regex]::Matches($ml, '"kit-toggle"')).Count -eq 1 -and $ml.Contains('"kit-panel"') -and (ReadT "$HH/mods/kit/mod.json").Contains('"place": "none"') }
+Check 'herdr-panel install: the Agents window (mods/kit-agents)' { (Test-Path "$HH/mods/kit-agents/main.js") -and (Test-Path "$HH/mods/kit-agents/.kit-panel") -and (ReadT "$HH/mods/kit-agents/mod.json").Contains('"kind": "window"') }
 Check "herdr-panel install: each pane's header is kit's (mods/kit-pane)" { $ml.Contains('"mod": "kit-pane"') -and -not $ml.Contains('"mod": "pane"') -and (Test-Path "$HH/mods/kit-pane/main.js") -and (Test-Path "$HH/mods/kit-pane/.kit-panel") -and (ReadT "$HH/mods/kit-pane/mod.json").Contains('"place": "none"') }
 Check 'herdr-panel install: layout backed up first' { @(Backups).Count -eq 1 -and (ReadT @(Backups)[0].FullName) -ceq $mineOrig }
 Kit herdr-panel install
@@ -609,7 +630,7 @@ if (-not $OnWindows) {
 Kit herdr-panel uninstall
 $ml = ReadT "$HH/layouts/mine.json"
 Check 'herdr-panel uninstall: mod and layout blocks gone' { $rc -eq 0 -and -not (Test-Path "$HH/mods/kit") -and -not $ml.Contains('kit') -and $ml.Contains('"tabs"') }
-Check "herdr-panel uninstall: Herdr's own pane header is back" { -not (Test-Path "$HH/mods/kit-pane") -and $ml.Contains('"mod": "pane"') }
+Check "herdr-panel uninstall: Herdr's own pane header is back, Agents window gone" { -not (Test-Path "$HH/mods/kit-pane") -and -not (Test-Path "$HH/mods/kit-agents") -and $ml.Contains('"mod": "pane"') }
 W "$HH/shared.json" "{`n  `"layout`": `"main`"`n}`n"
 Kit herdr-panel install
 Check 'herdr-panel on a Herdr layout: not edited, panel docks on the right' { $rc -eq 0 -and (ReadT "$HH/layouts/main.json") -eq "{`"main`":1}`n" -and (ReadT "$HH/mods/kit/mod.json").Contains('"place": "right"') -and $out.Contains('放進上排') }

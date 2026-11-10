@@ -1309,6 +1309,30 @@ token_file_ok() { # warn when the token file can be read by others
     local m; m=$(ls -l "$1" 2>/dev/null | cut -c5-10)
     [ "$m" = "------" ] || warn "${1} 的權限太開放了，請打  chmod 600 $1"
 }
+push_direct() { # push_direct DIR FILES MSG DRY : a source without origin: commit on this branch, push to every remote
+    local dir=$1 files=$2 msg=$3 dry=$4 remotes cur r ahead list=() f fail=0
+    remotes=$(git remote)
+    [ -n "$remotes" ] || die "$(basename "$dir") 沒有 remote，不知道要送到哪"
+    cur=$(git symbolic-ref --short -q HEAD) || die "$(basename "$dir") 現在不在分支上，什麼都沒送"
+    for r in $remotes; do check_host "$(git remote get-url "$r")"; done
+    say "要送的檔案（$(basename "$dir")）："
+    printf '%s\n' "$files" | sed 's/^/  /'
+    say "沒有 origin（你自己的來源）：直接 commit 到 ${cur}，推到 $(printf '%s' "$remotes" | paste -sd' ' -)，不開 PR"
+    say "commit：${msg}"
+    for r in $remotes; do
+        ahead=$(git rev-list --count "refs/remotes/$r/$cur..HEAD" 2>/dev/null) || ahead=0
+        [ "$ahead" -gt 0 ] && warn "${cur} 有 ${ahead} 個 commit 還沒推到 ${r}，會一起送出"
+    done
+    [ -n "$dry" ] && { say "（--dry-run：沒有 commit，沒有送）"; return 0; }
+    while IFS= read -r f; do [ -n "$f" ] && list+=("$f"); done <<< "$files"
+    { git add -A -- "${list[@]}" && git commit -q -m "$msg" -- "${list[@]}"; } || die "commit 失敗，什麼都沒送"
+    for r in $remotes; do
+        if git_safe push -q --no-recurse-submodules "$r" "HEAD:refs/heads/$cur"; then say "已推到 ${r}"
+        else warn "沒辦法推到 ${r}（落後了要先 git pull？沒網路？）"; fail=1; fi
+    done
+    [ $fail = 0 ] || die "commit 已經在本機的 ${cur}，有的 remote 沒推成功（看上面）"
+    return 0
+}
 cmd_push() {
     local to="" dry=""
     while [ $# -gt 0 ]; do
@@ -1340,7 +1364,14 @@ cmd_push() {
         email=$(git config user.email)
         printf '%s\n' "$doms" | grep -qxF "${email##*@}" || die "git 的 user.email 不是公司網域（要是 $(printf '%s' "$doms" | paste -sd' ' -)），什麼都沒送。請打  git config user.email 你的公司信箱"
     fi
-    local origin; origin=$(git remote get-url origin 2>/dev/null) || die "$(basename "$dir") 沒有 origin，不知道要送到哪"
+    local msg="" v
+    for v in add update remove; do
+        local l; l=$(printf '%s\n' "$items" | awk -F'\t' -v v="$v" '$1 == v { print $2 }' | paste -sd, - | sed 's/,/, /g')
+        [ -n "$l" ] && msg="${msg:+$msg; }$v $l"
+    done
+    msg="kit: $msg"
+    # no origin: your own source (not the team's Gitea): commit here and push to its remotes, no PR
+    local origin; origin=$(git remote get-url origin 2>/dev/null) || { push_direct "$dir" "$files" "$msg" "$dry"; return; }
     check_host "$origin"
     local api web owner_repo
     owner_repo=$(url_path "$origin")
@@ -1356,12 +1387,6 @@ cmd_push() {
     remote=$(git_safe ls-remote --heads origin 2>/dev/null | awk '{ sub(/^refs\/heads\//, "", $2); print $2 }')
     while git show-ref --verify -q "refs/heads/$b" || printf '%s\n' "$remote" | grep -qxF "$b"; do i=$((i+1)); b="$base-$i"; done
     local into; into=$(git symbolic-ref --short -q refs/remotes/origin/HEAD); into=${into#origin/}; [ -n "$into" ] || into=main
-    local msg="" v
-    for v in add update remove; do
-        local l; l=$(printf '%s\n' "$items" | awk -F'\t' -v v="$v" '$1 == v { print $2 }' | paste -sd, - | sed 's/,/, /g')
-        [ -n "$l" ] && msg="${msg:+$msg; }$v $l"
-    done
-    msg="kit: $msg"
 
     say "要送的檔案（$(basename "$dir")）："
     printf '%s\n' "$files" | sed 's/^/  /'
@@ -1658,11 +1683,18 @@ cmd_herdr_panel() {
         # the files (main.js etc.), then mod.json and the panel's config (how to run kit here)
         mkdir -p "$dest" || die "沒辦法建立 $dest"
         cp -R "$src"/. "$dest"/ || die "沒辦法複製 panel 到 $dest"
-        if [ -f "$(dirname "$src")/kit-pane/main.js" ]; then
-            [ ! -e "$mods/kit-pane" ] || [ -f "$mods/kit-pane/.kit-panel" ] || die "$mods/kit-pane 已經有東西，不是 kit 放的，不動它"
-            mkdir -p "$mods/kit-pane" && cp -R "$(dirname "$src")/kit-pane"/. "$mods/kit-pane"/ || die "沒辦法複製到 $mods/kit-pane"
-            printf '{ "place": "none", "title": "Pane header (kit)" }\n' > "$mods/kit-pane/mod.json"; : > "$mods/kit-pane/.kit-panel"
-        fi
+        # the other mods next to it: each pane's header (kit-pane) and the Agents window (kit-agents)
+        local xm mj
+        for xm in kit-pane kit-agents; do
+            [ -f "$(dirname "$src")/$xm/main.js" ] || continue
+            [ ! -e "$mods/$xm" ] || [ -f "$mods/$xm/.kit-panel" ] || die "$mods/$xm 已經有東西，不是 kit 放的，不動它"
+            mkdir -p "$mods/$xm" && cp -R "$(dirname "$src")/$xm"/. "$mods/$xm"/ || die "沒辦法複製到 $mods/$xm"
+            case $xm in
+                kit-pane) mj='{ "place": "none", "title": "Pane header (kit)" }';;
+                *) mj='{ "place": "none", "title": "kit Agents", "overlay": { "kind": "window", "width": 520, "height": 640 } }';;
+            esac
+            printf '%s\n' "$mj" > "$mods/$xm/mod.json"; : > "$mods/$xm/.kit-panel"
+        done
         printf '{ "place": "%s", "size": 420, "title": "kit" }\n' "$place" > "$dest/mod.json"
         env=""; first=1
         if [ -n "$keep" ]; then
@@ -1681,7 +1713,7 @@ cmd_herdr_panel() {
             [ -f "$dest/.kit-panel" ] || die "$dest 不是 kit 放的，不動它"
             rm -rf "$dest"
         fi
-        [ -f "$mods/kit-pane/.kit-panel" ] && rm -rf "$mods/kit-pane"
+        for xm in kit-pane kit-agents; do [ ! -f "$mods/$xm/.kit-panel" ] || rm -rf "${mods:?}/$xm"; done
         for lf in "$hh"/layouts/*.json; do
             [ -f "$lf" ] || continue
             case " $SHIPPED_LAYOUTS " in *" $(basename "$lf" .json) "*) continue;; esac

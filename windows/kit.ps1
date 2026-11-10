@@ -1539,6 +1539,31 @@ function Push-Items([string]$dir, $files) { # changed item files -> @(verb, kind
         , @($v, "${k}:$n")
     }
 }
+function Push-Direct($dir, $leaf, $files, $msg, $dry) { # a source without origin: commit on this branch, push to every remote
+    $remotes = @(Git-Q -C $dir remote | Where-Object { $_ })
+    if ($remotes.Count -eq 0) { Die "$leaf 沒有 remote，不知道要送到哪" }
+    $cur = "$(@(Git-Q -C $dir symbolic-ref --short -q HEAD) -join '')"
+    if (-not $cur) { Die "$leaf 現在不在分支上，什麼都沒送" }
+    foreach ($r in $remotes) { Check-Host "$(@(Git-Q -C $dir remote get-url $r) -join '')" }
+    Say "要送的檔案（$leaf）："
+    foreach ($f in $files) { Say "  $f" }
+    Say "沒有 origin（你自己的來源）：直接 commit 到 ${cur}，推到 $($remotes -join ' ')，不開 PR"
+    Say "commit：$msg"
+    foreach ($r in $remotes) {
+        $ahead = "$(@(Git-Q -C $dir rev-list --count "refs/remotes/$r/${cur}..HEAD") -join '')"
+        if ($LASTEXITCODE -eq 0 -and $ahead -match '^[0-9]+$' -and [int]$ahead -gt 0) { Warn "${cur} 有 ${ahead} 個 commit 還沒推到 ${r}，會一起送出" }
+    }
+    if ($dry) { Say '（--dry-run：沒有 commit，沒有送）'; return }
+    [void](Git-Q -C $dir add -A -- @files); $ok = $LASTEXITCODE -eq 0
+    if ($ok) { [void](Git-Q -C $dir commit -q -m $msg -- @files); $ok = $LASTEXITCODE -eq 0 }
+    if (-not $ok) { Die 'commit 失敗，什麼都沒送' }
+    $fail = $false
+    foreach ($r in $remotes) {
+        [void](Git-Safe -C $dir push -q --no-recurse-submodules $r "HEAD:refs/heads/$cur")
+        if ($LASTEXITCODE -eq 0) { Say "已推到 $r" } else { Warn "沒辦法推到 ${r}（落後了要先 git pull？沒網路？）"; $fail = $true }
+    }
+    if ($fail) { Die "commit 已經在本機的 ${cur}，有的 remote 沒推成功（看上面）" }
+}
 function Cmd-Push($rest) {
     $to = ''; $dry = $false; $r = @($rest | Where-Object { $_ })
     for ($i = 0; $i -lt $r.Count; $i++) {
@@ -1568,8 +1593,11 @@ function Cmd-Push($rest) {
         $email = "$(@(Git-Q -C $dir config user.email) -join '')"
         if ($doms -notcontains $email.Substring($email.LastIndexOf('@') + 1)) { Die "git 的 user.email 不是公司網域（要是 $($doms -join ' ')），什麼都沒送。請打  git config user.email 你的公司信箱" }
     }
+    $parts = @(foreach ($v in 'add', 'update', 'remove') { $l = @($items | Where-Object { $_[0] -eq $v } | ForEach-Object { $_[1] }); if ($l.Count -gt 0) { "$v $($l -join ', ')" } })
+    $msg = "kit: $($parts -join '; ')"
+    # no origin: your own source (not the team's Gitea): commit here and push to its remotes, no PR
     $origin = "$(@(Git-Q -C $dir remote get-url origin) -join '')"
-    if ($LASTEXITCODE -ne 0 -or -not $origin) { Die "$leaf 沒有 origin，不知道要送到哪" }
+    if ($LASTEXITCODE -ne 0 -or -not $origin) { Push-Direct $dir $leaf $files $msg $dry; return }
     Check-Host $origin
     $ownerRepo = Url-Path $origin
     $api = ''; $web = ''
@@ -1588,8 +1616,6 @@ function Cmd-Push($rest) {
     }
     $into = "$(@(Git-Q -C $dir symbolic-ref --short -q refs/remotes/origin/HEAD) -join '')" -replace '^origin/', ''
     if (-not $into) { $into = 'main' }
-    $parts = @(foreach ($v in 'add', 'update', 'remove') { $l = @($items | Where-Object { $_[0] -eq $v } | ForEach-Object { $_[1] }); if ($l.Count -gt 0) { "$v $($l -join ', ')" } })
-    $msg = "kit: $($parts -join '; ')"
 
     Say "要送的檔案（$leaf）："
     foreach ($f in $files) { Say "  $f" }
@@ -1857,13 +1883,16 @@ function Cmd-HerdrPanel($rest) {
         # the files (main.js etc.), then mod.json and the panel's config (how to run kit here)
         Ensure-Dir $dest
         Copy-Item -Path (Join-Path $src '*') -Destination $dest -Recurse -Force
-        $paneSrc = Join-Path (Split-Path -Parent $src) 'kit-pane'; $paneDest = Join-Path $mods 'kit-pane'
-        if (Test-Path -LiteralPath (Join-Path $paneSrc 'main.js') -PathType Leaf) {
-            if ((Test-Path -LiteralPath $paneDest) -and -not (Test-Path -LiteralPath (Join-Path $paneDest '.kit-panel'))) { Die "$paneDest 已經有東西，不是 kit 放的，不動它" }
-            Ensure-Dir $paneDest
-            Copy-Item -Path (Join-Path $paneSrc '*') -Destination $paneDest -Recurse -Force
-            Write-Text (Join-Path $paneDest 'mod.json') "{ `"place`": `"none`", `"title`": `"Pane header (kit)`" }`n"
-            Write-Text (Join-Path $paneDest '.kit-panel') ''
+        # the other mods next to it: each pane's header (kit-pane) and the Agents window (kit-agents)
+        $extra = @{ 'kit-pane' = '{ "place": "none", "title": "Pane header (kit)" }'; 'kit-agents' = '{ "place": "none", "title": "kit Agents", "overlay": { "kind": "window", "width": 520, "height": 640 } }' }
+        foreach ($xm in 'kit-pane', 'kit-agents') {
+            $xSrc = Join-Path (Split-Path -Parent $src) $xm; $xDest = Join-Path $mods $xm
+            if (-not (Test-Path -LiteralPath (Join-Path $xSrc 'main.js') -PathType Leaf)) { continue }
+            if ((Test-Path -LiteralPath $xDest) -and -not (Test-Path -LiteralPath (Join-Path $xDest '.kit-panel'))) { Die "$xDest 已經有東西，不是 kit 放的，不動它" }
+            Ensure-Dir $xDest
+            Copy-Item -Path (Join-Path $xSrc '*') -Destination $xDest -Recurse -Force
+            Write-Text (Join-Path $xDest 'mod.json') "$($extra[$xm])`n"
+            Write-Text (Join-Path $xDest '.kit-panel') ''
         }
         Write-Text (Join-Path $dest 'mod.json') "{ `"place`": `"$place`", `"size`": 420, `"title`": `"kit`" }`n"
         if ($OnWindows) {
@@ -1885,8 +1914,10 @@ function Cmd-HerdrPanel($rest) {
             if (-not $mine) { Die "$dest 不是 kit 放的，不動它" }
             Remove-Item -LiteralPath $dest -Recurse -Force
         }
-        $paneDest = Join-Path $mods 'kit-pane'
-        if (Test-Path -LiteralPath (Join-Path $paneDest '.kit-panel')) { Remove-Item -LiteralPath $paneDest -Recurse -Force }
+        foreach ($xm in 'kit-pane', 'kit-agents') {
+            $xDest = Join-Path $mods $xm
+            if (Test-Path -LiteralPath (Join-Path $xDest '.kit-panel')) { Remove-Item -LiteralPath $xDest -Recurse -Force }
+        }
         $ld = Join-Path $hh 'layouts'
         if (Test-Path -LiteralPath $ld) {
             foreach ($f in @(Get-ChildItem -LiteralPath $ld -File -Filter '*.json' | Where-Object { $_.Extension -eq '.json' })) {
