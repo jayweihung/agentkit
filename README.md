@@ -67,6 +67,20 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 有 GitHub 的字、不該公開的字（`~/.config/agentkit/private-words.txt` 和來源裡的 `private-words.txt`）
 或非文字檔就失敗，並刪掉輸出資料夾。成功後把資料夾內容 commit 到公司的 repo，訊息只寫 `kit <版本>`。
 
+## 送內容到 Gitea
+
+寫內容的人（在團隊來源的 clone 裡）：
+
+    kit new skill <名字> [--from 本機資料夾]   新增
+    kit update <名字> --from 本機資料夾       更新
+    kit check                     送出前檢查
+    kit push [--dry-run]          檢查後開分支、push、在 Gitea 開 PR
+
+`kit push` 只送改過的 rule、skill、mcp、agent，只 push `kit/...` 分支，不動 main。
+檢查（`kit check`、`author_domains`、`allowed_hosts`）有一項不過就什麼都不送。
+要自動開 PR 就放 Gitea token：環境變數 `KIT_GITEA_TOKEN`，或檔案
+`~/.config/agentkit/gitea-token`（`chmod 600`）。沒有 token 時會印出網址讓你自己開。
+
 ## 測試
 
     tests/json_test.sh

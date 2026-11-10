@@ -378,7 +378,11 @@ function Src-Dir([string]$s) {
     $s
 }
 function Src-Dirs { @(foreach ($s in M-Sources) { Src-Dir $s }) }
-function Allowed-Hosts { Uniq @(foreach ($d in Src-Dirs) { YGet (Join-Path $d 'kit.yaml') 'allowed_hosts' }) }
+$script:PushDir = $null
+function Allowed-Hosts { # from the configured sources (+ the source kit push sends from)
+    $dirs = @(Src-Dirs); if ($script:PushDir) { $dirs += $script:PushDir }
+    Uniq @(foreach ($d in $dirs) { YGet (Join-Path $d 'kit.yaml') 'allowed_hosts' })
+}
 
 function Git-Safe { # git without prompts, submodules or LFS downloads
     $env:GIT_TERMINAL_PROMPT = '0'; $env:GIT_LFS_SKIP_SMUDGE = '1'
@@ -1290,6 +1294,132 @@ function Cmd-ExportSelf($rest) {
     Say "  放進這個資料夾的內容後 commit，訊息只寫：kit ${ver}"
 }
 
+# ---------- push: send your changes in a source to Gitea as a pull request ----------
+function Git-Q { # git, stderr dropped, output as strings; $LASTEXITCODE is git's
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & git @args 2>$null | ForEach-Object { "$_" } } finally { $ErrorActionPreference = $old }
+}
+function Url-Path([string]$u) { # owner/repo of a git URL or folder (last two parts, no .git)
+    $p = (($u -replace '^[a-z+]+://[^/]*/', '') -replace '^[^/\\]*@[^:/\\]*:', '').Replace('\', '/').TrimEnd('/') -replace '\.git$', ''
+    $parts = @($p.Split('/') | Where-Object { $_ })
+    if ($parts.Count -ge 2) { "$($parts[$parts.Count - 2])/$($parts[$parts.Count - 1])" } else { $parts[0] }
+}
+function Push-Items([string]$dir, $files) { # changed item files -> @(verb, kind:name) per item
+    $seen = @{}
+    foreach ($f in $files) {
+        if ($f -match '^rules/([^/]+)\.md$') { $k = 'rule'; $n = $Matches[1]; $p = $f }
+        elseif ($f -match '^skills/([^/]+)/') { $k = 'skill'; $n = $Matches[1]; $p = "skills/$n/SKILL.md" }
+        elseif ($f -match '^mcp/([^/]+)\.yaml$') { $k = 'mcp'; $n = $Matches[1]; $p = $f }
+        elseif ($f -match '^agents/([^/]+)\.md$') { $k = 'agent'; $n = $Matches[1]; $p = $f }
+        else { continue }
+        if ($seen.ContainsKey("${k}:$n")) { continue }; $seen["${k}:$n"] = 1
+        [void](Git-Q -C $dir cat-file -e "HEAD:$p")
+        $v = if ($LASTEXITCODE -ne 0) { 'add' } elseif (Test-Path -LiteralPath (Join-Path $dir $p)) { 'update' } else { 'remove' }
+        , @($v, "${k}:$n")
+    }
+}
+function Cmd-Push($rest) {
+    $to = ''; $dry = $false; $r = @($rest | Where-Object { $_ })
+    for ($i = 0; $i -lt $r.Count; $i++) {
+        if ($r[$i] -eq '--to') { if ($i + 1 -ge $r.Count) { Die '--to 後面要接來源' }; $i++; $to = $r[$i] }
+        elseif ($r[$i] -eq '--dry-run') { $dry = $true }
+        else { Die '用法：kit push [--to 來源] [--dry-run]' }
+    }
+    $dir = Target-Dir $to
+    $leaf = Split-Path -Leaf $dir
+    $top = @(Git-Q -C $dir rev-parse --show-toplevel)
+    $prefix = @(Git-Q -C $dir rev-parse --show-prefix | Where-Object { $_ })
+    if ($top.Count -eq 0 -or $prefix.Count -gt 0) { Die "$leaf 不是 git repo（要先 git clone 團隊來源）" }
+    $script:PushDir = $dir
+
+    # what changed: only item files are sent
+    $all = @(Git-Q -C $dir -c core.quotePath=false status --porcelain --untracked-files=all | Where-Object { $_.Length -gt 3 } | ForEach-Object { $_.Substring(3) -replace '^.* -> ', '' })
+    $files = @($all | Where-Object { $_ -match '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md)$' })
+    $other = @($all | Where-Object { $files -notcontains $_ })
+    if ($files.Count -eq 0) { Say "沒有要送的（$leaf 裡沒有改過的 rule、skill、mcp、agent）"; return }
+    $items = @(Push-Items $dir $files)
+    if ($other.Count -gt 0) { Warn "這些不是 rule、skill、mcp、agent，不會送：$($other -join ' ')" }
+
+    # checks: any problem stops everything
+    if (-not (Check-Dirs @($dir))) { Die 'kit check 有問題，什麼都沒送（改好再 kit push）' }
+    $doms = @(YGet (Join-Path $dir 'kit.yaml') 'author_domains')
+    if ($doms.Count -gt 0) {
+        $email = "$(@(Git-Q -C $dir config user.email) -join '')"
+        if ($doms -notcontains $email.Substring($email.LastIndexOf('@') + 1)) { Die "git 的 user.email 不是公司網域（要是 $($doms -join ' ')），什麼都沒送。請打  git config user.email 你的公司信箱" }
+    }
+    $origin = "$(@(Git-Q -C $dir remote get-url origin) -join '')"
+    if ($LASTEXITCODE -ne 0 -or -not $origin) { Die "$leaf 沒有 origin，不知道要送到哪" }
+    Check-Host $origin
+    $ownerRepo = Url-Path $origin
+    $api = ''; $web = ''
+    if ($env:KIT_GITEA_API) { $api = $env:KIT_GITEA_API.TrimEnd('/'); Check-Host $api; $web = $api -replace '/api/v1$', '' }
+    elseif (Is-Url $origin) { $web = "https://$(Url-Host $origin)"; $api = "$web/api/v1" }
+
+    # branch: kit/<names>-YYYYMMDD, -2, -3 ... when taken
+    $names = (@($items | ForEach-Object { $_[1].Substring($_[1].IndexOf(':') + 1) }) -join '-')
+    if ($names.Length -gt 40) { $names = $names.Substring(0, 40) }
+    $base = "kit/$($names.TrimEnd('-'))-$(Get-Date -Format yyyyMMdd)"; $b = $base; $n = 1
+    $remote = @(Git-Safe -C $dir ls-remote --heads origin | Where-Object { $_ -match "`trefs/heads/" } | ForEach-Object { $_.Substring($_.IndexOf("`trefs/heads/") + 12) })
+    while ($true) {
+        [void](Git-Q -C $dir show-ref --verify -q "refs/heads/$b")
+        if ($LASTEXITCODE -ne 0 -and $remote -notcontains $b) { break }
+        $n++; $b = "$base-$n"
+    }
+    $into = "$(@(Git-Q -C $dir symbolic-ref --short -q refs/remotes/origin/HEAD) -join '')" -replace '^origin/', ''
+    if (-not $into) { $into = 'main' }
+    $parts = @(foreach ($v in 'add', 'update', 'remove') { $l = @($items | Where-Object { $_[0] -eq $v } | ForEach-Object { $_[1] }); if ($l.Count -gt 0) { "$v $($l -join ', ')" } })
+    $msg = "kit: $($parts -join '; ')"
+
+    Say "要送的檔案（$leaf）："
+    foreach ($f in $files) { Say "  $f" }
+    Say "分支：${b}（PR 到 ${into}）"
+    Say "commit：$msg"
+    if ($dry) { Say '（--dry-run：沒有 commit，沒有送）'; return }
+
+    # the branch starts from origin's base, so unpushed local commits are never sent
+    $orig = "$(@(Git-Q -C $dir symbolic-ref --short -q HEAD) -join '')"
+    if (-not $orig) { $orig = "$(@(Git-Q -C $dir rev-parse HEAD) -join '')" }
+    [void](Git-Safe -C $dir fetch -q --no-recurse-submodules origin "+refs/heads/${into}:refs/remotes/origin/$into")
+    if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 origin/${into}（沒網路？）" }
+    $start = 'HEAD'
+    [void](Git-Q -C $dir rev-parse -q --verify "refs/remotes/origin/$into"); if ($LASTEXITCODE -eq 0) { $start = "refs/remotes/origin/$into" }
+    [void](Git-Q -C $dir checkout -q -b $b $start)
+    if ($LASTEXITCODE -ne 0) { Die "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送" }
+    [void](Git-Q -C $dir add -A -- @files); $ok = $LASTEXITCODE -eq 0
+    if ($ok) { [void](Git-Q -C $dir commit -q -m $msg -- @files); $ok = $LASTEXITCODE -eq 0 }
+    if (-not $ok) { [void](Git-Q -C $dir checkout -q $orig); [void](Git-Q -C $dir branch -q -D $b); Die 'commit 失敗，什麼都沒送' }
+    [void](Git-Q -C $dir checkout -q $orig)
+    if ($LASTEXITCODE -ne 0) { Warn "沒辦法切回 ${orig}，你現在在 $b" }
+    [void](Git-Safe -C $dir push -q --no-recurse-submodules origin "refs/heads/${b}:refs/heads/$b")
+    if ($LASTEXITCODE -ne 0) { Die "沒辦法 push 分支 ${b}（沒網路？）。commit 留在本機的 $b" }
+    Say "已送出分支 ${b}（改的檔案現在在這個分支上，PR 合併後 git pull 就會拿到）"
+
+    # pull request
+    $tok = ''; $tf = Join-Path $KitConf 'gitea-token'
+    $compare = if ($web) { "$web/$ownerRepo/compare/$into...$b" } else { '' }
+    if ($env:KIT_GITEA_TOKEN) { $tok = $env:KIT_GITEA_TOKEN }
+    elseif (Test-Path -LiteralPath $tf -PathType Leaf) {
+        if (-not $script:OnWindows) { $m = "$(& ls -l $tf)"; if ($m.Length -lt 10 -or $m.Substring(4, 6) -ne '------') { Warn "$tf 的權限太開放了，請打  chmod 600 $tf" } }
+        $tok = (Read-Text $tf) -replace '\s', ''
+    }
+    if ($tok -and $api) {
+        $body = "由 kit push 送出：`n" + ((@($items | ForEach-Object { "- $($_[0]) $($_[1])" })) -join "`n")
+        $json = '{"title":' + (Json-Str $msg) + ',"head":' + (Json-Str $b) + ',"base":' + (Json-Str $into) + ',"body":' + (Json-Str $body) + '}'
+        $code = ''
+        try {
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+            $resp = Invoke-RestMethod -Method Post -Uri "$api/repos/$ownerRepo/pulls" -Headers @{ Authorization = "token $tok" } `
+                -ContentType 'application/json; charset=utf-8' -Body ($Utf8.GetBytes($json)) -TimeoutSec 30 -UseBasicParsing
+            $pr = ''; if ($resp -and ($resp.PSObject.Properties.Name -contains 'html_url')) { $pr = [string]$resp.html_url }
+            if ($pr) { Say "已開 PR：$pr"; return }
+        } catch { try { $code = [string][int]$_.Exception.Response.StatusCode } catch { } }
+        Warn "沒辦法自動開 PR（Gitea 回 $(if ($code) { $code } else { '沒回應' })）"
+    } elseif (-not $tok) {
+        Say "沒有 Gitea token（KIT_GITEA_TOKEN 或 ${tf}），PR 請自己開"
+    }
+    if ($compare) { Say "開 PR：$compare" } else { Say "請到 Gitea 用分支 $b 開 PR" }
+}
+
 function Usage {
     Say @'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -1309,6 +1439,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template                   印出 Gitea Actions 範本（PR 自動跑 kit check --ci），用法：
                                       kit ci-template > .gitea/workflows/kit-check.yaml
+  kit push [--to 來源] [--dry-run]  檢查後把改的東西送到 Gitea 開 PR
 
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
@@ -1338,6 +1469,7 @@ try {
         'check' { Cmd-Check $rest }
         'export-self' { Cmd-ExportSelf $rest }
         'ci-template' { Cmd-CiTemplate }
+        'push' { Cmd-Push $rest }
         'uninstall' { Cmd-Uninstall $rest }
         'self-update' { Cmd-SelfUpdate }
         { $_ -in '--version', 'version' } { Say "kit $KitVersion" }
