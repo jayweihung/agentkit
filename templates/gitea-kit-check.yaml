@@ -11,8 +11,9 @@
 # To block merging when the check fails, add "kit-check" as a required status
 # check in the branch protection rule of the target branch.
 #
-# Needs a Linux runner with bash, awk and git. actions/checkout is fetched from
-# the instance's DEFAULT_ACTIONS_URL (an admin can point it at a local mirror).
+# Needs a Linux runner with bash, awk, git and base64. Change runs-on to the
+# label of your runner. No "uses:" steps, so nothing is fetched from outside
+# your Gitea (actions such as actions/checkout would come from DEFAULT_ACTIONS_URL).
 
 name: kit-check
 
@@ -24,10 +25,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the pull request (full history, for the author check)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ gitea.event.pull_request.head.sha }}
+        env:
+          SERVER: ${{ gitea.server_url }}
+          REPO: ${{ gitea.repository }}
+          BASE: ${{ gitea.base_ref }}
+          PR: ${{ gitea.event.pull_request.number }}
+          SHA: ${{ gitea.event.pull_request.head.sha }}
+          TOKEN: ${{ gitea.token }}
+        run: |
+          set -eu
+          git init --quiet .
+          git remote add origin "$SERVER/$REPO.git"
+          # the job's own token, through the environment so it is not on the command line
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: basic $auth"
+          git fetch --quiet --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" "+refs/pull/$PR/head:refs/remotes/origin/pr"
+          unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+          git checkout --quiet --detach "$SHA"
 
       - name: Install kit from the company repo
         env:

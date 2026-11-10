@@ -508,11 +508,9 @@ cmd_init() {
 
 seen_all() { for i in $(available); do state_set seen "$i" 1; done; }
 
-version_nag() { # tell once when a source's kit.yaml wants a newer kit (not in the background, not when quiet)
-    [ -z "${QUIET:-}${NO_NAG:-}" ] || return 0
-    local need
+wanted_version() { # the newest kit_version the sources ask for, when it is newer than this kit
     # x.y.z compared as numbers, "+build" ignored; a dev build (no VERSION) is never told
-    need=$(src_dirs | while IFS= read -r d; do yget "$d/kit.yaml" kit_version; done | awk -v have="$KIT_VERSION" '
+    src_dirs | while IFS= read -r d; do yget "$d/kit.yaml" kit_version; done | awk -v have="$KIT_VERSION" '
         function num(v,   p, n, i) {
             sub(/\+.*/, "", v); n = split(v, p, ".")
             if (n < 1 || n > 3) return ""
@@ -521,7 +519,12 @@ version_nag() { # tell once when a source's kit.yaml wants a newer kit (not in t
         }
         BEGIN { best = num(have); if (best == "") exit }
         { n = num($0); if (n != "" && n > best) { best = n; need = $0 } }
-        END { if (need != "") print need }')
+        END { if (need != "") print need }'
+}
+version_nag() { # tell once when a source's kit.yaml wants a newer kit (not in the background, not when quiet)
+    [ -z "${QUIET:-}${NO_NAG:-}" ] || return 0
+    local need
+    need=$(wanted_version)
     if [ -z "$need" ]; then [ -z "$(state_get nag kit_version)" ] || state_del nag kit_version; return 0; fi
     [ "$(state_get nag kit_version)" = "$need $KIT_VERSION" ] && return 0
     say "kit：團隊要 kit ${need} 以上，你的是 ${KIT_VERSION}。請打  kit self-update"
@@ -568,7 +571,56 @@ cmd_sync() {
     version_nag
 }
 
+json_s() { # a JSON string: \ " TAB LF CR escaped, other control characters dropped (the same as kit.ps1)
+    local s=$1
+    s=${s//\\/\\\\}; s=${s//\"/\\\"}
+    s=${s//$TAB/\\t}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}
+    case $s in *[$'\001'-$'\037']*) s=$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\037');; esac
+    printf '"%s"' "$s"
+}
+item_desc() { # item_desc KIND FILE : the description of a skill or agent (frontmatter) or of an MCP yaml
+    case $1 in
+        skill|agent) head -n 1 "$2" | grep -qx -- '---' && fm_val "$(fm_of "$2")" description | head -n 1;;
+        mcp) yget "$2" description 2>/dev/null | head -n 1;;
+    esac
+}
+cmd_list_json() { # what kit list shows, as JSON for programs (the Herdr panel); kit.ps1 prints the same
+    local want req i k n p d status new first s tools
+    want=$(wanted); req=$(required_items)
+    printf '{\n  "kit": %s,\n  "sources": [' "$(json_s "$KIT_VERSION")"
+    first=1
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        [ $first = 1 ] || printf ','; first=0
+        printf '\n    {"name": %s, "source": %s, "dir": %s}' "$(json_s "$(src_name "$s")")" "$(json_s "$s")" "$(json_s "$(src_dir "$s")")"
+    done <<EOF
+$(m_sources)
+EOF
+    tools='"claude"'; has_codex && tools="$tools, \"codex\""; has_omp && tools="$tools, \"omp\""
+    printf '\n  ],\n  "tools": [%s],\n  "items": [' "$tools"
+    first=1
+    for i in $(available); do
+        k=${i%%:*}; n=${i#*:}
+        p=$(find_item "$k" "$n") || continue
+        status=unused
+        printf '%s\n' "$want" | grep -qxF "$i" && status=used
+        printf '%s\n' "$req" | grep -qxF "$i" && status=required
+        [ "$k" = agent ] && status=agent
+        new=false; [ -n "$(state_get seen "$i")" ] || new=true
+        d=$(item_path "" "$k" "$n"); d=${p%"$d"}               # the source folder that has it
+        [ $first = 1 ] || printf ','; first=0
+        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "source": %s, "description": %s}' \
+            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")"
+    done
+    printf '\n  ],\n  "kit_version_wanted": %s\n}\n' "$(json_s "$(wanted_version)")"
+}
+
 cmd_list() {
+    case ${1:-} in
+        --json) need_init; cmd_list_json; return;;
+        "") ;;
+        *) die "用法：kit list [--json]";;
+    esac
     need_init
     local want req i mark
     want=$(wanted); req=$(required_items)
@@ -1247,7 +1299,7 @@ EOF
     fi
     git checkout -q "$orig" || warn "沒辦法切回 ${orig}，你現在在 $b"
     git_safe push -q --no-recurse-submodules origin "refs/heads/$b:refs/heads/$b" || die "沒辦法 push 分支 ${b}（沒網路？）。commit 留在本機的 $b"
-    say "已送出分支 ${b}（改的檔案現在在這個分支上，PR 合併後 git pull 就會拿到）"
+    say "已送出分支 ${b}。改的檔案已從這裡移到那個分支，PR 合併後打 git pull 就會回來；想先看可以  git checkout ${b}"
 
     # pull request
     local tok="" tf="$KIT_CONF/gitea-token" compare=""
@@ -1457,12 +1509,103 @@ cmd_approve() { # kit approve <approvals repo> <source clone>... --key <ssh key>
     say "kit：已核准並簽章（serial ${serial}）。下一步：git -C $dir push"
 }
 
+# ---------- the Herdr panel (a Herdr mod that runs kit list --json / add / rm / sync / run) ----------
+SHIPPED_LAYOUTS="main terminals win98"     # Herdr's own layouts: Herdr puts them back when edited
+PANEL_TOGGLE='{"id":"kit-toggle","type":"block","content":{"mod":"kit","props":{"role":"toggle"}},"size":{"px":56}}'
+PANEL_NODE='{"id":"kit-panel","type":"column","children":[{"id":"kit","type":"block","content":{"mod":"kit"}}],"size":{"px":420},"min":320,"max":800}'
+herdr_home() { # the same rule as Herdr: $HERDR_APP_HOME, else $XDG_CONFIG_HOME/herdr-app, else ~/.config/herdr-app
+    if [ -n "${HERDR_APP_HOME:-}" ]; then printf '%s\n' "$HERDR_APP_HOME"
+    elif [ -n "${XDG_CONFIG_HOME:-}" ]; then printf '%s/herdr-app\n' "$XDG_CONFIG_HOME"
+    else printf '%s/.config/herdr-app\n' "$HOME"; fi
+}
+panel_src() { # the panel's files: next to the installed kit, else in the repo kit runs from
+    local d
+    for d in "$KIT_LIB/herdr/kit-panel" "$(kit_repo 2>/dev/null)/herdr/kit-panel"; do
+        [ -f "$d/main.js" ] && { printf '%s\n' "$d"; return 0; }
+    done
+    return 1
+}
+layout_without_panel() { # layout_without_panel FILE OUT : FILE without the panel's blocks
+    printf 'rmwhere\tcontent.mod\tkit\nrmwhere\tid\tkit-toggle\nrmwhere\tid\tkit-panel\n' > "$2.ops"
+    LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$2.ops" "$1" > "$2"; local rc=$?
+    rm -f "$2.ops"; return $rc
+}
+swap_layout() { # swap_layout NEW FILE : FILE (backed up first) becomes NEW
+    local b; b="$2.kit-backup-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$2" "$b" || { rm -f "$1"; die "沒辦法備份 $2"; }
+    cat "$1" > "$2" && rm -f "$1"
+    say "kit：改了版面 $(basename "$2")（原本的備份在 $(basename "$b")）"
+}
+cmd_herdr_panel() {
+    local hh mods dest src name lf tmp place=none keep="" k v env first
+    hh=$(herdr_home); mods="$hh/mods"; dest="$mods/kit"
+    case ${1:-} in
+    install)
+        [ "${2:-}" = --keep-env ] && keep=1
+        src=$(panel_src) || die "找不到 panel 的檔案（herdr/kit-panel）；請重裝 kit"
+        [ -d "$mods" ] || die "找不到 Herdr 的 mods 資料夾：${mods}（Herdr 有裝、開過一次嗎？）"
+        [ ! -e "$dest" ] || [ -f "$dest/.kit-panel" ] || die "$dest 已經有東西，不是 kit 放的，不動它"
+        # where the panel goes: a button in the tab bar of the shown layout + the panel beside the work area
+        name=$(json_get "$hh/shared.json" layout | sed 's/^"//; s/"$//'); [ -n "$name" ] || name=main
+        lf="$hh/layouts/$name.json"; tmp=""
+        case " $SHIPPED_LAYOUTS " in
+        *" $name "*) place=right
+            say "kit：現在的版面（${name}）是 Herdr 內建的，不能直接改：panel 會先出現在右邊，按 panel 上的「放進上排」會複製一份版面再放進去";;
+        *)  if [ ! -f "$lf" ]; then place=right
+            elif grep -q '"kit-toggle"' "$lf"; then :
+            else
+                tmp=$(mktemp "$lf.kit.XXXXXX")
+                layout_without_panel "$lf" "$tmp.1" &&
+                    printf 'addnear\tcontent.mod\ttabs\t%s\naddnear\tcontent.tab\tactive\t%s\n' "$PANEL_TOGGLE" "$PANEL_NODE" > "$tmp.ops" &&
+                    LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$tmp.ops" "$tmp.1" > "$tmp"
+                rm -f "$tmp.1" "$tmp.ops"
+                if ! grep -q '"kit-toggle"' "$tmp" || ! grep -q '"kit-panel"' "$tmp"; then
+                    rm -f "$tmp"; tmp=""; place=right
+                    say "kit：版面 $name 找不到分頁列（tabs）或工作區，沒改它：panel 會先出現在右邊"
+                fi
+            fi;;
+        esac
+        # the files (main.js etc.), then mod.json and the panel's config (how to run kit here)
+        mkdir -p "$dest" || die "沒辦法建立 $dest"
+        cp -R "$src"/. "$dest"/ || die "沒辦法複製 panel 到 $dest"
+        printf '{ "place": "%s", "size": 420, "title": "kit" }\n' "$place" > "$dest/mod.json"
+        env=""; first=1
+        if [ -n "$keep" ]; then
+            for k in HOME AGENTKIT_CONFIG AGENTKIT_SOURCES CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR; do
+                eval "v=\${$k:-}"; [ -n "$v" ] || continue
+                [ $first = 1 ] || env="$env, "; first=0; env="$env$(json_s "$k"): $(json_s "$v")"
+            done
+        fi
+        printf '{\n  "kit": [%s],\n  "env": {%s}\n}\n' "$(json_s "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")" "$env" > "$dest/config.json"
+        : > "$dest/.kit-panel"
+        [ -n "$tmp" ] && swap_layout "$tmp" "$lf"
+        say "kit：Herdr 的 kit panel 裝好了（${dest}）"
+        ;;
+    uninstall)
+        if [ -e "$dest" ]; then
+            [ -f "$dest/.kit-panel" ] || die "$dest 不是 kit 放的，不動它"
+            rm -rf "$dest"
+        fi
+        for lf in "$hh"/layouts/*.json; do
+            [ -f "$lf" ] || continue
+            case " $SHIPPED_LAYOUTS " in *" $(basename "$lf" .json) "*) continue;; esac
+            grep -q '"kit-toggle"\|"kit-panel"\|"mod": "kit"' "$lf" || continue
+            tmp=$(mktemp "$lf.kit.XXXXXX")
+            layout_without_panel "$lf" "$tmp" || { rm -f "$tmp"; warn "沒辦法讀 ${lf}，沒改它"; continue; }
+            swap_layout "$tmp" "$lf"
+        done
+        say "kit：Herdr 的 kit panel 拿掉了"
+        ;;
+    *) die "用法：kit herdr-panel install|uninstall";;
+    esac
+}
+
 usage() {
     cat <<'EOF'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
-  kit list                          有哪些、你在用哪些、哪些是新的
+  kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
   kit add rule|skill|mcp <名字>     開始用
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
@@ -1484,6 +1627,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit push [--to 來源] [--dry-run]  檢查後把改的東西送到 Gitea 開 PR
 
   kit approve <核准紀錄> <來源 clone>... --key <金鑰>   簽章核准這些版本（給 root 這類只用核准版本的帳號）
+  kit herdr-panel install|uninstall 在 Herdr 加上（或拿掉）kit 的面板
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
@@ -1495,7 +1639,7 @@ case ${1:-} in
     sync)      shift
                case ${1:-} in --force) FORCE=1;; --hook) sync_hook;; esac
                cmd_sync;;
-    list|ls)   cmd_list;;
+    list|ls)   shift; cmd_list "$@";;
     add)       shift; cmd_add_rm add "$@";;
     rm|remove) shift; cmd_add_rm rm "$@";;
     run)       shift; cmd_run "$@";;
@@ -1511,6 +1655,7 @@ case ${1:-} in
     approve)   shift; cmd_approve "$@";;
     collect)   shift; cmd_collect "$@";;
     outdated)  shift; cmd_outdated "$@";;
+    herdr-panel) shift; cmd_herdr_panel "$@";;
     --version|version) echo "kit $KIT_VERSION";;
     ""|-h|--help|help) usage;;
     *) die "沒有這個指令：$1（打 kit help）";;

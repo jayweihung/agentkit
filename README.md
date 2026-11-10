@@ -25,7 +25,7 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
 ## 使用
 
     kit init <團隊來源的網址>     第一次
-    kit list                      有哪些、在用哪些
+    kit list [--json]             有哪些、在用哪些
     kit add skill <名字>          開始用
     kit rm  skill <名字>          不用了
     kit run <agent> [--tool codex|omp]   開一個做好的 agent（預設 Claude）
@@ -58,6 +58,18 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | Claude | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Codex | ✅ | ✅（列在提示裡，用到時才讀） | ✅ | ✗ | 只限 MCP 工具 |
 | omp | ✅ | ✅ | ✗（要用 `kit add mcp` 加到全域） | ✅ | ✗ |
+
+## Herdr 的 kit 面板
+
+不想打指令的話，可以在 Herdr 裡用面板：看到所有的 rule、skill、MCP、agent（團隊必備／在用／新的／沒用），
+按一下加上、拿掉、同步，agent 按「開啟」會在新分頁用 `kit run` 開（有裝 Codex、omp 的話可以選）。
+
+    kit herdr-panel install       裝進 Herdr（mods/kit），在上排加一顆 kit 按鈕
+    kit herdr-panel uninstall     拿掉
+
+改版面前會留一份 `layouts/<版面>.json.kit-backup-<時間>`。Herdr 內建的版面（main 等）不能改：
+面板會先出現在右邊，按面板上的「放進上排」會複製一份版面再放進去。
+面板讀的是 `kit list --json`（給程式讀的 JSON：kit 版本、來源、每個項目的種類、名字、狀態、說明、是不是新的）。
 
 ## 把 kit 帶進公司的 git server
 

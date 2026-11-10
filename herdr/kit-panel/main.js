@@ -1,0 +1,291 @@
+// kit panel for Herdr: see and change what kit manages (rules, skills, MCP servers, agents) without typing.
+// Installed by `kit herdr-panel install` into <Herdr home>/mods/kit, next to config.json (how to run kit
+// on this computer) and mod.json. Everything goes through the kit command itself:
+//   kit list --json      what there is and what is in use      kit add|rm <kind> <name>
+//   kit sync             update                                kit run <agent> --tool <tool>  (in a new tab)
+// Roles (props.role): the panel (default) and "toggle", the tab-bar button that shows or hides "kit-panel".
+import { View, div } from "gpui-kit";
+import { v_flex, h_flex } from "gpui-base";
+import { theme, settings, exec, run, layout, shared, setShared, window, appHome, readTextFile, props as blockProps } from "herdr";
+
+const TOGGLE = "kit-toggle", PANEL = "kit-panel";
+const SHIPPED = ["main", "terminals", "win98"]; // Herdr's own layouts: read-only, so "放進上排" clones one first
+const DATA = "kit.data.v1", BUSY = "kit.busy", MSG = "kit.msg";
+const TOGGLE_NODE = { id: TOGGLE, type: "block", content: { mod: "kit", props: { role: "toggle" } }, size: { px: 56 } };
+const PANEL_NODE = { id: PANEL, type: "column", children: [{ id: "kit", type: "block", content: { mod: "kit" } }],
+  size: { px: 420 }, min: 320, max: 800 };
+const KINDS = [
+  { kind: "rule", title: "Rules（規則）" },
+  { kind: "skill", title: "Skills" },
+  { kind: "mcp", title: "MCP" },
+  { kind: "agent", title: "Agents" },
+];
+const TOOL_NAMES = { claude: "Claude", codex: "Codex", omp: "omp" };
+const STATUS = { required: "團隊必備", used: "在用", unused: "沒用" };
+
+const fs = () => Number(settings().ui_font_size) || 13;
+const mono = () => settings().font_family || (window()?.platform === "windows" ? "Consolas" : "Menlo");
+const stop = (_e, cx) => cx.stop_propagation();
+const isWindows = () => window()?.platform === "windows";
+function find(node, id) {
+  if (node?.id === id) return node;
+  for (const c of node?.children ?? []) { const f = find(c, id); if (f) return f; }
+  return null;
+}
+function parentOf(node, test) {
+  for (const c of node?.children ?? []) {
+    if (test(c)) return node;
+    const p = parentOf(c, test);
+    if (p) return p;
+  }
+  return null;
+}
+// The layout with a tab-bar button + the panel beside the work area, the stray dock removed (like kit herdr-panel install).
+function placed(root) {
+  const strip = (n) => ({ ...n, children: n.children?.filter((c) => c.content?.mod !== "kit" && c.id !== PANEL).map(strip) });
+  const tree = strip(JSON.parse(JSON.stringify(root)));
+  const bar = parentOf(tree, (c) => c.content?.mod === "tabs");
+  const body = parentOf(tree, (c) => c.content?.tab != null);
+  if (!bar || !body) return null;
+  bar.children.push(TOGGLE_NODE);
+  body.children.push(PANEL_NODE);
+  return tree;
+}
+
+// How to run kit here: config.json (written by kit herdr-panel install), else kit / kit.cmd on PATH.
+async function kitConfig() {
+  const home = appHome().replace(/\\/g, "/");
+  const text = await readTextFile(`${home}/mods/kit/config.json`).catch(() => null);
+  let c = {};
+  try { c = text ? JSON.parse(text) : {}; } catch { c = {}; }
+  const kit = Array.isArray(c.kit) && c.kit.length ? c.kit.map(String) : [isWindows() ? "kit.cmd" : "kit"];
+  const env = c.env && typeof c.env === "object" ? Object.entries(c.env).map(([k, v]) => `${k}=${v}`) : [];
+  // Windows has no env program: the variables are only for trying the panel on a Mac/Linux test setup.
+  return env.length && !isWindows() ? ["/usr/bin/env", ...env, ...kit] : kit;
+}
+async function kit(args, timeout) {
+  const argv = await kitConfig();
+  try {
+    const r = await exec(argv[0], [...argv.slice(1), ...args], { timeout });
+    return { code: r.code, out: String(r.stdout ?? ""), err: String(r.stderr ?? "") };
+  } catch (e) {
+    return { code: -1, out: "", err: `沒辦法執行 kit（${argv[0]}）：${e?.message ?? e}` };
+  }
+}
+// kit's own messages, without the "kit: " / "kit：" in front of each line
+const clean = (s) => String(s).split("\n").map((l) => l.replace(/^kit[:：]\s?/, "")).join("\n").trim();
+
+export default class KitPanel extends View {
+  init(_p, cx) {
+    this.role = blockProps()?.role === "toggle" ? "toggle" : "panel";
+    this.filter = "";
+    this.tool = this.load("tool") || "claude";
+    this.folded = {};
+    try { this.folded = JSON.parse(this.load("folded") || "{}"); } catch { this.folded = {}; }
+    // Both the button and the panel keep the shared list fresh (a hidden panel may not have started yet);
+    // the background sync Claude starts may change things, so look again every minute.
+    const stale = () => !this.data || Date.now() - (this.data.at ?? 0) > 50000;
+    if (this.role === "panel" || stale()) this.refresh(cx);
+    cx.timer.every(60000, (cx) => { if (stale() && !this.busy) this.refresh(cx); });
+  }
+
+  load(k) { try { return localStorage.getItem(`kit.${k}`); } catch { return null; } }
+  save(k, v) { try { localStorage.setItem(`kit.${k}`, v); } catch {} }
+
+  get data() { return shared(DATA) ?? null; }
+  get busy() { return shared(BUSY) ?? null; }
+
+  refresh(cx) {
+    cx.spawn(async (cx) => {
+      const r = await kit(["list", "--json"], 60000);
+      let d = null;
+      if (r.code === 0) {
+        try { d = JSON.parse(r.out); } catch { d = null; }
+        setShared(DATA, d ? { ...d, at: Date.now() } : { error: "kit list --json 的輸出讀不懂（kit 太舊？請打 kit self-update）", at: Date.now() });
+      } else setShared(DATA, { error: clean(r.err || r.out) || `kit list 失敗（${r.code}）`, at: Date.now() });
+      cx.notify();
+    });
+  }
+
+  // add / rm / sync: one at a time, the result (kit's own words) shown above the list
+  act(label, args, cx) {
+    if (this.busy) return;
+    setShared(BUSY, label);
+    setShared(MSG, null);
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const r = await kit(args, 600000);
+      const text = clean([r.out, r.err].filter(Boolean).join("\n"));
+      setShared(MSG, { ok: r.code === 0, label, text: text || (r.code === 0 ? "完成" : `失敗（${r.code}）`), at: Date.now() });
+      setShared(BUSY, null);
+      this.refresh(cx);
+      cx.notify();
+    });
+  }
+
+  // kit run <agent> in a new tab of this space (kit syncs first, then starts the tool)
+  openAgent(name, cx) {
+    cx.spawn(async (cx) => {
+      const argv = await kitConfig();
+      const tool = (this.data?.tools ?? ["claude"]).includes(this.tool) ? this.tool : "claude";
+      const kitArgs = [...argv, "run", name, "--tool", tool];
+      // kit.cmd is a batch file: start it through cmd so the terminal can run it
+      const full = isWindows() && /\.(cmd|bat)$/i.test(argv[0]) ? ["cmd.exe", "/d", "/c", ...kitArgs] : kitArgs;
+      try {
+        await run("tab.new", { name: `${name}（${TOOL_NAMES[tool] ?? tool}）`, argv: full });
+        setShared(MSG, { ok: true, label: "開啟", text: `在新分頁開了 ${name}（${TOOL_NAMES[tool] ?? tool}）`, at: Date.now() });
+      } catch (e) {
+        setShared(MSG, { ok: false, label: "開啟", text: `開不起來：${e?.message ?? e}`, at: Date.now() });
+      }
+      cx.notify();
+    });
+  }
+
+  async moveIntoBar(cx) {
+    this.moveErr = null;
+    let name = shared("layout");
+    if (SHIPPED.includes(name)) {
+      // Herdr's own layout can't change shape: work on a copy of it (once; later moves reuse the copy).
+      const as = `${name}-kit`;
+      try { await run("layout.clone", { name, as }); } catch { await run("layout.switch", { name: as }); }
+      await cx.sleep(800);
+      name = shared("layout");
+    }
+    const tree = placed(layout());
+    if (!tree) { this.moveErr = "這個版面沒有上排分頁列，沒辦法自動放。"; cx.notify(); return; }
+    await run("layout.set", { layout: tree });
+  }
+
+  render(cx) {
+    if (this.role === "toggle") return this.renderToggle();
+    const t = theme(), z = fs();
+    const root = v_flex().id("kit-root").size_full().bg(t.surface).text_size(z).text_color(t.foreground);
+    root.child(this.header(t, z));
+    if (!find(layout(), TOGGLE)) root.child(this.moveBanner(t, z));
+    const d = this.data, msg = shared(MSG);
+    if (msg) root.child(this.message(t, z, msg));
+    if (!d) return root.child(div().p(14).text_color(t.muted).child("讀取中…"));
+    if (d.error) return root.child(this.problem(t, z, d.error));
+    if (d.kit_version_wanted) root.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked)
+      .child(`團隊要 kit ${d.kit_version_wanted} 以上，你的是 ${d.kit}。請在終端機打  kit self-update`));
+    return root.child(this.list(t, z, d));
+  }
+
+  header(t, z) {
+    const d = this.data, busy = this.busy;
+    const inBar = Boolean(find(layout(), TOGGLE));
+    return v_flex().flex_none().border_b(1).border_color(t.border)
+      .child(h_flex().px(10).py(6).gap(6).items_center()
+        .child(div().flex_1().min_w(0).truncate().font_semibold().child(d?.kit ? `kit ${d.kit}` : "kit"))
+        .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { kind: "primary", off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
+        .child(this.btn(t, z, "reload", "↻", { off: Boolean(busy), on: (cx) => this.refresh(cx) }))
+        .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { on: () => run("layout.hide", { id: PANEL }) }))))
+      .when(Boolean(d?.sources?.length), (el) => el.child(div().px(12).pb(5).text_size(z - 1.5).truncate().text_color(t.muted)
+        .child(`來源：${d.sources.map((s) => s.name).join("、")}`)));
+  }
+
+  moveBanner(t, z) {
+    return v_flex().flex_none().px(12).py(10).gap(6).bg(t.raised).border_b(1).border_color(t.border)
+      .child(div().text_size(z - 1).text_color(t.muted).child(this.moveErr ?? "這個面板還在版面最外面。按下面的按鈕，會放進上排（一顆 kit 按鈕，按了開關面板）。"))
+      .child(h_flex().child(this.btn(t, z, "move", "放進上排", { kind: "primary", on: (cx) => cx.spawn(async (cx) => this.moveIntoBar(cx)) })));
+  }
+
+  message(t, z, msg) {
+    return h_flex().flex_none().mx(10).mt(8).p(8).gap(8).items_start().rounded(6).bg(t.raised)
+      .border_1().border_color(msg.ok ? t.border : t.ansi1)
+      .child(div().flex_1().min_w(0).text_size(z - 1).font_family(mono()).text_color(msg.ok ? t.foreground : t.ansi1)
+        .child(`${msg.label}：${msg.ok ? "" : "失敗\n"}${msg.text}`))
+      .child(div().id("msg-close").flex_none().px(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, cx) => { setShared(MSG, null); cx.notify(); }).child("✕"));
+  }
+
+  problem(t, z, text) {
+    const notInit = /kit init/.test(text);
+    return v_flex().p(14).gap(8)
+      .child(div().font_semibold().text_color(t.ansi1).child("kit 出錯了"))
+      .child(div().font_family(mono()).text_size(z - 1).child(text))
+      .when(notInit, (el) => el.child(div().text_size(z - 1).text_color(t.muted)
+        .child("第一次用要先在終端機打  kit init <團隊來源的網址>，好了再按 ↻。")));
+  }
+
+  list(t, z, d) {
+    const items = d.items ?? [];
+    const tools = d.tools ?? ["claude"];
+    const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(10);
+    const news = items.filter((i) => i.new).length;
+    if (news) body.child(div().text_size(z - 1).text_color(t.done).child(`有 ${news} 個新的（標「新」）。按「⟳ 同步」後就不再標新。`));
+    for (const { kind, title } of KINDS) {
+      const rows = items.filter((i) => i.kind === kind);
+      if (!rows.length) continue;
+      const folded = Boolean(this.folded[kind]);
+      const used = rows.filter((i) => i.status === "used" || i.status === "required").length;
+      body.child(h_flex().id(`sec-${kind}`).gap(6).items_center().cursor_pointer().on_mouse_down("left", stop)
+        .on_click((_e, cx) => { this.folded[kind] = !folded; this.save("folded", JSON.stringify(this.folded)); cx.notify(); })
+        .child(div().w(12).text_color(t.muted).child(folded ? "▸" : "▾"))
+        .child(div().font_semibold().child(title))
+        .child(div().text_size(z - 1.5).text_color(t.muted).child(kind === "agent" ? `${rows.length} 個` : `在用 ${used} / ${rows.length}`)));
+      if (kind === "agent" && tools.length > 1 && !folded) body.child(this.toolPicker(t, z, tools));
+      if (!folded) body.child(v_flex().gap(4).children(rows.map((i) => this.row(t, z, i))));
+    }
+    if (!items.length) body.child(div().text_color(t.muted).child("來源裡還沒有東西。"));
+    return body;
+  }
+
+  toolPicker(t, z, tools) {
+    const cur = tools.includes(this.tool) ? this.tool : "claude";
+    return h_flex().gap(4).items_center().pl(18)
+      .child(div().text_size(z - 1.5).text_color(t.muted).child("用"))
+      .children(tools.map((tool) => div().id(`tool-${tool}`).px(8).py(2).rounded(5).text_size(z - 1.5).cursor_pointer()
+        .bg(tool === cur ? t.selected : t.raised).text_color(tool === cur ? t.foreground : t.muted)
+        .border_1().border_color(tool === cur ? t.accent : t.raised)
+        .on_mouse_down("left", stop).on_click((_e, cx) => { this.tool = tool; this.save("tool", tool); cx.notify(); })
+        .child(TOOL_NAMES[tool] ?? tool)))
+      .child(div().text_size(z - 1.5).text_color(t.muted).child("開"));
+  }
+
+  row(t, z, i) {
+    const busy = Boolean(this.busy);
+    const badge = (text, color) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(color).child(text);
+    const head = h_flex().gap(5).items_center().min_w(0)
+      .child(div().min_w(0).truncate().font_semibold().text_color(i.status === "unused" ? t.muted : t.foreground).child(i.name));
+    if (i.status === "required") head.child(badge("必備", t.accent));
+    if (i.status === "used") head.child(badge("在用", t.working));
+    if (i.new) head.child(badge("新", t.done));
+    let action;
+    if (i.kind === "agent") action = this.btn(t, z, `run-${i.name}`, "開啟", { small: true, on: (cx) => this.openAgent(i.name, cx) });
+    else if (i.status === "required") action = div().flex_none().text_size(z - 1.5).text_color(t.dim).child("拿不掉");
+    else if (i.status === "used") action = this.btn(t, z, `rm-${i.kind}-${i.name}`, "拿掉", { small: true, off: busy, on: (cx) => this.act(`拿掉 ${i.name}`, ["rm", i.kind, i.name], cx) });
+    else action = this.btn(t, z, `add-${i.kind}-${i.name}`, "加上", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加上 ${i.name}`, ["add", i.kind, i.name], cx) });
+    const sub = [i.description, i.source].filter(Boolean).join(" · ");
+    return h_flex().id(`row-${i.kind}-${i.name}`).gap(8).items_center().px(8).py(5).rounded(6).hover((s) => s.bg(t.hover))
+      .child(v_flex().flex_1().min_w(0).gap(1)
+        .child(head)
+        .when(Boolean(sub), (el) => el.child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child(sub))))
+      .child(action);
+  }
+
+  btn(t, z, id, label, { kind, on, off, small } = {}) {
+    const bg = off ? t.raised : kind === "primary" ? t.solid : t.raised;
+    const fg = off ? t.dim : kind === "primary" ? t.solid_foreground : t.foreground;
+    return div().id(id).h(small ? 26 : 30).px(small ? 10 : 12).flex().flex_none().items_center().justify_center().rounded(6)
+      .text_size(small ? z - 1 : z).font_semibold().bg(bg).text_color(fg)
+      .when(!off, (el) => el.cursor_pointer().hover((st) => st.opacity(0.85)).on_mouse_down("left", stop).on_click((_e, cx) => on?.(cx)))
+      .child(label);
+  }
+
+  // The tab-bar button: "kit" plus how many new things there are; click shows / hides the panel.
+  renderToggle() {
+    const t = theme(), node = find(layout(), PANEL), on = node && !node.hidden;
+    const d = this.data;
+    const news = (d?.items ?? []).filter((i) => i.new).length;
+    const badge = d?.error ? div().text_color(t.ansi1).child("!")
+      : news ? div().px(5).rounded(8).text_size(11).font_semibold().bg(t.done).text_color(t.background).child(String(news)) : null;
+    return h_flex().size_full().pr(6).items_center().bg(t.chrome).border_b(1).border_color(t.border)
+      .child(h_flex().id("toggle-kit").h(26).px(8).gap(5).flex_none().items_center().rounded(6)
+        .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
+        .hover((st) => st.bg(t.hover)).on_mouse_down("left", stop)
+        .on_click(() => run("layout.toggle", { id: PANEL }))
+        .child("kit")
+        .when(Boolean(badge), (el) => el.child(badge)));
+  }
+}
