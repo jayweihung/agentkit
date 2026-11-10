@@ -498,6 +498,49 @@ echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"
 
+# ---------- collect / outdated (other people's skills; a local repo plays the author) ----------
+UP="$T/upstream"; CO="$T/collector"
+mkdir -p "$UP/skills/foo/scripts" "$CO"
+printf -- '---\nname: foo\ndescription: >-\n  Upstream foo.\n---\nfoo v1\n' > "$UP/skills/foo/SKILL.md"
+echo 'echo hi' > "$UP/skills/foo/scripts/run.sh"; printf '\0\1' > "$UP/skills/foo/logo.png"; ln -s SKILL.md "$UP/skills/foo/link.md"
+printf 'MIT License\n\nPermission is hereby granted, free of charge, ...\n' > "$UP/LICENSE"
+( cd "$UP" && git init -q && git config user.name a && git config user.email a@a && git add -A && git commit -qm v1 )
+mkdir -p "$T/nolic/skills/bar"; printf -- '---\nname: bar\ndescription: b\n---\nb\n' > "$T/nolic/skills/bar/SKILL.md"
+( cd "$T/nolic" && git init -q && git config user.name a && git config user.email a@a && git add -A && git commit -qm x )
+printf 'name: collector\ncollect_sources: [file://%s, file://%s]\n' "$UP" "$T/nolic" > "$CO/kit.yaml"
+cd "$CO"
+out=$(kit collect "file://$UP" --path skills/foo 2>&1); rc=$?
+check "collect copies the skill with the repo's LICENSE" '[ $rc -eq 0 ] && [ -f "$CO/skills/foo/SKILL.md" ] && grep -q "MIT License" "$CO/skills/foo/LICENSE" && [ -f "$CO/skills/foo/scripts/run.sh" ]'
+check "collect skips binaries and links" '[ ! -e "$CO/skills/foo/logo.png" ] && [ ! -e "$CO/skills/foo/link.md" ]'
+check "collect points at files that run" 'echo "$out" | grep -q "會執行的檔案" && echo "$out" | grep -q scripts/run.sh'
+v1=$(git -C "$UP" rev-parse HEAD)
+check "third_party.lock records author, commit, license" 'awk -F"\t" -v u="file://$UP" -v s="$v1" "\$1 == \"foo\" && \$2 == u && \$3 == \"skills/foo\" && \$5 == s && \$6 == \"MIT\"" "$CO/third_party.lock" | grep -q .'
+out=$(kit collect "file://$T/elsewhere" 2>&1); rc=$?
+check "collect refuses authors not in collect_sources" '[ $rc -ne 0 ] && echo "$out" | grep -q "不在 collect_sources"'
+out=$(kit collect "file://$T/nolic" --path skills/bar 2>&1); rc=$?
+check "collect refuses a repo without a license" '[ $rc -ne 0 ] && echo "$out" | grep -q "沒有 LICENSE" && [ ! -e "$CO/skills/bar" ]'
+mkdir -p "$CO/skills/own"; printf -- '---\nname: own\ndescription: mine\n---\nmine\n' > "$CO/skills/own/SKILL.md"
+out=$(kit collect "file://$UP" --path skills/foo --name own 2>&1); rc=$?
+check "collect will not replace your own skill without --force" '[ $rc -ne 0 ] && grep -q mine "$CO/skills/own/SKILL.md"'
+rm -rf "$CO/skills/own"
+out=$(kit outdated 2>&1)
+check "outdated: up to date" 'echo "$out" | grep -q "foo：最新"'
+( cd "$UP" && echo "foo v2" >> skills/foo/SKILL.md && git commit -qam v2 )
+out=$(kit outdated 2>&1)
+check "outdated: new version upstream" 'echo "$out" | grep -q "foo：有新版本" && echo "$out" | grep -q "kit collect foo"'
+echo "local edit" >> "$CO/skills/foo/SKILL.md"
+out=$(kit collect foo 2>&1); rc=$?
+check "collect <name> replaces the whole copy with the new version" '[ $rc -eq 0 ] && grep -q "foo v2" "$CO/skills/foo/SKILL.md" && ! grep -q "local edit" "$CO/skills/foo/SKILL.md" && grep -q "$(git -C "$UP" rev-parse HEAD)" "$CO/third_party.lock" && [ "$(grep -c "^foo" "$CO/third_party.lock")" = 1 ]'
+( cd "$UP" && git tag -a v1.0 -m rel && echo "foo v3" >> skills/foo/SKILL.md && git commit -qam v3 )
+out=$(kit collect foo --ref v1.0 2>&1); rc=$?
+check "collect --ref takes a tag" '[ $rc -eq 0 ] && ! grep -q "foo v3" "$CO/skills/foo/SKILL.md"'
+out=$(kit outdated 2>&1)
+check "outdated follows the tag, not the branch" 'echo "$out" | grep -q "foo：最新"'
+printf 'maintainers: [someone-else]\n' >> "$CO/kit.yaml"
+out=$(kit collect foo 2>&1); rc=$?
+check "only maintainers may collect" '[ $rc -ne 0 ] && echo "$out" | grep -q 維護者'
+cd "$T"
+
 # ---------- signed approvals (root uses only versions signed on the Mac) ----------
 SA="$T/signed"; mkdir -p "$SA"
 ssh-keygen -q -t ed25519 -N '' -C approver -f "$SA/key"

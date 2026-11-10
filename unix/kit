@@ -1188,7 +1188,7 @@ cmd_push() {
     # what changed: only item files are sent
     local all files items other
     all=$(git -c core.quotePath=false status --porcelain --untracked-files=all | cut -c4- | sed 's/.* -> //')
-    files=$(printf '%s\n' "$all" | grep -E '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md)$')
+    files=$(printf '%s\n' "$all" | grep -E '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$')
     other=$(printf '%s\n' "$all" | grep -vxF -f <(printf '%s\n' "$files"; echo '##none##') | awk 'NF')
     [ -n "$files" ] || { say "沒有要送的（$(basename "$dir") 裡沒有改過的 rule、skill、mcp、agent）"; return 0; }
     items=$(printf '%s\n' "$files" | push_items)
@@ -1275,6 +1275,146 @@ $(printf '%s\n' "$items" | awk -F'\t' '{ print "- " $1 " " $2 }')"
     if [ -n "$compare" ]; then say "開 PR：$compare"; else say "請到 Gitea 用分支 $b 開 PR"; fi
     return 0
 }
+# ---------- collect / outdated: other people's skills, from their own repos ----------
+# third_party.lock (in the source that keeps them): one line per skill
+#   name<TAB>url<TAB>path<TAB>ref<TAB>commit<TAB>license<TAB>date
+LOCK_HEAD='# third_party.lock - written by kit collect; name url path ref commit license date'
+url_id() { # host/path of a git URL, without scheme, user, .git or trailing /
+    printf '%s\n' "$1" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#^([^/:]+):#\1/#; s#/+$##; s#\.git$##'
+}
+collect_allowed() { # collect_allowed URL DIR : the URL must be (inside) one of collect_sources
+    local id e d; id=$(url_id "$1")
+    for d in "$2" $( [ -f "$MACHINE" ] && src_dirs ); do
+        for e in $(yget "$d/kit.yaml" collect_sources); do
+            e=$(url_id "$e")
+            [ "$id" = "$e" ] && return 0
+            case $id in "$e"/*) return 0;; esac
+        done
+    done
+    return 1
+}
+check_maintainer() { # check_maintainer DIR : when kit.yaml lists maintainers, you must be one
+    local m me; m=$(yget "$1/kit.yaml" maintainers)
+    [ -n "$m" ] || return 0
+    me=$(git -C "$1" config user.email 2>/dev/null)
+    printf '%s\n' "$m" | grep -qxF -e "$me" -e "${me%%@*}" -e "${USER:-}" -e "$(id -un 2>/dev/null)" && return 0
+    die "只有維護者能用 collect／outdated（kit.yaml 的 maintainers）"
+}
+license_kind() { # license_kind FILE -> short name
+    if grep -qiE 'Apache License' "$1"; then echo Apache-2.0
+    elif grep -qiE 'MIT License|Permission is hereby granted, free of charge' "$1"; then echo MIT
+    elif grep -qiE 'Mozilla Public License' "$1"; then echo MPL-2.0
+    elif grep -qiE 'GNU (AFFERO|LESSER)? *GENERAL PUBLIC LICENSE' "$1"; then echo GPL
+    elif grep -qiE 'Redistribution and use in source and binary forms' "$1"; then echo BSD
+    elif grep -qiE 'CC0|Creative Commons' "$1"; then echo CC
+    else echo unknown; fi
+}
+lock_get() { [ -f "$1/third_party.lock" ] && awk -F'\t' -v n="$2" '$1 == n' "$1/third_party.lock"; }
+lock_set() { # lock_set DIR LINE(name first)
+    local f="$1/third_party.lock" n=${2%%"$TAB"*}
+    { echo "$LOCK_HEAD"; [ -f "$f" ] && awk -F'\t' -v n="$n" '$0 !~ /^#/ && NF && $1 != n' "$f"; printf '%s\n' "$2"; } | { read -r h; echo "$h"; LC_ALL=C sort; } > "$f.tmp" && mv "$f.tmp" "$f"
+}
+real_url_ok() { # git config insteadOf can send a URL elsewhere: the real one must be allowed too
+    local real; real=$(git ls-remote --get-url "$1" 2>/dev/null)
+    [ -z "$real" ] || [ "$real" = "$1" ] || collect_allowed "$real" "$2" || die "git 設定把 $1 改到 ${real}，不在 collect_sources"
+}
+
+cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to SOURCE] [--force]
+    local arg="" path="" name="" ref="" to="" force=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --path) path=${2:-}; shift 2 || die "--path 後面要接 repo 裡的資料夾";;
+            --name) name=${2:-}; shift 2 || die "--name 後面要接名字";;
+            --ref)  ref=${2:-}; shift 2 || die "--ref 後面要接分支或 tag";;
+            --to)   to=${2:-}; shift 2 || die "--to 後面要接來源";;
+            --force) force=1; shift;;
+            -*) die "不認得 $1";;
+            *) [ -z "$arg" ] || die "多了一個參數：$1"; arg=$1; shift;;
+        esac
+    done
+    [ -n "$arg" ] || die "用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag]，或 kit collect <名字>（再收一次）"
+    local dir url line; dir=$(target_dir "$to") || exit 1
+    check_maintainer "$dir"
+    if is_url "$arg"; then url=$arg
+    else # collect again what the lock says
+        line=$(lock_get "$dir" "$arg"); [ -n "$line" ] || die "$(basename "$dir") 的 third_party.lock 裡沒有 ${arg}（第一次收要給網址）"
+        name=$arg; url=$(printf '%s' "$line" | cut -f2)
+        [ -n "$path" ] || path=$(printf '%s' "$line" | cut -f3); [ "$path" = . ] && path=""
+        [ -n "$ref" ] || ref=$(printf '%s' "$line" | cut -f4); [ "$ref" = - ] && ref=""
+    fi
+    collect_allowed "$url" "$dir" || die "$(url_id "$url") 不在 collect_sources（$(basename "$dir")/kit.yaml），不能收"
+    real_url_ok "$url" "$dir"
+    path=${path#/}; path=${path%/}
+    case /$path/ in */../*|*/./*) die "--path 不能有 .. 或 .";; esac
+
+    local tmp repo src sha f lic kind skipped=0 scripts=""; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-collect.XXXXXX"); repo="$tmp/repo"
+    say "從 $(url_id "$url") 下載${ref:+（${ref}）}…"
+    if ! git_safe -c protocol.file.allow=always clone -q --depth 1 --no-recurse-submodules ${ref:+--branch "$ref"} "$url" "$repo" 2>"$tmp/err"; then
+        sed 's/^/  /' "$tmp/err" >&2; rm -rf "$tmp"; die "沒辦法下載 $url"
+    fi
+    sha=$(git -C "$repo" rev-parse HEAD)
+    repo=$(cd "$repo" && pwd -P); src=$repo${path:+/$path}
+    [ -d "$src" ] && src=$(cd "$src" && pwd -P)
+    case $src/ in "$repo"/*) ;; *) rm -rf "$tmp"; die "--path 要在 repo 裡面";; esac
+    [ -f "$src/SKILL.md" ] || { rm -rf "$tmp"; die "$(url_id "$url")${path:+/$path} 裡沒有 SKILL.md（用 --path 指出 skill 的資料夾）"; }
+    [ -n "$name" ] || name=$(fm_val "$(fm_of "$src/SKILL.md")" name)
+    [ -n "$name" ] || name=$(basename "$src")
+    valid_name "$name" || { rm -rf "$tmp"; die "名字 $name 不行（只能小寫英文、數字和 -），用 --name 給一個"; }
+    local dst="$dir/skills/$name"
+    if [ -e "$dst" ] && [ -z "$(lock_get "$dir" "$name")" ] && [ -z "$force" ]; then
+        rm -rf "$tmp"; die "$(basename "$dir") 已經有 skill:${name}，而且不是 collect 收的（要整份換掉加 --force，或用 --name 換名字）"
+    fi
+    # license: the skill's own, else the repo's
+    lic=""
+    for f in "$src"/LICENSE* "$src"/LICENCE* "$src"/COPYING* "$repo"/LICENSE* "$repo"/LICENCE* "$repo"/COPYING*; do [ -f "$f" ] && { lic=$f; break; }; done
+    [ -n "$lic" ] || { rm -rf "$tmp"; die "$(url_id "$url") 沒有 LICENSE，不知道能不能用，不收"; }
+    kind=$(license_kind "$lic")
+    # copy: everything text, no links, no binaries, no git
+    mkdir -p "$tmp/out"
+    while IFS= read -r f; do
+        local rel=${f#"$src"/}
+        if [ -L "$f" ]; then skipped=$((skipped+1)); warn "跳過捷徑 $rel"; continue; fi
+        if [ -s "$f" ] && ! LC_ALL=C grep -qI . "$f"; then skipped=$((skipped+1)); warn "跳過非文字檔 $rel"; continue; fi
+        mkdir -p "$(dirname "$tmp/out/$rel")"; cp "$f" "$tmp/out/$rel"
+        case $rel in *.sh|*.py|*.js|*.mjs|*.cjs|*.ts|*.ps1|*.rb|*.pl|*.bat|*.cmd) scripts="$scripts $rel";; *) [ -x "$f" ] && scripts="$scripts $rel";; esac
+    done <<EOF
+$(cd "$src" && find "$(pwd -P)" -name .git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort)
+EOF
+    [ "$lic" = "$src/${lic##*/}" ] || cp "$lic" "$tmp/out/${lic##*/}"
+    rm -rf "$dst"; mkdir -p "$dir/skills"; cp -R "$tmp/out" "$dst"
+    lock_set "$dir" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$name" "$url" "${path:-.}" "${ref:--}" "$sha" "$kind" "$(date +%Y-%m-%d)")"
+    rm -rf "$tmp"
+    say "已收 skill:$name ← $(url_id "$url")${path:+/$path} @ $(printf %.12s "$sha")（授權 ${kind}）"
+    [ "$kind" = unknown ] && warn "認不出授權種類，請自己看 skills/$name/${lic##*/}"
+    [ "$kind" = GPL ] && warn "GPL 類授權：改了再發布要公開原始碼，請確認可以用"
+    [ -n "$scripts" ] && warn "這個 skill 有會執行的檔案，送出前請看過：$scripts"
+    check_dirs "$dir" >/dev/null 2>&1 || warn "kit check 有問題，送出前請先打  kit check  看看"
+    say "下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR"
+}
+
+cmd_outdated() { # kit outdated [--to SOURCE]
+    local to=""
+    while [ $# -gt 0 ]; do case $1 in --to) to=${2:-}; shift 2 || die "--to 後面要接來源";; *) die "用法：kit outdated [--to 來源]";; esac; done
+    local dir; dir=$(target_dir "$to") || exit 1
+    check_maintainer "$dir"
+    [ -f "$dir/third_party.lock" ] || { say "$(basename "$dir") 沒有 third_party.lock（還沒用 kit collect 收過東西）"; return 0; }
+    local n url path ref sha lic day now new=0
+    while IFS="$TAB" read -r n url path ref sha lic day; do
+        case $n in ""|\#*) continue;; esac
+        if ! collect_allowed "$url" "$dir"; then warn "${n}：$(url_id "$url") 已經不在 collect_sources，不檢查"; continue; fi
+        if [ "$ref" = - ]; then now=$(git_safe ls-remote "$url" HEAD 2>/dev/null | awk '$2 == "HEAD" { print $1; exit }')
+        else # a branch, or a tag (the commit it points to: ^{})
+            now=$(git_safe ls-remote "$url" "refs/heads/$ref" "refs/tags/$ref" "refs/tags/$ref^{}" 2>/dev/null |
+                  awk -v r="$ref" '$2 == "refs/heads/" r { b = $1 } $2 == "refs/tags/" r { t = $1 } $2 == "refs/tags/" r "^{}" { p = $1 }
+                                   END { print (b != "" ? b : (p != "" ? p : t)) }')
+        fi
+        if [ -z "$now" ]; then warn "${n}：連不到 $(url_id "$url")"
+        elif [ "$now" = "$sha" ]; then say "  ${n}：最新（$(printf %.12s "$sha")）"
+        else say "  ${n}：有新版本 $(printf %.12s "$sha") → $(printf %.12s "$now")，打  kit collect $n  收新的"; new=$((new+1)); fi
+    done < "$dir/third_party.lock"
+    [ $new = 0 ] || say "kit：$new 個有新版本"
+}
+
 cmd_approve() { # kit approve <approvals repo> <source clone>... --key <ssh key> [--yes]
     local dir="" key="" yes="" repos=() r n sha prev f tmp serial
     while [ $# -gt 0 ]; do
@@ -1332,6 +1472,11 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit diff   [種類] <名字> --from 本機資料夾   比較
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
+
+維護者用（只收 kit.yaml 的 collect_sources 列的原作者）：
+  kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支]   收別人的 skill（保留 LICENSE）
+  kit collect <名字>                再收一次＝整份換成原作者的新版
+  kit outdated                      看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml
@@ -1363,6 +1508,8 @@ case ${1:-} in
     uninstall) shift; cmd_uninstall "$@";;
     self-update) cmd_self_update;;
     approve)   shift; cmd_approve "$@";;
+    collect)   shift; cmd_collect "$@";;
+    outdated)  shift; cmd_outdated "$@";;
     --version|version) echo "kit $KIT_VERSION";;
     ""|-h|--help|help) usage;;
     *) die "沒有這個指令：$1（打 kit help）";;
