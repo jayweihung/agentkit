@@ -22,6 +22,8 @@ fi
 mkdir -p "$DEST" "$BIN"
 for f in kit json.awk yaml.awk; do cp "$REPO/unix/$f" "$DEST/$f.new" && mv "$DEST/$f.new" "$DEST/$f"; done
 cp "$REPO/VERSION" "$DEST/VERSION"
+mkdir -p "$DEST/templates"
+for f in "$REPO"/templates/*; do cp "$f" "$DEST/templates/"; done
 printf '%s\n' "$REPO" > "$DEST/.repo"      # where kit self-update pulls from
 chmod 755 "$DEST/kit"
 ln -sf "$DEST/kit" "$BIN/kit"

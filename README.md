@@ -33,6 +33,15 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
     kit self-update               更新 kit 本身
     kit uninstall [--self]        移除
 
+團隊的 kit.yaml 可以寫 `kit_version: 0.4.0`：kit 比這個舊的人，`kit sync` / `kit list` 會提醒一次去 `kit self-update`。
+
+內容 repo 的 PR 自動檢查（Gitea Actions，Linux runner）：
+
+    kit ci-template > .gitea/workflows/kit-check.yaml
+
+要在 repo 或組織設定 Actions 變數 `AGENTKIT_REPO`（agentkit repo 的 git 網址；私有的話再加 secret `AGENTKIT_TOKEN`），
+並在分支保護把 `kit-check` 設成必須通過。細節看範本裡的註解。
+
 kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 
 | | rule | skill | MCP | 團隊禁用的工具 |

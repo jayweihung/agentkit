@@ -116,6 +116,35 @@ check "list marks in use" 'echo "$out" | grep -q "^\*  skill:gerrit-review"'
 check "list shows unused" 'echo "$out" | grep -q "^   skill:gerrit-workflow"'
 check "list shows agent" 'echo "$out" | grep -q "agent:gerrit"'
 
+# ---------- kit_version: tell once when the team wants a newer kit ----------
+cp "$TEAM/kit.yaml" "$T/kit.yaml.orig"
+echo "kit_version: 0.4.0" >> "$TEAM/kit.yaml"
+out=$(kit sync 2>&1)
+check "old kit: sync tells the user" 'echo "$out" | grep -qF "團隊要 kit 0.4.0 以上，你的是 0.1.0。請打  kit self-update"'
+out=$(kit sync 2>&1; kit list 2>&1)
+check "old kit: told only once" '! echo "$out" | grep -q 團隊要'
+cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 0.10.0" >> "$TEAM/kit.yaml"
+out=$(kit list 2>&1)
+check "team version changed: list tells again (numbers, not text)" 'echo "$out" | grep -qF "團隊要 kit 0.10.0 以上"'
+mkdir -p "$T/dev/unix"; cp "$HERE"/../unix/* "$T/dev/unix/"
+cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 0.6.0" >> "$TEAM/kit.yaml"
+out=$("$T/dev/unix/kit" sync 2>&1)
+check "dev build (no VERSION) is not told" '! echo "$out" | grep -q 團隊要'
+echo "0.6.0+local" > "$T/dev/VERSION"
+out=$("$T/dev/unix/kit" sync 2>&1)
+check "+build part ignored" '! echo "$out" | grep -q 團隊要'
+echo "0.5.9" > "$T/dev/VERSION"
+out=$("$T/dev/unix/kit" sync 2>&1)
+check "older patch level is told" 'echo "$out" | grep -qF "團隊要 kit 0.6.0 以上，你的是 0.5.9"'
+state_nag() { awk -F'\t' '$1 == "nag"' "$HOME/.config/agentkit/state.tsv"; }
+echo "0.6.0" > "$T/dev/VERSION"; "$T/dev/unix/kit" sync >/dev/null 2>&1
+check "new enough: note forgotten" '[ -z "$(state_nag)" ]'
+# kit_version 0.6.0 stays for the background sync below
+
+# ---------- ci-template ----------
+out=$(kit ci-template)
+check "ci-template prints the template" '[ "$out" = "$(cat "$HERE/../templates/gitea-kit-check.yaml")" ]'
+
 # ---------- run (dry run: show the claude command) ----------
 out=$(KIT_DRY_RUN=1 kit run gerrit --model sonnet 2>&1)
 tmp=$(echo "$out" | sed -n 's/^tmp=//p')
@@ -156,10 +185,13 @@ check "hook returns at once, exit 0" '[ $rc -eq 0 ] && [ $took -le 1 ]'
 for i in 1 2 3 4 5 6 7 8 9 10; do [ -d "$HOME/.config/agentkit/sync.lock" ] || break; sleep 1; done
 check "hook synced in the background" 'grep -q "hook change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
 check "hook logs" 'grep -q "^== " "$HOME/.config/agentkit/sync.log"'
+check "hook: kit_version not told in the background" '! grep -q 團隊要 "$HOME/.config/agentkit/sync.log" && [ -z "$(state_nag)" ]'
 echo "second change" >> "$TEAM/skills/gerrit-review/SKILL.md"
 kit sync --hook; sleep 2
 check "hook runs at most every 10 minutes" '! grep -q "second change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
-kit sync >/dev/null 2>&1
+out=$(kit sync 2>&1)
+check "hook: kit_version told at the next sync" 'echo "$out" | grep -qF "團隊要 kit 0.6.0 以上"'
+cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"
 
 # ---------- allowed_hosts ----------
 out=$(kit init "$TEAM" https://github.com/someone/agentkit-library.git 2>&1); rc=$?
@@ -258,7 +290,7 @@ check "claude.json byte-identical after everything" 'cmp -s "$HOME/.claude.json"
 check "uninstall removes mcp" '! jget "$HOME/.claude.json" mcpServers.gerrit >/dev/null'
 
 # ---------- install / self-update / uninstall --self ----------
-R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../VERSION" "$R/"
+R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../templates" "$HERE/../VERSION" "$R/"
 ( cd "$R" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm v1 )
 U="$T/clone2"; git clone -q "$R" "$U"
 touch "$HOME/.bashrc"
@@ -268,6 +300,7 @@ check "install adds PATH once" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc"
 PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
 check "reinstall does not add PATH twice" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc")" = 1 ]'
 check "installed kit works" '"$HOME/.local/bin/kit" init "$TEAM" >/dev/null 2>&1 && grep -q agentkit:begin "$HOME/.claude/CLAUDE.md"'
+check "installed kit has the ci template" '"$HOME/.local/bin/kit" ci-template | cmp -s - "$R/templates/gitea-kit-check.yaml"'
 ( cd "$R" && echo 0.1.1 > VERSION && git -c user.name=t -c user.email=t@t commit -qam v2 )
 out=$("$HOME/.local/bin/kit" self-update 2>&1)
 check "self-update pulls new version" '"$HOME/.local/bin/kit" --version | grep -q "kit 0.1.1"'
