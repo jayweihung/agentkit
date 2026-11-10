@@ -406,9 +406,9 @@ W "$W/skills/pfoo/SKILL.md" "---`nname: pfoo`ndescription: p`n---`nok`n"
 Kit push
 Check 'push: author domain must be company' { $rc -ne 0 -and $out.Contains('user.email 不是公司網域') -and (RemoteHeads) -eq 'main' }
 & git -C $W config user.email me@corp.example
-& git -C $W remote set-url origin https://github.com/acme/team.git
+& git -C $W remote set-url origin https://public-git.example/acme/team.git
 Kit push
-Check 'push: origin host not allowed' { $rc -ne 0 -and $out.Contains('github.com 不在允許的主機清單') -and (RemoteHeads) -eq 'main' }
+Check 'push: origin host not allowed' { $rc -ne 0 -and $out.Contains('public-git.example 不在允許的主機清單') -and (RemoteHeads) -eq 'main' }
 & git -C $W remote set-url origin $ORIGIN
 W "$W/notes.txt" "local only`n"; & git -C $W add notes.txt; & git -C $W commit -qm 'local only'   # an unpushed commit on main
 Kit push

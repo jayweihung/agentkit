@@ -364,9 +364,9 @@ git config user.email me@home.example
 out=$(kit push 2>&1); rc=$?
 check "push: author domain must be company" '[ $rc -ne 0 ] && echo "$out" | grep -q "user.email 不是公司網域" && [ "$(remote_heads)" = main ]'
 git config user.email me@corp.example
-git remote set-url origin https://github.com/acme/team.git
+git remote set-url origin https://public-git.example/acme/team.git
 out=$(kit push 2>&1); rc=$?
-check "push: origin host not allowed" '[ $rc -ne 0 ] && echo "$out" | grep -q "github.com 不在允許的主機清單" && [ "$(remote_heads)" = main ]'
+check "push: origin host not allowed" '[ $rc -ne 0 ] && echo "$out" | grep -q "public-git.example 不在允許的主機清單" && [ "$(remote_heads)" = main ]'
 git remote set-url origin "$ORIGIN"
 echo "local only" > notes.txt; git add notes.txt; git commit -qm "local only"   # an unpushed commit on main
 out=$(kit push 2>&1); rc=$?
