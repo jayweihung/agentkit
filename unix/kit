@@ -65,7 +65,7 @@ prune_empty() { # prune_empty FILE PATH... : delete each PATH whose value is [] 
     done
     rm -f "$ops"
 }
-prune_deny() { prune_empty "$CLAUDE_DIR/settings.json" permissions.deny permissions; }
+prune_deny() { prune_empty "$CLAUDE_DIR/settings.json" permissions.deny permissions hooks.SessionStart hooks; }
 
 json_get() { LC_ALL=C awk -f "$KIT_LIB/json.awk" -v get="$2" "$1" 2>/dev/null; }
 
@@ -296,8 +296,36 @@ EOF
         printf '%s\n' "$deny" | grep -qxF "$n" && continue
         printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; state_del deny "$n"; say "  removed deny $n"
     done
+    # update automatically when Claude starts -> settings.json hooks.SessionStart
+    local hj old; hj=$(hook_json); old=$(state_get hook SessionStart)
+    if [ "$hj" != "$old" ]; then
+        [ -n "$old" ] && printf 'rmjson\thooks.SessionStart\t%s\n' "$old" >> "$ops"
+        printf 'addjson\thooks.SessionStart\t%s\n' "$hj" >> "$ops"; state_set hook SessionStart "$hj"
+    fi
     [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
     rm -f "$ops"
+}
+
+hook_json() { # the SessionStart hook entry kit adds to settings.json
+    local k="$HOME/.local/bin/kit"
+    [ -x "$k" ] || k="$KIT_LIB/kit"
+    printf '{"hooks":[{"type":"command","command":%s,"timeout":10}]}' "$(json_str "'$k' sync --hook")"
+}
+
+sync_hook() { # run by Claude at start: sync in the background, at most every 10 minutes
+    [ -f "$MACHINE" ] || exit 0
+    local stamp="$KIT_CONF/last-sync" lock="$KIT_CONF/sync.lock" log="$KIT_CONF/sync.log"
+    [ -f "$stamp" ] && [ -z "$(find "$stamp" -mmin +10 2>/dev/null)" ] && exit 0
+    [ -d "$lock" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null
+    mkdir "$lock" 2>/dev/null || exit 0                      # another sync is running
+    touch "$stamp"
+    [ -f "$log" ] && [ "$(wc -c < "$log")" -gt 100000 ] && mv -f "$log" "$log.old"
+    (
+        trap 'rmdir "$lock" 2>/dev/null' EXIT
+        printf '== %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20 cmd_sync
+    ) </dev/null >>"$log" 2>&1 &
+    exit 0
 }
 
 # ---------- commands ----------
@@ -426,14 +454,17 @@ EOF
 
 cmd_uninstall() {
     local self=0; [ "${1:-}" = "--self" ] && self=1
-    local n ops
+    local n ops k v
     claude_rules_block < /dev/null
     for n in $(state_list skill); do rm -rf "$CLAUDE_DIR/skills/$n"; done
     ops=$(mktemp); : > "$ops"
     for n in $(state_list mcp); do printf 'del\tmcpServers.%s\n' "$n" >> "$ops"; done
     [ -s "$ops" ] && { json_edit "$CLAUDE_JSON" "$ops"; prune_empty "$CLAUDE_JSON" mcpServers; }
     : > "$ops"
-    while IFS="$TAB" read -r k n _; do [ "$k" = deny ] && printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; done < "${STATE:-/dev/null}" 2>/dev/null
+    while IFS="$TAB" read -r k n v; do
+        [ "$k" = deny ] && printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"
+        [ "$k" = hook ] && printf 'rmjson\thooks.%s\t%s\n' "$n" "$v" >> "$ops"
+    done < "${STATE:-/dev/null}" 2>/dev/null
     [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
     rm -f "$ops" "$STATE" "$MACHINE"
     say "kit：已移除 kit 放進 Claude 的東西（你自己的檔案沒動）"
@@ -471,7 +502,9 @@ EOF
 
 case ${1:-} in
     init)      shift; cmd_init "$@";;
-    sync)      shift; [ "${1:-}" = --force ] && FORCE=1; cmd_sync;;
+    sync)      shift
+               case ${1:-} in --force) FORCE=1;; --hook) sync_hook;; esac
+               cmd_sync;;
     list|ls)   cmd_list;;
     add)       shift; cmd_add_rm add "$@";;
     rm|remove) shift; cmd_add_rm rm "$@";;

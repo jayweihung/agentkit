@@ -88,6 +88,32 @@ v=$(LC_ALL=C $AWK -f "$JA" -v get=permissions.deny "$T/b")
 [ "$v" = "[]" ] && ok || bad "rmstr/get got: $v"
 LC_ALL=C $AWK -f "$JA" -v get=no.such "$T/b" >/dev/null 2>&1; [ $? -eq 1 ] && ok || bad "get missing should exit 1"
 
+# addjson / rmjson: objects in an array, deduped by value
+cat > "$T/h.json" <<'J'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mine"
+          }
+        ]
+      }
+    ]
+  }
+}
+J
+H='{"hooks":[{"type":"command","command":"kit sync --hook"}]}'
+printf 'addjson\thooks.SessionStart\t%s\naddjson\thooks.SessionStart\t%s\n' "$H" "$H" > "$T/ops4"
+LC_ALL=C $AWK -f "$JA" -v ops="$T/ops4" "$T/h.json" > "$T/h2"
+v=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(len(d["hooks"]["SessionStart"]),d["hooks"]["SessionStart"][1]["hooks"][0]["command"],d["hooks"]["SessionStart"][0]["hooks"][0]["command"])' "$T/h2")
+[ "$v" = "2 kit sync --hook mine" ] && ok || bad "addjson got: $v"
+printf 'rmjson\thooks.SessionStart\t%s\n' "$H" > "$T/ops5"
+LC_ALL=C $AWK -f "$JA" -v ops="$T/ops5" "$T/h2" > "$T/h3"
+cmp -s "$T/h.json" "$T/h3" && ok || bad "rmjson did not restore"; 
+
 # empty file counts as {}
 : > "$T/empty.json"
 printf 'set\ta\t1\n' > "$T/ops3"

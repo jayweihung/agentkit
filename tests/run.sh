@@ -127,6 +127,20 @@ check "run prompt has rule and body" 'grep -q "Only comment" "$tmp/prompt.md" &&
 check "run mcp json valid" 'LC_ALL=C awk -f "$JA" "$tmp/mcp.json" >/dev/null && grep -q gerrit-mcp-server "$tmp/mcp.json"'
 rm -rf "$tmp"
 
+# ---------- auto sync when Claude starts ----------
+check "SessionStart hook added" 'jget "$HOME/.claude/settings.json" hooks.SessionStart | grep -qF "sync --hook"'
+check "hook added once" '[ "$(jget "$HOME/.claude/settings.json" hooks.SessionStart | grep -c "sync --hook")" = 1 ]'
+echo "hook change" >> "$TEAM/skills/gerrit-review/SKILL.md"
+start=$(date +%s); kit sync --hook; rc=$?; took=$(( $(date +%s) - start ))
+check "hook returns at once, exit 0" '[ $rc -eq 0 ] && [ $took -le 1 ]'
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -d "$HOME/.config/agentkit/sync.lock" ] || break; sleep 1; done
+check "hook synced in the background" 'grep -q "hook change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
+check "hook logs" 'grep -q "^== " "$HOME/.config/agentkit/sync.log"'
+echo "second change" >> "$TEAM/skills/gerrit-review/SKILL.md"
+kit sync --hook; sleep 2
+check "hook runs at most every 10 minutes" '! grep -q "second change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
+kit sync >/dev/null 2>&1
+
 # ---------- allowed_hosts ----------
 out=$(kit init "$TEAM" https://github.com/someone/agentkit-library.git 2>&1); rc=$?
 check "host outside allowed_hosts refused" '[ $rc -ne 0 ] && echo "$out" | grep -q "github.com 不在允許的主機清單"'
@@ -137,10 +151,13 @@ kit add skill gerrit-review >/dev/null 2>&1; kit add mcp gerrit >/dev/null 2>&1
 kit uninstall >/dev/null 2>&1
 check "uninstall restores CLAUDE.md" '[ "$(cat "$HOME/.claude/CLAUDE.md")" = "$(printf "# My notes\nBe brief.")" ]'
 check "uninstall removes kit skills" '[ ! -e "$HOME/.claude/skills/gerrit-review" ] && [ -f "$HOME/.claude/skills/my-own/SKILL.md" ]'
+check "uninstall removes hook" '! grep -q "sync --hook" "$HOME/.claude/settings.json"'
 check "uninstall removes only kit deny" '[ "$(jget "$HOME/.claude/settings.json" permissions.deny | tr -d " \n")" = "[\"Bash(rm-rf:*)\"]" ]'
 check "uninstall leaves no empty deny" '[ "$(jget "$HOME/.claude/settings.json" permissions.deny | tr -d " \n")" = "[\"Bash(rm-rf:*)\"]" ]'
-printf '{\n  "model": "opus"\n}\n' > "$T/s.orig"; cp "$T/s.orig" "$HOME/.claude/settings.json"
-kit init "$TEAM" >/dev/null 2>&1; kit uninstall >/dev/null 2>&1
+printf '{\n  "model": "opus",\n  "hooks": {\n    "SessionStart": [\n      {\n        "hooks": [\n          {\n            "type": "command",\n            "command": "my-hook"\n          }\n        ]\n      }\n    ]\n  }\n}\n' > "$T/s.orig"; cp "$T/s.orig" "$HOME/.claude/settings.json"
+kit init "$TEAM" >/dev/null 2>&1
+check "user hook kept next to kit hook" '[ "$(jget "$HOME/.claude/settings.json" hooks.SessionStart | grep -c "my-hook\|sync --hook")" = 2 ]'
+kit uninstall >/dev/null 2>&1
 check "settings.json byte-identical after init+uninstall" 'cmp -s "$T/s.orig" "$HOME/.claude/settings.json"'
 check "uninstall leaves no empty mcpServers" '! grep -q mcpServers "$HOME/.claude.json"'
 check "claude.json byte-identical after everything" 'cmp -s "$HOME/.claude.json" "$T/claude.json.orig"'

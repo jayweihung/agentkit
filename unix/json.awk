@@ -13,6 +13,8 @@
 #   del     PATH           remove PATH if it exists
 #   addstr  PATH  STRING   append "STRING" to the array at PATH if missing
 #   rmstr   PATH  STRING   remove "STRING" from the array at PATH
+#   addjson PATH  JSON     append JSON to the array at PATH if no equal item exists
+#   rmjson  PATH  JSON     remove items equal to JSON from the array at PATH
 # PATH is keys joined by "." (keys must not contain "." or TAB).
 # STRING is plain text; " and \ are escaped by json.awk.
 #
@@ -259,6 +261,19 @@ function apply_ops(file,    line, f, cnt, n, p, j, a, i, s, found) {
             for (i = 1; i <= N[a]; i++) if (C[a, i] && T[C[a, i]] == "v" && V[C[a, i]] == s) { found = i; break }
             if (f[1] == "addstr" && !found) { n = new_node("v"); V[n] = s; N[a]++; C[a, N[a]] = n }
             if (f[1] == "rmstr" && found) C[a, found] = 0
+        } else if (f[1] == "addjson" || f[1] == "rmjson") {
+            n = parse_text(f[3]); s = ser(n, "")
+            a = find_path(root, f[2])
+            if (a == 0) {
+                if (f[1] == "rmjson") continue
+                a = new_node("a"); set_path(f[2], a)
+            }
+            if (T[a] != "a") fail(f[2] " is not an array")
+            found = 0
+            for (i = 1; i <= N[a]; i++) if (C[a, i] && ser(C[a, i], "") == s) {
+                found = i; if (f[1] == "rmjson") C[a, i] = 0
+            }
+            if (f[1] == "addjson" && !found) { N[a]++; C[a, N[a]] = n }
         } else fail("unknown op " f[1])
     }
     close(file)
