@@ -196,8 +196,8 @@ Check 'hook runs at most every 10 minutes' { -not (ReadT "$H/.claude/skills/gerr
 Kit sync
 
 # ---------- allowed_hosts ----------
-Kit init $TEAM 'https://github.com/someone/agentkit-library.git'
-Check 'host outside allowed_hosts refused' { $rc -ne 0 -and $out.Contains('github.com 不在允許的主機清單') }
+Kit init $TEAM 'https://public-git.example/someone/agentkit-library.git'
+Check 'host outside allowed_hosts refused' { $rc -ne 0 -and $out.Contains('public-git.example 不在允許的主機清單') }
 Kit init $TEAM
 
 # ---------- new / diff / update / check (authoring, local only) ----------
@@ -224,7 +224,7 @@ Kit new skill gerrit-review
 Check 'new refuses a name another source has' { $rc -ne 0 -and $out.Contains('名字重複') }
 Kit new skill Bad_Name
 Check 'new refuses bad names' { $rc -ne 0 }
-foreach ($u in 'https://github.com/x/y', 'git@github.com:x/y.git') {
+foreach ($u in 'https://public-git.example/x/y', 'git@public-git.example:x/y.git') {
     Kit new skill zz --from $u
     Check "--from refuses $u" { $rc -ne 0 -and $out.Contains('本機') }
 }
@@ -271,6 +271,40 @@ Check 'check --ci: author email must be company' { $rc -ne 0 -and $out.Contains(
 Kit check --ci
 Check 'check --ci passes' { $rc -eq 0 }
 Pop-Location
+
+# ---------- export-self (a fake kit repo; the private word list of this home is still set) ----------
+$FK = Join-Path $T 'fakekit'; $EX = Join-Path $T 'export'; $EX2 = Join-Path $T 'export2'
+foreach ($f in 'unix/kit', 'unix/json.awk', 'unix/yaml.awk', 'windows/kit.ps1') { [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent "$FK/$f")); Copy-Item (Join-Path $Repo $f) "$FK/$f" }
+W "$FK/VERSION" "0.3.0`n"; W "$FK/README.md" "# kit`n"; W "$FK/CHANGELOG.md" "notes`n"; W "$FK/.github/workflows/ci.yml" "on: push`n"
+W "$FK/tests/t.sh" "echo test`n"; W "$FK/.gitattributes" "* text=auto`n"; W "$FK/.gitignore" "*.tmp`n"; W "$FK/docs/guide.md" "guide`n"
+W "$FK/private-words.txt" "repoword`n"
+function FkCommit { & git -C $FK add -A 2>$null; & git -C $FK -c user.name=t -c user.email=t@t -c core.autocrlf=false commit -qm x 2>$null | Out-Null }
+& git -C $FK init -q; FkCommit
+W "$FK/untracked.md" "not tracked`n"
+$saveKit = $Kit; $Kit = "$FK/windows/kit.ps1"
+Kit export-self $EX --version 0.4.0+gitea.12
+Check 'export-self succeeds, says the commit message' { $rc -eq 0 -and $out.Contains('kit 0.4.0+gitea.12') }
+Check 'export-self drops README, CHANGELOG, .github, private-words.txt' { -not (Test-Path "$EX/README.md") -and -not (Test-Path "$EX/CHANGELOG.md") -and -not (Test-Path "$EX/.github") -and -not (Test-Path "$EX/private-words.txt") }
+Check 'export-self keeps tests, .gitattributes, .gitignore, kit' { (Test-Path "$EX/tests/t.sh") -and (Test-Path "$EX/.gitattributes") -and (Test-Path "$EX/.gitignore") -and (Test-Path "$EX/unix/kit") -and (Test-Path "$EX/windows/kit.ps1") }
+Check 'export-self leaves out untracked files' { -not (Test-Path "$EX/untracked.md") }
+Check 'export-self writes VERSION' { (ReadT "$EX/VERSION") -eq "0.4.0+gitea.12`n" }
+Check 'export-self INSTALL.md, no URL' { $m = ReadT "$EX/INSTALL.md"; $m.Contains('sh unix/install.sh') -and $m.Contains('windows\install.ps1') -and $m -notmatch '://|@[A-Za-z0-9.-]+:' }
+Kit export-self $EX
+Check 'export-self stops when the folder is not empty' { $rc -ne 0 -and $out.Contains('不是空的') -and (Test-Path "$EX/VERSION") }
+$gh = 'github' + '.com'
+[void](New-Item -ItemType Directory -Path $EX2); [IO.File]::AppendAllText("$FK/docs/guide.md", "see https://$gh/x`n"); FkCommit
+Kit export-self $EX2
+Check 'export-self: GitHub word fails, folder deleted' { $rc -ne 0 -and $out.Contains('docs/guide.md:2: 有 GitHub 的字') -and -not (Test-Path $EX2) }
+W "$FK/docs/guide.md" "guide`n"; W "$FK/tests/t.sh" "by TopSecretName`n"; W "$FK/docs/my-repoword.md" "x`n"; [IO.File]::WriteAllBytes("$FK/docs/logo.png", [byte[]]@(0, 1)); FkCommit
+Kit export-self $EX2
+Check "export-self: private words (this machine and the repo's list), file names, binaries" { $rc -ne 0 -and $out.Contains('tests/t.sh:1: 有不該公開的字') -and $out.Contains('docs/<不公開>: 檔名有不該公開的字') -and $out.Contains('docs/logo.png: 只能放文字檔') -and -not (Test-Path $EX2) }
+Check 'export-self never prints the private word' { $out -notmatch '(?i)topsecret|repoword' }
+& git -C $FK rm -q docs/my-repoword.md docs/logo.png; W "$FK/tests/t.sh" "echo test`n"; FkCommit
+W "$T/inst/lib/.repo" $FK; Copy-Item (Join-Path $Repo 'windows/kit.ps1') "$T/inst/lib/kit.ps1"
+$Kit = "$T/inst/lib/kit.ps1"
+Kit export-self $EX2
+Check 'export-self from an installed kit uses the clone in .repo' { $rc -eq 0 -and (ReadT "$EX2/VERSION") -eq "0.3.0`n" -and (Test-Path "$EX2/docs/guide.md") }
+$Kit = $saveKit
 
 # ---------- uninstall ----------
 Kit add skill gerrit-review; Kit add mcp gerrit

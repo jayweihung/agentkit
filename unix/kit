@@ -771,13 +771,14 @@ cmd_diff_update() { # cmd_diff_update diff|update ARGS...
 }
 
 # ---------- check ----------
-problem() { printf '%s\n' "$*" >> "$PROBLEM_FILE"; printf 'kit check: %s\n' "$*" >&2; }
+problem() { printf '%s\n' "$*" >> "$PROBLEM_FILE"; printf '%s: %s\n' "${PROBLEM_TAG:-kit check}" "$*" >&2; }
 fm_of() { LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$1" 2>/dev/null; }
 fm_val() { printf '%s\n' "$1" | awk -F'\t' -v p="$2" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
-private_words() { # nonblank lines of the private word lists (this machine + sources), into a file
-    local out=$1 d
+private_words() { # private_words OUT [DIR...] : nonblank lines of the private word lists (this machine, sources, DIRs) into OUT
+    local out=$1 d; shift
     { cat "$KIT_CONF/private-words.txt" 2>/dev/null
       [ -f "$MACHINE" ] && src_dirs | while IFS= read -r d; do cat "$d/private-words.txt" 2>/dev/null; done
+      for d in "$@"; do cat "$d/private-words.txt" 2>/dev/null; done
     } | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' | awk 'NF && !seen[$0]++' > "$out"
 }
 check_dirs() { # check_dirs DIR... : print problems, return 1 if any
@@ -885,6 +886,130 @@ EOF
     fi
     if check_dirs "${dirs[@]}"; then say "kit check：沒問題（${#dirs[@]} 個來源）"; else printf 'kit check：%s 個問題\n' "$PROBLEMS" >&2; exit 1; fi
 }
+
+# ---------- export-self: a clean copy of kit's own source, for a company git server ----------
+kit_repo() { # the clone kit was installed from, else the repo this kit runs from
+    local d
+    d=$(cat "$KIT_LIB/.repo" 2>/dev/null)
+    if [ -n "$d" ] && [ -f "$d/unix/kit" ] && [ -f "$d/windows/kit.ps1" ]; then printf '%s\n' "$d"; return 0; fi
+    d=$KIT_LIB
+    while [ -n "$d" ] && [ "$d" != / ] && [ "$d" != . ]; do
+        [ -f "$d/unix/kit" ] && [ -f "$d/windows/kit.ps1" ] && { printf '%s\n' "$d"; return 0; }
+        d=$(dirname "$d")
+    done
+    return 1
+}
+export_skip() { # files that stay out of the export
+    case /$1 in */.github/*) return 0;; esac
+    case $(basename "$1" | tr 'A-Z' 'a-z') in readme*|changelog*|private-words.txt) return 0;; esac
+    return 1
+}
+mask_paths() { # mask_paths WORDFILE : paths on stdin -> those with a word in them, each such part shown as <不公開>
+    awk 'NR == FNR { if (NF) w[++n] = tolower($0); next }
+         { k = split($0, p, "/"); s = ""; hit = 0
+           for (i = 1; i <= k; i++) {
+               q = p[i]
+               for (j = 1; j <= n; j++) if (index(tolower(q), w[j])) { q = "<不公開>"; hit = 1; break }
+               s = s (i > 1 ? "/" : "") q
+           }
+           if (hit) print s }' "$1" -
+}
+install_md() { # INSTALL.md of the export (no URLs; the same text as kit.ps1 writes)
+    cat <<'EOF'
+# 安裝 kit
+
+先把公司的 agentkit repo clone 下來（網址問管理這個 repo 的人），再照你的系統做。
+
+## Windows
+
+在 clone 的資料夾裡打：
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File windows\install.ps1
+
+不用管理員權限。開新的終端機後，在 cmd 和 PowerShell 都能打 `kit`。
+
+## Linux / Mac
+
+需要 bash、awk、git。Mac 還沒有 git 的話，先打 `xcode-select --install`。
+在 clone 的資料夾裡打：
+
+    sh unix/install.sh
+
+開新的終端機後就能打 `kit`。
+
+## 裝好以後
+
+    kit init <團隊來源的網址>
+    kit help
+EOF
+}
+cmd_export_self() {
+    local out="" ver="" repo line mode rel f n probs
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --version) ver=${2:-}; [ -n "$ver" ] || die "--version 後面要接版本，例：0.4.0+gitea.12"; shift 2;;
+            -*) die "不認得 $1";;
+            *) [ -z "$out" ] || die "多了一個參數：$1"; out=$1; shift;;
+        esac
+    done
+    [ -n "$out" ] || die "用法：kit export-self <資料夾> [--version <版本>]"
+    case $ver in *[!A-Za-z0-9.+_-]*) die "版本只能用英文、數字和 . + - _：$ver";; esac
+    repo=$(kit_repo) || die "找不到 kit 的原始碼（有 unix/kit 和 windows/kit.ps1 的 git clone）"
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || die "$repo 不是 git repo"
+    if [ -e "$out" ] || [ -L "$out" ]; then
+        [ -d "$out" ] && [ ! -L "$out" ] && [ -z "$(ls -A "$out")" ] || die "$out 已經存在而且不是空的；請給一個新的資料夾"
+    fi
+    mkdir -p "$out" || die "沒辦法建立 $out"
+    out=$(cd "$out" && pwd)
+    [ -z "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ] || warn "$repo 有還沒 commit 的改動，匯出的是資料夾裡現在的檔案"
+
+    PROBLEM_TAG="kit export-self"; PROBLEM_FILE=$(mktemp "${TMPDIR:-/tmp}/kit-export.XXXXXX")
+    # only files git tracks (the index), taken from the working folder
+    while IFS= read -r -d '' line; do
+        mode=${line%% *}; rel=${line#*"$TAB"}
+        export_skip "$rel" && continue
+        case $mode in
+            120000) problem "$rel: 不能放捷徑（symlink）"; continue;;
+            160000) problem "$rel: 不能用 git submodule"; continue;;
+        esac
+        f="$repo/$rel"
+        [ -f "$f" ] && [ ! -L "$f" ] || { warn "$rel 在 git 裡有、資料夾裡沒有，跳過"; continue; }
+        mkdir -p "$(dirname "$out/$rel")" && cp "$f" "$out/$rel" || { rm -rf "$out" "$PROBLEM_FILE"; die "沒辦法複製 $rel"; }
+        [ "$mode" = 100755 ] && chmod 755 "$out/$rel"
+    done < <(git -C "$repo" -c core.quotepath=off ls-files -s -z)
+    install_md > "$out/INSTALL.md"
+    [ -n "$ver" ] && printf '%s\n' "$ver" > "$out/VERSION"
+
+    # nothing that points back to GitHub or names private things; text files only
+    printf '%s\n' 'github''.com' 'github''usercontent' 'noreply''.github' > "$PROBLEM_FILE.gh"   # split so the export does not flag itself
+    private_words "$PROBLEM_FILE.pw" "$repo"
+    ( cd "$out" && find . -type f | sed 's#^\./##' | LC_ALL=C sort ) > "$PROBLEM_FILE.files"
+    while IFS= read -r rel; do
+        f="$out/$rel"
+        case $(printf '%s' "$rel" | tr 'A-Z' 'a-z') in
+            *.exe|*.dll|*.so|*.dylib|*.msi|*.bin|*.jar|*.class|*.pyc|*.o|*.a|*.lib|*.zip|*.gz|*.tgz|*.7z|*.rar) problem "$rel: 不能放執行檔或壓縮檔"; continue;;
+        esac
+        [ -s "$f" ] && ! LC_ALL=C grep -qI . "$f" 2>/dev/null && [ "$(LC_ALL=C tr -d '\n' < "$f" | wc -c)" -gt 0 ] && problem "$rel: 只能放文字檔"
+    done < "$PROBLEM_FILE.files"
+    ( cd "$out" && LC_ALL=C grep -rnIiF -f "$PROBLEM_FILE.gh" . 2>/dev/null ) | cut -d: -f1,2 | sed 's#^\./##' | while IFS= read -r line; do problem "${line}: 有 GitHub 的字"; done
+    mask_paths "$PROBLEM_FILE.gh" < "$PROBLEM_FILE.files" | while IFS= read -r line; do problem "${line}: 檔名有 GitHub 的字"; done
+    if [ -s "$PROBLEM_FILE.pw" ]; then
+        ( cd "$out" && LC_ALL=C grep -rnIiF -f "$PROBLEM_FILE.pw" . 2>/dev/null ) | cut -d: -f1,2 | sed 's#^\./##' | while IFS= read -r line; do problem "${line}: 有不該公開的字"; done
+        mask_paths "$PROBLEM_FILE.pw" < "$PROBLEM_FILE.files" | while IFS= read -r line; do problem "${line}: 檔名有不該公開的字"; done
+    fi
+    n=$(wc -l < "$PROBLEM_FILE.files" | tr -d ' ')
+    probs=$(wc -l < "$PROBLEM_FILE" | tr -d ' ')
+    rm -f "$PROBLEM_FILE" "$PROBLEM_FILE.gh" "$PROBLEM_FILE.pw" "$PROBLEM_FILE.files"
+    if [ "$probs" != 0 ]; then
+        rm -rf "$out"
+        die "匯出失敗：${probs} 個問題，已刪掉 ${out}。在 kit 的 repo 改好再匯出一次"
+    fi
+    [ -n "$ver" ] || ver=$(cat "$out/VERSION" 2>/dev/null) || ver=""
+    [ -n "$ver" ] || ver="（沒有 VERSION）"
+    say "kit：已匯出 ${n} 個檔案到 ${out}（版本 ${ver}）"
+    say "下一步（在公司）：在 Gitea 的 agentkit repo clone 裡，刪掉 .git 以外的舊檔案，"
+    say "  放進這個資料夾的內容後 commit，訊息只寫：kit ${ver}"
+}
 usage() {
     cat <<'EOF'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -901,6 +1026,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit diff   [種類] <名字> --from 本機資料夾   比較
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
+  kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
 
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
@@ -921,6 +1047,7 @@ case ${1:-} in
     diff)      shift; cmd_diff_update diff "$@";;
     update)    shift; cmd_diff_update update "$@";;
     check)     shift; cmd_check "$@";;
+    export-self) shift; cmd_export_self "$@";;
     uninstall) shift; cmd_uninstall "$@";;
     self-update) cmd_self_update;;
     --version|version) echo "kit $KIT_VERSION";;
