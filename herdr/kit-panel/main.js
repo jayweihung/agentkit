@@ -1,6 +1,6 @@
 // kit panel for Herdr: the repository (倉庫) of what kit's sources have (rules, skills, MCP), per machine.
-// It follows the agent (terminal) you clicked last: kit runs on that agent's machine, and the panel also lists
-// what that agent reads from its folder (CLAUDE.md, .claude/rules, .claude/skills, .mcp.json) besides kit's.
+// Adding here is for the whole account on that machine. One agent's own set (kit's plus what its folder adds:
+// CLAUDE.md, .claude/rules, .claude/skills, .mcp.json) is the popup its pane header's kit button opens (role "pane").
 // Installed by `kit herdr-panel install` into <Herdr home>/mods/kit, next to config.json (how to run kit
 // on this computer) and mod.json. Everything goes through the kit command itself:
 //   kit list --json --dir <folder> --pid <pid>   what there is, what is in use, what the folder adds
@@ -103,7 +103,7 @@ const shortDir = (d) => { const h = String(home() ?? "").replace(/\\/g, "/"); re
 const clean = (s) => String(s).split("\n").map((l) => l.replace(/^kit[:：]\s?/, "")).join("\n").trim();
 
 // kit list --json for a target (an agent: its machine, folder and process), as the panel shows it
-async function loadFor(tg) {
+async function loadFor(tg, strict = false) {
   const args = ["list", "--json"];
   if (tg.cwd) args.push("--dir", tg.cwd);
   if (tg.term) {
@@ -113,10 +113,37 @@ async function loadFor(tg) {
   let r = await kit(args, 60000, tg.machine), warn = null;
   // an older kit without --dir: ask again without it
   if (r.code !== 0 && /--dir|--pid|用法/.test(r.err)) r = await kit(["list", "--json"], 60000, tg.machine);
-  if (r.code === -1 && tg.machine) { warn = clean(r.err); r = await kit(["list", "--json"], 60000, null); }
+  if (r.code === -1 && tg.machine && !strict) { warn = clean(r.err); r = await kit(["list", "--json"], 60000, null); }
   if (r.code !== 0) return { error: clean(r.err || r.out) || `kit list 失敗（${r.code}）`, key: tg.key, at: Date.now() };
   try { return { ...JSON.parse(r.out), key: tg.key, warn, machine: warn ? null : tg.machine, at: Date.now() }; }
   catch { return { error: "kit list --json 的輸出讀不懂（kit 太舊？請打 kit self-update）", key: tg.key, at: Date.now() }; }
+}
+// The repository: kit list on this computer and on every machine this window has spaces on, put together.
+// The things are the same everywhere (the same source repos); what differs is where each one is in use:
+// item.on = { "": status here, "<machine>": status there } (no key: that machine's sources lack it, sync there).
+async function loadRepo() {
+  const ms = machinesHere();
+  const all = await Promise.all(ms.map(async (m) => {
+    try { return [m, await loadFor(repoTarget(m), true)]; } catch (e) { return [m, { error: String(e?.message ?? e) }]; }
+  }));
+  const items = new Map(), sources = new Map(), machines = [];
+  for (const [m, d] of all) {
+    machines.push({ machine: m, error: d.error ?? null });
+    if (d.error) continue;
+    for (const s of d.sources ?? []) if (!sources.has(s.name)) sources.set(s.name, s);
+    for (const i of d.items ?? []) {
+      if (i.kind === "agent") continue;
+      const k = `${i.kind}:${i.name}`, cur = items.get(k) ?? { ...i, on: {} };
+      cur.on[m ?? ""] = i.status;
+      cur.new = cur.new || i.new;
+      if (!cur.description && i.description) cur.description = i.description;
+      items.set(k, cur);
+    }
+  }
+  const here = all[0][1];
+  if (machines.every((x) => x.error)) return { error: here.error, key: "repo", at: Date.now() };
+  return { key: "repo", at: Date.now(), kit: here.kit, kit_version_wanted: here.kit_version_wanted ?? "",
+    items: [...items.values()], sources: [...sources.values()], machines };
 }
 function icon(p, size, color) {
   if (!p?.icon) return null;
@@ -141,31 +168,17 @@ export default class KitPanel extends View {
       cx.timer.every(500, (cx) => { if (!this.data) cx.notify(); });
       return;
     }
-    // the repository (倉庫): everything kit's sources have, for one machine's account (this computer unless picked)
+    // the repository (倉庫): everything kit's sources have, and on which machines your account uses it
     this.kind = this.load("kind") || "skill";
     this.open = null;   // the row showing its details
     if (this.role === "panel") {
       this.input = InputState.new({ placeholder: "找：名字、說明、來源" });
       this.input.on("change", (_e, cx) => { this.filter = this.input.value().trim().toLowerCase(); cx.notify(); });
     }
-    this.target = repoTarget(this.load("machine") || null);
-    const stale = () => !this.data || this.data.key !== this.target.key || Date.now() - (this.data.at ?? 0) > 50000;
+    this.target = { key: "repo" };
+    const stale = () => !this.data || this.data.key !== "repo" || Date.now() - (this.data.at ?? 0) > 50000;
     if (this.role === "panel" || stale()) this.refresh(cx);
     cx.timer.every(60000, (cx) => { if (stale() && !this.busy) this.refresh(cx); });
-    // the toggle button follows the machine the panel picked
-    if (this.role === "toggle") cx.timer.every(2000, (cx) => {
-      const m = this.load("machine") || null;
-      if (m !== this.target.machine) { this.target = repoTarget(m); cx.notify(); }
-    });
-  }
-
-  pickMachine(m, cx) {
-    this.save("machine", m ?? "");
-    this.target = repoTarget(m);
-    this.open = null;
-    setShared(MSG, null);
-    if (!this.busy) this.refresh(cx);
-    cx.notify();
   }
 
   load(k) { try { return localStorage.getItem(`kit.${k}`); } catch { return null; } }
@@ -179,7 +192,7 @@ export default class KitPanel extends View {
     const tg = this.target ?? currentTarget(null);
     cx.spawn(async (cx) => {
       let d;
-      try { d = await loadFor(tg); } catch (e) { d = { error: `讀不到：${e?.message ?? e}`, key: tg.key, at: Date.now() }; }
+      try { d = this.role === "pane" ? await loadFor(tg) : await loadRepo(); } catch (e) { d = { error: `讀不到：${e?.message ?? e}`, key: tg.key, at: Date.now() }; }
       if (this.role === "pane") setShared(PANE_DATA, { ...(shared(PANE_DATA) ?? {}), [tg.key]: d }); else setShared(DATA, d);
       cx.notify();
     });
@@ -187,15 +200,23 @@ export default class KitPanel extends View {
 
 
   // add / rm / sync: one at a time, the result (kit's own words) shown above the list
-  act(label, args, cx) {
+  act(label, args, cx, machines) {
     if (this.busy) return;
     setShared(BUSY, label);
     setShared(MSG, null);
     cx.notify();
     cx.spawn(async (cx) => {
-      const r = await kit(args, 600000, this.data?.machine ?? null);
-      const text = clean([r.out, r.err].filter(Boolean).join("\n"));
-      setShared(MSG, { ok: r.code === 0, label, text: text || (r.code === 0 ? "完成" : `失敗（${r.code}）`), at: Date.now() });
+      // one machine, or several (the repository's sync): each one's words under its name
+      const ms = machines ?? [this.data?.machine ?? null];
+      let ok = true;
+      const parts = [];
+      for (const m of ms) {
+        const r = await kit(args, 600000, m);
+        ok = ok && r.code === 0;
+        const text = clean([r.out, r.err].filter(Boolean).join("\n")) || (r.code === 0 ? "完成" : `失敗（${r.code}）`);
+        parts.push(ms.length > 1 ? `【${m ?? "這台電腦"}】\n${text}` : text);
+      }
+      setShared(MSG, { ok, label, text: parts.join("\n\n"), at: Date.now() });
       setShared(BUSY, null);
       // the pane headers' counts are out of date now: they ask kit again on their next look
       const pc = shared(PANE_CACHE);
@@ -300,27 +321,59 @@ export default class KitPanel extends View {
       if (!rows.length) body.child(div().p(8).text_color(t.muted).child(sources.length ? "找不到符合的來源。" : "還沒有來源：在終端機打  kit init <團隊來源的網址>"));
       return box.child(body);
     }
-    const rank = (i) => (i.new ? 0 : 3) + (i.status === "required" ? 0 : i.status === "used" ? 1 : 2);
+    const ms = d.machines ?? [{ machine: null, error: null }];
+    const usedN = (i) => Object.values(i.on ?? {}).filter((v) => v === "used" || v === "required").length;
+    const rank = (i) => (i.new ? 0 : 1) * 100 - usedN(i);
     const rows = items.filter((i) => i.kind === kind && hit(i.name, i.description, i.source))
       .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
     body.child(div().pb(4).text_size(z - 1.5).text_color(t.muted)
-      .child(`「加上」＝${d.machine ?? "這台電腦"} 你這個帳號的每個 agent 都會有。只想給一個 agent 用，點它視窗上的 kit 按鈕。`));
-    for (const i of rows) body.child(this.repoRow(t, z, i));
+      .child(ms.length > 1
+        ? "每格一台主機，✓ 在用、＋ 沒用，按一下切換（那台每個 agent 都會有）。"
+        : "✓ 在用、＋ 沒用，按一下切換（每個 agent 都會有）。"));
+    for (const x of ms.filter((x) => x.error)) body.child(div().pb(4).text_size(z - 1.5).text_color(t.blocked)
+      .child(`${x.machine ?? "這台電腦"}：${x.error}`));
+    for (const i of rows) body.child(this.repoRow(t, z, i, ms));
     if (!rows.length) body.child(div().p(8).text_color(t.muted).child(f ? "找不到符合的。" : "這一類還沒有東西。"));
     return box.child(body);
   }
 
-  // a repository row: click it for the whole description and where it comes from
-  repoRow(t, z, i) {
-    const id = `${i.kind}:${i.name}`, opened = this.open === id;
-    const row = this.row(t, z, i);
-    return v_flex().id(`repo-${id}`).rounded(6).when(opened, (el) => el.bg(t.raised))
+  // a repository row: name, marks, what it is; one chip per machine (in use or not, click to change); click the row for more
+  repoRow(t, z, i, ms) {
+    const id = `${i.kind}:${i.name}`, opened = this.open === id, busy = Boolean(this.busy);
+    const on = i.on ?? {}, required = Object.values(on).includes("required");
+    const badge = (text, color) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(color).child(text);
+    const head = h_flex().gap(5).items_center().min_w(0)
+      .child(div().min_w(0).truncate().font_semibold().child(i.name))
+      .when(required, (el) => el.child(badge("團隊必備", t.accent)))
+      .when(Boolean(i.new), (el) => el.child(badge("新", t.done)));
+    const chip = ({ machine: m, error }) => {
+      const st = error ? "down" : on[m ?? ""] ?? "missing", name = m ?? "這台";
+      const used = st === "used" || st === "required", can = !busy && (st === "used" || st === "unused");
+      const text = st === "down" ? `${name} ？` : st === "missing" ? `${name} —` : `${used ? "✓" : "＋"} ${name}`;
+      return div().id(`chip-${id}-${m ?? "here"}`).h(22).px(7).flex().flex_none().items_center().rounded(5).text_size(z - 2)
+        .bg(used ? t.selected : t.surface).text_color(used ? t.foreground : t.dim)
+        .border_1().border_color(used ? t.accent : t.border)
+        .when(can, (el) => el.cursor_pointer().hover((s) => s.border_color(t.foreground)).on_mouse_down("left", stop)
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            const verb = st === "used" ? "拿掉" : "加上";
+            this.act(`${verb} ${i.name}（${m ?? "這台電腦"}）`, [st === "used" ? "rm" : "add", i.kind, i.name], cx, [m]);
+          }))
+        .child(text);
+    };
+    const why = { required: "團隊必備（拿不掉）", used: "在用", unused: "沒用", missing: "那台的來源還沒有它（到那台 ⟳ 同步）", down: "連不到" };
+    return v_flex().id(`repo-${id}`).rounded(6).hover((s) => s.bg(t.hover)).when(opened, (el) => el.bg(t.raised))
       .on_mouse_down("left", stop)
       .on_click((_e, cx) => { this.open = opened ? null : id; cx.notify(); })
-      .child(row)
+      .child(h_flex().gap(8).items_center().px(8).py(5)
+        .child(v_flex().flex_1().min_w(0).gap(1).child(head)
+          .when(Boolean(i.description || i.source), (el) => el.child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted)
+            .child([i.description, i.source].filter(Boolean).join(" · ")))))
+        .child(h_flex().flex_none().gap(4).children(ms.map(chip))))
       .when(opened, (el) => el.child(v_flex().px(8).pb(8).gap(4).text_size(z - 1.5).text_color(t.muted)
         .when(Boolean(i.description), (e) => e.child(div().text_color(t.foreground).child(i.description)))
-        .child(div().child(`來源：${i.source || "—"}　·　${STATUS[i.status] ?? i.status}${i.new ? "　·　剛加進來源" : ""}`))));
+        .child(div().child(`來源：${i.source || "—"}${i.new ? "　·　剛加進來源" : ""}`))
+        .children(ms.map(({ machine: m, error }) => div().child(`${m ?? "這台電腦"}：${why[error ? "down" : on[m ?? ""] ?? "missing"]}`)))));
   }
 
   header(t, z) {
@@ -341,24 +394,17 @@ export default class KitPanel extends View {
 
   repoHeader(t, z) {
     const d = this.data, busy = this.busy, inBar = Boolean(find(layout(), TOGGLE));
-    const ms = machinesHere(), cur = this.target?.machine ?? null;
-    const head = h_flex().px(10).py(8).gap(8).items_center()
+    const ok = (d?.machines ?? [{ machine: null }]).filter((x) => !x.error).map((x) => x.machine);
+    const sub = d && !d.error
+      ? `${(d.items ?? []).length} 樣 · ${(d.sources ?? []).length} 個來源 · ${(d.machines ?? []).length || 1} 台主機`
+      : "規則、skill、MCP 都在這裡";
+    return h_flex().flex_none().px(10).py(8).gap(8).items_center().border_b(1).border_color(t.border)
       .child(div().size(32).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().font_semibold().text_size(z - 1).child("kit"))
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().font_semibold().child("倉庫"))
-        .child(div().truncate().text_size(z - 1.5).text_color(t.muted)
-          .child(d && !d.error ? `${(d.items ?? []).filter((i) => i.kind !== "agent").length} 樣 · ${(d.sources ?? []).length} 個來源` : "規則、skill、MCP 都在這裡")))
-      .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
+        .child(div().truncate().text_size(z - 1.5).text_color(t.muted).child(sub)))
+      .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx, ok) }))
       .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
-    const v = v_flex().flex_none().border_b(1).border_color(t.border).child(head);
-    if (ms.length > 1) v.child(h_flex().px(10).pb(8).gap(4).items_center()
-      .child(div().text_size(z - 1.5).text_color(t.dim).child("哪台："))
-      .children(ms.map((m) => div().id(`m-${m ?? "here"}`).px(8).py(2).rounded(5).text_size(z - 1.5).cursor_pointer()
-        .bg(m === cur ? t.selected : t.raised).text_color(m === cur ? t.foreground : t.muted)
-        .border_1().border_color(m === cur ? t.accent : t.raised)
-        .on_mouse_down("left", stop).on_click((_e, cx) => this.pickMachine(m, cx))
-        .child(m ?? "這台電腦"))));
-    return v;
   }
 
   moveBanner(t, z) {
