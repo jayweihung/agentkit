@@ -1,4 +1,4 @@
-// kit panel for Herdr: see and change what kit manages (rules, skills, MCP servers, agents) without typing.
+// kit panel for Herdr: the repository (倉庫) of what kit's sources have (rules, skills, MCP), per machine.
 // It follows the agent (terminal) you clicked last: kit runs on that agent's machine, and the panel also lists
 // what that agent reads from its folder (CLAUDE.md, .claude/rules, .claude/skills, .mcp.json) besides kit's.
 // Installed by `kit herdr-panel install` into <Herdr home>/mods/kit, next to config.json (how to run kit
@@ -9,12 +9,12 @@
 // Roles (props.role): the panel (default), "toggle" (the tab-bar button that shows or hides "kit-panel") and
 // "pane": a popup opened by the kit button in an agent's pane header (mod kit-pane) for that one agent (props.target).
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, settings, exec, hc, home, run, layout, shared, setShared, window, appHome, readTextFile, focused, terminals, spaces, closeOverlay, props as blockProps } from "herdr";
 
 const TOGGLE = "kit-toggle", PANEL = "kit-panel";
 const SHIPPED = ["main", "terminals", "win98"]; // Herdr's own layouts: read-only, so "放進上排" clones one first
-const DATA = "kit.data.v2", BUSY = "kit.busy", MSG = "kit.msg", TARGET = "kit.target", PANE_CACHE = "kit.pane.v1", PANE_DATA = "kit.pane.data.v1";
+const DATA = "kit.data.v2", BUSY = "kit.busy", MSG = "kit.msg", PANE_CACHE = "kit.pane.v1", PANE_DATA = "kit.pane.data.v1";
 const TOGGLE_NODE = { id: TOGGLE, type: "block", content: { mod: "kit", props: { role: "toggle" } }, size: { px: 56 } };
 const PANEL_NODE = { id: PANEL, type: "column", children: [{ id: "kit", type: "block", content: { mod: "kit" } }],
   size: { px: 420 }, min: 320, max: 800 };
@@ -93,6 +93,10 @@ function currentTarget(prev) {
     title: t.title || t.name || t.program?.name || f.terminal, agent: Boolean(f.agent || t.program?.agent),
     program: t.program ?? null, status: t.status ?? null };
 }
+// the repository's view of a machine: no folder, no process (only what kit itself manages there)
+const repoTarget = (machine) => ({ key: `repo|${machine ?? ""}`, term: null, machine, space: null, cwd: null, title: "", agent: false, program: null });
+// the machines this window has spaces on (null: this computer)
+const machinesHere = () => [null, ...new Set(spaces().map((s) => s.machine).filter(Boolean))];
 // a folder with ~ for this computer's home (other machines' paths stay as they are)
 const shortDir = (d) => { const h = String(home() ?? "").replace(/\\/g, "/"); return d && h && (d + "/").startsWith(h + "/") ? "~" + d.slice(h.length) : d; };
 // kit's own messages, without the "kit: " / "kit：" in front of each line
@@ -137,15 +141,31 @@ export default class KitPanel extends View {
       cx.timer.every(500, (cx) => { if (!this.data) cx.notify(); });
       return;
     }
-    this.target = currentTarget(shared(TARGET) ?? null);
+    // the repository (倉庫): everything kit's sources have, for one machine's account (this computer unless picked)
+    this.kind = this.load("kind") || "skill";
+    this.open = null;   // the row showing its details
+    if (this.role === "panel") {
+      this.input = InputState.new({ placeholder: "找：名字、說明、來源" });
+      this.input.on("change", (_e, cx) => { this.filter = this.input.value().trim().toLowerCase(); cx.notify(); });
+    }
+    this.target = repoTarget(this.load("machine") || null);
     const stale = () => !this.data || this.data.key !== this.target.key || Date.now() - (this.data.at ?? 0) > 50000;
     if (this.role === "panel" || stale()) this.refresh(cx);
     cx.timer.every(60000, (cx) => { if (stale() && !this.busy) this.refresh(cx); });
-    // follow the agent you click: look at the focus often, ask kit again only when it changed
-    if (this.role === "panel") cx.timer.every(700, (cx) => {
-      const t = currentTarget(this.target);
-      if (t.key !== this.target.key) { this.target = t; setShared(TARGET, t); if (!this.busy) this.refresh(cx); cx.notify(); }
+    // the toggle button follows the machine the panel picked
+    if (this.role === "toggle") cx.timer.every(2000, (cx) => {
+      const m = this.load("machine") || null;
+      if (m !== this.target.machine) { this.target = repoTarget(m); cx.notify(); }
     });
+  }
+
+  pickMachine(m, cx) {
+    this.save("machine", m ?? "");
+    this.target = repoTarget(m);
+    this.open = null;
+    setShared(MSG, null);
+    if (!this.busy) this.refresh(cx);
+    cx.notify();
   }
 
   load(k) { try { return localStorage.getItem(`kit.${k}`); } catch { return null; } }
@@ -242,10 +262,69 @@ export default class KitPanel extends View {
         : "這裡只看得到你自己帳號的 kit，看不到也不能改它的。")));
     if (d.kit_version_wanted) root.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked)
       .child(`團隊要 kit ${d.kit_version_wanted} 以上，你的是 ${d.kit}。請在終端機打  kit self-update`));
-    return root.child(this.list(t, z, d));
+    return root.child(this.role === "panel" ? this.repo(t, z, d) : this.list(t, z, d));
+  }
+
+  // 倉庫: tabs per kind (+ the sources), a search, each thing with what it is, where from, and whether this account uses it
+  repo(t, z, d) {
+    const items = (d.items ?? []).filter((i) => i.kind !== "agent"), f = this.filter;
+    const sources = d.sources ?? [];
+    const tabs = [["rule", "規則"], ["skill", "Skills"], ["mcp", "MCP"], ["source", "來源"]];
+    const count = (k) => k === "source" ? sources.length : items.filter((i) => i.kind === k).length;
+    const newIn = (k) => items.filter((i) => i.kind === k && i.new).length;
+    const kind = tabs.some(([k]) => k === this.kind) ? this.kind : "skill";
+    const box = v_flex().flex_1().min_h(0);
+    box.child(h_flex().flex_none().px(10).pt(8).gap(4).children(tabs.map(([k, label]) => {
+      const on = k === kind, n = newIn(k);
+      return h_flex().id(`tab-${k}`).h(28).px(10).gap(5).items_center().rounded(6).cursor_pointer()
+        .bg(on ? t.selected : t.surface).text_color(on ? t.foreground : t.muted).font_semibold()
+        .hover((st) => st.bg(t.hover)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => { this.kind = k; this.save("kind", k); this.open = null; cx.notify(); })
+        .child(label).child(div().text_size(z - 2).text_color(t.dim).child(String(count(k))))
+        .when(n > 0, (el) => el.child(div().px(4).rounded(4).text_size(z - 3).bg(t.done).text_color(t.background).child(`${n} 新`)));
+    })));
+    box.child(div().flex_none().px(10).pt(8).child(Input.new(this.input).h(30).px(8).rounded(6).border_1().border_color(t.border)
+      .bg(t.background).text_size(z - 1).text_color(t.foreground)));
+    const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(2);
+    const hit = (...xs) => !f || xs.some((x) => String(x ?? "").toLowerCase().includes(f));
+    if (kind === "source") {
+      body.child(div().pb(4).text_size(z - 1.5).text_color(t.muted).child("kit 從這些地方拿東西。按上面的 ⟳ 同步 會把每個來源更新成最新的。"));
+      const rows = sources.filter((s) => hit(s.name, s.source));
+      for (const s of rows) {
+        const n = items.filter((i) => i.source === s.name).length;
+        body.child(v_flex().id(`src-${s.name}`).px(8).py(6).gap(1).rounded(6).hover((st) => st.bg(t.hover))
+          .child(h_flex().gap(6).items_center().child(div().font_semibold().child(s.name))
+            .child(div().text_size(z - 2).text_color(t.dim).child(`${n} 樣`)))
+          .child(div().truncate().text_size(z - 1.5).text_color(t.muted).font_family(mono()).child(shortDir(s.source))));
+      }
+      if (!rows.length) body.child(div().p(8).text_color(t.muted).child(sources.length ? "找不到符合的來源。" : "還沒有來源：在終端機打  kit init <團隊來源的網址>"));
+      return box.child(body);
+    }
+    const rank = (i) => (i.new ? 0 : 3) + (i.status === "required" ? 0 : i.status === "used" ? 1 : 2);
+    const rows = items.filter((i) => i.kind === kind && hit(i.name, i.description, i.source))
+      .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+    body.child(div().pb(4).text_size(z - 1.5).text_color(t.muted)
+      .child(`「加上」＝${d.machine ?? "這台電腦"} 你這個帳號的每個 agent 都會有。只想給一個 agent 用，點它視窗上的 kit 按鈕。`));
+    for (const i of rows) body.child(this.repoRow(t, z, i));
+    if (!rows.length) body.child(div().p(8).text_color(t.muted).child(f ? "找不到符合的。" : "這一類還沒有東西。"));
+    return box.child(body);
+  }
+
+  // a repository row: click it for the whole description and where it comes from
+  repoRow(t, z, i) {
+    const id = `${i.kind}:${i.name}`, opened = this.open === id;
+    const row = this.row(t, z, i);
+    return v_flex().id(`repo-${id}`).rounded(6).when(opened, (el) => el.bg(t.raised))
+      .on_mouse_down("left", stop)
+      .on_click((_e, cx) => { this.open = opened ? null : id; cx.notify(); })
+      .child(row)
+      .when(opened, (el) => el.child(v_flex().px(8).pb(8).gap(4).text_size(z - 1.5).text_color(t.muted)
+        .when(Boolean(i.description), (e) => e.child(div().text_color(t.foreground).child(i.description)))
+        .child(div().child(`來源：${i.source || "—"}　·　${STATUS[i.status] ?? i.status}${i.new ? "　·　剛加進來源" : ""}`))));
   }
 
   header(t, z) {
+    if (this.role === "panel") return this.repoHeader(t, z);
     const d = this.data, busy = this.busy, tg = this.target ?? {};
     const inBar = Boolean(find(layout(), TOGGLE));
     const where = [d?.machine ?? tg.machine ?? "這台電腦", shortDir(d?.here?.dir ?? tg.cwd)].filter(Boolean).join(" · ");
@@ -258,6 +337,28 @@ export default class KitPanel extends View {
       .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
       .when(this.role === "pane", (el) => el.child(this.btn(t, z, "close", "✕", { small: true, on: () => closeOverlay(blockProps()?.overlay) })))
       .when(this.role !== "pane" && inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
+  }
+
+  repoHeader(t, z) {
+    const d = this.data, busy = this.busy, inBar = Boolean(find(layout(), TOGGLE));
+    const ms = machinesHere(), cur = this.target?.machine ?? null;
+    const head = h_flex().px(10).py(8).gap(8).items_center()
+      .child(div().size(32).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().font_semibold().text_size(z - 1).child("kit"))
+      .child(v_flex().flex_1().min_w(0)
+        .child(div().truncate().font_semibold().child("倉庫"))
+        .child(div().truncate().text_size(z - 1.5).text_color(t.muted)
+          .child(d && !d.error ? `${(d.items ?? []).filter((i) => i.kind !== "agent").length} 樣 · ${(d.sources ?? []).length} 個來源` : "規則、skill、MCP 都在這裡")))
+      .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "⟳ 同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx) }))
+      .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
+    const v = v_flex().flex_none().border_b(1).border_color(t.border).child(head);
+    if (ms.length > 1) v.child(h_flex().px(10).pb(8).gap(4).items_center()
+      .child(div().text_size(z - 1.5).text_color(t.dim).child("哪台："))
+      .children(ms.map((m) => div().id(`m-${m ?? "here"}`).px(8).py(2).rounded(5).text_size(z - 1.5).cursor_pointer()
+        .bg(m === cur ? t.selected : t.raised).text_color(m === cur ? t.foreground : t.muted)
+        .border_1().border_color(m === cur ? t.accent : t.raised)
+        .on_mouse_down("left", stop).on_click((_e, cx) => this.pickMachine(m, cx))
+        .child(m ?? "這台電腦"))));
+    return v;
   }
 
   moveBanner(t, z) {
@@ -355,8 +456,10 @@ export default class KitPanel extends View {
     const badge = (text, color) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(color).child(text);
     const head = h_flex().gap(5).items_center().min_w(0)
       .child(div().min_w(0).truncate().font_semibold().text_color(i.status === "unused" ? t.muted : t.foreground).child(i.name));
-    if (i.status === "required") head.child(badge("kit · 必備", t.accent));
-    if (i.status === "used") head.child(badge("kit", t.working));
+    // in the popup "kit" tells kit's things from the folder's own; in the repository it is all kit's: say used or not
+    const repo = this.role === "panel";
+    if (i.status === "required") head.child(badge(repo ? "團隊必備" : "kit · 必備", t.accent));
+    if (i.status === "used") head.child(badge(repo ? "在用" : "kit", t.working));
     if (i.new) head.child(badge("新", t.done));
     let action;
     if (i.kind === "agent") action = this.btn(t, z, `run-${i.name}`, "開啟", { small: true, on: (cx) => this.openAgent(i.name, cx) });
@@ -376,7 +479,7 @@ export default class KitPanel extends View {
     const fg = off ? t.dim : kind === "primary" ? t.solid_foreground : t.foreground;
     return div().id(id).h(small ? 26 : 30).px(small ? 10 : 12).flex().flex_none().items_center().justify_center().rounded(6)
       .text_size(small ? z - 1 : z).font_semibold().bg(bg).text_color(fg)
-      .when(!off, (el) => el.cursor_pointer().hover((st) => st.opacity(0.85)).on_mouse_down("left", stop).on_click((_e, cx) => on?.(cx)))
+      .when(!off, (el) => el.cursor_pointer().hover((st) => st.opacity(0.85)).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); on?.(cx); }))
       .child(label);
   }
 
