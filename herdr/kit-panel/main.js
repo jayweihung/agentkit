@@ -603,9 +603,9 @@ export default class KitPanel extends View {
     return v_flex().flex_none().mb(8).p(10).gap(6).rounded(8).bg(t.raised).border_1().border_color(t.working)
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().font_semibold().text_color(t.working).child("有改動還沒送出"))
-        .child(this.btn(t, z, "push", busy === "檢查" ? "檢查中…" : "看要送什麼…", { small: true, kind: "primary", off: Boolean(busy), on: (cx) => this.planPush(cx) })))
+        .child(this.btn(t, z, "push", busy === "檢查" ? "檢查中…" : "送出", { small: true, kind: "primary", off: Boolean(busy), on: (cx) => this.planPush(cx) })))
       .children(lines)
-      .child(div().text_size(z - 1.5).text_color(t.dim).child("先列出每個倉會送哪些檔案，你看過再按「確定送出」。"));
+      .child(div().text_size(z - 1.5).text_color(t.dim).child("按了會先列出要上傳的檔案，再按「確定送出」才真的送。"));
   }
 
   // + 新增: write a new one from scratch (a name, which source; kit new makes the file and the editor opens it),
@@ -641,7 +641,7 @@ export default class KitPanel extends View {
       const name = this.newName.value().trim() || "名字";
       const rel = { rule: `rules/${name}.md`, skill: `skills/${name}/SKILL.md`, mcp: `mcp/${name}.yaml` }[kind];
       if (src?.dir) box.child(note(`會建立 ${shortDir(src.dir)}/${rel}，然後在這裡打開讓你寫。`, t.foreground));
-      box.child(note(`寫完存檔 → 清單上面黃色那條按「看要送什麼…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。`));
+      box.child(note(`寫完存檔 → 清單上面黃色那條按「送出」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。`));
       return box.child(h_flex().gap(6)
         .child(this.btn(t, z, "make", "建立並打開", { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.make(cx) }))
         .child(this.btn(t, z, "make-cancel", "取消", { small: true, on: (cx) => { this.making = null; cx.notify(); } })));
@@ -676,7 +676,7 @@ export default class KitPanel extends View {
       lines.push(note(`${lk.id} 還不在 ${lk.source} 的允許清單（kit.yaml 的 collect_sources）。按下去會一起加進清單，之後這個作者的東西就能收。`, t.working)); }
     else if (!lk.allowed) { block = block ?? "不在允許清單";
       lines.push(note(`${lk.id} 不在 ${lk.source} 的允許清單。這是團隊的倉，要請維護者把它加進 kit.yaml 的 collect_sources 才能收。`, t.ansi1)); }
-    lines.push(note("收進來後：用 git diff 看收了哪些檔案 → 清單上面黃色那條按「看要送什麼…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。"));
+    lines.push(note("收進來後：用 git diff 看收了哪些檔案 → 清單上面黃色那條按「送出」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。"));
     const act = block ? div().flex_none().text_size(z - 2).text_color(t.ansi1).child(`不能收：${block}`)
       : this.btn(t, z, "collect", this.busy === "收" ? "收進來中…" : label, { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.collect(x, allow, cx) });
     card.child(h_flex().gap(6).items_center()
