@@ -1802,8 +1802,31 @@ function Git-AddCommit([string]$dir, [string]$msg, $files) { # commit exactly th
     $env:GIT_LITERAL_PATHSPECS = '1'
     try {
         [void](Git-Q -C $dir add -A '--' @files); if ($LASTEXITCODE -ne 0) { return $false }
-        [void](Git-Q -C $dir commit -q -m $msg '--' @files); $LASTEXITCODE -eq 0
+        $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $o = @(& git -C $dir commit -q -m $msg '--' @files 2>&1 | ForEach-Object { "$_" }) } finally { $ErrorActionPreference = $old }
+        if ($LASTEXITCODE -eq 0) { return $true }
+        # git (or a commit hook) said no: say what it said, and put the files back as they were (nothing staged)
+        foreach ($l in @($o | Select-Object -First 40)) { Warn "  $l" }
+        if ($o.Count -gt 40) { Warn "  …（還有 $($o.Count - 40) 行）" }
+        [void](Git-Q -C $dir reset -q '--' @files)
+        $false
     } finally { Remove-Item env:GIT_LITERAL_PATHSPECS -ErrorAction SilentlyContinue }
+}
+function Collect-OnlyYaml([string]$dir) { # kit.yaml differs from the last commit only in collect_sources (kit collect --allow)
+    $head = @(Git-Q -C $dir show HEAD:kit.yaml)
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $strip = {
+        param($lines)
+        $s = $false
+        foreach ($l in $lines) {
+            if ($l -match '^collect_sources:') { $s = $true; continue }
+            if ($s -and $l -match '^\s*(-\s|#|$)') { continue }
+            $s = $false; $l.TrimEnd("`r")
+        }
+    }
+    $now = (Read-Text (Join-Path $dir 'kit.yaml')) -split "`r?`n"
+    if ($now.Count -gt 0 -and $now[-1] -eq '') { $now = $now[0..($now.Count - 2)] }
+    ((& $strip $head) -join "`n") -ceq ((& $strip $now) -join "`n")
 }
 function Author-Check([string]$dir) { # with author_domains in kit.yaml, the commit's author and committer must use one
     $doms = @(YGet (Join-Path $dir 'kit.yaml') 'author_domains' | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() })
@@ -1866,6 +1889,8 @@ function Cmd-Push($rest) {
     $other = @($all | Where-Object { $files -notcontains $_ })
     if ($files.Count -eq 0) { Say "沒有要送的（$leaf 裡沒有改過的 rule、skill、mcp、agent）"; return }
     $items = @(Push-Items $dir $files)
+    # kit.yaml goes too when all that changed in it is collect_sources (kit collect --allow added an author)
+    if (($other -contains 'kit.yaml') -and (Collect-OnlyYaml $dir)) { $files += 'kit.yaml'; $other = @($other | Where-Object { $_ -ne 'kit.yaml' }) }
     if ($other.Count -gt 0) { Warn "這些不是 rule、skill、mcp、agent，不會送：$($other -join ' ')" }
 
     # checks: any problem stops everything

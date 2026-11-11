@@ -51,6 +51,17 @@ const shortDir = (d) => { const h = slash(home()), p = slash(d); return p && h &
 const spin = (size, color) => svg("mods/workspace-chrome/spinner.svg").size(size).flex_none().text_color(color).spin(900);
 const withSpin = (label, size, color) => (typeof label === "string" && /中…$/.test(label) ? h_flex().gap(5).items_center().child(spin(size, color)).child(label) : label);
 const waiting = (t, z, text) => h_flex().gap(6).items_center().text_color(t.muted).child(spin(z - 1, t.muted)).child(text);
+// a long run of file lines (indented, as kit lists them) shows its first few and how many more: the reason stays in view
+const squeeze = (text) => {
+  const out = [], lines = String(text).split("\n");
+  for (let i = 0; i < lines.length;) {
+    let j = i; while (j < lines.length && /^  \S/.test(lines[j])) j++;
+    if (j - i > 8) { out.push(...lines.slice(i, i + 5), `  …還有 ${j - i - 5} 個檔案`); i = j; }
+    else if (j > i) { out.push(...lines.slice(i, j)); i = j; }
+    else out.push(lines[i++]);
+  }
+  return out.join("\n");
+};
 // kit's own messages, without the "kit: " / "kit：" in front of each line
 const clean = (s) => String(s).split("\n").map((l) => l.replace(/^kit[:：]\s?/, "")).join("\n").trim();
 function find(node, id) {
@@ -341,7 +352,7 @@ export default class KitPanel extends View {
           return;
         }
         const r = await kit(["push", "--to", p.name], LONG);
-        let text = clean([r.out, r.err].filter(Boolean).join("\n")) || (r.code === 0 ? "送出了" : `失敗（${r.code}）`);
+        let text = clean((r.code === 0 ? [r.out, r.err] : [r.err, r.out]).filter(Boolean).join("\n")) || (r.code === 0 ? "送出了" : `失敗（${r.code}）`);
         if (r.code === 0 && p.push !== "direct" && /PR|分支/.test(text)) text += "\n\n改的檔案現在在送出的分支上：PR 合併、kit sync 之後才會回到這裡。";
         this.setMsg({ ok: r.code === 0, label: `送出 ${p.name}`, text, at: Date.now() });
         this.plan = (this.plan ?? []).filter((x) => x.name !== p.name);
@@ -520,7 +531,6 @@ export default class KitPanel extends View {
         .child(div().truncate().font_semibold().child("倉庫"))
         .child(h_flex().gap(5).items_center().min_w(0).when(this.loading, (el) => el.child(spin(z - 3, t.muted)))
           .child(div().truncate().text_size(z - 1.5).text_color(what ? t.working : t.muted).child(this.loading ? `${sub} · 讀取中…` : sub))))
-      .when(Boolean(what) && !this.plan, (el) => el.child(this.btn(t, z, "push", busy === "檢查" ? "檢查中…" : "送出…", { small: true, kind: "primary", off: Boolean(busy), on: (cx) => this.planPush(cx) })))
       .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx, LONG) }))
       .child(this.btn(t, z, "reload", this.loading ? spin(z - 2, t.dim) : "⟳", { small: true, off: this.loading, on: (cx) => this.refresh(cx) }))
       .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
@@ -545,7 +555,7 @@ export default class KitPanel extends View {
         .child(div().flex_1().font_semibold().child(p.name))
         .when(Boolean(PUSH_KIND[p.push]), (el) => el.child(div().text_size(z - 2).text_color(t.muted).child(PUSH_KIND[p.push])))
         .when(p.ok, (el) => el.child(this.btn(t, z, `push-${p.name}`, this.busy === "送出" ? "送出中…" : "確定送出", { small: true, kind: "primary", off: busy, on: (cx) => this.push(p, cx) }))))
-      .child(div().p(6).rounded(6).bg(t.background).font_family(mono()).text_size(z - 2).text_color(p.ok ? t.foreground : t.ansi1).child(p.text || "（kit 沒說什麼）")));
+      .child(div().p(6).rounded(6).bg(t.background).font_family(mono()).text_size(z - 2).text_color(p.ok ? t.foreground : t.ansi1).child(squeeze(p.text) || "（kit 沒說什麼）")));
     return card;
   }
 
@@ -575,10 +585,27 @@ export default class KitPanel extends View {
     const rows = items.filter((i) => i.kind === kind && hit(i.name, i.description, i.source))
       .sort((a, b) => (b.changed - a.changed) || (b.new - a.new) || a.name.localeCompare(b.name));
     const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(2);
+    if (!this.plan && (d.dirty ?? []).length) body.child(this.unsent(t, z, d));
     if (this.making) body.child(this.maker(t, z, d, kind));   // in the scroll area: a long one (a skill looked at) can be scrolled
     for (const i of rows) body.child(this.repoRow(t, z, i));
     if (!rows.length) body.child(div().p(8).text_color(t.muted).child(f ? "找不到符合的。" : "這一類還沒有東西，按「＋ 新增」寫一個。"));
     return box.child(body);
+  }
+
+  // changes not sent yet: one yellow strip above the list, per source what changed, and the one button that sends
+  unsent(t, z, d) {
+    const busy = this.busy, items = d.items ?? [];
+    const lines = (d.dirty ?? []).map((x) => {
+      const names = items.filter((i) => i.changed && i.src === x.name).map((i) => i.name);
+      const what = [names.length ? names.slice(0, 3).join("、") + (names.length > 3 ? ` 等 ${names.length} 樣` : "") : "", x.agents ? `agent ${x.agents} 個` : ""].filter(Boolean).join("、");
+      return div().text_size(z - 1).text_color(t.foreground).child(`${x.name}：${what || "改過的檔案"}（${x.items + x.agents} 個檔案）`);
+    });
+    return v_flex().flex_none().mb(8).p(10).gap(6).rounded(8).bg(t.raised).border_1().border_color(t.working)
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().font_semibold().text_color(t.working).child("有改動還沒送出"))
+        .child(this.btn(t, z, "push", busy === "檢查" ? "檢查中…" : "看要送什麼…", { small: true, kind: "primary", off: Boolean(busy), on: (cx) => this.planPush(cx) })))
+      .children(lines)
+      .child(div().text_size(z - 1.5).text_color(t.dim).child("先列出每個倉會送哪些檔案，你看過再按「確定送出」。"));
   }
 
   // + 新增: write a new one from scratch (a name, which source; kit new makes the file and the editor opens it),
@@ -614,7 +641,7 @@ export default class KitPanel extends View {
       const name = this.newName.value().trim() || "名字";
       const rel = { rule: `rules/${name}.md`, skill: `skills/${name}/SKILL.md`, mcp: `mcp/${name}.yaml` }[kind];
       if (src?.dir) box.child(note(`會建立 ${shortDir(src.dir)}/${rel}，然後在這裡打開讓你寫。`, t.foreground));
-      box.child(note(`寫完存檔 → 上排「送出…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。`));
+      box.child(note(`寫完存檔 → 清單上面黃色那條按「看要送什麼…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。`));
       return box.child(h_flex().gap(6)
         .child(this.btn(t, z, "make", "建立並打開", { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.make(cx) }))
         .child(this.btn(t, z, "make-cancel", "取消", { small: true, on: (cx) => { this.making = null; cx.notify(); } })));
@@ -649,7 +676,7 @@ export default class KitPanel extends View {
       lines.push(note(`${lk.id} 還不在 ${lk.source} 的允許清單（kit.yaml 的 collect_sources）。按下去會一起加進清單，之後這個作者的東西就能收。`, t.working)); }
     else if (!lk.allowed) { block = block ?? "不在允許清單";
       lines.push(note(`${lk.id} 不在 ${lk.source} 的允許清單。這是團隊的倉，要請維護者把它加進 kit.yaml 的 collect_sources 才能收。`, t.ansi1)); }
-    lines.push(note("收進來後：用 git diff 看收了哪些檔案 → 上排「送出…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。"));
+    lines.push(note("收進來後：用 git diff 看收了哪些檔案 → 清單上面黃色那條按「看要送什麼…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。"));
     const act = block ? div().flex_none().text_size(z - 2).text_color(t.ansi1).child(`不能收：${block}`)
       : this.btn(t, z, "collect", this.busy === "收" ? "收進來中…" : label, { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.collect(x, allow, cx) });
     card.child(h_flex().gap(6).items_center()
@@ -819,7 +846,7 @@ export default class KitPanel extends View {
       .when(Boolean(e.err), (el) => el.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked).child(e.err)))
       .child(Editor.new(this.code).flex_1().min_h(0))
       .child(h_flex().flex_none().px(10).py(6).gap(6).items_center().border_t(1).border_color(t.border)
-        .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(e.dirty ? "還沒存檔" : unsent ? "存好了，還沒送出（倉庫上面的「送出…」）" : ""))
+        .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(e.dirty ? "還沒存檔" : unsent ? "存好了，還沒送出（倉庫清單上面黃色那條）" : ""))
         .child(this.btn(t, z, "reload-file", "重新讀取", { small: true, on: (cx) => cx.spawn(async (cx) => { await this.openItem(i, cx); cx.notify(); }) }))
         .child(this.btn(t, z, "outside", "用編輯器開", { small: true, on: () => { openOutside(i.path).catch(() => {}); } })));
   }
@@ -835,7 +862,7 @@ export default class KitPanel extends View {
     return h_flex().flex_none().mx(10).mt(8).p(8).gap(8).items_start().rounded(6).bg(t.raised)
       .border_1().border_color(msg.ok ? t.border : t.ansi1)
       .child(div().flex_1().min_w(0).text_size(z - 1).font_family(mono()).text_color(msg.ok ? t.foreground : t.ansi1)
-        .child(`${msg.label}：${msg.ok ? "" : "失敗\n"}${msg.text}`))
+        .child(`${msg.label}：${msg.ok ? "" : "失敗\n"}${squeeze(msg.text)}`))
       .child(div().id("msg-close").flex_none().px(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
         .on_mouse_down("left", stop).on_click((_e, cx) => { this.setMsg(null); cx.notify(); }).child("✕"));
   }

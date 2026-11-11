@@ -64,7 +64,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 不想打指令的話，可以在 Herdr 裡用（Windows、Mac、Linux 都一樣）：
 
 - **每個 agent 視窗上的 Kit 按鈕**：這個 agent 在用哪些規則、skill、MCP，加上或拿掉。
-- **上排的 Kit（倉庫）**：看、改、新增規則、skill、MCP，改好按「送出…」（`kit push`）。
+- **上排的 Kit（倉庫）**：看、改、新增規則、skill、MCP，改好按清單上面黃色那條的「看要送什麼…」（`kit push`）。
 - **上排的 Agents**：kit 做好的 agent 用了哪些東西，用 Claude、Codex 或 omp 開起來。
 
     kit herdr-panel install       裝進 Herdr
@@ -98,6 +98,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 
 - 沒給 `--path` 時：repo 最外層有 `SKILL.md` 就收它；不然 repo 裡只有一個 `SKILL.md` 就收那個資料夾；有好幾個就列出來讓你用 `--path` 選。
 - 只收 `kit.yaml` 的 `collect_sources` 裡的作者。自己的來源（`push: direct`）可以加 `--allow`，收的時候一起把作者加進清單；團隊來源要維護者改清單。
+  `kit push` 平常不送 `kit.yaml`；但它只改了 `collect_sources` 時（`--allow` 加的）會一起送。
 - `--look`：只下載來看、什麼都不寫，用 JSON 列出找到的 skill、授權、會執行的檔案（Herdr 面板的「下載看看」用它）。
 - 沒有 LICENSE 的不收；只收文字檔，不收捷徑、圖片和 `.github/` 這類資料夾。
 

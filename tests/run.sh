@@ -585,6 +585,21 @@ git remote remove three
 git clone -q "$R1" "$D/other" 2>/dev/null; git -C "$D/other" -c user.name=t -c user.email=t@t commit -q --allow-empty -m theirs; git -C "$D/other" push -q origin HEAD:main 2>/dev/null
 out=$(kit push 2>&1); rc=$?
 check "push direct: new commits on a remote stop it (pull first)" '[ $rc -ne 0 ] && echo "$out" | grep -qF "git pull one main" && [ "$(git status --porcelain rules)" = " M rules/mine.md" ]'
+git pull -q --no-rebase one main 2>/dev/null; git push -q two main 2>/dev/null; git fetch -q two
+# kit.yaml goes along only when all that changed in it is collect_sources (kit collect --allow)
+printf 'collect_sources: [example.com/a/b]\n' >> kit.yaml
+out=$(kit push 2>&1); rc=$?
+check "push direct: kit.yaml with only collect_sources changed goes along" '[ $rc -eq 0 ] && [ "$(git show --name-only --format= HEAD | sort | paste -sd" " -)" = "kit.yaml rules/mine.md" ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$(git rev-parse HEAD)" ]'
+echo "Mine, once more." > rules/mine.md; printf 'maintainers: [me]\n' >> kit.yaml
+out=$(kit push 2>&1); rc=$?
+check "push direct: kit.yaml with other changes stays behind" '[ $rc -eq 0 ] && [ "$(git show --name-only --format= HEAD)" = rules/mine.md ] && echo "$out" | grep -q "不會送：kit.yaml"'
+git checkout -q -- kit.yaml
+# a commit hook says no: git's words are shown, and nothing is left staged
+printf '#!/bin/sh\necho "hook: no thanks" >&2\nexit 1\n' > .git/hooks/pre-commit; chmod +x .git/hooks/pre-commit
+echo "Mine, blocked." > rules/mine.md; h=$(git rev-parse HEAD)
+out=$(kit push 2>&1); rc=$?
+check "push direct: a commit hook refusing: its words shown, nothing committed or left staged" '[ $rc -ne 0 ] && echo "$out" | grep -q "hook: no thanks" && [ "$(git rev-parse HEAD)" = "$h" ] && [ -z "$(git diff --cached --name-only)" ] && [ "$(git status --porcelain rules)" = " M rules/mine.md" ]'
+rm -f .git/hooks/pre-commit
 cd "$T"
 
 # ---------- uninstall ----------

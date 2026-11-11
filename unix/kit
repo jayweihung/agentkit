@@ -1490,8 +1490,16 @@ changed_files() { # changed files here, one per line, exactly as named (a rename
         awk '{ if (old) { old = 0; print; next } if (substr($0, 1, 1) == "R") old = 1; print substr($0, 4) }'
 }
 git_add_commit() { # git_add_commit MSG FILE... : commit exactly these files (names taken literally, not as patterns)
+    # if git (or a commit hook) says no, the files go back to how they were before: nothing staged
     local msg=$1; shift
-    GIT_LITERAL_PATHSPECS=1 git add -A -- "$@" && GIT_LITERAL_PATHSPECS=1 git commit -q -m "$msg" -- "$@"
+    GIT_LITERAL_PATHSPECS=1 git add -A -- "$@" && GIT_LITERAL_PATHSPECS=1 git commit -q -m "$msg" -- "$@" && return 0
+    GIT_LITERAL_PATHSPECS=1 git reset -q -- "$@" 2>/dev/null
+    return 1
+}
+collect_only_yaml() { # collect_only_yaml : kit.yaml differs from the last commit only in collect_sources (kit collect --allow)
+    local strip='/^collect_sources:/ { s = 1; next } s && /^[ \t]*(-[ \t]|#|\r?$)/ { next } { s = 0; print }'
+    git cat-file -e HEAD:kit.yaml 2>/dev/null || return 1
+    [ "$(git show HEAD:kit.yaml | awk "$strip")" = "$(awk "$strip" kit.yaml)" ]
 }
 author_check() { # author_check DIR : with author_domains in kit.yaml, the commit's author and committer must use one
     local doms e
@@ -1560,6 +1568,10 @@ cmd_push() {
     other=$(printf '%s\n' "$all" | grep -vxF -f <(printf '%s\n' "$files"; echo '##none##') | awk 'NF')
     [ -n "$files" ] || { say "沒有要送的（$(basename "$dir") 裡沒有改過的 rule、skill、mcp、agent）"; return 0; }
     items=$(printf '%s\n' "$files" | push_items)
+    # kit.yaml goes too when all that changed in it is collect_sources (kit collect --allow added an author)
+    if printf '%s\n' "$other" | grep -qx kit.yaml && collect_only_yaml; then
+        files=$(printf '%s\nkit.yaml\n' "$files"); other=$(printf '%s\n' "$other" | grep -vx kit.yaml)
+    fi
     [ -n "$other" ] && warn "這些不是 rule、skill、mcp、agent，不會送：$(printf '%s' "$other" | paste -sd' ' -)"
 
     # checks: any problem stops everything

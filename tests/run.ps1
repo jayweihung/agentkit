@@ -571,6 +571,21 @@ Check 'push direct: a remote without this branch stops it' { $rc -ne 0 -and $out
 & git clone -q $R1 (Join-Path $D 'other') 2>$null; & git -C (Join-Path $D 'other') -c user.name=t -c user.email=t@t commit -q --allow-empty -m theirs; & git -C (Join-Path $D 'other') push -q origin HEAD:main 2>$null
 Kit push
 Check 'push direct: new commits on a remote stop it (pull first)' { $rc -ne 0 -and $out.Contains('git pull one main') -and "$(& git -C $DW status --porcelain rules)" -eq ' M rules/mine.md' }
+& git -C $DW pull -q --no-rebase one main 2>&1 | Out-Null; & git -C $DW push -q two main 2>&1 | Out-Null; & git -C $DW fetch -q two 2>&1 | Out-Null
+# kit.yaml goes along only when all that changed in it is collect_sources (kit collect --allow)
+Add-Content -LiteralPath "$DW/kit.yaml" 'collect_sources: [example.com/a/b]'
+Kit push
+Check 'push direct: kit.yaml with only collect_sources changed goes along' { $rc -eq 0 -and ((@(& git -C $DW show --name-only --format= HEAD | Where-Object { $_ }) | Sort-Object) -join ' ') -eq 'kit.yaml rules/mine.md' }
+W "$DW/rules/mine.md" "Mine, once more.`n"; Add-Content -LiteralPath "$DW/kit.yaml" 'maintainers: [me]'
+Kit push
+Check 'push direct: kit.yaml with other changes stays behind' { $rc -eq 0 -and "$(& git -C $DW show --name-only --format= HEAD)".Trim() -eq 'rules/mine.md' -and $out -match '不會送：kit.yaml' }
+& git -C $DW checkout -q -- kit.yaml
+# a commit hook says no: git's words are shown, and nothing is left staged
+W "$DW/.git/hooks/pre-commit" "#!/bin/sh`necho 'hook: no thanks' >&2`nexit 1`n"; if (-not $IsWindows) { & chmod +x "$DW/.git/hooks/pre-commit" }
+W "$DW/rules/mine.md" "Mine, blocked.`n"; $headBefore = "$(& git -C $DW rev-parse HEAD)".Trim()
+Kit push
+Check "push direct: a commit hook refusing: its words shown, nothing committed or left staged" { $rc -ne 0 -and $out -match 'hook: no thanks' -and "$(& git -C $DW rev-parse HEAD)".Trim() -eq $headBefore -and -not "$(& git -C $DW diff --cached --name-only)" -and "$(& git -C $DW status --porcelain rules)" -eq ' M rules/mine.md' }
+Remove-Item -Force "$DW/.git/hooks/pre-commit"
 Pop-Location
 
 # ---------- uninstall ----------
