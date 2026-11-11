@@ -237,6 +237,7 @@ Herdr 內建的版面（main 等）不能改：面板會先出現在右邊，按
 | 視窗按鈕的清單 | `kit list --json --dir <資料夾> --pid <行程>` |
 | 加到整個帳號／從帳號拿掉 | `kit add` ／ `kit rm` |
 | 安裝／升級（skill 需要的程式） | `kit install-tool <程式> [--min 版本]` |
+| 窗格上方的 context 35%（每 15 秒，閒置時每分鐘） | `kit context --pid <pid> --tool <claude\|codex\|omp> --dir <資料夾>` |
 | 安裝／更新（skill 自己的套件） | `kit install-deps <skill> [npm\|pip]` |
 | 加到這個資料夾／從資料夾拿掉 | `kit add --dir <資料夾>` ／ `kit rm --dir <資料夾>` |
 | 同步 | `kit sync` |

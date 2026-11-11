@@ -794,6 +794,13 @@ function Hook-Json { # the SessionStart hook entry kit adds to settings.json
     '{"hooks":[{"type":"command","command":' + (Json-Str $cmd) + ',"timeout":10}]}'
 }
 
+function Statusline-Json { # the statusLine kit puts in settings.json
+    $exe = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell' } else { 'pwsh' }
+    $cmd = "$exe -NoProfile -ExecutionPolicy Bypass -File `"$($PSCommandPath.Replace('\', '/'))`" statusline"
+    '{"type":"command","command":' + (Json-Str $cmd) + ',"padding":0}'
+}
+function Flat-Json([string]$s) { if ($null -eq $s) { '' } else { $s -replace '[ \t\r\n]', '' } }
+
 function Apply-All {
     $want = Wanted
     $rules = Of-Kind $want 'rule'; $skills = Of-Kind $want 'skill'; $mcps = Of-Kind $want 'mcp'
@@ -833,8 +840,19 @@ function Apply-All {
         if ($old) { $ops.Add(@('rmjson', 'hooks.SessionStart', $old)) }
         $ops.Add(@('addjson', 'hooks.SessionStart', $hj))
     }
+    # Claude's status line: kit statusline keeps the numbers kit context shows (only when there is no status line of
+    # your own; kit's is replaced when its command changes)
+    $sj = Statusline-Json; $sold = State-Get 'statusline' 'claude'; $snew = $false
+    $sf = Join-Path $ClaudeDir 'settings.json'
+    $scur = if (Test-Path -LiteralPath $sf) { Flat-Json (Json-Get $sf 'statusLine') } else { '' }
+    if (-not $scur -or ($sold -and $scur -eq (Flat-Json $sold))) {
+        if (-not $scur -or $sj -ne $sold) { $ops.Add(@('set', 'statusLine', $sj)); $snew = $true }
+    } elseif ($null -eq (State-Get 'told' 'statusline')) {
+        Warn 'Claude 已經有自己的 statusLine：kit 不動它，Herdr 上 Claude 的 context 用量改從對話紀錄估（只提醒這一次）'; State-Set 'told' 'statusline' 1
+    }
     if ($ops.Count -gt 0) {
         Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny
+        if ($snew) { State-Set 'statusline' 'claude' $sj }
         foreach ($n in $add) { State-Set 'deny' $n 1 }
         foreach ($n in $del) { State-Del 'deny' $n }
         if ($hj -ne $old) { State-Set 'hook' 'SessionStart' $hj }
@@ -1348,6 +1366,206 @@ function Cmd-InstallDeps($rest) { # kit install-deps <skill> [npm|pip] : the ski
     if (Take-Lock -Soft) { $script:Quiet = $true; try { Cmd-Sync *> $null } catch { } finally { $script:Quiet = $false; Release-Lock } }
 }
 
+# ---------- how full an agent's context is (kit context; kit statusline keeps Claude's) ----------
+# The same as unix/kit. On Windows a process's folder and terminal can't be read: the panel passes --dir.
+$script:CtxDir = Join-Path $KitConf 'ctx'
+function Num-Of([string]$k, [string]$t) { $m = [regex]::Match($t, '"' + [regex]::Escape($k) + '"\s*:\s*([0-9]+)(\.[0-9]+)?'); if ($m.Success) { $m.Groups[1].Value } else { '' } }
+function Str-Of([string]$k, [string]$t) { $m = [regex]::Match($t, '"' + [regex]::Escape($k) + '"\s*:\s*"([^"]*)"'); if ($m.Success) { $m.Groups[1].Value } else { '' } }
+function After-Key([string]$k, [string]$t) { # the text after the last "KEY":
+    $m = [regex]::Match($t, '"' + [regex]::Escape($k) + '"\s*:\s*', [Text.RegularExpressions.RegexOptions]::RightToLeft)
+    if ($m.Success) { $t.Substring($m.Index + $m.Length) } else { $t }
+}
+function Sum-Of($t, [string[]]$keys) { $n = [long]0; foreach ($k in $keys) { $v = Num-Of $k $t; if ($v) { $n += [long]$v } }; $n }
+function Model-Window([string]$m) { # the context window Claude Code uses for a model: a setting (autoCompactWindow), else the model's own
+    $b = $m -replace '\[1m\]$', ''; $sf = Join-Path $ClaudeDir 'settings.json'; $w = ''
+    if (Test-Path -LiteralPath $sf) {
+        $w = "$(Json-Get $sf "modelSettings.$b.autoCompactWindow")".Trim('"', ' ')
+        if (-not $w) { $w = "$(Json-Get $sf 'autoCompactWindow')".Trim('"', ' ') }
+    }
+    if ($w -match '^[0-9]+$') { return $w }
+    if ($m -match '\[1m\]$|opus-5|opus-4-7|opus-4-8|sonnet-5|fable|mythos|haiku-5') { return '1000000' }
+    if ($m -match '^(claude-|anthropic/)') { return '200000' }
+    ''
+}
+function Proc-Info([int]$p) { # @{ parent; args } of a process ($null if gone)
+    if ($OnWindows) {
+        $c = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+        if (-not $c) { return $null }
+        return @{ parent = [int]$c.ParentProcessId; args = [string]$c.CommandLine }
+    }
+    $pp = "$(& ps -o ppid= -p $p 2>$null)".Trim(); if (-not $pp) { return $null }
+    @{ parent = [int]$pp; args = "$(& ps -o args= -p $p 2>$null)".Trim() }
+}
+function Proc-Cwd([int]$p) {
+    if ($OnWindows) { return '' }
+    if (Test-Path -LiteralPath "/proc/$p") { return "$(& readlink "/proc/$p/cwd" 2>$null)" }
+    if (Get-Command lsof -ErrorAction SilentlyContinue) { foreach ($l in @(& lsof -a -p $p -d cwd -Fn 2>$null)) { if ($l.StartsWith('n')) { return $l.Substring(1) } } }
+    ''
+}
+function Claude-Pid { # the Claude process above this one (Claude runs the status line through a shell)
+    $i = Proc-Info $PID; if (-not $i) { return $null }
+    $p = $i.parent
+    for ($n = 0; $n -lt 8 -and $p -gt 1; $n++) {
+        $i = Proc-Info $p; if (-not $i) { return $null }
+        $w = @($i.args.Trim() -split '\s+' | ForEach-Object { ($_.Trim('"') -split '[\\/]')[-1] })
+        if ($w[0] -match '^claude(\.exe)?$' -or ($w.Count -gt 1 -and $w[1] -match '^(claude|claude\.js|cli\.js)$')) { return $p }
+        $p = $i.parent
+    }
+    $null
+}
+function Ctx-Json([string]$tool, [string]$u, [string]$w, [string]$src, [string]$m, [string]$own = '') { # OWN: the tool's own way of counting
+    $pct = 'null'
+    if ($u -and $w -and [long]$w -gt 0) { $pct = [string][long][Math]::Floor(([long]$u * 100 + [long]$w / 2) / [long]$w) }
+    if ($own) { $pct = $own }
+    '{"tool": ' + (Json-S $tool) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $pct + ', "source": ' + (Json-S $src) + ', "model": ' + (Json-S $m) + '}'
+}
+function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for kit context, print a short status line
+    $j = [Console]::In.ReadToEnd()
+    $w = Num-Of 'context_window_size' $j
+    $pm = [regex]::Match($j, '"used_percentage"\s*:\s*([0-9]+(\.[0-9]+)?)'); $pct = if ($pm.Success) { [string][long][Math]::Floor([double]::Parse($pm.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) + 0.5) } else { '' }
+    $u = ''
+    if ($j -match '"current_usage"\s*:\s*\{') { $u = [string](Sum-Of (After-Key 'current_usage' $j) @('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')) }
+    $sid = Str-Of 'session_id' $j; $model = Str-Of 'id' (After-Key 'model' $j); $name = Str-Of 'display_name' $j
+    $cp = Claude-Pid
+    if ($cp) {
+        try {
+            Ensure-Dir $CtxDir
+            $line = '{"pid": ' + $cp + ', "session": ' + (Json-S $sid) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $(if ($pct) { $pct } else { 'null' }) + ', "model": ' + (Json-S $model) + "}`n"
+            $tmp = Join-Path $CtxDir ".claude-$cp.$PID"; [IO.File]::WriteAllText($tmp, $line, (New-Object Text.UTF8Encoding $false))
+            Move-Item -LiteralPath $tmp -Destination (Join-Path $CtxDir "claude-$cp.json") -Force
+        } catch { }
+    }
+    if (-not $pct -and $u -and $w -and [long]$w -gt 0) { $pct = [string][long][Math]::Floor(([long]$u * 100 + [long]$w / 2) / [long]$w) }
+    $nm = if ($name) { $name } else { 'Claude' }
+    $uk = if ($u) { [long]$u } else { 0 }
+    if ($pct -and $w) { [Console]::Out.Write("$nm · context $pct%（$([long][Math]::Floor($uk / 1000))k / $([long][Math]::Floor([long]$w / 1000))k）`n") } else { [Console]::Out.Write("$nm`n") }
+}
+function Last-Match($lines, [string[]]$must, [string[]]$not = @()) { # the last line holding every MUST and no NOT: @{ n; line }
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $l = [string]$lines[$i]; $ok = $true
+        foreach ($x in $must) { if (-not $l.Contains($x)) { $ok = $false; break } }
+        if ($ok) { foreach ($x in $not) { if ($l.Contains($x)) { $ok = $false; break } } }
+        if ($ok) { return @{ n = $i + 1; line = $l } }
+    }
+    $null
+}
+function Read-Lines([string]$f, [int]$tail = 0) {
+    if ($tail -gt 0) { @(Get-Content -LiteralPath $f -Tail $tail -Encoding UTF8 -ErrorAction SilentlyContinue) } else { @(Get-Content -LiteralPath $f -Encoding UTF8 -ErrorAction SilentlyContinue) }
+}
+function Newest-Files([string]$dir, [string]$filter) {
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    $since = (Get-Date).AddDays(-7)
+    @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter $filter -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $since } | Sort-Object LastWriteTime -Descending | Select-Object -First 40 | ForEach-Object { $_.FullName })
+}
+function Claude-Ctx([string]$cpid, [string]$cwd) {
+    $f = Join-Path $CtxDir "claude-$cpid.json"
+    if ($cpid -and (Test-Path -LiteralPath $f)) {
+        $j = Read-Text $f
+        return Ctx-Json 'claude' (Num-Of 'used' $j) (Num-Of 'window' $j) 'statusline' (Str-Of 'model' $j)
+    }
+    if (-not $cwd) { return Ctx-Json 'claude' '' '' '' '' }
+    $d = Join-Path (Join-Path $ClaudeDir 'projects') ($cwd -replace '[^A-Za-z0-9]', '-')
+    $t = @(if (Test-Path -LiteralPath $d) { Get-ChildItem -LiteralPath $d -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 })
+    if ($t.Count -eq 0) { return Ctx-Json 'claude' '' '' '' '' }
+    $ls = @(Read-Lines $t[0].FullName 400)
+    $a = Last-Match $ls @('"type":"assistant"', '"usage"'); $cut = Last-Match $ls @('"compact_boundary"')
+    $m = if ($a) { Str-Of 'model' $a.line } else { '' }; $w = Model-Window $m
+    if ($cut -and (-not $a -or $cut.n -gt $a.n)) { return Ctx-Json 'claude' (Num-Of 'postTokens' $cut.line) $w 'transcript' $m }
+    if (-not $a) { return Ctx-Json 'claude' '' '' 'transcript' '' }
+    Ctx-Json 'claude' ([string](Sum-Of (After-Key 'usage' $a.line) @('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))) $w 'transcript' $m
+}
+function Codex-Pct([long]$u, [long]$w) { # Codex's own "% context left" turned into % used (12000 tokens are its baseline)
+    $b = 12000; if ($w -le $b) { return '100' }
+    $e = $w - $b; $used = [Math]::Max([long]0, $u - $b); $rem = [Math]::Max([long]0, $e - $used)
+    [string](100 - [long][Math]::Floor(($rem * 100 + [Math]::Floor($e / 2)) / $e))
+}
+function Codex-Ctx([string]$cwd) {
+    if (-not $cwd) { return Ctx-Json 'codex' '' '' '' '' }
+    $want = '"cwd":' + (Json-S $cwd)
+    foreach ($f in Newest-Files (Join-Path $CodexDir 'sessions') 'rollout-*.jsonl') {
+        $first = "$(Get-Content -LiteralPath $f -TotalCount 1 -Encoding UTF8)"
+        if (-not $first.Contains($want)) { continue }
+        $ls = @(Read-Lines $f)
+        $tc = Last-Match $ls @('"token_count"', '"last_token_usage"'); $tx = Last-Match $ls @('"turn_context"')
+        $m = if ($tx) { Str-Of 'model' $tx.line } else { '' }
+        if (-not $tc) { return Ctx-Json 'codex' '' '' 'rollout' $m }
+        $u = Num-Of 'total_tokens' (After-Key 'last_token_usage' $tc.line); $w = Num-Of 'model_context_window' $tc.line
+        return Ctx-Json 'codex' $u $w 'rollout' $m $(if ($u -and $w) { Codex-Pct ([long]$u) ([long]$w) } else { '' })
+    }
+    Ctx-Json 'codex' '' '' '' ''
+}
+function Omp-Window([string]$m) {
+    $db = Join-Path $OmpDir 'models.db'; $w = ''
+    $prov = ($m -split '/', 2)[0]; $id = if ($m.Contains('/')) { ($m -split '/', 2)[1] } else { $m }
+    if ((Test-Path -LiteralPath $db) -and (Get-Command sqlite3 -ErrorAction SilentlyContinue) -and ($m -notmatch "'")) {
+        $q = "select json_extract(m.value,'`$.contextWindow') from model_cache, json_each(models) m where (provider_id = '$prov' or provider_id like '${prov}:%') and json_extract(m.value,'`$.id') = '$id' limit 1"
+        $w = "$(& sqlite3 -readonly "file:$($db.Replace('\', '/'))?mode=ro" $q 2>$null)".Trim()
+    }
+    if ($w -match '^[0-9]+$') { $w } else { Model-Window $id }
+}
+function Omp-Ctx([string]$opid, [string]$cwd) {
+    $f = ''
+    if (-not $OnWindows -and $opid) {
+        $tty = "$(& ps -o tty= -p $opid 2>$null)".Trim() -replace '^/dev/', '' -replace '/', '-'
+        if ($tty -and $tty -notmatch '^\?+$') { $bc = Join-Path (Join-Path $OmpDir 'terminal-sessions') $tty; if (Test-Path -LiteralPath $bc) { $f = "$(@(Get-Content -LiteralPath $bc -TotalCount 2 -Encoding UTF8)[1])" } }
+    }
+    if (-not $f -or -not (Test-Path -LiteralPath $f)) {
+        $f = ''
+        if ($cwd) {
+            $want = '"cwd":' + (Json-S $cwd)
+            foreach ($x in Newest-Files (Join-Path $OmpDir 'sessions') '*.jsonl') {
+                if (@(Get-Content -LiteralPath $x -TotalCount 3 -Encoding UTF8 | Where-Object { $_.Contains('"type":"session"') -and $_.Contains($want) }).Count -gt 0) { $f = $x; break }
+            }
+        }
+    }
+    if (-not $f) { return Ctx-Json 'omp' '' '' '' '' }
+    $ls = @(Read-Lines $f)
+    $a = Last-Match $ls @('"role":"assistant"') @('"stopReason":"aborted"', '"stopReason":"error"')
+    $c1 = Last-Match $ls @('"type":"compaction"'); $c2 = Last-Match $ls @('"type":"reset_boundary"')
+    $cut = if ($c1 -and $c2) { if ($c1.n -gt $c2.n) { $c1 } else { $c2 } } elseif ($c1) { $c1 } else { $c2 }
+    $mc = Last-Match $ls @('"type":"model_change"'); $m = if ($mc) { Str-Of 'model' $mc.line } else { '' }
+    if (-not $m -and $a) { $m = (Str-Of 'provider' $a.line) + '/' + (Str-Of 'model' $a.line) }
+    $w = if ($m) { Omp-Window $m } else { '' }
+    if ($cut -and (-not $a -or $cut.n -gt $a.n)) { return Ctx-Json 'omp' (Num-Of 'tokensAfter' $cut.line) $w 'session' $m }
+    if (-not $a) { return Ctx-Json 'omp' '' $w 'session' $m }
+    $u = Num-Of 'promptTokens' (After-Key 'contextSnapshot' $a.line)
+    if (-not $u) { $u = [string](Sum-Of (After-Key 'usage' $a.line) @('input', 'cacheRead', 'cacheWrite')) }
+    $rm = Num-Of 'historyRewriteTokensRemoved' $a.line
+    if ($rm) { $u = [string][Math]::Max([long]0, [long]$u - [long]$rm) }
+    # like omp's own footer: what came after that reply (tool results, your next message), about 4 bytes a token
+    $more = [long]0
+    for ($i = $a.n; $i -lt $ls.Count; $i++) { if (([string]$ls[$i]).Contains('"type":"message"')) { $more += [Text.Encoding]::UTF8.GetByteCount([string]$ls[$i]) + 1 } }
+    $u = [string]([long]$u + [long][Math]::Floor($more / 4))
+    Ctx-Json 'omp' $u $w 'session' $m
+}
+function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] : how full that agent's context is (JSON)
+    $use = '用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]'
+    $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''
+    for ($i = 0; $i -lt $rest.Count; $i++) {
+        $a = [string]$rest[$i]
+        if ($i + 1 -ge $rest.Count) { Die $use }
+        if ($a -eq '--pid') { $cpid = [string]$rest[++$i] } elseif ($a -eq '--tool') { $tool = [string]$rest[++$i] } elseif ($a -eq '--dir') { $dir = [string]$rest[++$i] } else { Die $use }
+    }
+    if ($cpid -notmatch '^[0-9]+$') { Die $use }
+    if (-not $tool) {
+        $pi = Proc-Info ([int]$cpid)
+        if ($pi) { $w = @($pi.args.Trim() -split '\s+'); $s2 = ($w[0] + ':' + $(if ($w.Count -gt 1) { $w[1] } else { '' }))
+            $b = ($w[0].Trim('"') -split '[\\/]')[-1]
+            if ($b -like 'claude*' -or $s2 -match ':.*claude') { $tool = 'claude' } elseif ($b -like 'codex*' -or $s2 -match ':.*codex') { $tool = 'codex' } elseif ($b -like 'omp*' -or $s2 -match ':.*omp') { $tool = 'omp' } }
+    }
+    if ($tool -eq 'claude-code') { $tool = 'claude' }
+    if (-not $dir) { $dir = Proc-Cwd ([int]$cpid) }
+    # the kept numbers of Claude processes that are gone
+    if (Test-Path -LiteralPath $CtxDir) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $CtxDir -Filter 'claude-*.json' -File -ErrorAction SilentlyContinue)) {
+            $p = $f.BaseName.Substring(7)
+            if ($p -ne $cpid -and $p -match '^[0-9]+$' -and -not (Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    $out = switch ($tool) { 'claude' { Claude-Ctx $cpid $dir } 'codex' { Codex-Ctx $dir } 'omp' { Omp-Ctx $cpid $dir } default { Ctx-Json '' '' '' '' '' } }
+    [Console]::Out.Write($out + "`n")
+}
+
 # ---------- commands ----------
 function Need-Init { if (-not (Test-Path -LiteralPath $Machine)) { Die '還沒設定：先打  kit init <網址或資料夾>' } }
 function Seen-All { foreach ($i in Available) { if ($null -eq (State-Get 'seen' $i)) { State-Set 'seen' $i 1 } } }
@@ -1827,11 +2045,12 @@ function Cmd-Uninstall($rest) {
         $f = $r.Split("`t")
         if ($f[0] -eq 'deny') { $ops.Add(@('rmstr', 'permissions.deny', $f[1])) }
         if ($f[0] -eq 'hook') { $ops.Add(@('rmjson', "hooks.$($f[1])", $f[2])) }
+        if ($f[0] -eq 'statusline' -and (Flat-Json (Json-Get (Join-Path $ClaudeDir 'settings.json') 'statusLine')) -eq (Flat-Json $f[2])) { $ops.Add(@('del', 'statusLine')) }
     }
     if ($ops.Count -gt 0) { Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny }
     if ($left) { Die '有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall' }
     foreach ($f in @($State, $Machine)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
-    foreach ($x in 'deps', 'pydeps') { $deps = Join-Path $KitConf $x; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force } }
+    foreach ($x in 'deps', 'pydeps', 'ctx') { $deps = Join-Path $KitConf $x; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force } }
     Say 'kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）'
     Say "     來源的 clone 還留在 $KitSrc"
     if ($self) {
@@ -3019,6 +3238,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
   kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
+  kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]   那個 agent 的 context 用了多少（JSON）
                                     用 kit 的裝法裝，太舊就升級（Herdr 的「安裝」按鈕就是這個）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
@@ -3065,6 +3285,8 @@ try {
         'tools' { Cmd-Tools $rest }
         'install-tool' { Cmd-InstallTool $rest }
         'install-deps' { Cmd-InstallDeps $rest }
+        'context' { Cmd-Context $rest }
+        'statusline' { Cmd-Statusline }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
         'run' { Cmd-Run $rest }
         'agents' { Cmd-Agents $rest }

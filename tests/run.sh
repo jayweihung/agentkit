@@ -851,6 +851,75 @@ echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"
 
+# ---------- how full an agent's context is (kit context, kit statusline) ----------
+H7="$T/home7"; P7="$T/ctxproj"; mkdir -p "$H7" "$P7"; P7=$(cd "$P7" && pwd -P)
+(
+export HOME="$H7"
+mkdir -p "$H7/.codex/sessions/2026/11/12" "$H7/.omp/agent/sessions/x" "$H7/.claude/projects/$(printf '%s' "$P7" | sed 's|[^A-Za-z0-9]|-|g')"
+RO="$H7/.codex/sessions/2026/11/12/rollout-2026-11-12T01-00-00-abc.jsonl"
+printf '{"timestamp":"t","type":"session_meta","payload":{"id":"abc","cwd":"%s","originator":"codex-tui"}}\n' "$P7" > "$RO"
+printf '{"type":"turn_context","payload":{"cwd":"%s","model":"gpt-6-luna"}}\n' "$P7" >> "$RO"
+for u in 13878 48813; do printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1,"total_tokens":412129},"last_token_usage":{"input_tokens":48732,"cached_input_tokens":48512,"output_tokens":81,"total_tokens":%s},"model_context_window":258400}}}\n' "$u" >> "$RO"; done
+printf '{"type":"session_meta","payload":{"id":"zzz","cwd":"/elsewhere"}}\n' > "$H7/.codex/sessions/2026/11/12/rollout-2026-11-12T02-00-00-zzz.jsonl"
+CX() { kit context "$@" 2>&1; }
+out=$(CX --pid 1 --tool codex --dir "$P7")
+check "context (codex): the folder's newest rollout, its last turn; % the way Codex counts it (85% left)" '[ "$out" = "{\"tool\": \"codex\", \"used\": 48813, \"window\": 258400, \"pct\": 15, \"source\": \"rollout\", \"model\": \"gpt-6-luna\"}" ]'
+OS="$H7/.omp/agent/sessions/x/2026-11-12T01-00-00-000Z_s1.jsonl"
+printf '{"type":"title","title":"secret words"}\n{"type":"session","version":3,"id":"s1","cwd":"%s"}\n{"type":"model_change","model":"anthropic/claude-opus-5-5"}\n' "$P7" > "$OS"
+printf '{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5-5","usage":{"input":4,"output":12,"cacheRead":149319,"cacheWrite":222},"contextSnapshot":{"promptTokens":149545,"compactionEpoch":0},"stopReason":"stop"}}\n' >> "$OS"
+printf '{"type":"message","message":{"role":"assistant","usage":{"input":9,"cacheRead":900000},"stopReason":"aborted"}}\n' >> "$OS"
+out=$(CX --pid 1 --tool omp --dir "$P7")
+u=$(printf '%s' "$out" | sed -n 's/.*"used": \([0-9]*\).*/\1/p'); ab=$(tail -n 1 "$OS" | wc -c | tr -d ' ')
+check "context (omp): its last finished reply (not an aborted one), plus what came after it like omp's footer" '[ "$u" = $((149545 + ab / 4)) ] && echo "$out" | grep -qF "\"window\": 1000000, \"pct\": 15, \"source\": \"session\", \"model\": \"anthropic/claude-opus-5-5\""'
+printf '{"type":"compaction","summary":"x","tokensBefore":150000,"tokensAfter":20000}\n' >> "$OS"
+out=$(CX --pid 1 --tool omp --dir "$P7")
+check "context (omp): compacted since -> the size after it" 'echo "$out" | grep -qF "\"used\": 20000, \"window\": 1000000, \"pct\": 2"'
+CT="$H7/.claude/projects/$(printf '%s' "$P7" | sed 's|[^A-Za-z0-9]|-|g')/t1.jsonl"
+printf '{"type":"user","message":{"content":"hello"}}\n{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":1146,"cache_read_input_tokens":241932,"output_tokens":484}}}\n' > "$CT"
+mkdir -p "$H7/.claude"; printf '{\n  "modelSettings": {\n    "claude-opus-5-5": {\n      "autoCompactWindow": 400000\n    }\n  }\n}\n' > "$H7/.claude/settings.json"
+out=$(CX --pid 1 --tool claude-code --dir "$P7")
+check "context (claude, no status line): the transcript, the window from autoCompactWindow" '[ "$out" = "{\"tool\": \"claude\", \"used\": 243080, \"window\": 400000, \"pct\": 61, \"source\": \"transcript\", \"model\": \"claude-opus-5-5\"}" ]'
+printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":390000,"postTokens":19421}}\n' >> "$CT"
+out=$(CX --pid 1 --tool claude --dir "$P7")
+check "context (claude): compacted since -> the size after it" 'echo "$out" | grep -qF "\"used\": 19421, \"window\": 400000, \"pct\": 5"'
+# kit statusline under a "claude" process keeps the numbers for that process; kit context prefers them
+printf '{"session_id":"abc","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_window":{"total_input_tokens":5,"context_window_size":400000,"current_usage":{"input_tokens":2,"output_tokens":9,"cache_creation_input_tokens":1146,"cache_read_input_tokens":138452},"used_percentage":34.9}}' > "$T/sl.json"
+mkdir -p "$T/fb7"; printf '#!/bin/sh\necho $$ > "%s/cpid"\n"%s" statusline < "%s/sl.json"\n' "$T" "$KIT" "$T" > "$T/fb7/claude"; chmod +x "$T/fb7/claude"
+out=$("$T/fb7/claude"); cp=$(cat "$T/cpid")
+check "statusline: a short line for Claude" '[ "$out" = "Opus 5.5 · context 35%（139k / 400k）" ]'
+check "statusline: the numbers kept for that Claude process" '[ -f "$H7/.config/agentkit/ctx/claude-$cp.json" ]'
+out=$(CX --pid "$cp" --tool claude --dir "$P7")
+check "context (claude): what the status line kept wins" '[ "$out" = "{\"tool\": \"claude\", \"used\": 139600, \"window\": 400000, \"pct\": 35, \"source\": \"statusline\", \"model\": \"claude-opus-5-5\"}" ]'
+if command -v pwsh >/dev/null 2>&1; then
+    same=1
+    for a in "--pid 1 --tool codex --dir $P7" "--pid 1 --tool omp --dir $P7" "--pid 1 --tool claude --dir $P7" "--pid $cp --tool claude --dir $P7"; do
+        [ "$(kit context $a 2>&1)" = "$(pwsh -NoProfile -File "$HERE/../windows/kit.ps1" context $a 2>&1)" ] || { same=0; echo "  differs: $a"; }
+    done
+    check "context: kit.ps1 says the same" '[ $same = 1 ]'
+    out=$(pwsh -NoProfile -File "$HERE/../windows/kit.ps1" statusline < "$T/sl.json")
+    check "statusline: kit.ps1 prints the same line" '[ "$out" = "Opus 5.5 · context 35%（139k / 400k）" ]'
+fi
+echo '{}' > "$H7/.config/agentkit/ctx/claude-999999.json"
+CX --pid 1 --tool claude --dir "$P7" >/dev/null
+check "context: numbers of a Claude process that is gone are thrown away" '[ ! -e "$H7/.config/agentkit/ctx/claude-999999.json" ]'
+out=$(CX --pid 1)
+check "context: not an agent -> nothing" '[ "$out" = "{\"tool\": \"\", \"used\": null, \"window\": null, \"pct\": null, \"source\": \"\", \"model\": \"\"}" ]'
+# the statusLine in settings.json: kit's when there is none, never over your own, gone again on uninstall
+cp "$H7/.claude/settings.json" "$T/s7.orig"
+mkdir -p "$T/src7/skills/a"; printf -- '---\nname: a\ndescription: a\n---\nx\n' > "$T/src7/skills/a/SKILL.md"
+kit init "$T/src7" >/dev/null 2>&1
+check "sync: kit's statusLine in settings.json" 'jget "$H7/.claude/settings.json" statusLine.command | grep -q "statusline" && jget "$H7/.claude/settings.json" modelSettings.claude-opus-5-5.autoCompactWindow | grep -q 400000'
+kit uninstall >/dev/null 2>&1
+check "uninstall: settings.json exactly as before, kit's numbers gone" 'cmp -s "$H7/.claude/settings.json" "$T/s7.orig" && [ ! -e "$H7/.config/agentkit/ctx" ]'
+printf '{\n  "statusLine": {\n    "type": "command",\n    "command": "my-line"\n  }\n}\n' > "$H7/.claude/settings.json"; cp "$H7/.claude/settings.json" "$T/s7.own"
+out=$(kit init "$T/src7" 2>&1)
+check "sync: your own statusLine stays, kit says so once" '[ "$(jget "$H7/.claude/settings.json" statusLine.command)" = "\"my-line\"" ] && echo "$out" | grep -q "statusLine" && ! kit sync 2>&1 | grep -q "statusLine"'
+kit uninstall >/dev/null 2>&1
+check "uninstall: your own statusLine stays" 'cmp -s "$H7/.claude/settings.json" "$T/s7.own"'
+echo "$pass $fail" > "$T/sub"
+)
+read pass fail < "$T/sub"
+
 # ---------- collect / outdated (other people's skills; a local repo plays the author) ----------
 UP="$T/upstream"; CO="$T/collector"
 mkdir -p "$UP/skills/foo/scripts" "$CO"

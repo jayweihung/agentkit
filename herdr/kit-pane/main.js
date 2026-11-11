@@ -10,11 +10,15 @@
 //   kit.pane.data.v1   key -> what kit list said (only for panes that still exist)
 //   kit.pane.want      key -> when someone asked for a fresh look (the popup's ⟳, after adding / taking off)
 // key = "<machine>|<folder>|<terminal>" (machine empty for this computer).
+// It also shows how full the agent's context is, from
+//   kit context --pid <the agent's process> --tool <claude|codex|omp> --dir <its folder>
+// kept in kit.ctx.v1 (key -> { used, window, pct, at, busy, started }), asked again every 15 s while it works.
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { panes, spaces, props, run, theme, home, exec, hc, shared, setShared, appHome, readTextFile, window, openOverlay } from "herdr";
 
-const CACHE = "kit.pane.v1", DATA = "kit.pane.data.v1", WANT = "kit.pane.want";
+const CACHE = "kit.pane.v1", DATA = "kit.pane.data.v1", WANT = "kit.pane.want", CTX = "kit.ctx.v1";
+const CTX_STALE = 15000, CTX_IDLE = 60000;   // how often to ask how full the context is: working / not
 const STALE = 60000, LOAD_TTL = 90000;   // look again after a minute; a load longer than this is taken as lost
 const isWindows = () => window()?.platform === "windows";
 const slash = (p) => String(p ?? "").replace(/\\/g, "/");
@@ -95,6 +99,23 @@ function summary(d) {
   return { text: counts.map(([l, n]) => `${l} ${n}`).join(" · "), level: news ? "new" : "ok", news, counts, agent: ag?.name ?? null };
 }
 
+// how full an agent's context is: kit context on the agent's machine, for its foreground process
+const TOOLS = { "claude-code": "claude", claude: "claude", codex: "codex", omp: "omp", pi: "omp" };
+async function loadContext(machine, cwd, term, agent) {
+  const g = await hc(["get", term, "--json"]).catch(() => null);
+  let pid = null;
+  try { const j = JSON.parse(g?.stdout ?? "{}"); pid = j.foreground?.pid ?? j.pid ?? null; } catch {}
+  if (!pid) return null;
+  const args = ["context", "--pid", String(pid)];
+  const tool = TOOLS[String(agent ?? "").toLowerCase()];
+  if (tool) args.push("--tool", tool);
+  if (cwd) args.push("--dir", cwd);
+  const r = await runKit(machine, args);
+  if (r.code !== 0) return null;   // an older kit without kit context: show nothing
+  try { return JSON.parse(r.out); } catch { return null; }
+}
+const kNum = (n) => (n >= 1000000 ? `${+(n / 1000000).toFixed(n % 1000000 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`);
+
 export default class KitPane extends View {
   init(_p, cx) {
     this.hovered = false;
@@ -110,6 +131,7 @@ export default class KitPane extends View {
   tick(cx) {
     const p = this.me();
     if (!p?.terminal || !p.program?.agent) return;
+    this.tickContext(p, cx);
     const w = placeOf(p), c = (shared(CACHE) ?? {})[w.key], want = (shared(WANT) ?? {})[w.key] ?? 0;
     if (c?.busy && Date.now() - (c.started ?? 0) < LOAD_TTL) return;
     if (c && !c.busy && Date.now() - c.at < STALE && (c.started ?? 0) >= want) return;
@@ -123,6 +145,33 @@ export default class KitPane extends View {
       setShared(CACHE, { ...pruned(shared(CACHE)), [w.key]: { ...summary(d), started, at: Date.now(), busy: false } });
       cx.notify();
     });
+  }
+
+  // ask how full the context is: every 15 s while the agent works (and once when it stops), else every minute
+  tickContext(p, cx) {
+    const w = placeOf(p), all = shared(CTX) ?? {}, c = all[w.key];
+    if (c?.busy && Date.now() - (c.started ?? 0) < LOAD_TTL) return;
+    const age = Date.now() - (c?.at ?? 0), moved = c && c.status !== p.status;
+    if (c && !moved && age < (p.status === "working" ? CTX_STALE : CTX_IDLE)) return;
+    const started = Date.now();
+    setShared(CTX, { ...pruned(all), [w.key]: { ...(c ?? {}), busy: true, started, status: p.status } });
+    cx.spawn(async (cx) => {
+      let d = null;
+      try { d = await loadContext(w.machine, p.cwd, p.terminal, p.program?.agent); } catch {}
+      setShared(CTX, { ...pruned(shared(CTX)), [w.key]: { ...(d ?? {}), busy: false, started, at: Date.now(), status: p.status } });
+      cx.notify();
+    });
+  }
+
+  // [context 35% 139k/400k]: how much of the agent's context window is used; yellow from 70 %, red from 90 %
+  contextBadge(t, p) {
+    const c = (shared(CTX) ?? {})[placeOf(p).key];
+    if (c?.pct == null && c?.used == null) return null;
+    const pct = c.pct, color = pct == null ? t.dim : pct >= 90 ? t.blocked : pct >= 70 ? t.working : t.dim;
+    return h_flex().id(`kit-ctx-${p.pane}`).flex_none().gap(4).items_center().text_size(11)
+      .child(div().text_color(t.dim).child("context"))
+      .when(pct != null, (el) => el.child(div().font_semibold().text_color(pct >= 70 ? color : t.foreground).child(`${pct}%`)))
+      .child(div().text_color(t.dim).child(c.window ? `${kNum(c.used ?? 0)}/${kNum(c.window)}` : kNum(c.used ?? 0)));
   }
 
   button(t, id, name, command, args) {
@@ -171,6 +220,7 @@ export default class KitPane extends View {
       .child(div().flex_none().truncate().max_w(260).font_medium().text_color(t.foreground).child(name))
       .child(div().flex_1().truncate().text_color(t.dim).child(folder(p.cwd)))
       .when(Boolean(p.terminal && p.program?.agent), (el) => el.child(this.kitButton(t, p)))
+      .when(Boolean(p.terminal && p.program?.agent && this.contextBadge(t, p)), (el) => el.child(this.contextBadge(t, p)))
       .when(st === "working", (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
       .when(st === "blocked", (el) => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).child("Needs you")))
       .when(st === "done", (el) => el.child(div().size(7).flex_none().rounded(4).bg(t.done)))

@@ -112,6 +112,22 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 - 有 venv 之後，kit 在 CLAUDE.md／AGENTS.md 的 kit 區塊多寫一行，請 agent 用 skill 資料夾裡的 `.venv/bin/python`（Windows：`.venv\Scripts\python.exe`）執行那個 skill 的程式，不要自己再 pip install。
 - Debian/Ubuntu 沒有 venv 時，要先裝 `python3-venv`（kit 會說）。
 
+## agent 的 context 用了多少
+
+    kit context --pid <agent 的 pid> [--tool claude|codex|omp] [--dir 資料夾]
+
+印出 JSON：`used`（用了幾個 token）、`window`（上限）、`pct`（%）、`source`（從哪裡讀的）、`model`。Herdr 每個 agent 窗格上方的「context 35% 139k/400k」就是它（70% 以上變黃、90% 以上變紅）。只讀數字，不讀對話內容。
+
+| agent | 從哪裡讀 | % 怎麼算 |
+|---|---|---|
+| Claude | kit 放的 statusLine 每次更新都把 Claude 自己的數字存在 `~/.config/agentkit/ctx/claude-<pid>.json`；沒有的話讀那個資料夾最新的對話紀錄 | Claude 自己的（`/context` 一樣的上限，`autoCompactWindow` 有設就用它） |
+| Codex | 那個資料夾最新的 `~/.codex/sessions/**/rollout-*.jsonl`，最後一次的 `last_token_usage` | 跟 Codex 畫面的「% context left」一樣：先扣掉它固定的 12000 |
+| omp | 它的終端機指向的 session（`~/.omp/agent/terminal-sessions/<tty>`），或那個資料夾最新的 session；最後一個完成的回覆 | 跟 omp 頁尾一樣：再加上那之後的工具結果（約 4 bytes 一個 token）；上限用 omp 自己的模型清單 |
+
+壓縮（compaction）過、還沒有新回覆時，用壓縮後的大小。
+
+**Claude 的 statusLine**：`kit sync` 會在 `~/.claude/settings.json` 加上 `statusLine`（執行 `kit statusline`），Claude 底下的狀態列會顯示「Opus 5.5 · context 35%（139k / 400k）」。你已經有自己的 statusLine 時 kit 不動它（只提醒一次），Claude 的用量改從對話紀錄估；Remote Control 的對話紀錄可能不即時。`kit uninstall` 會拿掉 kit 加的。
+
 ## Herdr 的 kit 面板
 
 不想打指令的話，可以在 Herdr 裡用（Windows、Mac、Linux 都一樣）：

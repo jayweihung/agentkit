@@ -768,6 +768,28 @@ Kit uninstall
 Check 'uninstall: kit''s packages go too' { -not (Test-Path (Join-Path $H '.config/agentkit/deps')) -and -not (Test-Path (Join-Path $H '.config/agentkit/pydeps')) }
 $env:PATH = $savedP
 
+# ---------- how full an agent's context is (kit context, kit statusline) ----------
+Set-Home (Join-Path $T 'home7')
+$P7 = Join-Path $T 'ctxproj'; [void](New-Item -ItemType Directory -Force -Path $P7); $P7 = (Resolve-Path $P7).ProviderPath
+$js = { param($x) $x.Replace('\', '\\') }
+$RO = "$H/.codex/sessions/2026/11/12/rollout-2026-11-12T01-00-00-abc.jsonl"
+W $RO ("{`"type`":`"session_meta`",`"payload`":{`"id`":`"abc`",`"cwd`":`"$(& $js $P7)`"}}`n{`"type`":`"turn_context`",`"payload`":{`"model`":`"gpt-6-luna`"}}`n" +
+    "{`"type`":`"event_msg`",`"payload`":{`"type`":`"token_count`",`"info`":{`"total_token_usage`":{`"total_tokens`":412129},`"last_token_usage`":{`"input_tokens`":48732,`"output_tokens`":81,`"total_tokens`":48813},`"model_context_window`":258400}}}`n")
+Kit context --pid 1 --tool codex --dir $P7
+Check 'context (codex): the folder''s rollout, % the way Codex counts it' { $out.Trim() -eq '{"tool": "codex", "used": 48813, "window": 258400, "pct": 15, "source": "rollout", "model": "gpt-6-luna"}' }
+W "$H/.omp/agent/sessions/x/s1.jsonl" ("{`"type`":`"session`",`"version`":3,`"id`":`"s1`",`"cwd`":`"$(& $js $P7)`"}`n{`"type`":`"model_change`",`"model`":`"anthropic/claude-opus-5-5`"}`n" +
+    "{`"type`":`"message`",`"message`":{`"role`":`"assistant`",`"usage`":{`"input`":4,`"cacheRead`":149319,`"cacheWrite`":222},`"contextSnapshot`":{`"promptTokens`":149545},`"stopReason`":`"stop`"}}`n")
+Kit context --pid 1 --tool omp --dir $P7
+Check 'context (omp): the folder''s session, its last reply' { $out -match '"used": 149545, "window": (1000000|200000), "pct": (15|75), "source": "session", "model": "anthropic/claude-opus-5-5"' }
+$cp = [string]$PID
+W "$H/.config/agentkit/ctx/claude-$cp.json" "{`"pid`": $cp, `"session`": `"abc`", `"used`": 139600, `"window`": 400000, `"pct`": 35, `"model`": `"claude-opus-5-5`"}`n"
+Kit context --pid $cp --tool claude-code --dir $P7
+Check 'context (claude): what the status line kept' { $out.Trim() -eq '{"tool": "claude", "used": 139600, "window": 400000, "pct": 35, "source": "statusline", "model": "claude-opus-5-5"}' }
+$sl = '{"model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_window":{"context_window_size":400000,"current_usage":{"input_tokens":2,"cache_creation_input_tokens":1146,"cache_read_input_tokens":138452},"used_percentage":34.9}}'
+
+$o = $sl | & $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit statusline 2>&1
+Check 'statusline: a short line for Claude' { "$o".Trim() -eq 'Opus 5.5 · context 35%（139k / 400k）' }
+
 # ---------- collect / outdated (other people's skills; a local repo plays the author) ----------
 function FileUrl([string]$p) { $p = $p.Replace('\', '/'); if ($p.StartsWith('/')) { "file://$p" } else { "file:///$p" } }
 function G { & git @args 2>&1 | Out-Null }

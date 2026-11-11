@@ -573,8 +573,18 @@ EOF
         [ -n "$old" ] && printf 'rmjson\thooks.SessionStart\t%s\n' "$old" >> "$ops"
         printf 'addjson\thooks.SessionStart\t%s\n' "$hj" >> "$ops"
     fi
+    # Claude's status line: kit statusline keeps the numbers kit context shows (only when there is no status line of
+    # your own; kit's is replaced when its command changes)
+    local sj sold scur snew=""; sj=$(statusline_json); sold=$(state_get statusline claude)
+    scur=$(json_get "$CLAUDE_DIR/settings.json" statusLine | tr -d ' \t\r\n')
+    if [ -z "$scur" ] || { [ -n "$sold" ] && [ "$scur" = "$(printf '%s' "$sold" | tr -d ' \t\r\n')" ]; }; then
+        [ -n "$scur" ] && [ "$sj" = "$sold" ] || { printf 'set\tstatusLine\t%s\n' "$sj" >> "$ops"; snew=1; }
+    elif [ -z "$(state_get told statusline)" ]; then
+        warn "Claude 已經有自己的 statusLine：kit 不動它，Herdr 上 Claude 的 context 用量改從對話紀錄估（只提醒這一次）"; state_set told statusline 1
+    fi
     if [ -s "$ops" ]; then
         json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny
+        [ -z "$snew" ] || state_set statusline claude "$sj"
         while IFS= read -r n; do [ -z "$n" ] || state_set deny "$n" 1; done <<EOF
 $add
 EOF
@@ -590,6 +600,12 @@ hook_json() { # the SessionStart hook entry kit adds to settings.json
     local k="$HOME/.local/bin/kit"
     [ -x "$k" ] || k="$KIT_LIB/kit"
     printf '{"hooks":[{"type":"command","command":%s,"timeout":10}]}' "$(json_str "'$k' sync --hook")"
+}
+
+statusline_json() { # the statusLine kit puts in settings.json
+    local k="$HOME/.local/bin/kit"
+    [ -x "$k" ] || k="$KIT_LIB/kit"
+    printf '{"type":"command","command":%s,"padding":0}' "$(json_str "'$k' statusline")"
 }
 
 sync_hook() { # run by Claude at start: sync in the background, at most every 10 minutes
@@ -1052,6 +1068,175 @@ cmd_install_deps() { # kit install-deps <skill> [npm|pip] : the skill's own pack
     [ -f "$MACHINE" ] || return 0
     if take_lock soft; then ( QUIET=1 cmd_sync ) >/dev/null 2>&1; release_lock; fi
     return 0
+}
+
+# ---------- how full an agent's context is (kit context; kit statusline keeps Claude's) ----------
+# Claude: its statusLine (kit puts `kit statusline` there when there is none) hands kit the exact numbers on every
+# update; kit keeps them in $KIT_CONF/ctx/claude-<pid>.json. Without that, the newest transcript in the folder's
+# project dir. Codex: the newest rollout of that folder (~/.codex/sessions), its last token_count. omp: the
+# session its terminal points at (~/.omp/agent/terminal-sessions/<tty>) or the newest of that folder, its last
+# assistant message. Only numbers are read, never what was said.
+CTX_DIR="$KIT_CONF/ctx"
+num_of() { # num_of KEY TEXT -> the first number after "KEY": in TEXT (JSON)
+    printf '%s' "$2" | grep -oE "\"$1\"[[:space:]]*:[[:space:]]*[0-9]+(\.[0-9]+)?" | head -n 1 | grep -oE '[0-9]+(\.[0-9]+)?$' | sed 's/\..*//'
+}
+str_of() { printf '%s' "$2" | grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//; s/"$//'; }
+after_key() { printf '%s' "$2" | sed "s/.*\"$1\"[[:space:]]*:[[:space:]]*//"; }   # the text after the last "KEY":
+model_window() { # the context window Claude Code uses for a model: a setting (autoCompactWindow), else the model's own
+    local m=${1%\[1m\]} w=""
+    [ -f "$CLAUDE_DIR/settings.json" ] && {
+        w=$(json_get "$CLAUDE_DIR/settings.json" "modelSettings.$m.autoCompactWindow" | tr -d '" ')
+        [ -n "$w" ] || w=$(json_get "$CLAUDE_DIR/settings.json" autoCompactWindow | tr -d '" ')
+    }
+    case $w in ""|auto) w="";; *[!0-9]*) w="";; esac
+    [ -n "$w" ] && { echo "$w"; return; }
+    case $1 in
+        *\[1m\]|*opus-5*|*opus-4-7*|*opus-4-8*|*sonnet-5*|*fable*|*mythos*|*haiku-5*) echo 1000000;;
+        claude-*|anthropic/*) echo 200000;;
+    esac
+}
+proc_args() { ps -o args= -p "$1" 2>/dev/null; }
+proc_cwd() { # a process's folder (Linux /proc, else lsof)
+    if [ -d "/proc/$1" ]; then readlink "/proc/$1/cwd" 2>/dev/null; return; fi
+    command -v lsof >/dev/null 2>&1 && lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+}
+claude_pid() { # the Claude process above this one (Claude runs the status line through a shell)
+    local pid=$PPID i=0 a w1 w2
+    while [ $i -lt 8 ] && [ "${pid:-0}" -gt 1 ] 2>/dev/null; do
+        a=$(proc_args "$pid"); set -- $a; w1=${1:-}; w2=${2:-}
+        case ${w1##*/}:${w2##*/} in claude:*|claude.exe:*|*:claude|*:claude.js|*:cli.js) printf '%s\n' "$pid"; return 0;; esac
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '); i=$((i + 1))
+    done
+    return 1
+}
+ctx_json() { # ctx_json TOOL USED WINDOW SOURCE MODEL [PCT] -> the answer (PCT: the tool's own way of counting)
+    local pct=null u=${2:-} w=${3:-}
+    [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] 2>/dev/null && pct=$(( (u * 100 + w / 2) / w ))
+    [ -z "${6:-}" ] || pct=$6
+    printf '{"tool": %s, "used": %s, "window": %s, "pct": %s, "source": %s, "model": %s}\n' "$(json_s "$1")" "${u:-null}" "${w:-null}" "$pct" "$(json_s "$4")" "$(json_s "$5")"
+}
+cmd_statusline() { # what Claude's statusLine runs: keep the numbers for kit context, print a short status line
+    local j u w pct pid sid model name tmp
+    j=$(cat)
+    w=$(num_of context_window_size "$j")
+    pct=$(printf '%s' "$j" | grep -oE '"used_percentage"[[:space:]]*:[[:space:]]*[0-9]+(\.[0-9]+)?' | head -n 1 | grep -oE '[0-9.]+$' | awk '{ printf "%d", $1 + 0.5 }')
+    u=""; case $j in *'"current_usage"'*'{'*)
+        local cu; cu=$(after_key current_usage "$j")
+        case $cu in null*) ;; *) u=$(( $(num_of input_tokens "$cu" || :)0 / 10 + $(num_of cache_creation_input_tokens "$cu" || :)0 / 10 + $(num_of cache_read_input_tokens "$cu" || :)0 / 10 ));; esac;;
+    esac
+    sid=$(str_of session_id "$j"); model=$(str_of id "$(after_key model "$j")"); name=$(str_of display_name "$j")
+    if pid=$(claude_pid); then
+        mkdir -p "$CTX_DIR" 2>/dev/null && tmp="$CTX_DIR/.claude-$pid.$$" && {
+            printf '{"pid": %s, "session": %s, "used": %s, "window": %s, "pct": %s, "model": %s}\n' "$pid" "$(json_s "$sid")" "${u:-null}" "${w:-null}" "${pct:-null}" "$(json_s "$model")" > "$tmp" && mv -f "$tmp" "$CTX_DIR/claude-$pid.json"; } 2>/dev/null
+    fi
+    [ -n "$pct" ] || { [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] && pct=$(( (u * 100 + w / 2) / w )); }
+    if [ -n "$pct" ] && [ -n "$w" ]; then printf '%s · context %s%%（%sk / %sk）\n' "${name:-Claude}" "$pct" "$(( ${u:-0} / 1000 ))" "$(( w / 1000 ))"
+    else printf '%s\n' "${name:-Claude}"; fi
+}
+claude_ctx() { # claude_ctx PID CWD
+    local f="$CTX_DIR/claude-$1.json" j d t line u w m post cut
+    if [ -n "$1" ] && [ -f "$f" ]; then
+        j=$(cat "$f"); u=$(num_of used "$j"); w=$(num_of window "$j"); m=$(str_of model "$j")
+        ctx_json claude "$u" "$w" statusline "$m"; return
+    fi
+    [ -n "$2" ] || { ctx_json claude "" "" "" ""; return; }
+    d="$CLAUDE_DIR/projects/$(printf '%s' "$2" | sed 's|[^A-Za-z0-9]|-|g')"
+    t=$(ls -t "$d"/*.jsonl 2>/dev/null | head -n 1)
+    [ -n "$t" ] || { ctx_json claude "" "" "" ""; return; }
+    line=$(tail -n 400 "$t" | grep -n '"type":"assistant"' | grep '"usage"' | tail -n 1)
+    cut=$(tail -n 400 "$t" | grep -n '"compact_boundary"' | tail -n 1)
+    m=$(str_of model "$line"); w=$(model_window "$m")
+    if [ -n "$cut" ] && [ "${cut%%:*}" -gt "${line%%:*}" ] 2>/dev/null || { [ -n "$cut" ] && [ -z "$line" ]; }; then
+        post=$(num_of postTokens "$cut"); ctx_json claude "$post" "$w" transcript "$m"; return
+    fi
+    [ -n "$line" ] || { ctx_json claude "" "" transcript ""; return; }
+    j=$(after_key usage "$line")
+    u=$(( $(num_of input_tokens "$j")0 / 10 + $(num_of cache_creation_input_tokens "$j")0 / 10 + $(num_of cache_read_input_tokens "$j")0 / 10 ))
+    ctx_json claude "$u" "$w" transcript "$m"
+}
+codex_pct() { # codex_pct USED WINDOW : Codex's own "% context left" turned into % used (12000 tokens are its baseline)
+    local u=$1 w=$2 b=12000 e used rem
+    [ "$w" -gt $b ] 2>/dev/null || { echo 100; return; }
+    e=$((w - b)); used=$((u > b ? u - b : 0)); rem=$((e > used ? e - used : 0))
+    echo $(( 100 - (rem * 100 + e / 2) / e ))
+}
+codex_ctx() { # codex_ctx CWD : the newest rollout started in that folder
+    local f line u w m
+    [ -n "$1" ] && [ -d "$CODEX_DIR/sessions" ] || { ctx_json codex "" "" "" ""; return; }
+    for f in $(find "$CODEX_DIR/sessions" -name 'rollout-*.jsonl' -mtime -7 2>/dev/null | xargs ls -t 2>/dev/null | head -n 40); do
+        head -n 1 "$f" | grep -qF "\"cwd\":$(json_s "$1")" || continue
+        line=$(grep '"token_count"' "$f" | grep '"last_token_usage"' | tail -n 1)
+        m=$(grep '"turn_context"' "$f" | tail -n 1); m=$(str_of model "$m")
+        [ -n "$line" ] || { ctx_json codex "" "" rollout "$m"; return; }
+        u=$(num_of total_tokens "$(after_key last_token_usage "$line")"); w=$(num_of model_context_window "$line")
+        ctx_json codex "$u" "$w" rollout "$m" "$( [ -n "$u" ] && [ -n "$w" ] && codex_pct "$u" "$w")"; return
+    done
+    ctx_json codex "" "" "" ""
+}
+omp_window() { # omp_window provider/model -> the window omp's model list has for it (needs sqlite3), else kit's guess
+    local db="$OMP_DIR/models.db" w=""
+    if [ -f "$db" ] && command -v sqlite3 >/dev/null 2>&1; then
+        case ${1%%/*}${1#*/} in *"'"*) ;; *)
+            w=$(sqlite3 -readonly "file:$db?mode=ro" "select json_extract(m.value,'\$.contextWindow') from model_cache, json_each(models) m where (provider_id = '${1%%/*}' or provider_id like '${1%%/*}:%') and json_extract(m.value,'\$.id') = '${1#*/}' limit 1" 2>/dev/null);;
+        esac
+    fi
+    case $w in ""|*[!0-9]*) model_window "${1#*/}";; *) echo "$w";; esac
+}
+omp_ctx() { # omp_ctx PID CWD
+    local f="" tty line cut u m j rm
+    tty=$(ps -o tty= -p "$1" 2>/dev/null | tr -d ' ' | sed 's|^/dev/||; s|/|-|g')
+    case $tty in ""|"?"|"??") ;; *) [ -f "$OMP_DIR/terminal-sessions/$tty" ] && f=$(sed -n 2p "$OMP_DIR/terminal-sessions/$tty");; esac
+    if [ -z "$f" ] || [ ! -f "$f" ]; then
+        f=""
+        [ -n "$2" ] && for f in $(find "$OMP_DIR/sessions" -name '*.jsonl' -mtime -7 2>/dev/null | xargs ls -t 2>/dev/null | head -n 40); do
+            head -n 3 "$f" | grep '"type":"session"' | grep -qF "\"cwd\":$(json_s "$2")" && break; f=""
+        done
+    fi
+    [ -n "$f" ] || { ctx_json omp "" "" "" ""; return; }
+    line=$(grep -n '"role":"assistant"' "$f" | grep -v '"stopReason":"aborted"' | grep -v '"stopReason":"error"' | tail -n 1)
+    cut=$(grep -n -E '"type":"(compaction|reset_boundary)"' "$f" | tail -n 1)
+    m=$(grep '"type":"model_change"' "$f" | tail -n 1); m=$(str_of model "$m")
+    [ -n "$line" ] && [ -z "$m" ] && m="$(str_of provider "$line")/$(str_of model "$line")"
+    w=$( [ -n "$m" ] && omp_window "$m")
+    if [ -n "$cut" ] && { [ -z "$line" ] || [ "${cut%%:*}" -gt "${line%%:*}" ]; }; then
+        ctx_json omp "$(num_of tokensAfter "$cut")" "$w" session "$m"; return
+    fi
+    [ -n "$line" ] || { ctx_json omp "" "$w" session "$m"; return; }
+    u=$(num_of promptTokens "$(after_key contextSnapshot "$line")")
+    if [ -z "$u" ]; then j=$(after_key usage "$line"); u=$(( $(num_of input "$j")0 / 10 + $(num_of cacheRead "$j")0 / 10 + $(num_of cacheWrite "$j")0 / 10 )); fi
+    rm=$(num_of historyRewriteTokensRemoved "$line"); [ -z "$rm" ] || u=$(( u > rm ? u - rm : 0 ))
+    # like omp's own footer: what came after that reply (tool results, your next message), about 4 bytes a token
+    u=$(( u + $(tail -n +$(( ${line%%:*} + 1 )) "$f" | grep '"type":"message"' | wc -c | tr -d ' ') / 4 ))
+    ctx_json omp "$u" "$w" session "$m"
+}
+cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] : how full that agent's context is (JSON)
+    local pid="" tool="" dir="" a f p
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --pid) pid=${2:-}; shift 2 || true;;
+            --tool) tool=${2:-}; shift 2 || true;;
+            --dir) dir=${2:-}; shift 2 || true;;
+            *) die "用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]";;
+        esac
+    done
+    case $pid in ""|*[!0-9]*) die "用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]";; esac
+    if [ -z "$tool" ]; then
+        a=$(proc_args "$pid"); set -- $a
+        case ${1##*/}:${2:-} in claude*|*:*claude*) tool=claude;; codex*|*:*codex*) tool=codex;; omp*|*:*omp*) tool=omp;; esac
+    fi
+    case $tool in claude-code) tool=claude;; esac
+    [ -n "$dir" ] || dir=$(proc_cwd "$pid")
+    # the kept numbers of Claude processes that are gone
+    for f in "$CTX_DIR"/claude-*.json; do
+        [ -f "$f" ] || continue; p=${f##*/claude-}; p=${p%.json}
+        [ "$p" = "$pid" ] || kill -0 "$p" 2>/dev/null || rm -f "$f"
+    done
+    case $tool in
+        claude) claude_ctx "$pid" "$dir";;
+        codex) codex_ctx "$dir";;
+        omp) omp_ctx "$pid" "$dir";;
+        *) ctx_json "" "" "" "" "";;
+    esac
 }
 
 # ---------- commands ----------
@@ -1531,11 +1716,12 @@ EOF
     while IFS="$TAB" read -r k n v; do
         [ "$k" = deny ] && printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"
         [ "$k" = hook ] && printf 'rmjson\thooks.%s\t%s\n' "$n" "$v" >> "$ops"
+        [ "$k" = statusline ] && [ "$(json_get "$CLAUDE_DIR/settings.json" statusLine | tr -d ' \t\r\n')" = "$(printf '%s' "$v" | tr -d ' \t\r\n')" ] && printf 'del\tstatusLine\n' >> "$ops"
     done < "${STATE:-/dev/null}" 2>/dev/null
     [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
     rm -f "$ops"
     [ $left = 0 ] || die "有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall"
-    rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps"
+    rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps" "$CTX_DIR"
     say "kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）"
     say "     來源的 clone 還留在 $KIT_SRC"
     if [ $self = 1 ]; then
@@ -2679,6 +2865,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
   kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
+  kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]   那個 agent 的 context 用了多少（JSON）
                                     用 kit 的裝法裝，太舊就升級（Herdr 的「安裝」按鈕就是這個）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
@@ -2733,6 +2920,8 @@ case ${1:-} in
     tools)     shift; cmd_tools "$@";;
     install-tool) shift; cmd_install_tool "$@";;
     install-deps) shift; cmd_install_deps "$@";;
+    context)   shift; cmd_context "$@";;
+    statusline) shift; cmd_statusline "$@";;
     collect)   shift; cmd_collect "$@";;
     outdated)  shift; cmd_outdated "$@";;
     herdr-panel) shift; cmd_herdr_panel "$@";;
