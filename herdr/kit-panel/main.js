@@ -225,7 +225,7 @@ export default class KitPanel extends View {
     this.newName.on("change", (_e, cx) => cx.notify());   // the path it will make follows the name
     this.newUrl = InputState.new({ placeholder: "網址，例如 https://github.com/作者/repo" });
     this.newUrl.on("submit", (_e, cx) => this.look(cx));
-    this.newUrl.on("change", (_e, cx) => { if (this.making?.look) { this.making.look = null; cx.notify(); } });
+    this.newUrl.on("change", (_e, cx) => { if (this.making?.look || this.making?.urlErr) { this.making.look = null; this.making.urlErr = null; cx.notify(); } });
     // load when there is nothing, it is a minute old, or someone marked it out of date (at: 0)
     const due = () => !this.loading && (!this.data || this.data.at === 0 || Date.now() - (this.data.at ?? 0) > STALE);
     if (due() || !this.data) this.refresh(cx);
@@ -623,6 +623,7 @@ export default class KitPanel extends View {
     box.child(h_flex().gap(6)
       .child(this.btn(t, z, "look", this.busy === "下載" ? "下載中…" : lk ? "重新下載" : "下載看看", { small: true, kind: lk ? undefined : "primary", off: Boolean(this.busy), on: (cx) => this.look(cx) }))
       .child(this.btn(t, z, "make-cancel", "取消", { small: true, on: (cx) => { this.making = null; cx.notify(); } })));
+    if (m.urlErr) box.child(note(m.urlErr, t.ansi1));
     if (!lk && this.busy === "下載") return box.child(this.working(t, z, "下載中：大的 repo 可能要一兩分鐘…"));
     if (!lk) return box.child(note("先下載看看：kit 只會列出找到什麼，還不會放進你的倉。", t.dim));
     const sk = lk.skills ?? [], i = Math.min(m.pick ?? 0, Math.max(sk.length - 1, 0)), x = sk[i];
@@ -663,7 +664,8 @@ export default class KitPanel extends View {
   // 下載看看: kit collect --look (only looks; nothing is written)
   look(cx) {
     const m = this.making, url = this.newUrl.value().trim();
-    if (!m || !url) return;
+    if (!m) return;
+    if (!url) { m.urlErr = "先在上面貼上網址（灰字只是例子）"; this.newUrl.focus(); cx.notify(); return; }
     if (!this.startBusy("下載", SHORT)) return;
     m.look = null; m.pick = 0;
     cx.notify();
