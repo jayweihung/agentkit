@@ -563,13 +563,13 @@ export default class KitPanel extends View {
         if (this.making) this.newName.focus();
         cx.notify();
       } })));
-    if (this.making) box.child(this.maker(t, z, d, kind));
     box.child(div().flex_none().px(10).pt(8).child(Input.new(this.input).h(30).px(8).rounded(6).border_1().border_color(t.border)
       .bg(t.background).text_size(z - 1).text_color(t.foreground)));
     const hit = (...xs) => !f || xs.some((x) => String(x ?? "").toLowerCase().includes(f));
     const rows = items.filter((i) => i.kind === kind && hit(i.name, i.description, i.source))
       .sort((a, b) => (b.changed - a.changed) || (b.new - a.new) || a.name.localeCompare(b.name));
     const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(2);
+    if (this.making) body.child(this.maker(t, z, d, kind));   // in the scroll area: a long one (a skill looked at) can be scrolled
     for (const i of rows) body.child(this.repoRow(t, z, i));
     if (!rows.length) body.child(div().p(8).text_color(t.muted).child(f ? "找不到符合的。" : "這一類還沒有東西，按「＋ 新增」寫一個。"));
     return box.child(body);
@@ -586,7 +586,7 @@ export default class KitPanel extends View {
     const chip = (id, label, on, click) => div().id(id).px(8).py(3).rounded(5).text_size(z - 1.5).cursor_pointer()
       .bg(on ? t.selected : t.surface).text_color(on ? t.foreground : t.muted).border_1().border_color(on ? t.accent : t.border)
       .on_mouse_down("left", stop).on_click((_e, cx) => click(cx)).child(label);
-    const box = v_flex().flex_none().mx(10).mt(8).p(10).gap(8).rounded(8).bg(t.raised)
+    const box = v_flex().flex_none().mb(8).p(10).gap(8).rounded(8).bg(t.raised)
       .child(div().font_semibold().child(`新增${what}`));
     if (kind === "skill") box.child(h_flex().gap(4)
       .child(chip("mode-write", "自己從頭寫", mode === "write", (cx) => { m.mode = "write"; this.newName.focus(); cx.notify(); }))
@@ -625,10 +625,12 @@ export default class KitPanel extends View {
     if (!x) return box.child(card.child(note("找不到 skill。", t.ansi1)));
     const scripts = String(x.scripts ?? "").split(" ").filter(Boolean);
     let block = null;
-    card.child(h_flex().gap(6).items_center()
-        .child(div().font_semibold().child(x.name))
-        .child(div().text_size(z - 2).text_color(t.dim).child(x.path === "." ? "（在 repo 最外層）" : `（在 ${x.path}/）`)))
-      .when(Boolean(x.description), (el) => el.child(note(x.description)))
+    const head = h_flex().gap(6).items_center()
+      .child(div().font_semibold().child(x.name))
+      .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(x.path === "." ? "（在 repo 最外層）" : `（在 ${x.path}/）`));
+    const desc = String(x.description ?? "");
+    card.child(head)
+      .when(Boolean(desc), (el) => el.child(note(desc.length > 180 ? desc.slice(0, 180).trimEnd() + " …" : desc)))
       .child(note(x.license ? `授權：${x.license}${x.license === "unknown" ? "（認不出種類，收進來後請自己看 LICENSE）" : x.license === "GPL" ? "（改了再發布要公開原始碼）" : ""}` : "沒有 LICENSE：不知道能不能用，kit 不收。",
         x.license ? t.foreground : t.ansi1));
     if (!x.license) block = "沒有 LICENSE";
@@ -644,8 +646,9 @@ export default class KitPanel extends View {
     else if (!lk.allowed) { block = block ?? "不在允許清單";
       card.child(note(`${lk.id} 不在 ${lk.source} 的允許清單。這是團隊的倉，要請維護者把它加進 kit.yaml 的 collect_sources 才能收。`, t.ansi1)); }
     card.child(note("收進來後：用 git diff 看收了哪些檔案 → 上排「送出…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。"));
-    if (!block) card.child(h_flex().child(this.btn(t, z, "collect", this.busy === "收" ? "收進來中…" : label,
-      { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.collect(x, allow, cx) })));
+    if (!block) head.child(this.btn(t, z, "collect", this.busy === "收" ? "收進來中…" : label,
+      { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.collect(x, allow, cx) }));
+    else head.child(div().text_size(z - 2).text_color(t.ansi1).child(`不能收：${block}`));
     return box.child(card);
   }
 
