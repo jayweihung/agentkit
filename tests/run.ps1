@@ -671,6 +671,50 @@ Add-Content -LiteralPath "$CO/kit.yaml" 'maintainers: [someone-else]'
 Kit collect foo
 Check 'only maintainers may collect' { $rc -ne 0 -and $out -match '維護者' }
 Pop-Location
+# no --path: the only SKILL.md in the repo; several: kit lists them; --look says it all as JSON without writing anything
+$U2 = Join-Path $T 'up-two'; $U1 = Join-Path $T 'up-one'
+foreach ($x in 'a', 'b', '.hidden/c', 'node_modules/d') { $n = Split-Path -Leaf $x; W "$U2/$x/SKILL.md" "---`nname: $n`ndescription: say `"$n`" now`n---`nx`n" }
+W "$U2/a/run.sh" "echo`n"; W "$U2/LICENSE" (ReadT "$UP/LICENSE")
+W "$U1/deep/one/SKILL.md" "---`nname: one`ndescription: o`n---`nx`n"; W "$U1/LICENSE" (ReadT "$UP/LICENSE")
+foreach ($r in $U2, $U1) { G -C $r init -q; G -C $r config user.name a; G -C $r config user.email a@a; G -C $r add -A; G -C $r commit -qm x }
+W "$CO/kit.yaml" "name: collector`ncollect_sources: [$(FileUrl $U2), $(FileUrl $U1)]`n"
+Remove-Item -Recurse -Force "$CO/skills/foo", "$CO/third_party.lock"
+Push-Location $CO
+Kit collect (FileUrl $U1)
+Check 'collect without --path finds the only SKILL.md' { $rc -eq 0 -and (Test-Path "$CO/skills/one/SKILL.md") -and (ReadT "$CO/third_party.lock") -match "(?m)^one`t[^`t]*`tdeep/one`t" }
+Kit collect (FileUrl $U2)
+Check 'collect without --path, several skills: lists them, collects nothing' { $rc -ne 0 -and $out -match '(?m)^\s+a\s*$' -and $out -match '(?m)^\s+b\s*$' -and $out -notmatch 'hidden' -and -not (Test-Path "$CO/skills/a") }
+$before = @(Get-ChildItem -Recurse -File $CO | ForEach-Object { "$($_.FullName) $($_.Length)" }) -join '|'
+Kit collect (FileUrl $U2) --look
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check 'collect --look: every skill, as JSON' { $rc -eq 0 -and $j.allowed -eq $true -and $j.can_allow -eq $false -and (@($j.skills | ForEach-Object { "$($_.path),$($_.name),$($_.description),$($_.license),$($_.scripts),$($_.exists)" }) -join ';') -eq 'a,a,say "a" now,MIT,run.sh,;b,b,say "b" now,MIT,,' }
+Check 'collect --look writes nothing' { $before -eq (@(Get-ChildItem -Recurse -File $CO | ForEach-Object { "$($_.FullName) $($_.Length)" }) -join '|') }
+Kit collect (FileUrl $UP) --look
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check 'collect --look on an author not on the list: says so (a team source: no --allow)' { $rc -eq 0 -and $j.allowed -eq $false -and $j.can_allow -eq $false -and $j.skills[0].path -eq 'skills/foo' }
+Kit collect (FileUrl $UP) --path skills/foo --allow
+Check 'collect --allow refused in a team source (no push: direct)' { $rc -ne 0 -and $out -match 'push: direct' -and -not (Test-Path "$CO/skills/foo") }
+W "$CO/kit.yaml" "name: collector`npush: direct`ncollect_sources: [$(FileUrl $U2)]   # authors`n"
+Kit collect (FileUrl $UP) --look
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check 'collect --look: your own source can add the author' { $j.can_allow -eq $true }
+Kit collect (FileUrl $UP)
+Check 'collect without --allow says how to add the author' { $rc -ne 0 -and $out -match '--allow' }
+Kit collect (FileUrl $UP) --allow
+$id = (FileUrl $UP) -replace '^file://', ''
+Check 'collect --allow: collected, the author added to the list on its line' { $rc -eq 0 -and (Test-Path "$CO/skills/foo/SKILL.md") -and (ReadT "$CO/kit.yaml").Contains("collect_sources: [$(FileUrl $U2), $id]   # authors") }
+Kit collect foo
+Check 'after --allow the author is on the list' { $rc -eq 0 }
+W "$CO/kit.yaml" "name: collector`npush: direct`ncollect_sources:`n    - $(FileUrl $U2)`n`n# more`nrecommended:`n  rules: []`n"
+Kit collect (FileUrl $U1) --allow
+$id1 = (FileUrl $U1) -replace '^file://', ''
+Check 'collect --allow: a - list gets a - line' { $l = (ReadT "$CO/kit.yaml") -split "`n"; $rc -eq 0 -and $l[3] -eq "    - $(FileUrl $U2)" -and $l[4] -eq "    - $id1" -and ($l -contains 'recommended:') }
+W "$CO/kit.yaml" "name: collector`npush: direct"
+Remove-Item -Recurse -Force "$CO/skills/one"
+Kit collect (FileUrl $U1) --allow
+Check 'collect --allow: no list yet gets one' { $l = @((ReadT "$CO/kit.yaml").TrimEnd("`n") -split "`n"); $rc -eq 0 -and $l[-1] -eq "collect_sources: [$id1]" -and ($l -contains 'push: direct') }
+Pop-Location
+
 
 # ---------- herdr-panel: the kit panel as a Herdr mod ----------
 $HH = Join-Path $T 'herdr-app'

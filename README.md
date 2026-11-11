@@ -90,6 +90,17 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
     kit check                     送出前檢查
     kit push [--to 來源] [--dry-run]   檢查後開分支、push、在 Gitea 開 PR
 
+收別人寫好的 skill（例如 GitHub 上的）：
+
+    kit collect <原作者 repo 網址> [--to 來源]   收進來（帶原作者的 LICENSE，記在 third_party.lock）
+    kit outdated                             看原作者有沒有新版
+    kit collect <名字>                        再收一次＝整份換成新版
+
+- 沒給 `--path` 時：repo 最外層有 `SKILL.md` 就收它；不然 repo 裡只有一個 `SKILL.md` 就收那個資料夾；有好幾個就列出來讓你用 `--path` 選。
+- 只收 `kit.yaml` 的 `collect_sources` 裡的作者。自己的來源（`push: direct`）可以加 `--allow`，收的時候一起把作者加進清單；團隊來源要維護者改清單。
+- `--look`：只下載來看、什麼都不寫，用 JSON 列出找到的 skill、授權、會執行的檔案（Herdr 面板的「下載看看」用它）。
+- 沒有 LICENSE 的不收；只收文字檔，不收捷徑、圖片和 `.github/` 這類資料夾。
+
 `kit push` 只送改過的 rule、skill、mcp、agent，只 push `kit/...` 分支，不動 main。
 來源的 `kit.yaml` 寫 `push: direct`（只有自己用的來源）時，改成直接 commit 到現在的分支、推到它所有的 remote，不開 PR。
 不寫就是 `push: pr`。團隊的來源一定要用 `push: pr`。

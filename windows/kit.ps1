@@ -2006,8 +2006,68 @@ function Lock-Set([string]$dir, [string]$line) {
     [Array]::Sort($rows, [StringComparer]::Ordinal)
     Write-Text (Join-Path $dir 'third_party.lock') ($LockHead + "`n" + ($rows -join "`n") + "`n")
 }
+function Skill-Dirs([string]$repo) { # the folders that hold a SKILL.md, relative ("." = the top); not inside dot folders or node_modules
+    $out = @()
+    foreach ($e in @(Walk-Tree $repo)) {
+        if ($e.PSIsContainer -or $e.Name -cne 'SKILL.md') { continue }
+        $rel = Rel-Path $repo $e.FullName
+        if ("/$rel" -match '/(\.|node_modules/)') { continue }
+        $d = $rel -replace '/?SKILL\.md$', ''
+        $out += $(if ($d) { $d } else { '.' })
+    }
+    [string[]]$a = @($out); [Array]::Sort($a, [StringComparer]::Ordinal); $a
+}
+function Collect-License([string]$src, [string]$repo) { # the skill's own LICENSE, else the repo's ($null: none)
+    foreach ($d in @($src, $repo)) {
+        $l = @(Get-ChildItem -LiteralPath $d -File -Force | Where-Object { $_.Name -cmatch '^(LICENSE|LICENCE|COPYING)' } | Sort-Object Name | Select-Object -First 1 | ForEach-Object { $_.FullName })[0]
+        if ($l) { return $l }
+    }
+    $null
+}
+function Collect-Scan([string]$src, [string]$outDir) { # what collect takes (text files, no links, no dot folders); copies into OUTDIR when given
+    $scripts = @(); $skipped = 0
+    foreach ($e in @(Walk-Tree $src)) {
+        $rel = Rel-Path $src $e.FullName
+        if ("/$rel" -match '/(\.|node_modules(/|$))') { continue }   # .github/, .claude-plugin/ ...: for other tools, not the skill
+        if (Is-Link $e) { $skipped++; if ($outDir) { Warn "跳過捷徑 $rel" }; continue }
+        if ($e.PSIsContainer) { continue }
+        if ($e.Length -gt 0 -and (Is-Binary $e.FullName)) { $skipped++; if ($outDir) { Warn "跳過非文字檔 $rel" }; continue }
+        if ($outDir) { $t = Join-Path $outDir $rel; Ensure-Dir (Split-Path -Parent $t); Copy-Item -LiteralPath $e.FullName -Destination $t }
+        if ($rel -match '\.(sh|py|js|mjs|cjs|ts|ps1|rb|pl|bat|cmd)$') { $scripts += $rel }
+    }
+    [string[]]$s = @($scripts); [Array]::Sort($s, [StringComparer]::Ordinal)
+    @{ scripts = ($s -join ' '); skipped = $skipped }
+}
+function Yaml-ListAdd([string]$f, [string]$k, [string]$v) { # VALUE goes into the list KEY ([a, b] on its line, or "- x" lines under it); no KEY: a new line KEY: [VALUE]
+    $text = if (Test-Path -LiteralPath $f) { Read-Text $f } else { '' }
+    $nl = if ($text -match "`r`n") { "`r`n" } else { "`n" }
+    $lines = [System.Collections.Generic.List[string]]@($text -split "`r?`n")
+    if ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
+    $at = -1; for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i].StartsWith("${k}:")) { $at = $i; break } }
+    $bad = "看不懂 $f 的 ${k}，請自己把 $v 加進去"
+    if ($at -lt 0) { $lines.Add("${k}: [$v]") }
+    else {
+        $rest = $lines[$at].Substring($k.Length + 1)
+        if ($rest -match '^\s*\[') {
+            $a = $lines[$at].IndexOf('['); $b = $lines[$at].IndexOf(']')
+            if ($b -lt 0) { Die $bad }
+            $inner = $lines[$at].Substring($a + 1, $b - $a - 1)
+            $lines[$at] = $lines[$at].Substring(0, $a + 1) + $(if ($inner -match '^\s*$') { $v } else { "$inner, $v" }) + $lines[$at].Substring($b)
+        } elseif ($rest -match '^\s*(#.*)?$') {
+            $ind = '  '; $last = $at
+            for ($i = $at + 1; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match '^(\s*)-\s') { $ind = $Matches[1]; $last = $i }
+                elseif ($lines[$i] -match '^\s*(#.*)?$') { continue }
+                else { break }
+            }
+            $lines.Insert($last + 1, "$ind- $v")
+        } else { Die $bad }
+    }
+    Write-Text $f (($lines -join $nl) + $nl)
+    if (@(YGet $f $k) -notcontains $v) { Die "加進 $f 的 $k 沒成功，請自己把 $v 加進去" }
+}
 function Cmd-Collect($rest) {
-    $arg = ''; $path = ''; $name = ''; $ref = ''; $to = ''; $force = $false
+    $arg = ''; $path = ''; $name = ''; $ref = ''; $to = ''; $force = $false; $allow = $false; $look = $false
     $r = @($rest | Where-Object { $_ })
     for ($i = 0; $i -lt $r.Count; $i++) {
         switch -CaseSensitive ($r[$i]) {
@@ -2016,61 +2076,97 @@ function Cmd-Collect($rest) {
             '--ref' { if ($i + 1 -ge $r.Count) { Die '--ref 後面要接分支或 tag' }; $i++; $ref = $r[$i] }
             '--to' { if ($i + 1 -ge $r.Count) { Die '--to 後面要接來源' }; $i++; $to = $r[$i] }
             '--force' { $force = $true }
+            '--allow' { $allow = $true }
+            '--look' { $look = $true }
             default { if ($r[$i].StartsWith('-')) { Die "不認得 $($r[$i])" }; if ($arg) { Die "多了一個參數：$($r[$i])" }; $arg = $r[$i] }
         }
     }
-    if (-not $arg) { Die '用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag]，或 kit collect <名字>（再收一次）' }
+    if (-not $arg) { Die '用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag] [--allow]，或 kit collect <名字>（再收一次）' }
     $dir = Target-Dir $to
     Check-Maintainer $dir
     if (Is-Url $arg) { $url = $arg }
     else {
         $line = Lock-Get $dir $arg; if (-not $line) { Die "$(Split-Path -Leaf $dir) 的 third_party.lock 裡沒有 ${arg}（第一次收要給網址）" }
         $f = $line.Split("`t"); $name = $arg; $url = $f[1]
-        if (-not $path -and $f[2] -ne '.') { $path = $f[2] }
+        if (-not $path) { $path = $f[2] }
         if (-not $ref -and $f[3] -ne '-') { $ref = $f[3] }
     }
-    if (-not (Collect-Allowed $url $dir)) { Die "$(Url-Id $url) 不在 collect_sources（$(Split-Path -Leaf $dir)/kit.yaml），不能收" }
-    $real = "$(& git ls-remote --get-url $url 2>$null)"
-    if ($real -and $real -ne $url -and -not (Collect-Allowed $real $dir)) { Die "git 設定把 $url 改到 ${real}，不在 collect_sources" }
+    if ($path -eq '.') { $path = '' }
+    # collect_sources: who may be collected from. --allow adds this author to it, only in your own source (push: direct);
+    # a team source's list is the maintainers' to change. --look only looks: it says whether the author is on the list.
+    $ok = Collect-Allowed $url $dir
+    $real = "$(& git ls-remote --get-url $url 2>$null)".Trim()
+    $moved = $real -and $real -ne $url
+    if ($moved -and -not (Collect-Allowed $real $dir)) {
+        if (-not $look) { Die "git 設定把 $url 改到 ${real}，不在 collect_sources" }
+        $ok = $false
+    }
+    $own = (Push-Mode $dir) -eq 'direct'
+    $add = $false
+    if (-not $ok -and -not $look) {
+        if (-not $allow) {
+            if ($own) { Die "$(Url-Id $url) 不在 collect_sources（$(Split-Path -Leaf $dir)/kit.yaml），不能收；確定要收就加 --allow，一起加進清單" }
+            Die "$(Url-Id $url) 不在 collect_sources（$(Split-Path -Leaf $dir)/kit.yaml），不能收"
+        }
+        if (-not $own) { Die "--allow 只能用在你自己的來源（kit.yaml 寫 push: direct 的）；團隊來源請維護者把 $(Url-Id $url) 加進 kit.yaml 的 collect_sources" }
+        if ($moved) { Die "git 設定把 $url 改到 ${real}：--allow 不幫這種網址加清單" }
+        $add = $true
+    }
     $path = $path.Replace('\', '/').Trim('/')
     if ("/$path/" -match '/\.\.?/') { Die '--path 不能有 .. 或 .' }
 
     $tmp = New-TempDir 'kit-collect.'
     try {
         $repo = Join-Path $tmp 'repo'
-        Say "從 $(Url-Id $url) 下載$(if ($ref) { "（$ref）" })…"
+        if (-not $look) { Say "從 $(Url-Id $url) 下載$(if ($ref) { "（$ref）" })…" }
         $ga = @('clone', '-q', '--depth', '1', '--no-recurse-submodules'); if ($ref) { $ga += @('--branch', $ref) }
         $out = Git-Safe @($ga + @($url, $repo))
         if ($LASTEXITCODE -ne 0) { foreach ($l in @($out)) { Warn "  $l" }; Die "沒辦法下載 $url" }
         $sha = "$(& git -C $repo rev-parse HEAD)".Trim()
         $repo = Full-Path $repo
+        # which folder: --path, else the top if it has a SKILL.md, else the only folder in the repo that has one
+        $found = @(if ($path) { $path } elseif (Test-Path -LiteralPath (Join-Path $repo 'SKILL.md') -PathType Leaf) { '.' } else { Skill-Dirs $repo })
+        if ($found.Count -eq 0) { Die "$(Url-Id $url) 裡找不到 SKILL.md" }
+        if ($look) { # what kit would collect, as JSON (the Herdr panel shows it before you collect)
+            $sk = @()
+            foreach ($d in $found) {
+                $src = if ($d -eq '.') { $repo } else { Join-Path $repo $d }
+                if (-not (Test-Path -LiteralPath (Join-Path $src 'SKILL.md') -PathType Leaf)) { Die "$(Url-Id $url)/$d 裡沒有 SKILL.md" }
+                $fm = $null; try { $fm = Yaml-Lines (Join-Path $src 'SKILL.md') -Frontmatter } catch { $fm = @() }
+                $n = $name; if (-not $n) { $n = "$(@(YGet-From $fm 'name')[0])" }
+                if (-not $n) { $n = if ($d -eq '.') { Split-Path -Leaf (Url-Id $url) } else { Split-Path -Leaf $d } }
+                $desc = "$(@(YGet-From $fm 'description')[0])"
+                $lic = Collect-License $src $repo; $kind = if ($lic) { License-Kind $lic } else { '' }
+                $sc = Collect-Scan $src $null
+                $dst = Join-Path (Join-Path $dir 'skills') $n
+                $ex = if (Test-Path -LiteralPath $dst) { if (Lock-Get $dir $n) { 'collected' } else { 'own' } } else { '' }
+                $sk += ('{"path": ' + (Json-Str $d) + ', "name": ' + (Json-Str $n) + ', "valid": ' + $(if (Valid-Name $n) { 'true' } else { 'false' }) +
+                    ', "description": ' + (Json-Str $desc) + ', "license": ' + (Json-Str $kind) + ', "scripts": ' + (Json-Str $sc.scripts) +
+                    ', "skipped": ' + $sc.skipped + ', "exists": ' + (Json-Str $ex) + ', "dest": ' + (Json-Str ((Join-Path $dst 'SKILL.md').Replace('\', '/'))) + '}')
+            }
+            $canAllow = (-not $ok) -and $own -and -not $moved
+            [Console]::Out.Write('{"source": ' + (Json-Str (Split-Path -Leaf $dir)) + ', "dir": ' + (Json-Str $dir.Replace('\', '/')) + ', "push": ' + (Json-Str (Push-Mode $dir)) +
+                ', "url": ' + (Json-Str $url) + ', "id": ' + (Json-Str (Url-Id $url)) + ', "commit": ' + (Json-Str $sha) +
+                ', "allowed": ' + $(if ($ok) { 'true' } else { 'false' }) + ', "can_allow": ' + $(if ($canAllow) { 'true' } else { 'false' }) +
+                ', "skills": [' + "`n  " + ($sk -join ",`n  ") + "`n]}`n")
+            return
+        }
+        if ($found.Count -gt 1) { Die ("$(Url-Id $url) 裡有好幾個 skill，用 --path 選一個：`n" + (($found | ForEach-Object { "  $_" }) -join "`n")) }
+        $path = if ($found[0] -eq '.') { '' } else { $found[0] }
         $src = if ($path) { Join-Path $repo $path } else { $repo }
         if (Test-Path -LiteralPath $src -PathType Container) { $src = Full-Path $src }
         if (-not ($src + [IO.Path]::DirectorySeparatorChar).StartsWith($repo + [IO.Path]::DirectorySeparatorChar) -and $src -ne $repo) { Die '--path 要在 repo 裡面' }
         if (-not (Test-Path -LiteralPath (Join-Path $src 'SKILL.md') -PathType Leaf)) { Die "$(Url-Id $url)$(if ($path) { "/$path" }) 裡沒有 SKILL.md（用 --path 指出 skill 的資料夾）" }
         if (-not $name) { try { $name = @(YGet-From (Yaml-Lines (Join-Path $src 'SKILL.md') -Frontmatter) 'name')[0] } catch { $name = '' } }
-        if (-not $name) { $name = Split-Path -Leaf $src }
+        if (-not $name) { $name = if ($path) { Split-Path -Leaf $src } else { Split-Path -Leaf (Url-Id $url) } }
         if (-not (Valid-Name $name)) { Die "名字 $name 不行（只能小寫英文、數字和 -），用 --name 給一個" }
         $dst = Join-Path (Join-Path $dir 'skills') $name
         if ((Test-Path -LiteralPath $dst) -and -not (Lock-Get $dir $name) -and -not $force) { Die "$(Split-Path -Leaf $dir) 已經有 skill:${name}，而且不是 collect 收的（要整份換掉加 --force，或用 --name 換名字）" }
-        $lic = $null
-        foreach ($d in @($src, $repo)) {
-            if ($lic) { break }
-            $lic = @(Get-ChildItem -LiteralPath $d -File -Force | Where-Object { $_.Name -cmatch '^(LICENSE|LICENCE|COPYING)' } | Sort-Object Name | Select-Object -First 1 | ForEach-Object { $_.FullName })[0]
-        }
+        $lic = Collect-License $src $repo
         if (-not $lic) { Die "$(Url-Id $url) 沒有 LICENSE，不知道能不能用，不收" }
         $kind = License-Kind $lic
         $outDir = Join-Path $tmp 'out'; Ensure-Dir $outDir
-        $scripts = @()
-        foreach ($e in @(Walk-Tree $src)) {
-            $rel = Rel-Path $src $e.FullName
-            if ("/$rel" -match '/\.') { continue }   # .github/, .claude-plugin/ ...: for other tools, not the skill
-            if (Is-Link $e) { Warn "跳過捷徑 $rel"; continue }
-            if ($e.PSIsContainer) { continue }
-            if ($e.Length -gt 0 -and (Is-Binary $e.FullName)) { Warn "跳過非文字檔 $rel"; continue }
-            $t = Join-Path $outDir $rel; Ensure-Dir (Split-Path -Parent $t); Copy-Item -LiteralPath $e.FullName -Destination $t
-            if ($rel -match '\.(sh|py|js|mjs|cjs|ts|ps1|rb|pl|bat|cmd)$') { $scripts += $rel }
-        }
+        $sc = Collect-Scan $src $outDir
         $licName = Split-Path -Leaf $lic
         if (-not (Test-Path -LiteralPath (Join-Path $outDir $licName))) { Copy-Item -LiteralPath $lic -Destination (Join-Path $outDir $licName) }
         if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }
@@ -2079,13 +2175,15 @@ function Cmd-Collect($rest) {
     } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
     $p2 = if ($path) { $path } else { '.' }; $r2 = if ($ref) { $ref } else { '-' }
     Lock-Set $dir ((@($name, $url, $p2, $r2, $sha, $kind, (Get-Date -Format 'yyyy-MM-dd'))) -join "`t")
+    if ($add) { Yaml-ListAdd (Join-Path $dir 'kit.yaml') 'collect_sources' (Url-Id $url); Say "已把 $(Url-Id $url) 加進 $(Split-Path -Leaf $dir)/kit.yaml 的 collect_sources" }
     Say "已收 skill:$name ← $(Url-Id $url)$(if ($path) { "/$path" }) @ $($sha.Substring(0, 12))（授權 $kind）"
     if ($kind -eq 'unknown') { Warn "認不出授權種類，請自己看 skills/$name/$licName" }
     if ($kind -eq 'GPL') { Warn 'GPL 類授權：改了再發布要公開原始碼，請確認可以用' }
-    if ($scripts.Count -gt 0) { Warn "這個 skill 有會執行的檔案，送出前請看過： $($scripts -join ' ')" }
+    if ($sc.scripts) { Warn "這個 skill 有會執行的檔案，送出前請看過： $($sc.scripts)" }
     $script:Quiet2 = $true
     if (-not (Check-Dirs @($dir) $false)) { Warn 'kit check 有問題，送出前請先打  kit check  看看' }
-    Say '下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR'
+    if ($own) { Say "下一步：用 git diff 看收進來的檔案；沒問題就  kit push  送出，要用它就  kit add skill $name" }
+    else { Say '下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR' }
 }
 function Cmd-Outdated($rest) {
     $to = ''; $r = @($rest | Where-Object { $_ })
@@ -2353,7 +2451,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
 
 維護者用（只收 kit.yaml 的 collect_sources 列的原作者）：
-  kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支]   收別人的 skill（保留 LICENSE）
+  kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支] [--allow]   收別人的 skill（保留 LICENSE）
+                                    （沒給 --path：repo 裡只有一個 SKILL.md 就用它；--allow：自己的來源一起加進 collect_sources）
   kit collect <名字>                再收一次＝整份換成原作者的新版
   kit outdated                      看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）

@@ -218,6 +218,10 @@ export default class KitPanel extends View {
     this.input.on("change", (_e, cx) => { this.filter = this.input.value().trim().toLowerCase(); cx.notify(); });
     this.newName = InputState.new({ placeholder: "名字：小寫英文、數字和 -" });
     this.newName.on("submit", (_e, cx) => this.make(cx));
+    this.newName.on("change", (_e, cx) => cx.notify());   // the path it will make follows the name
+    this.newUrl = InputState.new({ placeholder: "網址，例如 https://github.com/作者/repo" });
+    this.newUrl.on("submit", (_e, cx) => this.look(cx));
+    this.newUrl.on("change", (_e, cx) => { if (this.making?.look) { this.making.look = null; cx.notify(); } });
     // load when there is nothing, it is a minute old, or someone marked it out of date (at: 0)
     const due = () => !this.loading && (!this.data || this.data.at === 0 || Date.now() - (this.data.at ?? 0) > STALE);
     if (due() || !this.data) this.refresh(cx);
@@ -555,7 +559,7 @@ export default class KitPanel extends View {
         .when(ch > 0, (el) => el.child(div().size(6).rounded(3).bg(t.working)));
     })).child(div().flex_1())
       .child(this.btn(t, z, "new", "＋ 新增", { small: true, on: (cx) => {
-        this.making = this.making ? null : { source: (d.sources ?? [])[0]?.name ?? null };
+        this.making = this.making ? null : { source: (d.sources ?? [])[0]?.name ?? null, mode: "write", look: null, pick: 0 };
         if (this.making) this.newName.focus();
         cx.notify();
       } })));
@@ -571,23 +575,118 @@ export default class KitPanel extends View {
     return box.child(body);
   }
 
-  // + 新增: a name and which source it goes in, then kit new writes the starting file and the editor opens it
+  // + 新增: write a new one from scratch (a name, which source; kit new makes the file and the editor opens it),
+  // or, for skills, collect someone else's from a URL (kit collect --look shows what it would take, then kit collect).
+  // Every step says where the file goes and what comes next.
   maker(t, z, d, kind) {
-    const srcs = d.sources ?? [], cur = this.making.source;
+    const srcs = d.sources ?? [], m = this.making, cur = m.source, src = srcs.find((x) => x.name === cur);
     const what = { rule: "規則", skill: "skill", mcp: "MCP" }[kind];
-    return v_flex().flex_none().mx(10).mt(8).p(10).gap(8).rounded(8).bg(t.raised)
-      .child(div().font_semibold().child(`新的${what}`))
-      .child(Input.new(this.newName).h(30).px(8).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(z - 1).text_color(t.foreground))
-      .when(srcs.length > 1, (el) => el.child(h_flex().gap(4).items_center().flex_wrap()
-        .child(div().text_size(z - 1.5).text_color(t.dim).child("放在："))
-        .children(srcs.map((x) => div().id(`to-${x.name}`).px(8).py(2).rounded(5).text_size(z - 1.5).cursor_pointer()
-          .bg(x.name === cur ? t.selected : t.surface).text_color(x.name === cur ? t.foreground : t.muted)
-          .border_1().border_color(x.name === cur ? t.accent : t.border)
-          .on_mouse_down("left", stop).on_click((_e, cx) => { this.making.source = x.name; cx.notify(); })
-          .child(PUSH_KIND[x.push] ? `${x.name}（${PUSH_KIND[x.push]}）` : x.name)))))
-      .child(h_flex().gap(6)
-        .child(this.btn(t, z, "make", "建立", { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.make(cx) }))
+    const mode = kind === "skill" ? m.mode : "write";
+    const note = (text, color) => div().text_size(z - 1.5).text_color(color ?? t.muted).child(text);
+    const chip = (id, label, on, click) => div().id(id).px(8).py(3).rounded(5).text_size(z - 1.5).cursor_pointer()
+      .bg(on ? t.selected : t.surface).text_color(on ? t.foreground : t.muted).border_1().border_color(on ? t.accent : t.border)
+      .on_mouse_down("left", stop).on_click((_e, cx) => click(cx)).child(label);
+    const box = v_flex().flex_none().mx(10).mt(8).p(10).gap(8).rounded(8).bg(t.raised)
+      .child(div().font_semibold().child(`新增${what}`));
+    if (kind === "skill") box.child(h_flex().gap(4)
+      .child(chip("mode-write", "自己從頭寫", mode === "write", (cx) => { m.mode = "write"; this.newName.focus(); cx.notify(); }))
+      .child(chip("mode-collect", "從網址收別人的", mode === "collect", (cx) => { m.mode = "collect"; this.newUrl.focus(); cx.notify(); })));
+    if (mode === "collect") box.child(v_flex().gap(3).child(note("網址（GitHub 之類的 repo）", t.dim))
+      .child(Input.new(this.newUrl).h(30).px(8).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(z - 1).text_color(t.foreground))
+      .child(note("kit 會下載這個 repo，找出裡面的 skill（有 SKILL.md 的資料夾），連同原作者的 LICENSE 收進你的倉。", t.dim)));
+    else {
+      const hint = { skill: "之後在 Claude 打 /名字、Codex 打 $名字 叫它", rule: "只是用來認它的名字；規則的內容每次都會給 agent", mcp: "MCP server 的名字" }[kind];
+      box.child(v_flex().gap(3).child(note("名字（小寫英文、數字和 -）", t.dim))
+        .child(Input.new(this.newName).h(30).px(8).rounded(6).border_1().border_color(t.accent).bg(t.background).text_size(z - 1).text_color(t.foreground))
+        .child(note(hint, t.dim)));
+    }
+    if (srcs.length) box.child(v_flex().gap(4)
+      .child(note("放在哪個倉", t.dim))
+      .child(h_flex().gap(4).flex_wrap().children(srcs.map((x) => chip(`to-${x.name}`, PUSH_KIND[x.push] ? `${x.name}（${PUSH_KIND[x.push]}）` : x.name,
+        x.name === cur, (cx) => { m.source = x.name; m.look = null; cx.notify(); })))));
+    if (mode === "write") {
+      const name = this.newName.value().trim() || "名字";
+      const rel = { rule: `rules/${name}.md`, skill: `skills/${name}/SKILL.md`, mcp: `mcp/${name}.yaml` }[kind];
+      if (src?.dir) box.child(note(`會建立 ${shortDir(src.dir)}/${rel}，然後在這裡打開讓你寫。`, t.foreground));
+      box.child(note(`寫完存檔 → 上排「送出…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。`));
+      return box.child(h_flex().gap(6)
+        .child(this.btn(t, z, "make", "建立並打開", { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.make(cx) }))
         .child(this.btn(t, z, "make-cancel", "取消", { small: true, on: (cx) => { this.making = null; cx.notify(); } })));
+    }
+    const lk = m.look;
+    box.child(h_flex().gap(6)
+      .child(this.btn(t, z, "look", this.busy === "下載" ? "下載中…" : lk ? "重新下載" : "下載看看", { small: true, kind: lk ? undefined : "primary", off: Boolean(this.busy), on: (cx) => this.look(cx) }))
+      .child(this.btn(t, z, "make-cancel", "取消", { small: true, on: (cx) => { this.making = null; cx.notify(); } })));
+    if (!lk) return box.child(note("先下載看看：kit 只會列出找到什麼，還不會放進你的倉。", t.dim));
+    const sk = lk.skills ?? [], i = Math.min(m.pick ?? 0, Math.max(sk.length - 1, 0)), x = sk[i];
+    const card = v_flex().gap(5).p(8).rounded(6).bg(t.background);
+    if (sk.length > 1) card.child(note(`這個 repo 有 ${sk.length} 個 skill，選一個：`, t.foreground))
+      .child(h_flex().gap(4).flex_wrap().children(sk.map((y, j) => chip(`pick-${j}`, y.name, j === i, (cx) => { m.pick = j; cx.notify(); }))));
+    if (!x) return box.child(card.child(note("找不到 skill。", t.ansi1)));
+    const scripts = String(x.scripts ?? "").split(" ").filter(Boolean);
+    let block = null;
+    card.child(h_flex().gap(6).items_center()
+        .child(div().font_semibold().child(x.name))
+        .child(div().text_size(z - 2).text_color(t.dim).child(x.path === "." ? "（在 repo 最外層）" : `（在 ${x.path}/）`)))
+      .when(Boolean(x.description), (el) => el.child(note(x.description)))
+      .child(note(x.license ? `授權：${x.license}${x.license === "unknown" ? "（認不出種類，收進來後請自己看 LICENSE）" : x.license === "GPL" ? "（改了再發布要公開原始碼）" : ""}` : "沒有 LICENSE：不知道能不能用，kit 不收。",
+        x.license ? t.foreground : t.ansi1));
+    if (!x.license) block = "沒有 LICENSE";
+    if (scripts.length) card.child(note(`⚠ 有 ${scripts.length} 個會執行的程式（${scripts.slice(0, 3).join("、")}${scripts.length > 3 ? " …" : ""}），送出前請看過。`, t.working));
+    if (x.skipped) card.child(note(`${x.skipped} 個圖片、捷徑之類的非文字檔不會收。`, t.dim));
+    if (!x.valid) { block = "名字不行"; card.child(note(`名字 ${x.name} 不能用（只能小寫英文、數字和 -）：請用指令 kit collect … --name 換名字。`, t.ansi1)); }
+    if (x.exists === "own") { block = "已經有同名的"; card.child(note(`${lk.source} 已經有你自己的 ${x.name}，不會蓋掉它。要收請用指令 kit collect … --name 換名字。`, t.ansi1)); }
+    if (x.exists === "collected") card.child(note(`之前收過 ${x.name}：會整份換成這次下載的版本。`, t.working));
+    card.child(note(`會放到 ${shortDir(slash(x.dest).replace(/\/SKILL\.md$/, "/"))}`, t.foreground));
+    let label = "收進來", allow = false;
+    if (!lk.allowed && lk.can_allow) { allow = true; label = "加進清單並收進來";
+      card.child(note(`${lk.id} 還不在 ${lk.source} 的允許清單（kit.yaml 的 collect_sources）。按下去會一起加進清單，之後這個作者的東西就能收。`, t.working)); }
+    else if (!lk.allowed) { block = block ?? "不在允許清單";
+      card.child(note(`${lk.id} 不在 ${lk.source} 的允許清單。這是團隊的倉，要請維護者把它加進 kit.yaml 的 collect_sources 才能收。`, t.ansi1)); }
+    card.child(note("收進來後：用 git diff 看收了哪些檔案 → 上排「送出…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。"));
+    if (!block) card.child(h_flex().child(this.btn(t, z, "collect", this.busy === "收" ? "收進來中…" : label,
+      { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.collect(x, allow, cx) })));
+    return box.child(card);
+  }
+
+  // 下載看看: kit collect --look (only looks; nothing is written)
+  look(cx) {
+    const m = this.making, url = this.newUrl.value().trim();
+    if (!m || !url) return;
+    if (!this.startBusy("下載", SHORT)) return;
+    m.look = null; m.pick = 0;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const r = await kit(["collect", url, "--look", ...(m.source ? ["--to", m.source] : [])], SHORT);
+        if (r.code !== 0) { this.setMsg({ ok: false, label: "下載看看", text: clean(r.err || r.out), at: Date.now() }); return; }
+        try { m.look = JSON.parse(r.out); this.setMsg(null); }
+        catch { this.setMsg({ ok: false, label: "下載看看", text: "kit collect --look 的輸出讀不懂（kit 太舊？請打 kit self-update）", at: Date.now() }); }
+      } finally { this.endBusy(); cx.notify(); }
+    });
+  }
+
+  // 收進來: kit collect at the commit just looked at's URL, the folder picked, --allow when it was offered; then open it
+  collect(x, allow, cx) {
+    const m = this.making, lk = m?.look;
+    if (!lk) return;
+    if (!this.startBusy("收", LONG)) return;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const r = await kit(["collect", lk.url, "--to", lk.source, "--path", x.path, ...(allow ? ["--allow"] : [])], LONG);
+        if (r.code !== 0) { this.setMsg({ ok: false, label: "收進來", text: clean(r.err || r.out), at: Date.now() }); return; }
+        this.making = null;
+        this.newUrl.set_value("");
+        this.setMsg({ ok: true, label: "收進來", text: clean([r.out, r.err].filter(Boolean).join("\n")), at: Date.now() });
+        const seq = (shared(LOAD)?.seq ?? 0) + 1;
+        setShared(LOAD, { seq, at: Date.now(), done: false });
+        const d = await loadRepo();
+        if ((shared(LOAD)?.seq ?? 0) === seq) { setShared(DATA, d); setShared(LOAD, { seq, at: Date.now(), done: true }); }
+        const it = (d.items ?? []).find((i) => i.kind === "skill" && i.name === x.name);
+        if (it) await this.openItem(it, cx);
+      } finally { this.endBusy(); cx.notify(); }
+    });
   }
 
   make(cx) {

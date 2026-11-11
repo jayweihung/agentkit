@@ -1704,8 +1704,63 @@ real_url_ok() { # git config insteadOf can send a URL elsewhere: the real one mu
     [ -z "$real" ] || [ "$real" = "$1" ] || collect_allowed "$real" "$2" || die "git 設定把 $1 改到 ${real}，不在 collect_sources"
 }
 
-cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to SOURCE] [--force]
-    local arg="" path="" name="" ref="" to="" force=""
+skill_dirs() { # skill_dirs REPO : the folders that hold a SKILL.md, relative ("." = the top); not inside dot folders or node_modules
+    ( cd "$1" && find . \( -name '.?*' -o -name node_modules \) -prune -o -type f -name SKILL.md -print ) |
+        sed 's#^\./##; s#/\{0,1\}SKILL\.md$##; s#^$#.#' | LC_ALL=C sort
+}
+collect_license() { # collect_license SRC REPO -> the skill's own LICENSE, else the repo's (empty: none)
+    local f
+    for f in "$1"/LICENSE* "$1"/LICENCE* "$1"/COPYING* "$2"/LICENSE* "$2"/LICENCE* "$2"/COPYING*; do [ -f "$f" ] && { printf '%s\n' "$f"; return 0; }; done
+    return 0
+}
+collect_scan() { # collect_scan SRC [OUT] : what collect takes (text files, no links, no dot folders); copies into OUT when given
+    # sets COL_SCRIPTS (files that run) and COL_SKIPPED (how many were left out)
+    local src=$1 out=${2:-} f rel
+    COL_SCRIPTS=""; COL_SKIPPED=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        rel=${f#"$src"/}
+        case /$rel in */.*) continue;; esac       # .github/, .claude-plugin/ ...: for other tools, not the skill
+        if [ -L "$f" ]; then COL_SKIPPED=$((COL_SKIPPED+1)); [ -z "$out" ] || warn "跳過捷徑 $rel"; continue; fi
+        if [ -s "$f" ] && ! LC_ALL=C grep -qI . "$f"; then COL_SKIPPED=$((COL_SKIPPED+1)); [ -z "$out" ] || warn "跳過非文字檔 $rel"; continue; fi
+        [ -z "$out" ] || { mkdir -p "$(dirname "$out/$rel")"; cp "$f" "$out/$rel"; }
+        case $rel in *.sh|*.py|*.js|*.mjs|*.cjs|*.ts|*.ps1|*.rb|*.pl|*.bat|*.cmd) COL_SCRIPTS="$COL_SCRIPTS $rel";; *) [ -x "$f" ] && COL_SCRIPTS="$COL_SCRIPTS $rel";; esac
+    done <<EOT
+$(cd "$src" && find "$(pwd -P)" \( -name .git -o -name node_modules \) -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort)
+EOT
+    COL_SCRIPTS=${COL_SCRIPTS# }
+}
+yaml_list_add() { # yaml_list_add FILE KEY VALUE : VALUE goes into the list KEY ([a, b] on its line, or "- x" lines under it); no KEY: a new line KEY: [VALUE]
+    local f=$1 k=$2 v=$3 t="$1.tmp.$$"
+    if ! grep -q "^$k:" "$f" 2>/dev/null; then
+        { [ -f "$f" ] && cat "$f"; [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ] && echo; printf '%s: [%s]\n' "$k" "$v"; } > "$t"
+    else
+        awk -v k="$k" -v v="$v" '
+            function cr(l) { return (l ~ /\r$/) ? "\r" : "" }
+            function item() { print ind "- " v eol; for (j = 1; j <= nb; j++) print hold[j]; nb = 0; st = 2 }
+            st == 1 && /^[ \t]*-[ \t]/ { for (j = 1; j <= nb; j++) print hold[j]; nb = 0; ind = $0; sub(/-.*/, "", ind); print; next }
+            st == 1 && /^[ \t]*(#.*)?\r?$/ { hold[++nb] = $0; next }
+            st == 1 { item() }
+            st == 0 && index($0, k ":") == 1 {
+                eol = cr($0); rest = substr($0, length(k) + 2)
+                if (rest ~ /^[ \t]*\[/) {
+                    if (rest !~ /\]/) exit 3
+                    a = index($0, "["); b = index($0, "]")
+                    inner = substr($0, a + 1, b - a - 1)
+                    print substr($0, 1, a) (inner ~ /^[ \t]*$/ ? v : inner ", " v) substr($0, b); st = 2; next
+                }
+                if (rest !~ /^[ \t]*(#.*)?\r?$/) exit 3
+                st = 1; ind = "  "; print; next
+            }
+            { print }
+            END { if (st == 1) item(); if (st == 0) exit 3 }' "$f" > "$t" || { rm -f "$t"; die "看不懂 $f 的 ${k}，請自己把 $v 加進去"; }
+    fi
+    mv "$t" "$f"
+    yget "$f" "$k" | grep -qxF "$v" || die "加進 $f 的 $k 沒成功，請自己把 $v 加進去"
+}
+
+cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to SOURCE] [--force] [--allow] [--look]
+    local arg="" path="" name="" ref="" to="" force="" allow="" look=""
     while [ $# -gt 0 ]; do
         case $1 in
             --path) path=${2:-}; shift 2 || die "--path 後面要接 repo 裡的資料夾";;
@@ -1713,69 +1768,117 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
             --ref)  ref=${2:-}; shift 2 || die "--ref 後面要接分支或 tag";;
             --to)   to=${2:-}; shift 2 || die "--to 後面要接來源";;
             --force) force=1; shift;;
+            --allow) allow=1; shift;;
+            --look) look=1; shift;;
             -*) die "不認得 $1";;
             *) [ -z "$arg" ] || die "多了一個參數：$1"; arg=$1; shift;;
         esac
     done
-    [ -n "$arg" ] || die "用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag]，或 kit collect <名字>（再收一次）"
-    local dir url line; dir=$(target_dir "$to") || exit 1
+    [ -n "$arg" ] || die "用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag] [--allow]，或 kit collect <名字>（再收一次）"
+    local dir url line add=""; dir=$(target_dir "$to") || exit 1
     check_maintainer "$dir"
     if is_url "$arg"; then url=$arg
     else # collect again what the lock says
         line=$(lock_get "$dir" "$arg"); [ -n "$line" ] || die "$(basename "$dir") 的 third_party.lock 裡沒有 ${arg}（第一次收要給網址）"
         name=$arg; url=$(printf '%s' "$line" | cut -f2)
-        [ -n "$path" ] || path=$(printf '%s' "$line" | cut -f3); [ "$path" = . ] && path=""
+        [ -n "$path" ] || path=$(printf '%s' "$line" | cut -f3)
         [ -n "$ref" ] || ref=$(printf '%s' "$line" | cut -f4); [ "$ref" = - ] && ref=""
     fi
-    collect_allowed "$url" "$dir" || die "$(url_id "$url") 不在 collect_sources（$(basename "$dir")/kit.yaml），不能收"
-    real_url_ok "$url" "$dir"
+    [ "$path" = . ] && path=""
+    # collect_sources: who may be collected from. --allow adds this author to it, only in your own source (push: direct);
+    # a team source's list is the maintainers' to change. --look only looks: it says whether the author is on the list.
+    local ok=1 real; collect_allowed "$url" "$dir" || ok=0
+    real=$(git ls-remote --get-url "$url" 2>/dev/null)
+    if [ -n "$real" ] && [ "$real" != "$url" ] && ! collect_allowed "$real" "$dir"; then
+        [ -n "$look" ] || die "git 設定把 $url 改到 ${real}，不在 collect_sources"
+        ok=0
+    fi
+    local own=0; [ "$(push_mode "$dir")" = direct ] && own=1
+    if [ $ok = 0 ] && [ -z "$look" ]; then
+        if [ -z "$allow" ]; then
+            [ $own = 1 ] && die "$(url_id "$url") 不在 collect_sources（$(basename "$dir")/kit.yaml），不能收；確定要收就加 --allow，一起加進清單"
+            die "$(url_id "$url") 不在 collect_sources（$(basename "$dir")/kit.yaml），不能收"
+        fi
+        [ $own = 1 ] || die "--allow 只能用在你自己的來源（kit.yaml 寫 push: direct 的）；團隊來源請維護者把 $(url_id "$url") 加進 kit.yaml 的 collect_sources"
+        [ -z "$real" ] || [ "$real" = "$url" ] || die "git 設定把 $url 改到 ${real}：--allow 不幫這種網址加清單"
+        add=1
+    fi
     path=${path#/}; path=${path%/}
     case /$path/ in */../*|*/./*) die "--path 不能有 .. 或 .";; esac
 
-    local tmp repo src sha f lic kind skipped=0 scripts=""; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-collect.XXXXXX"); repo="$tmp/repo"
-    say "從 $(url_id "$url") 下載${ref:+（${ref}）}…"
+    local tmp repo src sha lic kind d; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-collect.XXXXXX"); repo="$tmp/repo"
+    [ -n "$look" ] || say "從 $(url_id "$url") 下載${ref:+（${ref}）}…"
     if ! git_safe -c protocol.file.allow=always clone -q --depth 1 --no-recurse-submodules ${ref:+--branch "$ref"} "$url" "$repo" 2>"$tmp/err"; then
         sed 's/^/  /' "$tmp/err" >&2; rm -rf "$tmp"; die "沒辦法下載 $url"
     fi
     sha=$(git -C "$repo" rev-parse HEAD)
-    repo=$(cd "$repo" && pwd -P); src=$repo${path:+/$path}
+    repo=$(cd "$repo" && pwd -P)
+    # which folder: --path, else the top if it has a SKILL.md, else the only folder in the repo that has one
+    local found
+    if [ -n "$path" ] || [ -f "$repo/SKILL.md" ]; then found=${path:-.}
+    else found=$(skill_dirs "$repo"); fi
+    [ -n "$found" ] || { rm -rf "$tmp"; die "$(url_id "$url") 裡找不到 SKILL.md"; }
+
+    if [ -n "$look" ]; then # what kit would collect, as JSON (the Herdr panel shows it before you collect)
+        local first=1 n desc fm ex
+        printf '{"source": %s, "dir": %s, "push": %s, "url": %s, "id": %s, "commit": %s, "allowed": %s, "can_allow": %s, "skills": [' \
+            "$(json_s "$(basename "$dir")")" "$(json_s "$dir")" "$(json_s "$(push_mode "$dir")")" "$(json_s "$url")" "$(json_s "$(url_id "$url")")" "$(json_s "$sha")" \
+            "$( [ $ok = 1 ] && echo true || echo false)" "$( [ $ok = 0 ] && [ $own = 1 ] && [ -z "$real" -o "$real" = "$url" ] && echo true || echo false)"
+        while IFS= read -r d; do
+            [ -n "$d" ] || continue
+            src=$repo; [ "$d" = . ] || src="$repo/$d"
+            [ -f "$src/SKILL.md" ] || { rm -rf "$tmp"; die "$(url_id "$url")/$d 裡沒有 SKILL.md"; }
+            fm=$(fm_of "$src/SKILL.md"); n=$name; [ -n "$n" ] || n=$(fm_val "$fm" name); desc=$(fm_val "$fm" description)
+            [ -n "$n" ] || { if [ "$d" = . ]; then n=$(basename "$(url_id "$url")"); else n=$(basename "$d"); fi; }
+            lic=$(collect_license "$src" "$repo"); kind=""; [ -z "$lic" ] || kind=$(license_kind "$lic")
+            collect_scan "$src"
+            ex=""; if [ -e "$dir/skills/$n" ]; then if [ -n "$(lock_get "$dir" "$n")" ]; then ex=collected; else ex=own; fi; fi
+            [ $first = 1 ] || printf ','; first=0
+            printf '\n  {"path": %s, "name": %s, "valid": %s, "description": %s, "license": %s, "scripts": %s, "skipped": %s, "exists": %s, "dest": %s}' \
+                "$(json_s "$d")" "$(json_s "$n")" "$(valid_name "$n" && echo true || echo false)" "$(json_s "$desc")" "$(json_s "$kind")" \
+                "$(json_s "$COL_SCRIPTS")" "$COL_SKIPPED" "$(json_s "$ex")" "$(json_s "$dir/skills/$n/SKILL.md")"
+        done <<EOT
+$found
+EOT
+        printf '\n]}\n'
+        rm -rf "$tmp"; return 0
+    fi
+    if [ "$(printf '%s\n' "$found" | wc -l | tr -d ' ')" -gt 1 ]; then
+        rm -rf "$tmp"
+        die "$(url_id "$url") 裡有好幾個 skill，用 --path 選一個：
+$(printf '%s\n' "$found" | sed 's/^/  /')"
+    fi
+    path=$found; [ "$path" = . ] && path=""
+    src=$repo${path:+/$path}
     [ -d "$src" ] && src=$(cd "$src" && pwd -P)
     case $src/ in "$repo"/*) ;; *) rm -rf "$tmp"; die "--path 要在 repo 裡面";; esac
     [ -f "$src/SKILL.md" ] || { rm -rf "$tmp"; die "$(url_id "$url")${path:+/$path} 裡沒有 SKILL.md（用 --path 指出 skill 的資料夾）"; }
     [ -n "$name" ] || name=$(fm_val "$(fm_of "$src/SKILL.md")" name)
-    [ -n "$name" ] || name=$(basename "$src")
+    [ -n "$name" ] || { if [ -z "$path" ]; then name=$(basename "$(url_id "$url")"); else name=$(basename "$src"); fi; }
     valid_name "$name" || { rm -rf "$tmp"; die "名字 $name 不行（只能小寫英文、數字和 -），用 --name 給一個"; }
     local dst="$dir/skills/$name"
     if [ -e "$dst" ] && [ -z "$(lock_get "$dir" "$name")" ] && [ -z "$force" ]; then
         rm -rf "$tmp"; die "$(basename "$dir") 已經有 skill:${name}，而且不是 collect 收的（要整份換掉加 --force，或用 --name 換名字）"
     fi
     # license: the skill's own, else the repo's
-    lic=""
-    for f in "$src"/LICENSE* "$src"/LICENCE* "$src"/COPYING* "$repo"/LICENSE* "$repo"/LICENCE* "$repo"/COPYING*; do [ -f "$f" ] && { lic=$f; break; }; done
+    lic=$(collect_license "$src" "$repo")
     [ -n "$lic" ] || { rm -rf "$tmp"; die "$(url_id "$url") 沒有 LICENSE，不知道能不能用，不收"; }
     kind=$(license_kind "$lic")
     # copy: everything text, no links, no binaries, no git
     mkdir -p "$tmp/out"
-    while IFS= read -r f; do
-        local rel=${f#"$src"/}
-        case /$rel in */.*) continue;; esac       # .github/, .claude-plugin/ ...: for other tools, not the skill
-        if [ -L "$f" ]; then skipped=$((skipped+1)); warn "跳過捷徑 $rel"; continue; fi
-        if [ -s "$f" ] && ! LC_ALL=C grep -qI . "$f"; then skipped=$((skipped+1)); warn "跳過非文字檔 $rel"; continue; fi
-        mkdir -p "$(dirname "$tmp/out/$rel")"; cp "$f" "$tmp/out/$rel"
-        case $rel in *.sh|*.py|*.js|*.mjs|*.cjs|*.ts|*.ps1|*.rb|*.pl|*.bat|*.cmd) scripts="$scripts $rel";; *) [ -x "$f" ] && scripts="$scripts $rel";; esac
-    done <<EOF
-$(cd "$src" && find "$(pwd -P)" -name .git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort)
-EOF
+    collect_scan "$src" "$tmp/out"
     [ "$lic" = "$src/${lic##*/}" ] || cp "$lic" "$tmp/out/${lic##*/}"
     rm -rf "$dst"; mkdir -p "$dir/skills"; cp -R "$tmp/out" "$dst"
     lock_set "$dir" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$name" "$url" "${path:-.}" "${ref:--}" "$sha" "$kind" "$(date +%Y-%m-%d)")"
     rm -rf "$tmp"
+    if [ -n "$add" ]; then yaml_list_add "$dir/kit.yaml" collect_sources "$(url_id "$url")"; say "已把 $(url_id "$url") 加進 $(basename "$dir")/kit.yaml 的 collect_sources"; fi
     say "已收 skill:$name ← $(url_id "$url")${path:+/$path} @ $(printf %.12s "$sha")（授權 ${kind}）"
     [ "$kind" = unknown ] && warn "認不出授權種類，請自己看 skills/$name/${lic##*/}"
     [ "$kind" = GPL ] && warn "GPL 類授權：改了再發布要公開原始碼，請確認可以用"
-    [ -n "$scripts" ] && warn "這個 skill 有會執行的檔案，送出前請看過：$scripts"
+    [ -n "$COL_SCRIPTS" ] && warn "這個 skill 有會執行的檔案，送出前請看過：$COL_SCRIPTS"
     check_dirs "$dir" >/dev/null 2>&1 || warn "kit check 有問題，送出前請先打  kit check  看看"
-    say "下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR"
+    if [ "$(push_mode "$dir")" = direct ]; then say "下一步：用 git diff 看收進來的檔案；沒問題就  kit push  送出，要用它就  kit add skill $name"
+    else say "下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR"; fi
 }
 
 cmd_outdated() { # kit outdated [--to SOURCE]
@@ -2067,7 +2170,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
 
 維護者用（只收 kit.yaml 的 collect_sources 列的原作者）：
-  kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支]   收別人的 skill（保留 LICENSE）
+  kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支] [--allow]   收別人的 skill（保留 LICENSE）
+                                    （沒給 --path：repo 裡只有一個 SKILL.md 就用它；--allow：自己的來源一起加進 collect_sources）
   kit collect <名字>                再收一次＝整份換成原作者的新版
   kit outdated                      看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）

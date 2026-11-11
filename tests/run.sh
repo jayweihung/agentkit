@@ -718,7 +718,50 @@ check "outdated follows the tag, not the branch" 'echo "$out" | grep -q "foo：�
 printf 'maintainers: [someone-else]\n' >> "$CO/kit.yaml"
 out=$(kit collect foo 2>&1); rc=$?
 check "only maintainers may collect" '[ $rc -ne 0 ] && echo "$out" | grep -q 維護者'
+sed -i.bak "/^maintainers:/d" "$CO/kit.yaml"; rm -f "$CO/kit.yaml.bak"
+# no --path: the only SKILL.md in the repo; several: kit lists them; --look says it all as JSON without writing anything
+U2="$T/up-two"; mkdir -p "$U2/a" "$U2/b" "$U2/.hidden/c" "$U2/node_modules/d"
+for x in a b .hidden/c node_modules/d; do printf -- '---\nname: %s\ndescription: say "%s" now\n---\nx\n' "${x##*/}" "${x##*/}" > "$U2/$x/SKILL.md"; done
+echo 'echo' > "$U2/a/run.sh"; cp "$UP/LICENSE" "$U2/LICENSE"
+( cd "$U2" && git init -q && git config user.name a && git config user.email a@a && git add -A && git commit -qm x )
+U1="$T/up-one"; mkdir -p "$U1/deep/one"; printf -- '---\nname: one\ndescription: o\n---\nx\n' > "$U1/deep/one/SKILL.md"; cp "$UP/LICENSE" "$U1/LICENSE"
+( cd "$U1" && git init -q && git config user.name a && git config user.email a@a && git add -A && git commit -qm x )
+printf 'name: collector\ncollect_sources: [file://%s, file://%s]\n' "$U2" "$U1" > "$CO/kit.yaml"
+cd "$CO"; rm -rf "$CO/skills/foo" "$CO/third_party.lock"
+out=$(kit collect "file://$U1" 2>&1); rc=$?
+check "collect without --path finds the only SKILL.md" '[ $rc -eq 0 ] && [ -f "$CO/skills/one/SKILL.md" ] && grep -q "^one	.*	deep/one	" "$CO/third_party.lock"'
+out=$(kit collect "file://$U2" 2>&1); rc=$?
+check "collect without --path, several skills: lists them, collects nothing" '[ $rc -ne 0 ] && echo "$out" | grep -q "  a$" && echo "$out" | grep -q "  b$" && ! echo "$out" | grep -q hidden && [ ! -e "$CO/skills/a" ]'
+before=$(cd "$CO" && find . -type f | sort | xargs cksum)
+out=$(kit collect "file://$U2" --look 2>/dev/null); rc=$?
+v=$(printf '%s' "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["allowed"],d["can_allow"],";".join(s["path"]+","+s["name"]+","+s["description"]+","+s["license"]+","+s["scripts"]+","+s["exists"] for s in d["skills"]))' 2>&1)
+check "collect --look: every skill, as JSON" '[ $rc -eq 0 ] && [ "$v" = "True False a,a,say \"a\" now,MIT,run.sh,;b,b,say \"b\" now,MIT,," ]'
+check "collect --look writes nothing" '[ "$before" = "$(cd "$CO" && find . -type f | sort | xargs cksum)" ]'
+out=$(kit collect "file://$UP" --look 2>/dev/null); rc=$?
+v=$(printf '%s' "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["allowed"],d["can_allow"],d["skills"][0]["path"])' 2>&1)
+check "collect --look on an author not on the list: says so (a team source: no --allow)" '[ $rc -eq 0 ] && [ "$v" = "False False skills/foo" ]'
+out=$(kit collect "file://$UP" --path skills/foo --allow 2>&1); rc=$?
+check "collect --allow refused in a team source (no push: direct)" '[ $rc -ne 0 ] && echo "$out" | grep -q "push: direct" && [ ! -e "$CO/skills/foo" ]'
+# your own source: --allow adds the author to collect_sources ([a, b] on one line, or - lines, or no list yet)
+printf 'name: collector\npush: direct\ncollect_sources: [file://%s]   # authors\n' "$U2" > "$CO/kit.yaml"
+v=$(kit collect "file://$UP" --look 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["can_allow"])')
+check "collect --look: your own source can add the author" '[ "$v" = True ]'
+out=$(kit collect "file://$UP" 2>&1); rc=$?
+check "collect without --allow says how to add the author" '[ $rc -ne 0 ] && echo "$out" | grep -q -- "--allow"'
+out=$(kit collect "file://$UP" --allow 2>&1); rc=$?
+check "collect --allow: collected, the author added to the list on its line" '[ $rc -eq 0 ] && [ -f "$CO/skills/foo/SKILL.md" ] && grep -qxF "collect_sources: [file://$U2, $UP]   # authors" "$CO/kit.yaml"'
+out=$(kit collect foo 2>&1); rc=$?
+check "after --allow the author is on the list" '[ $rc -eq 0 ]'
+printf 'name: collector\npush: direct\ncollect_sources:\n    - file://%s\n\n# more\nrecommended:\n  rules: []\n' "$U2" > "$CO/kit.yaml"
+out=$(kit collect "file://$U1" --allow 2>&1); rc=$?
+check "collect --allow: a - list gets a - line" '[ $rc -eq 0 ] && [ "$(sed -n 4,5p "$CO/kit.yaml")" = "    - file://$U2
+    - $U1" ] && grep -q "^recommended:" "$CO/kit.yaml"'
+printf 'name: collector\npush: direct' > "$CO/kit.yaml"
+rm -rf "$CO/skills/one"; out=$(kit collect "file://$U1" --allow 2>&1); rc=$?
+check "collect --allow: no list yet gets one" '[ $rc -eq 0 ] && [ "$(tail -n 1 "$CO/kit.yaml")" = "collect_sources: [$U1]" ] && grep -qx "push: direct" "$CO/kit.yaml"'
+rm -rf "$CO/skills/one" "$CO/skills/foo" "$CO/third_party.lock"
 cd "$T"
+
 
 # ---------- signed approvals (root uses only versions signed on the Mac) ----------
 SA="$T/signed"; mkdir -p "$SA"
