@@ -746,6 +746,8 @@ if (-not $OnWindows) {
     W "$NT/tools/node.yaml" "name: node`ntitle: Node`ninstall:`n  mac: [scoop node]`n  linux: [scoop node]`n"; Remove-Item "$FB/node", "$T/brew6.log" -ErrorAction SilentlyContinue
     Kit install-tool node
     Check 'install-tool: kit''s own recipe wins over a source''s' { (Test-Path /usr/bin/node) -or ($out.Contains('執行 brew install node') -and (ReadT "$T/brew6.log") -eq "install node`n" -and -not $out.Contains('scoop')) }
+    Kit tools
+    Check 'tools: kit''s own recipe for node, not the source''s' { $out -match '(?m)^node .*(brew install node|apt-get install -y nodejs)$' }
     W "$NT/tools/slowtool.yaml" "name: slowtool`nbin: [slowtool]`ninstall:`n  mac: [brew slowtool]`n  linux: [brew slowtool]`n"; W "$FB/slowtool" "#!/bin/sh`nsleep 30`necho slowtool 1.0`n"
     W "$NT/tools/chatty.yaml" "name: chatty`nbin: [chatty]`ninstall:`n  mac: [brew chatty]`n  linux: [brew chatty]`n"; W "$FB/chatty" "#!/bin/sh`nexec yes 'chatty 2.5'`n"
     & chmod +x "$FB/slowtool" "$FB/chatty"

@@ -1511,7 +1511,11 @@ function Install-Npm([string]$d, [string]$s) {
         Remove-Store $s
         Move-Item -LiteralPath $new -Destination $s
         $done = $true
-    } finally { if (-not $done) { try { Remove-Store $new } catch { } } }
+    } finally {
+        # .NET calls only (no command, function or loop): a Ctrl-C that comes while this runs stops PowerShell at the next one
+        # (a terminal's Ctrl-C goes to npm too, and npm ending can bring kit here first). It never follows a link.
+        if (-not $done) { try { if ([IO.Directory]::Exists($new)) { [IO.Directory]::Delete($new, $true) } } catch { } }
+    }
 }
 function Pip-Back([string]$s) { # a pip install that did not finish: the venv kit had before goes back in its place
     Remove-Store $s
@@ -1541,7 +1545,13 @@ function Install-Pip([string]$d, [string]$s) {
         if ($rc2 -ne 0) { Die '裝套件失敗（上面是 pip 說的原因；只能裝有現成 wheel 的套件）' }
         Copy-Item -LiteralPath (Join-Path $d 'requirements.txt') -Destination (Join-Path (Join-Path $s '.kit-src') 'requirements.txt')
         $done = $true
-    } finally { if ($done) { Remove-Store $old } else { try { Pip-Back $s } catch { } } }
+    } finally {
+        if ($done) { Remove-Store $old }
+        else { # .NET calls only, as in Install-Npm: a Ctrl-C that comes while this runs must not leave the old venv aside
+            try { if ([IO.Directory]::Exists($s)) { [IO.Directory]::Delete($s, $true) } } catch { }
+            try { if ([IO.Directory]::Exists($old)) { [IO.Directory]::Move($old, $s) } } catch { }
+        }
+    }
 }
 function Link-Copies([string]$n) { # every copy of skill N kit put (the account, Codex and omp, each folder's own) gets the links
     if ($null -ne (State-Get 'skill' $n)) { Link-Deps $n (Join-Path (Join-Path $ClaudeDir 'skills') $n) }

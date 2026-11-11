@@ -820,7 +820,9 @@ check "install-tool (pip): wheels only, for this account" 'echo "$out" | grep -q
 # kit's own recipes (node, python, git) cannot be replaced by a source
 printf 'name: node\ntitle: Node\ninstall:\n  mac: [scoop node]\n  linux: [scoop node]\n' > "$NT/tools/node.yaml"; rm -f "$FB/node" "$T/brew.log"
 out=$(kit install-tool node 2>&1); rc=$?
-check "install-tool: kit's own recipe wins over a source's" 'PATH=/usr/bin:/bin command -v node >/dev/null || echo "$out" | grep -qF "執行 brew install node" && [ "$(cat "$T/brew.log")" = "install node" ] && ! echo "$out" | grep -q scoop'
+# (a machine with node in /usr/bin, like a Linux server, has it already: kit tools still shows kit's way)
+check "install-tool: kit's own recipe wins over a source's" 'PATH=/usr/bin:/bin command -v node >/dev/null || { echo "$out" | grep -qF "執行 brew install node" && [ "$(cat "$T/brew.log")" = "install node" ] && ! echo "$out" | grep -q scoop; }'
+check "tools: kit's own recipe for node, not the source's" 'kit tools 2>&1 | grep -E "^node " | grep -qE "(brew install node|apt-get install -y nodejs)$"'
 # --version of a program that hangs (and what it started) or never stops talking: a few seconds, 4 KB
 printf 'name: slowtool\nbin: [slowtool]\ninstall:\n  mac: [brew slowtool]\n  linux: [brew slowtool]\n' > "$NT/tools/slowtool.yaml"
 printf '#!/bin/sh\nsleep 30\necho slowtool 1.0\n' > "$FB/slowtool"
