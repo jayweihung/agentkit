@@ -9,7 +9,7 @@
 //   kit agents --json                              every agent and what it uses, what there is to add
 //   kit agent <name> add|rm rule|skill|mcp <item>  change an agent (its file in the source)
 //   kit run <name> --tool claude|codex|omp         open it (in a new tab)
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
 import { theme, settings, exec, home, run, shared, setShared, window, appHome, readTextFile, writeTextFile, closeOverlay, props, spaces, focused, layout } from "herdr";
 
@@ -57,6 +57,10 @@ async function load() {
   catch { return { error: "kit agents --json 的輸出讀不懂（kit 太舊？請打 kit self-update）", at: Date.now() }; }
 }
 
+// something under way: a turning ring (Herdr turns it natively, no timer), alone or before "讀取中…" or a button's "送出中…"
+const spin = (size, color) => svg("mods/workspace-chrome/spinner.svg").size(size).flex_none().text_color(color).spin(900);
+const withSpin = (label, size, color) => (typeof label === "string" && /中…$/.test(label) ? h_flex().gap(5).items_center().child(spin(size, color)).child(label) : label);
+const waiting = (t, z, text) => h_flex().gap(6).items_center().text_color(t.muted).child(spin(z - 1, t.muted)).child(text);
 export default class KitAgents extends View {
   init(_p, cx) {
     this.role = props()?.role === "toggle" ? "toggle" : "panel";
@@ -210,7 +214,7 @@ export default class KitAgents extends View {
     const a = this.open && (d?.agents ?? []).find((x) => x.name === this.open);
     root.child(this.header(t, z, d, a));
     if (msg) root.child(this.message(t, z, msg));
-    if (!d) return root.child(div().p(14).text_color(t.muted).child("讀取中…"));
+    if (!d) return root.child(div().p(14).child(waiting(t, z, "讀取中…")));
     if (d.error) return root.child(v_flex().p(14).gap(8)
       .child(div().font_semibold().text_color(t.ansi1).child("kit 出錯了"))
       .child(div().font_family(mono()).text_size(z - 1).child(d.error))
@@ -230,8 +234,8 @@ export default class KitAgents extends View {
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().font_semibold().child(a ? a.name : "Agents"))
         .child(div().truncate().text_size(z - 1.5).text_color(t.muted).child(sub)))
-      .when(Boolean(busy), (el) => el.child(div().flex_none().text_size(z - 1.5).text_color(t.muted).child(`${busy}…`)))
-      .child(this.btn(t, z, "reload", "⟳", { small: true, off: Boolean(this.loading), on: (cx) => this.refresh(cx) }))
+      .when(Boolean(busy), (el) => el.child(h_flex().flex_none().gap(5).items_center().text_size(z - 1.5).text_color(t.muted).child(spin(z - 2, t.muted)).child(`${busy}…`)))
+      .child(this.btn(t, z, "reload", this.loading ? spin(z - 2, t.dim) : "⟳", { small: true, off: Boolean(this.loading), on: (cx) => this.refresh(cx) }))
       .when(Boolean(overlay), (el) => el.child(this.btn(t, z, "close", "✕", { small: true, on: () => closeOverlay(overlay) })))
       .when(!overlay && Boolean(findNode(layout(), PANEL)), (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
   }
@@ -339,6 +343,6 @@ export default class KitAgents extends View {
     return div().id(id).h(small ? 26 : 30).px(small ? 10 : 12).flex().flex_none().items_center().justify_center().rounded(6)
       .text_size(small ? z - 1 : z).font_semibold().bg(bg).text_color(fg)
       .when(!off, (el) => el.cursor_pointer().hover((st) => st.opacity(0.85)).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); on?.(cx); }))
-      .child(label);
+      .child(withSpin(label, small ? z - 2 : z - 1, fg));
   }
 }

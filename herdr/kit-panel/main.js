@@ -47,6 +47,10 @@ const isWindows = () => window()?.platform === "windows";
 const slash = (p) => String(p ?? "").replace(/\\/g, "/");
 // a folder with ~ for this computer's home (other machines' paths stay as they are)
 const shortDir = (d) => { const h = slash(home()), p = slash(d); return p && h && (p + "/").startsWith(h + "/") ? "~" + p.slice(h.length) : p; };
+// something under way: a turning ring (Herdr turns it natively, no timer), alone or before "讀取中…" or a button's "送出中…"
+const spin = (size, color) => svg("mods/workspace-chrome/spinner.svg").size(size).flex_none().text_color(color).spin(900);
+const withSpin = (label, size, color) => (typeof label === "string" && /中…$/.test(label) ? h_flex().gap(5).items_center().child(spin(size, color)).child(label) : label);
+const waiting = (t, z, text) => h_flex().gap(6).items_center().text_color(t.muted).child(spin(z - 1, t.muted)).child(text);
 // kit's own messages, without the "kit: " / "kit：" in front of each line
 const clean = (s) => String(s).split("\n").map((l) => l.replace(/^kit[:：]\s?/, "")).join("\n").trim();
 function find(node, id) {
@@ -379,7 +383,7 @@ export default class KitPanel extends View {
       .when(this.role === "pane", (el) => el.h(POPUP_H).rounded(8));
     if (this.role === "editor") {
       if (msg) root.child(this.message(t, z, msg));
-      return root.child(this.edit ? this.editor(t, z) : div().p(14).text_color(t.muted).child("讀取中…"));
+      return root.child(this.edit ? this.editor(t, z) : div().p(14).child(waiting(t, z, "讀取中…")));
     }
     root.child(this.role === "pane" ? this.paneHeader(t, z) : this.repoHeader(t, z));
     if (this.role === "panel" && !find(layout(), TOGGLE)) root.child(this.moveBanner(t, z));
@@ -387,7 +391,7 @@ export default class KitPanel extends View {
     const d = this.data;
     if (!d && this.role === "pane" && !this.loading && Date.now() - (this.openedAt ?? 0) > 8000)
       return root.child(div().p(14).text_color(t.muted).child("讀不到這個 agent（它可能換了資料夾，或已經關掉）。關掉這個視窗，再按一次它上面的 Kit 按鈕。"));
-    if (!d) return root.child(div().p(14).text_color(t.muted).child("讀取中…"));
+    if (!d) return root.child(div().p(14).child(waiting(t, z, "讀取中…")));
     if (d.error) return root.child(this.problem(t, z, d.error));
     if (this.role === "pane" && d.here?.user) return root.child(v_flex().p(14).gap(6)
       .child(div().font_semibold().child(`這個 agent 用 ${d.here.user} 帳號跑`))
@@ -410,9 +414,10 @@ export default class KitPanel extends View {
       .child(div().size(32).flex_none().rounded(16).bg(t.raised).flex().items_center().justify_center().child(pic ?? div().text_color(t.muted).child("•")))
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().font_semibold().child(tg.title || "agent"))
-        .child(div().truncate().text_size(z - 1.5).text_color(t.muted).child(this.loading ? `${where} · 讀取中…` : where)))
+        .child(h_flex().gap(5).items_center().min_w(0).when(this.loading, (el) => el.child(spin(z - 3, t.muted)))
+          .child(div().truncate().text_size(z - 1.5).text_color(t.muted).child(this.loading ? `${where} · 讀取中…` : where))))
       .when(Boolean(canSync), (el) => el.child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx, LONG) })))
-      .child(this.btn(t, z, "reload", "⟳", { small: true, off: this.loading, on: () => this.want() }))
+      .child(this.btn(t, z, "reload", this.loading ? spin(z - 2, t.dim) : "⟳", { small: true, off: this.loading, on: () => this.want() }))
       .child(this.btn(t, z, "close", "✕", { small: true, on: () => closeOverlay(blockProps()?.overlay) }));
   }
 
@@ -513,10 +518,11 @@ export default class KitPanel extends View {
       .child(div().size(32).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().font_semibold().text_size(z - 1).child("Kit"))
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().font_semibold().child("倉庫"))
-        .child(div().truncate().text_size(z - 1.5).text_color(what ? t.working : t.muted).child(this.loading ? `${sub} · 讀取中…` : sub)))
+        .child(h_flex().gap(5).items_center().min_w(0).when(this.loading, (el) => el.child(spin(z - 3, t.muted)))
+          .child(div().truncate().text_size(z - 1.5).text_color(what ? t.working : t.muted).child(this.loading ? `${sub} · 讀取中…` : sub))))
       .when(Boolean(what) && !this.plan, (el) => el.child(this.btn(t, z, "push", busy === "檢查" ? "檢查中…" : "送出…", { small: true, kind: "primary", off: Boolean(busy), on: (cx) => this.planPush(cx) })))
       .child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx, LONG) }))
-      .child(this.btn(t, z, "reload", "⟳", { small: true, off: this.loading, on: (cx) => this.refresh(cx) }))
+      .child(this.btn(t, z, "reload", this.loading ? spin(z - 2, t.dim) : "⟳", { small: true, off: this.loading, on: (cx) => this.refresh(cx) }))
       .when(inBar, (el) => el.child(this.btn(t, z, "hide", "✕", { small: true, on: () => run("layout.hide", { id: PANEL }) })));
     const v = v_flex().flex_none().border_b(1).border_color(t.border).child(head);
     // each source and what 送出 does with it
@@ -856,7 +862,7 @@ export default class KitPanel extends View {
     return div().id(id).h(small ? 26 : 30).px(small ? 10 : 12).flex().flex_none().items_center().justify_center().rounded(6)
       .text_size(small ? z - 1 : z).font_semibold().bg(bg).text_color(fg)
       .when(!off, (el) => el.cursor_pointer().hover((st) => st.opacity(0.85)).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); on?.(cx); }))
-      .child(label);
+      .child(withSpin(label, small ? z - 2 : z - 1, fg));
   }
 
   // The tab-bar button: "kit" plus how many new things there are; click shows / hides the panel.
