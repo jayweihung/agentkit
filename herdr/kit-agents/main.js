@@ -16,7 +16,7 @@ import { theme, settings, exec, home, run, shared, setShared, window, appHome, r
 // Roles (props.role): the panel (default; "kit-agents-panel" beside the work area, or a window) and "toggle",
 // the tab-bar button next to Kit's that shows or hides it. Agents stand beside Kit, not inside it.
 const PANEL = "kit-agents-panel";
-const DATA = "kitag.data.v1", BUSY = "kitag.busy", MSG = "kitag.msg", REPO = "kit.data.v2";
+const DATA = "kitag.data.v1", BUSY = "kit.busy", MSG = "kitag.msg", REPO = "kit.data.v2";
 const SHORT = 120000, STALE = 50000;
 const KINDS = [["rule", "rules", "規則"], ["skill", "skills", "Skills"], ["mcp", "mcp", "MCP"]];
 const TOOL_NAMES = { claude: "Claude", codex: "Codex", omp: "omp" };
@@ -65,7 +65,7 @@ export default class KitAgents extends View {
     this.adding = {};      // kind -> the "加上…" list is unfolded
     this.edit = null;      // { path, orig, dirty, err } while its file is open; this.code is the editor
     this.tool = this.load("tool") || "claude";
-    this.mine = false;     // this window started the action in kitag.busy
+    this.mine = false;     // the id of the action this window started in kit.busy (shared with Kit: one kit action at a time)
     this.seq = 0;          // the newest load wins
     const b = shared(BUSY);
     if (b && (typeof b !== "object" || Date.now() - (b.at ?? 0) > (b.ttl ?? 0))) setShared(BUSY, null);
@@ -75,7 +75,7 @@ export default class KitAgents extends View {
   }
 
   async close(cx) {
-    if (this.mine) setShared(BUSY, null);
+    if (this.mine && shared(BUSY)?.id === this.mine) setShared(BUSY, null);
     this.code?.release();
     this.code = null;
   }
@@ -104,8 +104,9 @@ export default class KitAgents extends View {
   // kit agent <name> add|rm ...: one at a time, kit's own words shown above
   act(label, args, cx) {
     if (this.busy) return;
-    setShared(BUSY, { label, at: Date.now(), ttl: SHORT });
-    this.mine = true;
+    const id = `${Date.now()}-${Math.random()}`;
+    setShared(BUSY, { label, at: Date.now(), ttl: SHORT, id });
+    this.mine = id;
     setShared(MSG, null);
     cx.notify();
     cx.spawn(async (cx) => {
@@ -114,7 +115,7 @@ export default class KitAgents extends View {
         const text = clean([r.out, r.err].filter(Boolean).join("\n"));
         setShared(MSG, { ok: r.code === 0, label, text: text || (r.code === 0 ? "完成" : `失敗（${r.code}）`), at: Date.now() });
       } finally {
-        if (this.mine) setShared(BUSY, null);
+        if (this.mine && shared(BUSY)?.id === this.mine) setShared(BUSY, null);
         this.mine = false;
         this.changed(cx);
         cx.notify();
@@ -134,7 +135,16 @@ export default class KitAgents extends View {
 
   // kit run <agent> in a new tab (kit syncs first, then starts the tool)
   openAgent(name, cx) {
+    if (this.opening) return;
+    const where = this.place();
+    if (!where.space) {
+      setShared(MSG, { ok: false, label: "開啟", text: "這台電腦沒有開著的 space：先在這台開一個 space，再按開啟。", at: Date.now() });
+      cx.notify();
+      return;
+    }
+    this.opening = true;
     cx.spawn(async (cx) => {
+      try {
       const argv = await kitArgv();
       const tools = this.data?.tools ?? ["claude"];
       const tool = tools.includes(this.tool) ? this.tool : "claude";
@@ -142,12 +152,12 @@ export default class KitAgents extends View {
       // kit.cmd is a batch file: start it through cmd so the terminal can run it
       const full = isWindows() && /\.(cmd|bat)$/i.test(argv[0]) ? ["cmd.exe", "/d", "/c", ...kitArgs] : kitArgs;
       try {
-        await run("tab.new", { name: `${name}（${TOOL_NAMES[tool] ?? tool}）`, argv: full, ...this.place() });
+        await run("tab.new", { name: `${name}（${TOOL_NAMES[tool] ?? tool}）`, argv: full, ...where });
         setShared(MSG, { ok: true, label: "開啟", text: `在新分頁開了 ${name}（${TOOL_NAMES[tool] ?? tool}）`, at: Date.now() });
       } catch (e) {
         setShared(MSG, { ok: false, label: "開啟", text: `開不起來：${e?.message ?? e}`, at: Date.now() });
       }
-      cx.notify();
+      } finally { this.opening = false; cx.notify(); }
     });
   }
 

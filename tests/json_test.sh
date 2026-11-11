@@ -152,5 +152,19 @@ printf 'set\ta\t1\n' > "$T/ops3"
 v=$(LC_ALL=C $AWK -f "$JA" -v ops="$T/ops3" "$T/empty.json")
 [ "$v" = $'{\n  "a": 1\n}' ] && ok || bad "empty file: $v"
 
+# a UTF-8 BOM and CRLF line ends stay as they were (the same as kit.ps1)
+printf '\357\273\277{"a": 1}\r\n' > "$T/bom.json"
+LC_ALL=C $AWK -f "$JA" -v ops="$T/ops3" "$T/bom.json" > "$T/bom.out"; rc=$?
+[ $rc -eq 0 ] && [ "$(od -An -tx1 -N3 "$T/bom.out" | tr -d ' ')" = efbbbf ] && [ "$(tail -c 2 "$T/bom.out" | od -An -tx1 | tr -d ' ')" = 0d0a ] &&
+    [ "$(tr -d '\r' < "$T/bom.out" | tail -c +4)" = $'{\n  "a": 1\n}' ] && ok || bad "BOM / CRLF kept"
+v=$(LC_ALL=C $AWK -f "$JA" -v get=a "$T/bom.json")
+[ "$v" = 1 ] && ok || bad "get through a BOM: $v"
+
+# rmholder: a column holding only blocks with that mod goes, whatever its id; mixed columns stay
+printf '{"children":[{"id":"x","children":[{"content":{"mod":"kit"}}]},{"id":"y","children":[{"content":{"mod":"kit"}},{"content":{"mod":"tabs"}}]},{"id":"z","children":[]}]}' > "$T/h.json"
+printf 'rmholder\tcontent.mod\tkit\n' > "$T/ops9"
+v=$(LC_ALL=C $AWK -f "$JA" -v ops="$T/ops9" "$T/h.json" | python3 -c 'import json,sys;print(" ".join(c["id"] for c in json.load(sys.stdin)["children"]))')
+[ "$v" = "y z" ] && ok || bad "rmholder got: $v"
+
 echo "json.awk ($AWK): $pass passed, $fail failed"
 [ $fail -eq 0 ]

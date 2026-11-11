@@ -51,6 +51,28 @@ function Warn([string]$msg) {
     if ($script:LogPath) { [IO.File]::AppendAllText($script:LogPath, "kit: $msg`n", $Utf8) } else { [Console]::Error.WriteLine("kit: $msg") }
 }
 function Die([string]$msg) { Warn $msg; exit 1 }
+# one kit at a time changes state.tsv and the tools' files (the background sync takes the same lock); freed when kit ends
+$script:LockMine = $false; $script:Locked = $false; $script:SshSet = $false
+function Take-Lock([switch]$Soft) { # -Soft: give up quietly after a few seconds ($false) instead of stopping
+    if ($script:Locked) { return $true }
+    $lock = Join-Path $KitConf 'sync.lock'; $max = 60; if ($env:KIT_LOCK_WAIT) { $max = [int]$env:KIT_LOCK_WAIT }; if ($Soft) { $max = 5 }
+    Ensure-Dir $KitConf
+    for ($i = 0; ; $i++) {
+        try { [void](New-Item -ItemType Directory -Path $lock -ErrorAction Stop); break } catch { }
+        # left by a kit that was killed: older than 10 minutes
+        if ((Test-Path -LiteralPath $lock) -and (Get-Item -LiteralPath $lock).LastWriteTime -lt (Get-Date).AddMinutes(-10)) { Remove-Item -LiteralPath $lock -Force -Recurse -ErrorAction SilentlyContinue; continue }
+        if ($i -ge $max) { if ($Soft) { return $false }; Die "另一個 kit 正在跑（${lock}），等它跑完再試一次" }
+        if ($i -eq 2 -and -not $Soft) { Warn '等另一個 kit 跑完…' }
+        Start-Sleep -Seconds 1
+    }
+    $script:LockMine = $true; $script:Locked = $true
+    $true
+}
+function Release-Lock {
+    if ($script:LockMine) { Remove-Item -LiteralPath (Join-Path $KitConf 'sync.lock') -Force -Recurse -ErrorAction SilentlyContinue }
+    $script:LockMine = $false; $script:Locked = $false
+}
+function Temp-Next([string]$f) { "$f.kit." + [IO.Path]::GetRandomFileName() }   # a temp file next to F, unique per kit
 
 function Read-Text([string]$path) {
     $t = [IO.File]::ReadAllText($path, $Utf8)
@@ -281,6 +303,17 @@ function Json-SwapWhere($n, [string]$key, [string]$raw, [string]$new) { # anywhe
     if (Json-ItemIs $n $key $raw) { (Json-Find $n $key).raw = $new }
     for ($i = 0; $i -lt $n.v.Count; $i++) { Json-SwapWhere $n.v[$i] $key $raw $new }
 }
+function Json-RmHolder($n, [string]$key, [string]$raw) { # anywhere: remove array items whose "children" hold nothing but objects whose KEY is the string
+    if ($n.t -eq 'v') { return }
+    for ($i = $n.v.Count - 1; $i -ge 0; $i--) {
+        $c = $n.v[$i]
+        if ($n.t -eq 'a' -and $c.t -eq 'o') {
+            $ch = Json-Find $c 'children'
+            if ($null -ne $ch -and $ch.t -eq 'a' -and $ch.v.Count -gt 0 -and @($ch.v | Where-Object { -not (Json-ItemIs $_ $key $raw) }).Count -eq 0) { $n.v.RemoveAt($i); continue }
+        }
+        Json-RmHolder $c $key $raw
+    }
+}
 function Json-Apply($root, $ops) {
     foreach ($op in $ops) {
         switch ($op[0]) {
@@ -293,13 +326,15 @@ function Json-Apply($root, $ops) {
             'rmwhere' { Json-RmWhere $root $op[1] (Json-Str $op[2]) }
             'addnear' { Json-AddNear $root $op[1] (Json-Str $op[2]) $op[3] }
             'swapwhere' { Json-SwapWhere $root $op[1] (Json-Str $op[2]) (Json-Str $op[3]) }
+            'rmholder' { Json-RmHolder $root $op[1] (Json-Str $op[2]) }
             default   { throw "json: unknown op $($op[0])" }
         }
     }
 }
-function Json-Text($root, [string]$orig) { # keep a trailing newline only if the file had one
+function Json-Text($root, [string]$orig) { # keep a trailing newline only if the file had one; CRLF files keep CRLF
     $s = Json-Ser $root
     if ($orig.EndsWith("`n")) { $s += "`n" }
+    if ($orig.Contains("`r`n")) { $s = $s.Replace("`n", "`r`n") }
     $s
 }
 function Json-Get([string]$file, [string]$path) {
@@ -323,7 +358,7 @@ function Json-Edit([string]$f, $ops) { # edit FILE, keep a backup
             $text = Json-Text $root $orig
             [void](Json-Parse $text)
         } catch { Die "沒辦法更新 ${f}（檔案沒有被改動）：$($_.Exception.Message)" }
-        $tmp = "$f.kit.tmp"
+        $tmp = Temp-Next $f
         $bytes = $Utf8.GetBytes($text); if ($bom) { $bytes = [byte[]](0xEF, 0xBB, 0xBF) + $bytes }
         [IO.File]::WriteAllBytes($tmp, $bytes)
         $now = [IO.File]::ReadAllBytes($f)
@@ -337,7 +372,15 @@ function Json-Edit([string]$f, $ops) { # edit FILE, keep a backup
     Die "沒辦法更新 ${f}：別的程式一直在寫它（檔案沒有被改動）"
 }
 function Swap-In([string]$tmp, [string]$f, [bool]$backup) { # put TMP in place of F
-    $b = if ($backup) { "$f.kit-backup" } else { [NullString]::Value }   # a plain $null would become ""
+    # the backup is the file as it was before kit first changed it (later edits do not replace it)
+    if ($backup -and (Test-Path -LiteralPath "$f.kit-backup")) { $backup = $false }
+    if ((Test-Path -LiteralPath $f) -and (Is-Link (Get-Item -LiteralPath $f -Force))) {   # keep the link (dotfiles)
+        try {
+            if ($backup) { Copy-Item -LiteralPath $f -Destination "$f.kit-backup" -Force }
+            [IO.File]::WriteAllBytes($f, [IO.File]::ReadAllBytes($tmp)); Remove-Item -LiteralPath $tmp -Force; return
+        } catch { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; Die "沒辦法寫入 ${f}：$($_.Exception.Message)" }
+    }
+    $b = if ($backup) { "$f.kit-backup" } else { [NullString]::Value }   # a plain $null would become "
     try { [IO.File]::Replace($tmp, $f, $b); return }                     # atomic, keeps the file's permissions
     catch { $why = $_.Exception.Message }
     # some network drives and file systems cannot replace: copy instead (not atomic)
@@ -383,7 +426,9 @@ function State-Set([string]$k, [string]$n, $v) {
     Ensure-Dir $KitConf
     $rows = @(foreach ($r in State-Rows) { $f = $r.Split("`t"); if (-not ($f[0] -eq $k -and $f[1] -eq $n)) { $r } })
     if ($null -ne $v) { $rows += "$k`t$n`t$v" }
-    Write-Text $State (($rows | ForEach-Object { "$_`n" }) -join '')
+    $t = Temp-Next $State
+    Write-Text $t (($rows | ForEach-Object { "$_`n" }) -join '')
+    Move-Item -LiteralPath $t -Destination $State -Force
 }
 function State-Del([string]$k, [string]$n) { if (Test-Path -LiteralPath $State) { State-Set $k $n $null } }
 
@@ -398,12 +443,18 @@ function Write-Machine($sources, $added, $removed) {
     foreach ($s in $sources) { if ($s) { $t += "  - $s`n" } }
     $t += 'added: [' + ((@($added) | Where-Object { $_ }) -join ', ') + "]`n"
     $t += 'removed: [' + ((@($removed) | Where-Object { $_ }) -join ', ') + "]    # kit rm; sync will not add these back`n"
-    Write-Text $Machine $t
+    $tmp = Temp-Next $Machine; Write-Text $tmp $t; Move-Item -LiteralPath $tmp -Destination $Machine -Force
 }
 
 # ---------- sources ----------
-function Is-Url([string]$s) { $s -match '://' -or $s -match '^[^/\\]*@[^/\\]*:' }
-function Url-Host([string]$u) { (($u -replace '^[a-z+]+://', '') -replace '^[^@/]*@', '') -replace '[:/].*$', '' }
+function Is-Url([string]$s) { # a git URL: scheme://..., user@host:path, or host:path (git's scp form; a drive letter C: is a folder)
+    if ($s -match '://' -or $s -match '^[^/\\]*@[^/\\]*:') { return $true }
+    if ($s -match '^[A-Za-z]:([\\/]|$)' -or $s -match '^(/|\./|\.\./|~|\\)') { return $false }
+    $s -match '^[^/\\:]+:'
+}
+function Url-Host([string]$u) { ((($u -replace '^[A-Za-z][A-Za-z0-9+.-]*://', '') -replace '^[^@/]*@', '') -replace '[:/].*$', '').ToLowerInvariant() }
+function Url-Safe([string]$u) { $u -replace '^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@', '$1' }   # a URL without user:password@ (never printed or kept)
+function Has-Creds([string]$u) { $u -match '^[Hh][Tt][Tt][Pp][Ss]?://[^/]*@' }   # an http(s) URL with user[:password]@ in it
 function Src-Name([string]$s) { [IO.Path]::GetFileName($s.TrimEnd('/', '\')) -replace '\.git$', '' }
 function Src-Dir([string]$s) {
     if (Is-Url $s) { return Join-Path $KitSrc (Src-Name $s) }
@@ -412,13 +463,23 @@ function Src-Dir([string]$s) {
 }
 function Src-Dirs { @(foreach ($s in M-Sources) { Src-Dir $s }) }
 $script:PushDir = $null
-function Allowed-Hosts { # from the configured sources (+ the source kit push sends from)
+function Allowed-Hosts { # kit push: the source's own list when it has one; else every configured source's (+ the source kit push sends from)
+    if ($script:PushDir) {
+        $own = @(YGet (Join-Path $script:PushDir 'kit.yaml') 'allowed_hosts' | Where-Object { $_ })
+        if ($own.Count -gt 0) { return (Uniq @($own | ForEach-Object { $_.ToLowerInvariant() })) }
+    }
     $dirs = @(Src-Dirs); if ($script:PushDir) { $dirs += $script:PushDir }
-    Uniq @(foreach ($d in $dirs) { YGet (Join-Path $d 'kit.yaml') 'allowed_hosts' })
+    Uniq @(foreach ($d in $dirs) { YGet (Join-Path $d 'kit.yaml') 'allowed_hosts' | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() } })
 }
 
-function Git-Safe { # git without prompts, submodules or LFS downloads
-    $env:GIT_TERMINAL_PROMPT = '0'; $env:GIT_LFS_SKIP_SMUDGE = '1'
+function Git-Safe { # git without prompts (no password question, no sign-in window, no ssh question), submodules or LFS downloads
+    $env:GIT_TERMINAL_PROMPT = '0'; $env:GCM_INTERACTIVE = 'never'; $env:GIT_LFS_SKIP_SMUDGE = '1'
+    if (-not $env:GIT_SSH_COMMAND -and -not $script:SshSet) {
+        $script:SshSet = $true
+        $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $c = "$(& git config core.sshCommand 2>$null)" } finally { $ErrorActionPreference = $old }
+        if (-not $c) { $env:GIT_SSH_COMMAND = 'ssh -o BatchMode=yes' }
+    }
     $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { & git @args 2>&1 | ForEach-Object { "$_" } } finally { $ErrorActionPreference = $old }
 }
@@ -430,7 +491,7 @@ function Check-Host([string]$url) { # refuse URLs whose host is not allowed
     if ($hosts -notcontains $h) { Die "$h 不在允許的主機清單：$($hosts -join ' ')" }
     # git config "insteadOf" rules can rewrite a URL; check where git really goes
     $real = (Git-Safe ls-remote --get-url $url | Select-Object -First 1)
-    if ($real -and $real -ne $url) { $h = Url-Host $real; if ($hosts -notcontains $h) { Die "git 設定把網址改到 ${h}，不在允許的主機清單" } }
+    if ($real -and $real -ne $url -and (Is-Url $real)) { $h = Url-Host $real; if ($hosts -notcontains $h) { Die "git 設定把網址改到 ${h}，不在允許的主機清單" } }
 }
 function Push-Urls([string]$dir, [string]$remote) { # every URL git may push REMOTE to (pushurl else url, insteadOf applied; pushInsteadOf too)
     $rules = @(Git-Q -C $dir config --get-regexp '^url\..*\.pushinsteadof$')
@@ -453,17 +514,20 @@ function Pull-Why([string]$d) { # why git pull --ff-only did not work there
     if ($LASTEXITCODE -eq 0 -and $n -match '^[0-9]+$' -and $n -ne '0') { return "$d 有 $n 個來源沒有的 commit，跟來源分岔了" }
     "到 $d 打 git pull 看原因"
 }
+function Git-Err($out) { # the last lines git said (no user:password@), for the message
+    foreach ($l in @(@($out | Where-Object { $_ }) | Select-Object -Last 3)) { Warn ("    " + ("$l" -replace '(://)[^/@ ]*@', '$1')) }
+}
 function Fetch-Source([string]$s) { # clone or fast-forward one source
     if (-not (Is-Url $s)) { if (-not (Test-Path -LiteralPath $s -PathType Container)) { Die "找不到來源資料夾：$s" }; return }
     Check-Host $s
     $d = Src-Dir $s
     if (Test-Path -LiteralPath (Join-Path $d '.git')) {
-        [void](Git-Safe -C $d pull --ff-only --quiet --no-recurse-submodules)
-        if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 $(Src-Name $s)（$(Pull-Why $d)）" }
+        $o = @(Git-Safe -C $d pull --ff-only --quiet --no-recurse-submodules)
+        if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 $(Src-Name $s)（$(Pull-Why $d)）"; Git-Err $o }
     } else {
         Ensure-Dir $KitSrc
-        [void](Git-Safe clone --quiet --no-recurse-submodules $s $d)
-        if ($LASTEXITCODE -ne 0) { Die "沒辦法 clone $s" }
+        $o = @(Git-Safe clone --quiet --no-recurse-submodules $s $d)
+        if ($LASTEXITCODE -ne 0) { Warn "沒辦法 clone $(Url-Safe $s)，git 說："; Git-Err $o; exit 1 }
     }
 }
 
@@ -505,11 +569,22 @@ function Of-Kind($items, [string]$kind) { @(foreach ($i in $items) { if ($i.Star
 
 # ---------- MCP yaml -> JSON / TOML ----------
 function Mcp-Env($lines) { foreach ($l in $lines) { if ($l.StartsWith('env.')) { $t = $l.IndexOf("`t"); , @($l.Substring(4, $t - 4), $l.Substring($t + 1)) } } }   # pairs; callers wrap in @()
+function Mcp-Argv($y) { # command + args of an MCP yaml; on Windows a .cmd / .bat (npx, npm, pnpm, yarn ...) runs through cmd /c
+    $cmd = @(YGet-From $y 'command'); if ($cmd.Count -eq 0 -or -not $cmd[0]) { return $null }
+    $c = [string]$cmd[0]; $a = @(YGet-From $y 'args')
+    if ($script:OnWindows -and $c -notmatch '^(cmd|cmd\.exe)$' -and -not [IO.Path]::GetExtension($c)) {
+        $shim = @('npx', 'npm', 'pnpm', 'pnpx', 'yarn', 'bunx') -contains $c.ToLowerInvariant()
+        if (-not $shim) { $g = Get-Command $c -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($g -and $g.Path -match '\.(cmd|bat)$') { $shim = $true } }
+        if ($shim) { return , (@('cmd', '/c', $c) + $a) }
+    }
+    , (@($c) + $a)
+}
 function Mcp-Json([string]$f) { # {"command":..,"args":[..],"env":{..}}
     $y = Yaml-Lines $f
-    $cmd = @(YGet-From $y 'command')
-    if ($cmd.Count -eq 0 -or -not $cmd[0]) { Warn "$f has no command"; return $null }
-    $out = '{"command":' + (Json-Str $cmd[0]) + ',"args":[' + ((@(YGet-From $y 'args') | ForEach-Object { Json-Str $_ }) -join ',') + ']'
+    $argv = Mcp-Argv $y
+    if (-not $argv) { Warn "$f has no command"; return $null }
+    $rest = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] })
+    $out = '{"command":' + (Json-Str $argv[0]) + ',"args":[' + ((@($rest) | ForEach-Object { Json-Str $_ }) -join ',') + ']'
     $envs = @(Mcp-Env $y)
     if ($envs.Count -gt 0) { $out += ',"env":{' + ((@($envs) | ForEach-Object { (Json-Str $_[0]) + ':' + (Json-Str $_[1]) }) -join ',') + '}' }
     $out + '}'
@@ -525,12 +600,12 @@ function Codex-Mcp-Toml($names) { # [mcp_servers.x] tables for Codex
     $sb = New-Object System.Text.StringBuilder
     foreach ($n in @($names | Where-Object { $_ })) {
         $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found in any source"; continue }
-        $y = Yaml-Lines $p; $cmd = @(YGet-From $y 'command')
-        if ($cmd.Count -eq 0 -or -not $cmd[0]) { Warn "$p has no command"; continue }
+        $y = Yaml-Lines $p; $argv = Mcp-Argv $y
+        if (-not $argv) { Warn "$p has no command"; continue }
         $pat = '^\s*\[mcp_servers\."?' + [regex]::Escape($n) + '"?[\]. ]'
         if (@($user | Where-Object { $_ -match $pat }).Count -gt 0) { Warn "Codex 的 config.toml 已經有自己的 mcp_servers.${n}，kit 不動它"; continue }
-        [void]$sb.Append("[mcp_servers.$(Toml-Key $n)]`ncommand = $(Json-Str $cmd[0])`n")
-        $args2 = @(YGet-From $y 'args'); if ($args2.Count -gt 0) { [void]$sb.Append('args = [' + (($args2 | ForEach-Object { Json-Str $_ }) -join ', ') + "]`n") }
+        [void]$sb.Append("[mcp_servers.$(Toml-Key $n)]`ncommand = $(Json-Str $argv[0])`n")
+        $args2 = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] }); if ($args2.Count -gt 0) { [void]$sb.Append('args = [' + (($args2 | ForEach-Object { Json-Str $_ }) -join ', ') + "]`n") }
         # team deny rules for this server's tools (mcp__<server>__<tool>) become disabled_tools
         $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Json-Str $d.Substring("mcp__${n}__".Length) } })
         if ($tools.Count -gt 0) { [void]$sb.Append('disabled_tools = [' + ($tools -join ', ') + "]`n") }
@@ -551,7 +626,7 @@ function Targets { $t = 'Claude'; if (Has-Codex) { $t += '、Codex' }; if (Has-O
 
 function Replace-Block([string]$f, [string]$begin, [string]$end, [string]$body) { # put BODY between the markers, at the end of FILE
     $exists = Test-Path -LiteralPath $f
-    if (-not $exists -and -not $body) { return }
+    if (-not $exists -and -not $body) { return $true }
     $orig = if ($exists) { Read-Text $f } else { '' }
     $nl = if ($orig.Contains("`r`n")) { "`r`n" } else { "`n" }
     $lines = New-Object System.Collections.Generic.List[string]; $skip = $false
@@ -559,6 +634,7 @@ function Replace-Block([string]$f, [string]$begin, [string]$end, [string]$body) 
         $parts = $orig -split "`n"; if ($orig.EndsWith("`n")) { $parts = $parts[0..($parts.Count - 2)] }
         foreach ($l in $parts) { $l = $l.TrimEnd("`r"); if ($l -eq $begin) { $skip = $true; continue }; if ($l -eq $end) { $skip = $false; continue }; if (-not $skip) { $lines.Add($l) } }
     }
+    if ($skip) { Warn "$f 裡有 kit 的開始標記，但找不到結束標記（$end）：kit 不動這個檔案，請手動修好（刪掉開始那行，或補上結束那行）"; return $false }
     while ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
     $sb = New-Object System.Text.StringBuilder
     foreach ($l in $lines) { [void]$sb.Append($l).Append($nl) }
@@ -568,22 +644,24 @@ function Replace-Block([string]$f, [string]$begin, [string]$end, [string]$body) 
         [void]$sb.Append($begin).Append($nl).Append($body.Replace("`r`n", "`n").Replace("`n", $nl)).Append($end).Append($nl)
     }
     $new = $sb.ToString()
-    if ($exists -and $new -ceq $orig) { return }
-    if ($new -eq '') { Remove-Item -LiteralPath $f -Force; return }   # nothing left: kit made it
+    if ($exists -and $new -ceq $orig) { return $true }
+    if ($new -eq '') { Remove-Item -LiteralPath $f -Force; return $true }   # nothing left: kit made it
     Ensure-Dir (Split-Path -Parent $f)
-    Write-Text "$f.kit.tmp" $new
-    if ($exists) { Swap-In "$f.kit.tmp" $f $false } else { Move-Item -LiteralPath "$f.kit.tmp" -Destination $f }
+    $tmp = Temp-Next $f
+    Write-Text $tmp $new
+    if ($exists) { Swap-In $tmp $f $false } else { Move-Item -LiteralPath $tmp -Destination $f }
+    $true
 }
 function Rules-Body($names, [string]$mode) { # text for the instructions file
     $sb = New-Object System.Text.StringBuilder
     foreach ($n in @($names | Where-Object { $_ })) {
         $p = Find-Item 'rule' $n; if (-not $p) { Warn "rule $n not found in any source"; continue }
-        if ($mode -eq 'import') { [void]$sb.Append("@$p`n") }
+        if ($mode -eq 'import') { [void]$sb.Append('@' + $p.Replace('\', '/').Replace(' ', '\ ') + "`n") }
         else { $t = Read-Text $p; [void]$sb.Append("<!-- rule: $n -->`n").Append($t); if (-not $t.EndsWith("`n")) { [void]$sb.Append("`n") } }
     }
     $sb.ToString()
 }
-function Set-Rules([string]$f, $names, [string]$mode) { Replace-Block $f $BeginMark $EndMark (Rules-Body $names $mode) }
+function Set-Rules([string]$f, $names, [string]$mode) { [void](Replace-Block $f $BeginMark $EndMark (Rules-Body $names $mode)) }
 
 function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills into DIR
     $names = @($names | Where-Object { $_ })
@@ -614,19 +692,30 @@ function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills
     }
 }
 function Sync-McpJson([string]$f, [string]$kind, $names) { # wanted MCP -> FILE's mcpServers
+    # A server the user already has under that name (not kit's) is never replaced, so never removed either.
+    # state.tsv changes only after FILE was written: if that fails, the next sync tries again.
     $names = @($names | Where-Object { $_ }); $ops = New-Object System.Collections.Generic.List[object]
+    $sets = @(); $dels = @()
     foreach ($n in $names) {
         $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found in any source"; continue }
         $k = Mcp-Json $p; if (-not $k) { continue }
-        $sum = Text-Hash $k
-        if ((State-Get $kind $n) -eq $sum) { continue }
-        $ops.Add(@('set', "mcpServers.$n", $k)); State-Set $kind $n $sum; Say "  mcp $n → $f"
+        $sum = Text-Hash $k; $old = State-Get $kind $n
+        if ($old -eq $sum) { continue }
+        if (-not $old -and $null -ne (Json-Get $f "mcpServers.$n")) {
+            if ($null -eq (State-Get 'skipped' "$f#mcp.$n")) { Warn "$f 已經有自己的 MCP ${n}，不是 kit 放的，kit 不動它（只提醒這一次）"; State-Set 'skipped' "$f#mcp.$n" 1 }
+            continue
+        }
+        $ops.Add(@('set', "mcpServers.$n", $k)); $sets += , @($n, $sum); Say "  mcp $n → $f"
     }
     foreach ($n in State-List $kind) {
         if ($names -contains $n) { continue }
-        $ops.Add(@('del', "mcpServers.$n")); State-Del $kind $n; Say "  removed mcp $n ← $f"
+        $ops.Add(@('del', "mcpServers.$n")); $dels += $n; Say "  removed mcp $n ← $f"
     }
-    if ($ops.Count -gt 0) { Json-Edit $f $ops.ToArray(); Prune-Empty $f @('mcpServers') }
+    if ($ops.Count -gt 0) {
+        Json-Edit $f $ops.ToArray(); Prune-Empty $f @('mcpServers')
+        foreach ($x in $sets) { State-Set $kind $x[0] $x[1]; if ($null -ne (State-Get 'skipped' "$f#mcp.$($x[0])")) { State-Del 'skipped' "$f#mcp.$($x[0])" } }
+        foreach ($n in $dels) { State-Del $kind $n }
+    }
 }
 
 function Hook-Json { # the SessionStart hook entry kit adds to settings.json
@@ -649,7 +738,7 @@ function Apply-All {
     if ($codex -or $omp) { Sync-Skills $AgentsSkills 'skill.agents' $skills }
     if ($codex) {
         Set-Rules (Join-Path $CodexDir 'AGENTS.md') $rules 'inline'
-        Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd (Codex-Mcp-Toml $mcps)
+        [void](Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd (Codex-Mcp-Toml $mcps))
     }
     if ($omp) {
         Set-Rules (Join-Path $OmpDir 'AGENTS.md') $rules 'inline'
@@ -657,22 +746,28 @@ function Apply-All {
     }
 
     # tool deny rules and the auto-sync hook -> ~/.claude/settings.json
+    # (state.tsv only after settings.json was written)
     $ops = New-Object System.Collections.Generic.List[object]
-    $deny = Required-Deny
+    $deny = Required-Deny; $add = @(); $del = @()
     foreach ($n in $deny) {
         if ($null -ne (State-Get 'deny' $n)) { continue }
-        $ops.Add(@('addstr', 'permissions.deny', $n)); State-Set 'deny' $n 1; Say "  deny $n"
+        $ops.Add(@('addstr', 'permissions.deny', $n)); $add += $n; Say "  deny $n"
     }
     foreach ($n in State-List 'deny') {
         if ($deny -contains $n) { continue }
-        $ops.Add(@('rmstr', 'permissions.deny', $n)); State-Del 'deny' $n; Say "  removed deny $n"
+        $ops.Add(@('rmstr', 'permissions.deny', $n)); $del += $n; Say "  removed deny $n"
     }
     $hj = Hook-Json; $old = State-Get 'hook' 'SessionStart'
     if ($hj -ne $old) {
         if ($old) { $ops.Add(@('rmjson', 'hooks.SessionStart', $old)) }
-        $ops.Add(@('addjson', 'hooks.SessionStart', $hj)); State-Set 'hook' 'SessionStart' $hj
+        $ops.Add(@('addjson', 'hooks.SessionStart', $hj))
     }
-    if ($ops.Count -gt 0) { Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny }
+    if ($ops.Count -gt 0) {
+        Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny
+        foreach ($n in $add) { State-Set 'deny' $n 1 }
+        foreach ($n in $del) { State-Del 'deny' $n }
+        if ($hj -ne $old) { State-Set 'hook' 'SessionStart' $hj }
+    }
 }
 
 # ---------- commands ----------
@@ -707,6 +802,7 @@ function Version-Nag { # tell once when a source's kit.yaml wants a newer kit (n
 function Cmd-Init($srcs) {
     if (@($srcs).Count -lt 1) { Die '用法：kit init <網址或資料夾> [更多來源...]' }
     $list = @(foreach ($s in $srcs) {
+        if (Has-Creds $s) { Die "網址裡有帳號或 token（$(Url-Safe $s)）：不要把密碼放進網址，先用 git clone 登入一次（Git 的認證管理會記住），再用不含帳號的網址" }
         if (Is-Url $s) { $s }
         elseif (Test-Path -LiteralPath $s -PathType Container) { (Resolve-Path -LiteralPath $s).ProviderPath }
         else { Die "找不到資料夾：$s" }
@@ -770,6 +866,7 @@ function Sync-Bg { # the background half of Sync-Hook
     $lock = Join-Path $KitConf 'sync.lock'; $log = Join-Path $KitConf 'sync.log'
     if ((Test-Path -LiteralPath $log) -and (Get-Item -LiteralPath $log).Length -gt 100000) { Move-Item -LiteralPath $log -Destination "$log.old" -Force }
     $script:LogPath = $log
+    $script:Locked = $true; $script:LockMine = $true
     try {
         Say "== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
         $env:GIT_HTTP_LOW_SPEED_LIMIT = '1000'; $env:GIT_HTTP_LOW_SPEED_TIME = '20'
@@ -933,7 +1030,7 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
     foreach ($s in @(M-Sources)) {
         if (-not $s) { continue }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
-        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S $s), `"dir`": $(Json-S (Src-Dir $s)), `"push`": $(Json-S (Push-Mode (Src-Dir $s)))}")
+        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S (Url-Safe $s)), `"dir`": $(Json-S (Src-Dir $s)), `"push`": $(Json-S (Push-Mode (Src-Dir $s)))}")
     }
     $tools = '"claude"'; if (Has-Codex) { $tools += ', "codex"' }; if (Has-Omp) { $tools += ', "omp"' }
     [void]$sb.Append("`n  ],`n  `"tools`": [$tools],`n  `"items`": [")
@@ -1024,7 +1121,7 @@ function Cmd-Run($rest) {
     }
     if (@('claude', 'codex', 'omp') -notcontains $tool) { Die '--tool 只能是 claude、codex 或 omp' }
     $f = Find-Item 'agent' $name; if (-not $f) { Die "找不到 agent ${name}（打 kit list 看有哪些）" }
-    $script:Quiet = $true; try { Cmd-Sync } catch { }; $script:Quiet = $false
+    if (Take-Lock -Soft) { $script:Quiet = $true; try { Cmd-Sync } catch { } finally { $script:Quiet = $false; Release-Lock } }   # busy (another kit is syncing): start as it is
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('kit-run.' + [IO.Path]::GetRandomFileName())
     $skdir = if ($tool -eq 'claude') { Join-Path $tmp '.claude/skills' } else { Join-Path $tmp 'skills' }
@@ -1108,8 +1205,9 @@ function Cmd-Run($rest) {
 }
 function Cmd-Uninstall($rest) {
     $self = (@($rest) -contains '--self')
-    foreach ($f in @((Join-Path $ClaudeDir 'CLAUDE.md'), (Join-Path $CodexDir 'AGENTS.md'), (Join-Path $OmpDir 'AGENTS.md'))) { Replace-Block $f $BeginMark $EndMark '' }
-    Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd ''
+    $left = $false
+    foreach ($f in @((Join-Path $ClaudeDir 'CLAUDE.md'), (Join-Path $CodexDir 'AGENTS.md'), (Join-Path $OmpDir 'AGENTS.md'))) { if (-not (Replace-Block $f $BeginMark $EndMark '')) { $left = $true } }
+    if (-not (Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd '')) { $left = $true }
     $script:Quiet = $true
     Sync-Skills (Join-Path $ClaudeDir 'skills') 'skill' @()
     Sync-Skills $AgentsSkills 'skill.agents' @()
@@ -1123,14 +1221,22 @@ function Cmd-Uninstall($rest) {
         if ($f[0] -eq 'hook') { $ops.Add(@('rmjson', "hooks.$($f[1])", $f[2])) }
     }
     if ($ops.Count -gt 0) { Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny }
+    if ($left) { Die '有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall' }
     foreach ($f in @($State, $Machine)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
     Say 'kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）'
     Say "     來源的 clone 還留在 $KitSrc"
     if ($self) {
         $dir = if ((Split-Path -Leaf $KitLib) -eq 'lib') { Split-Path -Parent $KitLib } else { $KitLib }
         if ($OnWindows) {
-            $p = [Environment]::GetEnvironmentVariable('Path', 'User')
-            if ($p) { [Environment]::SetEnvironmentVariable('Path', ((@($p.Split(';') | Where-Object { $_ -and $_.TrimEnd('\') -ne $dir.TrimEnd('\') })) -join ';'), 'User') }
+            # the raw value (%VAR% kept), written back as REG_EXPAND_SZ
+            $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+            if ($key) {
+                $p = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                if ($p) { $key.SetValue('Path', ((@($p.Split(';') | Where-Object { $_ -and $_.TrimEnd('\') -ne $dir.TrimEnd('\') })) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+                $key.Close()
+                # tell Windows the variables changed (new terminals see it)
+                [Environment]::SetEnvironmentVariable('AGENTKIT_PATH_REFRESH', '1', 'User'); [Environment]::SetEnvironmentVariable('AGENTKIT_PATH_REFRESH', $null, 'User')
+            }
         }
         if (Test-Path -LiteralPath (Join-Path $KitLib '.repo')) { Remove-Item -LiteralPath $dir -Recurse -Force }   # only an installed copy
         Say 'kit：kit 本身也移除了'
@@ -1369,8 +1475,15 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
             if (-not (Valid-Name $n)) { Problem "${rel}: 名字只能用小寫英文、數字和 -" }
             $cmd = @(YGet $f 'command')
             if ($cmd.Count -eq 0 -or -not $cmd[0]) { Problem "${rel}: 少了 command" }
+            $mh = @(YGet $kitYaml 'allowed_hosts') + @(YGet $kitYaml 'content_hosts')
+            if (Test-Path -LiteralPath $Machine) { foreach ($sd in Src-Dirs) { $mh += @(YGet (Join-Path $sd 'kit.yaml') 'allowed_hosts') + @(YGet (Join-Path $sd 'kit.yaml') 'content_hosts') } }
+            $mh = @($mh | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() })
             foreach ($v in @($cmd) + @(YGet $f 'args')) {
-                if ($v -match '^(git\+|github:|git@)' -or $v.Contains('://')) { Problem "${rel}: MCP 只能從公司允許的套件來源裝，不能用 $v 這種寫法" }
+                if ($v -match '^(git\+|github:|git@)') { Problem "${rel}: MCP 只能從公司允許的套件來源裝，不能用 $v 這種寫法" }
+                elseif ($v.Contains('://')) {   # a package index etc.: only a host the sources list (allowed_hosts or content_hosts)
+                    $h = (($v.Substring($v.IndexOf('://') + 3) -replace '^[^@/]*@', '') -replace '[:/?#].*$', '').ToLowerInvariant()
+                    if ($mh -notcontains $h) { Problem "${rel}: MCP 只能從公司允許的套件來源裝：$h 不在 allowed_hosts 或 content_hosts" }
+                }
             }
         }
         if (Test-Path -LiteralPath $kitYaml -PathType Leaf) {
@@ -1396,7 +1509,7 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
         }
         # URLs only to content_hosts (when the sources list them)
         $hosts = @(YGet $kitYaml 'content_hosts'); if (Test-Path -LiteralPath $Machine) { foreach ($sd in Src-Dirs) { $hosts += @(YGet (Join-Path $sd 'kit.yaml') 'content_hosts') } }
-        $hosts = @(Uniq $hosts)
+        $hosts = @(Uniq @($hosts | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() }))
         foreach ($tf in $textFiles) {
             $lines = (Read-Text $tf[1]) -split "`n"
             for ($i = 0; $i -lt $lines.Count; $i++) {
@@ -1418,7 +1531,7 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
                 foreach ($l in @(& git -C $d log --format='%h %ae' $range 2>$null)) {
                     $parts = "$l".Split(' '); if ($parts.Count -lt 2) { continue }
                     $dom = $parts[1].Substring($parts[1].LastIndexOf('@') + 1)
-                    if ($doms -notcontains $dom) { Problem "commit $($parts[0]): 作者 email 不是公司網域" }
+                    if ($doms -notcontains $dom.ToLowerInvariant() -and $doms -notcontains $dom) { Problem "commit $($parts[0]): 作者 email 不是公司網域" }
                 }
             }
         }
@@ -1613,6 +1726,33 @@ function Push-Items([string]$dir, $files) { # changed item files -> @(verb, kind
         , @($v, "${k}:$n")
     }
 }
+function Changed-Files([string]$dir) { # changed files in DIR, exactly as named (a rename: the new and the old name)
+    $raw = "$(@(Git-Q -C $dir status --porcelain -z --untracked-files=all) -join "`n")"
+    $old = $false
+    foreach ($e in $raw.Split([char]0)) {
+        if ($old) { $old = $false; if ($e) { $e }; continue }
+        if ($e.Length -lt 4) { continue }
+        if ($e[0] -eq 'R') { $old = $true }
+        $e.Substring(3)
+    }
+}
+function Git-AddCommit([string]$dir, [string]$msg, $files) { # commit exactly these files (names taken literally, not as patterns)
+    $env:GIT_LITERAL_PATHSPECS = '1'
+    try {
+        [void](Git-Q -C $dir add -A '--' @files); if ($LASTEXITCODE -ne 0) { return $false }
+        [void](Git-Q -C $dir commit -q -m $msg '--' @files); $LASTEXITCODE -eq 0
+    } finally { Remove-Item env:GIT_LITERAL_PATHSPECS -ErrorAction SilentlyContinue }
+}
+function Author-Check([string]$dir) { # with author_domains in kit.yaml, the commit's author and committer must use one
+    $doms = @(YGet (Join-Path $dir 'kit.yaml') 'author_domains' | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() })
+    if ($doms.Count -eq 0) { return }
+    $ids = @(Git-Q -C $dir var GIT_AUTHOR_IDENT) + @(Git-Q -C $dir var GIT_COMMITTER_IDENT)
+    $emails = @(foreach ($i in $ids) { if ("$i" -match '<([^>]*)>') { $Matches[1] } })
+    if ($emails.Count -eq 0) { Die 'git 還不知道你的名字和信箱，什麼都沒送。請打  git config --global user.name "你的名字"  和  git config --global user.email 你的公司信箱' }
+    foreach ($e in $emails) {
+        if ($doms -notcontains $e.Substring($e.LastIndexOf('@') + 1).ToLowerInvariant()) { Die "git 的作者信箱 $e 不是公司網域（要是 $($doms -join ' ')），什麼都沒送。請打  git config user.email 你的公司信箱（也看看 GIT_AUTHOR_EMAIL、GIT_COMMITTER_EMAIL）" }
+    }
+}
 function Rev-Count([string]$dir, [string]$range) { $n = "$(@(Git-Q -C $dir rev-list --count $range) -join '')"; if ($LASTEXITCODE -ne 0 -or $n -notmatch '^[0-9]+$') { return '1' }; $n }
 function Push-Direct($dir, $leaf, $files, $msg, $dry) { # kit.yaml says push: direct: commit on this branch, push to every remote
     $remotes = @(Git-Q -C $dir remote | Where-Object { $_ })
@@ -1636,13 +1776,11 @@ function Push-Direct($dir, $leaf, $files, $msg, $dry) { # kit.yaml says push: di
     Say "kit.yaml 寫 push: direct：直接 commit 到 ${cur}，推到 $($remotes -join ' ')，不開 PR"
     Say "commit：$msg"
     if ($dry) { Say '（--dry-run：沒有 commit，沒有送）'; return }
-    [void](Git-Q -C $dir add -A '--' @files); $ok = $LASTEXITCODE -eq 0
-    if ($ok) { [void](Git-Q -C $dir commit -q -m $msg '--' @files); $ok = $LASTEXITCODE -eq 0 }
-    if (-not $ok) { Die 'commit 失敗，什麼都沒送' }
+    if (-not (Git-AddCommit $dir $msg $files)) { Die 'commit 失敗，什麼都沒送' }
     $fail = $false
     foreach ($r in $remotes) {
-        [void](Git-Safe -C $dir push -q --no-recurse-submodules $r "HEAD:refs/heads/$cur")
-        if ($LASTEXITCODE -eq 0) { Say "已推到 $r" } else { Warn "沒辦法推到 ${r}（落後了要先 git pull？沒網路？）"; $fail = $true }
+        $o = @(Git-Safe -C $dir push -q --no-recurse-submodules $r "HEAD:refs/heads/$cur")
+        if ($LASTEXITCODE -eq 0) { Say "已推到 $r" } else { Warn "沒辦法推到 ${r}（落後了要先 git pull？沒網路？），git 說："; Git-Err $o; $fail = $true }
     }
     if ($fail) { Die "commit 已經在本機的 ${cur}，有的 remote 沒推成功（看上面）" }
 }
@@ -1661,7 +1799,7 @@ function Cmd-Push($rest) {
     $script:PushDir = $dir
 
     # what changed: only item files are sent
-    $all = @(Git-Q -C $dir -c core.quotePath=false status --porcelain --untracked-files=all | Where-Object { $_.Length -gt 3 } | ForEach-Object { $_.Substring(3) -replace '^.* -> ', '' })
+    $all = @(Changed-Files $dir)
     $files = @($all | Where-Object { $_ -match '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$' })
     $other = @($all | Where-Object { $files -notcontains $_ })
     if ($files.Count -eq 0) { Say "沒有要送的（$leaf 裡沒有改過的 rule、skill、mcp、agent）"; return }
@@ -1670,11 +1808,7 @@ function Cmd-Push($rest) {
 
     # checks: any problem stops everything
     if (-not (Check-Dirs @($dir))) { Die 'kit check 有問題，什麼都沒送（改好再 kit push）' }
-    $doms = @(YGet (Join-Path $dir 'kit.yaml') 'author_domains')
-    if ($doms.Count -gt 0) {
-        $email = "$(@(Git-Q -C $dir config user.email) -join '')"
-        if ($doms -notcontains $email.Substring($email.LastIndexOf('@') + 1)) { Die "git 的 user.email 不是公司網域（要是 $($doms -join ' ')），什麼都沒送。請打  git config user.email 你的公司信箱" }
-    }
+    Author-Check $dir
     $parts = @(foreach ($v in 'add', 'update', 'remove') { $l = @($items | Where-Object { $_[0] -eq $v } | ForEach-Object { $_[1] }); if ($l.Count -gt 0) { "$v $($l -join ', ')" } })
     $msg = "kit: $($parts -join '; ')"
     # kit.yaml push: pr (the default): a branch on origin + a PR; push: direct (your own source): commit here, push to every remote
@@ -1685,9 +1819,15 @@ function Cmd-Push($rest) {
     if ($LASTEXITCODE -ne 0 -or -not $origin) { Die "$leaf 沒有 origin，不知道要開 PR 到哪，什麼都沒送（團隊來源要有 origin；自己的來源想直接推到它的 remote，在 kit.yaml 加一行  push: direct）" }
     Check-Host $origin; Check-PushUrls $dir 'origin'
     $ownerRepo = Url-Path $origin
-    $api = ''; $web = ''
-    if ($env:KIT_GITEA_API) { $api = $env:KIT_GITEA_API.TrimEnd('/'); Check-Host $api; $web = $api -replace '/api/v1$', '' }
-    elseif (Is-Url $origin) { $web = "https://$(Url-Host $origin)"; $api = "$web/api/v1" }
+    # the Gitea token goes only to the Gitea you named (KIT_GITEA_API), or to origin's host when this source's own
+    # kit.yaml lists it in allowed_hosts; anywhere else kit prints the link and you open the PR yourself
+    $api = ''; $web = ''; $tokenTo = $false
+    if ($env:KIT_GITEA_API) { $api = $env:KIT_GITEA_API.TrimEnd('/'); Check-Host $api; $web = $api -replace '/api/v1$', ''; $tokenTo = $true }
+    elseif (Is-Url $origin) {
+        $web = "https://$(Url-Host $origin)"; $api = "$web/api/v1"
+        $own = @(YGet (Join-Path $dir 'kit.yaml') 'allowed_hosts' | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() })
+        if ($own -contains (Url-Host $origin)) { $tokenTo = $true }
+    }
 
     # branch: kit/<names>-YYYYMMDD, -2, -3 ... when taken
     $names = (@($items | ForEach-Object { $_[1].Substring($_[1].IndexOf(':') + 1) }) -join '-')
@@ -1699,7 +1839,9 @@ function Cmd-Push($rest) {
         if ($LASTEXITCODE -ne 0 -and $remote -notcontains $b) { break }
         $n++; $b = "$base-$n"
     }
+    # where the PR goes: origin's default branch (as this clone knows it, else as origin says)
     $into = "$(@(Git-Q -C $dir symbolic-ref --short -q refs/remotes/origin/HEAD) -join '')" -replace '^origin/', ''
+    if (-not $into) { foreach ($l in @(Git-Safe -C $dir ls-remote --symref origin HEAD)) { if ("$l" -match '^ref:\s+refs/heads/(\S+)\s+HEAD$') { $into = $Matches[1]; break } } }
     if (-not $into) { $into = 'main' }
 
     Say "要送的檔案（$leaf）："
@@ -1713,17 +1855,17 @@ function Cmd-Push($rest) {
     if (-not $orig) { $orig = "$(@(Git-Q -C $dir rev-parse HEAD) -join '')" }
     [void](Git-Safe -C $dir fetch -q --no-recurse-submodules origin "+refs/heads/${into}:refs/remotes/origin/$into")
     if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 origin/${into}（沒網路？）" }
-    $start = 'HEAD'
-    [void](Git-Q -C $dir rev-parse -q --verify "refs/remotes/origin/$into"); if ($LASTEXITCODE -eq 0) { $start = "refs/remotes/origin/$into" }
-    [void](Git-Q -C $dir checkout -q -b $b $start)
+    [void](Git-Q -C $dir rev-parse -q --verify "refs/remotes/origin/$into")
+    if ($LASTEXITCODE -ne 0) { Die "找不到 origin 的 ${into} 分支（沒網路？還是 origin 的主分支不叫 ${into}？），什麼都沒送" }
+    $start = "refs/remotes/origin/$into"
+    [void](Git-Q -C $dir checkout -q --no-track -b $b $start)
     if ($LASTEXITCODE -ne 0) { Die "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送" }
-    [void](Git-Q -C $dir add -A '--' @files); $ok = $LASTEXITCODE -eq 0
-    if ($ok) { [void](Git-Q -C $dir commit -q -m $msg '--' @files); $ok = $LASTEXITCODE -eq 0 }
+    $ok = Git-AddCommit $dir $msg $files
     if (-not $ok) { [void](Git-Q -C $dir checkout -q $orig); [void](Git-Q -C $dir branch -q -D $b); Die 'commit 失敗，什麼都沒送' }
     [void](Git-Q -C $dir checkout -q $orig)
     if ($LASTEXITCODE -ne 0) { Warn "沒辦法切回 ${orig}，你現在在 $b" }
-    [void](Git-Safe -C $dir push -q --no-recurse-submodules origin "refs/heads/${b}:refs/heads/$b")
-    if ($LASTEXITCODE -ne 0) { Die "沒辦法 push 分支 ${b}（沒網路？）。commit 留在本機的 $b" }
+    $o = @(Git-Safe -C $dir push -q --no-recurse-submodules origin "refs/heads/${b}:refs/heads/$b")
+    if ($LASTEXITCODE -ne 0) { Warn "沒辦法 push 分支 ${b}，git 說："; Git-Err $o; Die "commit 留在本機的 ${b}（沒網路？沒權限？）" }
     Say "已送出分支 ${b}。改的檔案已從這裡移到那個分支，PR 合併後打 git pull 就會回來；想先看可以  git checkout $b"
 
     # pull request
@@ -1734,7 +1876,9 @@ function Cmd-Push($rest) {
         if (-not $script:OnWindows) { $m = "$(& ls -l $tf)"; if ($m.Length -lt 10 -or $m.Substring(4, 6) -ne '------') { Warn "$tf 的權限太開放了，請打  chmod 600 $tf" } }
         $tok = (Read-Text $tf) -replace '\s', ''
     }
-    if ($tok -and $api) {
+    if ($tok -and $api -and -not $tokenTo) {
+        Say "kit.yaml 的 allowed_hosts 沒有列 $(Url-Host $origin)，kit 不把 Gitea token 送過去；PR 請自己開（或設 KIT_GITEA_API）"
+    } elseif ($tok -and $api) {
         $body = "由 kit push 送出：`n" + ((@($items | ForEach-Object { "- $($_[0]) $($_[1])" })) -join "`n")
         $json = '{"title":' + (Json-Str $msg) + ',"head":' + (Json-Str $b) + ',"base":' + (Json-Str $into) + ',"body":' + (Json-Str $body) + '}'
         $code = ''
@@ -1927,16 +2071,17 @@ function Panel-Src { # the panel's files: next to the installed kit, else in the
     foreach ($d in $cands) { if (Test-Path -LiteralPath (Join-Path $d 'main.js') -PathType Leaf) { return $d } }
     $null
 }
+function Has-Id([string]$text, [string]$id) { $text -match ('"id"\s*:\s*"' + [regex]::Escape($id) + '"') }   # a layout node with this id
 function Layout-Edit([string]$f, $ops, [switch]$Clean) { # the layout text with OPS applied (-Clean: kit's blocks all taken out first)
     $text = Read-Text $f
     $root = Json-Parse $text
     $ops = @($ops | Where-Object { $_ })
-    if (-not $Clean -and $text.Contains('"kit-toggle"') -and $text.Contains('"kit-panel"')) {
+    if (-not $Clean -and (Has-Id $text 'kit-toggle') -and (Has-Id $text 'kit-panel')) {
         # Kit's button and panel already there (maybe moved or resized by hand): keep them, only add what is missing
-        $ops = @($ops | Where-Object { -not ($_[0] -eq 'addnear' -and $_[3] -match '^\{"id":"([^"]+)"' -and $text.Contains('"' + $Matches[1] + '"')) })
+        $ops = @($ops | Where-Object { -not ($_[0] -eq 'addnear' -and $_[3] -match '^\{"id":"([^"]+)"' -and (Has-Id $text $Matches[1])) })
     }
-    else { # start clean: old or half-placed blocks taken out first
-        $ops = @(@('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel'), @('rmwhere', 'content.mod', 'kit-agents'), @('rmwhere', 'id', 'kit-agents-toggle'), @('rmwhere', 'id', 'kit-agents-panel'), @('swapwhere', 'content.mod', 'kit-pane', 'pane')) + $ops
+    else { # start clean: old or half-placed blocks taken out first (a column holding only kit's block too, whatever its id became)
+        $ops = @(@('rmholder', 'content.mod', 'kit'), @('rmholder', 'content.mod', 'kit-agents'), @('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel'), @('rmwhere', 'content.mod', 'kit-agents'), @('rmwhere', 'id', 'kit-agents-toggle'), @('rmwhere', 'id', 'kit-agents-panel'), @('swapwhere', 'content.mod', 'kit-pane', 'pane')) + $ops
     }
     Json-Apply $root $ops
     Json-Text $root $text
@@ -1975,7 +2120,7 @@ function Cmd-HerdrPanel($rest) {
             # the button and panel, and each pane's header with kit's button (the pane header mod "kit-pane")
             $t = $null
             try { $t = Layout-Edit $lf @(@('addnear', 'content.mod', 'tabs', $AgentsToggle), @('addnear', 'content.mod', 'tabs', $PanelToggle), @('addnear', 'content.tab', 'active', $PanelNode), @('addnear', 'content.tab', 'active', $AgentsNode), @('swapwhere', 'content.mod', 'pane', 'kit-pane')) } catch { if ($env:KIT_DEBUG) { Warn "$($_.Exception.Message) $($_.ScriptStackTrace)" }; $t = $null }
-            if ($t -and $t.Contains('"kit-toggle"') -and $t.Contains('"kit-panel"')) {
+            if ($t -and (Has-Id $t 'kit-toggle') -and (Has-Id $t 'kit-panel')) {
                 if ($t -cne (Read-Text $lf)) { $newLayout = $t }     # already like this: no backup, no write
             }
             else { $place = 'right'; Say "kit：版面 $name 找不到分頁列（tabs）或工作區，沒改它：panel 會先出現在右邊" }
@@ -2160,6 +2305,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 $cmd = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
 $rest = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
 try {
+    # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook / --bg take it themselves)
+    if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
     switch ($cmd) {
         'init' { Cmd-Init $rest }
         'sync' {
@@ -2194,5 +2341,5 @@ try {
 } catch {
     if ($env:KIT_DEBUG) { Warn $_.ScriptStackTrace }
     Die $_.Exception.Message
-}
+} finally { if (-not ($cmd -eq 'sync' -and @($rest) -contains '--bg')) { Release-Lock } }
 exit 0

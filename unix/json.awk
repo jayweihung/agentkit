@@ -8,7 +8,8 @@
 #
 # Output is formatted like JSON.stringify(value, null, 2): 2-space indent,
 # key order kept, strings copied byte for byte. A trailing newline is kept
-# only if the input had one. An empty input file counts as {}.
+# only if the input had one; a UTF-8 BOM and CRLF line ends are kept too
+# (the same as kit.ps1). An empty input file counts as {}.
 #
 # OPSFILE has one operation per line, fields separated by a TAB:
 #   set     PATH  JSON     put JSON at PATH (creates missing objects)
@@ -21,6 +22,8 @@
 #   addnear KEY   STRING  JSON   anywhere in the file: append JSON to each array that has an
 #                                item (object) whose KEY is "STRING", if no equal item is there
 #   swapwhere KEY STRING  NEW    anywhere in the file: objects whose KEY is "STRING" get "NEW" there
+#   rmholder KEY  STRING   anywhere in the file: remove array items (objects) whose "children"
+#                          array holds nothing but objects whose KEY is "STRING"
 # PATH and KEY are keys joined by "." (keys must not contain "." or TAB).
 # STRING is plain text; " and \ are escaped by json.awk.
 #
@@ -33,6 +36,7 @@ BEGIN {
 
 {
     total += length($0) + 1
+    if (NR == 1 && substr($0, 1, 3) == "\357\273\277") { bom = 1; $0 = substr($0, 4) }   # UTF-8 BOM
     if (!instr) {
         lex_outside($0)
         instr = 1; buf = ""; lastout = 1
@@ -70,8 +74,11 @@ END {
         exit 0
     }
     if (ops != "") apply_ops(ops)
-    printf "%s", ser(root, "")
-    if (had_nl) printf "\n"
+    out = ser(root, "")
+    if (crlf) gsub(/\n/, "\r\n", out)
+    if (bom) printf "\357\273\277"
+    printf "%s", out
+    if (had_nl) printf (crlf ? "\r\n" : "\n")
 }
 
 function odd_backslashes(s,    n) {
@@ -89,6 +96,7 @@ function lex_outside(s,    i, c, lit) {
             tok[++ntok] = c
         } else if (c == " " || c == "\t" || c == "\r" || c == "\n") {
             if (lit != "") { tok[++ntok] = lit; lit = "" }
+            if (c == "\r") crlf = 1
         } else {
             lit = lit c
         }
@@ -293,6 +301,8 @@ function apply_ops(file,    line, f, cnt, n, p, j, a, i, s, found) {
             add_near(root, f[2], json_str(f[3]), f[4])
         } else if (f[1] == "swapwhere") {
             swap_where(root, f[2], json_str(f[3]), json_str(f[4]))
+        } else if (f[1] == "rmholder") {
+            rm_holder(root, f[2], json_str(f[3]))
         } else fail("unknown op " f[1])
     }
     close(file)
@@ -310,6 +320,19 @@ function rm_where(n, key, s,    i, c) {
         c = C[n, i]; if (c == 0) continue
         if (T[n] == "a" && item_is(c, key, s)) { C[n, i] = 0; continue }
         rm_where(c, key, s)
+    }
+}
+
+function rm_holder(n, key, s,    i, c, j, k, m, all, any) {
+    if (T[n] == "v") return
+    for (i = 1; i <= N[n]; i++) {
+        c = C[n, i]; if (c == 0) continue
+        if (T[n] == "a" && T[c] == "o" && (j = child(c, "children")) && T[C[c, j]] == "a") {
+            k = C[c, j]; all = 1; any = 0
+            for (m = 1; m <= N[k]; m++) if (C[k, m]) { any = 1; if (!item_is(C[k, m], key, s)) all = 0 }
+            if (any && all) { C[n, i] = 0; continue }
+        }
+        rm_holder(c, key, s)
     }
 }
 

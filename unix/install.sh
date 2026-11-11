@@ -42,11 +42,15 @@ case ":$PATH:" in
         # the startup file the user's login shell really reads must exist
         case "${SHELL:-}" in
             */zsh)  main=$HOME/.zshrc ;;
-            */bash) if [ "$(uname)" = Darwin ]; then main=$HOME/.bash_profile; else main=$HOME/.bashrc; fi ;;
+            */bash) if [ "$(uname)" = Darwin ]; then
+                        # a Mac's bash reads the first of these that exists: never make an earlier one (it would hide the others)
+                        main=$HOME/.bash_profile
+                        for rc in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do [ -f "$rc" ] && { main=$rc; break; }; done
+                    else main=$HOME/.bashrc; fi ;;
             *)      main=$HOME/.profile ;;
         esac
         [ -f "$main" ] || : > "$main"
-        for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
             [ -f "$rc" ] || continue
             grep -qF '# added by agentkit' "$rc" || printf '\n%s\n' "$line" >> "$rc"
         done

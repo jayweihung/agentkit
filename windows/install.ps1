@@ -43,12 +43,18 @@ Copy-Item -LiteralPath (Join-Path $repo 'windows\kit.cmd') -Destination (Join-Pa
 [IO.File]::WriteAllText((Join-Path $lib '.repo'), $repo, (New-Object Text.UTF8Encoding $false))   # where kit self-update pulls from
 
 if ($onWindows) {
-    $p = [Environment]::GetEnvironmentVariable('Path', 'User'); if (-not $p) { $p = '' }
+    # the raw value, so entries like %USERPROFILE%\bin stay as they are; written back as REG_EXPAND_SZ
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $key) { $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment') }
+    $p = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
     $parts = @($p.Split(';') | Where-Object { $_ })
-    if (@($parts | Where-Object { $_.TrimEnd('\') -eq $dest.TrimEnd('\') }).Count -eq 0) {
-        [Environment]::SetEnvironmentVariable('Path', (($parts + $dest) -join ';'), 'User')
+    if (@($parts | Where-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -eq $dest.TrimEnd('\') }).Count -eq 0) {
+        $key.SetValue('Path', (($parts + $dest) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        # tell Windows the variables changed, so new terminals see the new PATH
+        [Environment]::SetEnvironmentVariable('AGENTKIT_PATH_REFRESH', '1', 'User'); [Environment]::SetEnvironmentVariable('AGENTKIT_PATH_REFRESH', $null, 'User')
         Say "已把 $dest 加進你的 PATH，開新的終端機後生效"
     }
+    $key.Close()
 }
 $v = ([IO.File]::ReadAllText((Join-Path $lib 'VERSION'))).Trim()
 Say "kit $v 裝好了。下一步：kit init <團隊來源的網址>"

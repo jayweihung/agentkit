@@ -30,6 +30,30 @@ KINDS="rule skill mcp agent"
 
 # ---------- small helpers ----------
 die()  { printf 'kit: %s\n' "$*" >&2; exit 1; }
+# on the way out (also after die or Ctrl-C): the temp folder with a token in it, and the lock if this kit took it
+on_exit() { [ -z "${KIT_TMPDIR:-}" ] || rm -rf "$KIT_TMPDIR"; [ -z "${KIT_LOCK_MINE:-}" ] || rmdir "$KIT_CONF/sync.lock" 2>/dev/null; }
+trap on_exit EXIT
+trap 'exit 130' INT TERM HUP
+take_lock() { # take_lock [soft] : one kit at a time changes state.tsv and the tools' files (the background sync takes the same lock)
+    # soft: give up quietly after a few seconds (return 1) instead of stopping
+    [ -z "${KIT_LOCKED:-}" ] || return 0
+    local lock="$KIT_CONF/sync.lock" i=0 max=${KIT_LOCK_WAIT:-60}
+    [ "${1:-}" = soft ] && max=5
+    mkdir -p "$KIT_CONF" 2>/dev/null || return 0
+    until mkdir "$lock" 2>/dev/null; do
+        # left by a kit that was killed: older than 10 minutes
+        [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null && continue
+        i=$((i + 1))
+        if [ $i -gt "$max" ]; then
+            [ "${1:-}" = soft ] && return 1
+            die "另一個 kit 正在跑（${lock}），等它跑完再試一次"
+        fi
+        [ $i = 3 ] && [ "${1:-}" != soft ] && warn "等另一個 kit 跑完…"
+        sleep 1
+    done
+    KIT_LOCK_MINE=1; KIT_LOCKED=1
+}
+release_lock() { [ -z "${KIT_LOCK_MINE:-}" ] || rmdir "$KIT_CONF/sync.lock" 2>/dev/null; KIT_LOCK_MINE=; KIT_LOCKED=; }
 say()  { [ -n "${QUIET:-}" ] || printf '%s\n' "$*"; }
 warn() { printf 'kit: %s\n' "$*" >&2; }
 
@@ -52,7 +76,8 @@ json_edit() { # json_edit FILE OPSFILE : edit FILE, keep a backup
             rm -f "$snap" "$tmp"; die "沒辦法更新 ${f}（檔案沒有被改動）"
         fi
         if cmp -s "$snap" "$f"; then
-            [ $new = 1 ] || cp -p "$snap" "$f.kit-backup" 2>/dev/null
+            # the backup is the file as it was before kit first changed it (later edits do not replace it)
+            [ $new = 1 ] || [ -e "$f.kit-backup" ] || cp -p "$snap" "$f.kit-backup" 2>/dev/null
             if [ -L "$f" ]; then cat "$tmp" > "$f"; rm -f "$tmp"; else mv -f "$tmp" "$f"; fi
             rm -f "$snap"; return 0
         fi
@@ -63,7 +88,7 @@ json_edit() { # json_edit FILE OPSFILE : edit FILE, keep a backup
 prune_empty() { # prune_empty FILE PATH... : delete each PATH whose value is [] or {} (in order)
     local f=$1 p v ops; shift
     [ -f "$f" ] || return 0
-    ops=$(mktemp)
+    ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
     for p in "$@"; do
         v=$(json_get "$f" "$p" | tr -d ' \n')
         if [ "$v" = "[]" ] || [ "$v" = "{}" ]; then printf 'del\t%s\n' "$p" > "$ops"; json_edit "$f" "$ops"; fi
@@ -90,12 +115,19 @@ dir_hash() { # content hash of a directory (portable: cksum)
 state_get() { [ -f "$STATE" ] && awk -F'\t' -v k="$1" -v n="$2" '$1 == k && $2 == n { print $3; exit }' "$STATE"; }
 state_list() { [ -f "$STATE" ] && awk -F'\t' -v k="$1" '$1 == k { print $2 }' "$STATE"; }
 state_set() {
+    local t
     mkdir -p "$KIT_CONF"; touch "$STATE"
-    awk -F'\t' -v k="$1" -v n="$2" '!($1 == k && $2 == n)' "$STATE" > "$STATE.tmp"
-    [ $# -ge 3 ] && printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$STATE.tmp"
-    mv "$STATE.tmp" "$STATE"
+    t=$(mktemp "$STATE.XXXXXX") || die "沒辦法寫 $STATE"
+    awk -F'\t' -v k="$1" -v n="$2" '!($1 == k && $2 == n)' "$STATE" > "$t"
+    [ $# -ge 3 ] && printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$t"
+    mv -f "$t" "$STATE"
 }
-state_del() { [ -f "$STATE" ] || return 0; awk -F'\t' -v k="$1" -v n="$2" '!($1 == k && $2 == n)' "$STATE" > "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
+state_del() {
+    local t
+    [ -f "$STATE" ] || return 0
+    t=$(mktemp "$STATE.XXXXXX") || die "沒辦法寫 $STATE"
+    awk -F'\t' -v k="$1" -v n="$2" '!($1 == k && $2 == n)' "$STATE" > "$t"; mv -f "$t" "$STATE"
+}
 
 # ---------- machine.yaml ----------
 m_sources() { yget "$MACHINE" sources; }
@@ -104,7 +136,9 @@ m_added()   { yget "$MACHINE" added; }
 m_removed() { yget "$MACHINE" removed; }
 
 write_machine() { # write_machine SOURCES ADDED REMOVED (newline separated lists)
+    local t
     mkdir -p "$KIT_CONF"
+    t=$(mktemp "$MACHINE.XXXXXX") || die "沒辦法寫 $MACHINE"
     {
         echo "# written by kit - use kit add / kit rm instead of editing"
         echo "sources:            # earlier sources win when names repeat"
@@ -115,20 +149,37 @@ write_machine() { # write_machine SOURCES ADDED REMOVED (newline separated lists
             echo "# only signed, approved versions of the sources are used (kit approve)"
             printf 'approvals: %s\nsigners: %s\n' "$M_APPROVALS" "$M_SIGNERS"
         fi
-    } > "$MACHINE.tmp" && mv "$MACHINE.tmp" "$MACHINE"
+    } > "$t" && mv -f "$t" "$MACHINE"
 }
 
 # ---------- sources ----------
-is_url() { case $1 in *://*|*@*:*) return 0;; *) return 1;; esac; }
-url_host() { printf '%s\n' "$1" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#[:/].*$##'; }
+is_url() { # a git URL: scheme://..., user@host:path, or host:path (git's scp form; a drive letter C: is a folder)
+    case $1 in
+        *://*|*@*:*) return 0;;
+        [A-Za-z]:|[A-Za-z]:[\\/]*|/*|./*|../*|~*) return 1;;
+        *:*) case ${1%%:*} in ""|*/*) return 1;; *) return 0;; esac;;
+        *) return 1;;
+    esac
+}
+url_host() { printf '%s\n' "$1" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://##; s#^[^@/]*@##; s#[:/].*$##' | tr 'A-Z' 'a-z'; }
+url_safe() { printf '%s\n' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\1#'; }   # a URL without user:password@ (never printed or kept)
+has_creds() { # an http(s) URL with user[:password]@ in it (a token in the URL)
+    local a
+    case $1 in [Hh][Tt][Tt][Pp]://*|[Hh][Tt][Tt][Pp][Ss]://*) a=${1#*://}; a=${a%%/*}; case $a in *@*) return 0;; esac;; esac
+    return 1
+}
 src_name() { basename "$1" .git; }
 src_dir() { # local checkout of a source
     if is_url "$1"; then printf '%s/%s\n' "$KIT_SRC" "$(src_name "$1")"; else (cd "$1" 2>/dev/null && pwd) || printf '%s\n' "$1"; fi
 }
 src_dirs() { m_sources | while IFS= read -r s; do src_dir "$s"; done; }
 
-allowed_hosts() { # from the configured sources (+ the source kit push sends from)
-    { [ -f "$MACHINE" ] && src_dirs; [ -n "${PUSH_DIR:-}" ] && printf '%s\n' "$PUSH_DIR"; } | while IFS= read -r d; do yget "$d/kit.yaml" allowed_hosts; done | awk 'NF && !seen[$0]++'
+allowed_hosts() { # kit push: the source's own list when it has one; else every configured source's (+ the source kit push sends from)
+    local own=""
+    [ -n "${PUSH_DIR:-}" ] && own=$(yget "$PUSH_DIR/kit.yaml" allowed_hosts | awk 'NF')
+    if [ -n "$own" ]; then printf '%s\n' "$own"
+    else { [ -f "$MACHINE" ] && src_dirs; [ -n "${PUSH_DIR:-}" ] && printf '%s\n' "$PUSH_DIR"; } | while IFS= read -r d; do yget "$d/kit.yaml" allowed_hosts; done
+    fi | tr 'A-Z' 'a-z' | awk 'NF && !seen[$0]++'
 }
 
 check_host() { # refuse URLs whose host is not allowed
@@ -140,7 +191,7 @@ check_host() { # refuse URLs whose host is not allowed
     printf '%s\n' "$hosts" | grep -qxF "$h" || die "$h 不在允許的主機清單：$(printf '%s' "$hosts" | paste -sd' ' -)"
     # git config "insteadOf" rules can rewrite a URL; check where git really goes
     local real; real=$(git ls-remote --get-url "$url" 2>/dev/null)
-    [ -z "$real" ] || [ "$real" = "$url" ] || { h=$(url_host "$real"); printf '%s\n' "$hosts" | grep -qxF "$h" || die "git 設定把網址改到 ${h}，不在允許的主機清單"; }
+    [ -z "$real" ] || [ "$real" = "$url" ] || ! is_url "$real" || { h=$(url_host "$real"); printf '%s\n' "$hosts" | grep -qxF "$h" || die "git 設定把網址改到 ${h}，不在允許的主機清單"; }
     return 0
 }
 push_urls() { # push_urls REMOTE : every URL git may push REMOTE to (pushurl else url, insteadOf applied; pushInsteadOf too)
@@ -162,8 +213,16 @@ EOF
     return 0
 }
 
-git_safe() { # git without prompts, submodules or LFS downloads
-    GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 git "$@"
+git_safe() { # git without prompts (no password question, no sign-in window, no ssh question), submodules or LFS downloads
+    if [ -z "${GIT_SSH_COMMAND:-}" ] && [ -z "$(git config core.sshCommand 2>/dev/null)" ]; then
+        GIT_SSH_COMMAND='ssh -o BatchMode=yes' GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never GIT_LFS_SKIP_SMUDGE=1 git "$@"
+    else
+        GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never GIT_LFS_SKIP_SMUDGE=1 git "$@"
+    fi
+}
+git_err() { # git_err FILE : the last lines git wrote there, for the message (no user:password@)
+    [ -s "$1" ] && sed -E 's#(://)[^/@ ]*@#\1#g' "$1" | tail -n 3 | sed 's/^/    /' >&2
+    rm -f "$1"
 }
 
 # ---------- signed approvals (for accounts, like root, that must not follow sources blindly) ----------
@@ -204,7 +263,7 @@ fetch_approved() { # fetch_approved URL DIR : check out the approved commit of a
     n=$(src_name "$s")
     if ! sha=$(approved_sha "$n"); then
         [ -d "$d/.git" ] && { warn "$n 沒有有效的核准，繼續用現在的版本"; return 0; }
-        die "$n 還沒核准，不能用（先在 Mac 上 kit approve）"
+        die "$n 還沒核准，不能用（先在簽核的機器上 kit approve）"
     fi
     if [ -d "$d/.git" ]; then git_safe -C "$d" fetch -q --no-recurse-submodules origin || warn "沒辦法更新 ${n}（沒網路？）"
     else mkdir -p "$KIT_SRC"; git_safe clone -q --no-checkout --no-recurse-submodules "$s" "$d" || die "沒辦法 clone $s"; fi
@@ -229,12 +288,14 @@ fetch_source() { # clone or fast-forward one source
     check_host "$s"
     d=$(src_dir "$s")
     [ -n "$M_APPROVALS" ] && { fetch_approved "$s" "$d"; return 0; }
+    local err; err=$(mktemp "${TMPDIR:-/tmp}/kit-git.XXXXXX")
     if [ -d "$d/.git" ]; then
-        git_safe -C "$d" pull --ff-only --quiet --no-recurse-submodules 2>/dev/null || warn "沒辦法更新 $(src_name "$s")（$(pull_why "$d")）"
+        git_safe -C "$d" pull --ff-only --quiet --no-recurse-submodules 2>"$err" || { warn "沒辦法更新 $(src_name "$s")（$(pull_why "$d")）"; git_err "$err"; }
     else
         mkdir -p "$KIT_SRC"
-        git_safe clone --quiet --no-recurse-submodules "$s" "$d" || die "沒辦法 clone $s"
+        git_safe clone --quiet --no-recurse-submodules "$s" "$d" 2>"$err" || { warn "沒辦法 clone $(url_safe "$s")，git 說："; git_err "$err"; exit 1; }
     fi
+    rm -f "$err"
 }
 
 item_path() { # item_path DIR KIND NAME
@@ -314,21 +375,34 @@ targets()   { printf 'Claude'; has_codex && printf '、Codex'; has_omp && printf
 
 replace_block() { # replace_block FILE BEGIN END : put $KIT_BLOCK between the markers, at the end of FILE
     # The block has newlines, which "awk -v" refuses on BSD awk; it comes in via the environment.
-    local f=$1 tmp
+    # A file with CRLF line ends keeps them; a linked file (dotfiles) is written where the link points.
+    local f=$1 tmp rc=0
     if [ ! -f "$f" ]; then [ -n "${KIT_BLOCK:-}" ] || return 0; mkdir -p "$(dirname "$f")"; : > "$f"; fi
-    tmp="$f.kit.tmp"; cp -p "$f" "$tmp"                      # keep the file's permissions
+    tmp=$(mktemp "$f.kit.XXXXXX") || { warn "沒辦法在 $f 旁邊寫暫存檔"; return 1; }
+    cp -p "$f" "$tmp"                                         # keep the file's permissions
     awk -v b="$2" -v e="$3" '
-        $0 == b { skip = 1; next }
-        $0 == e { skip = 0; next }
-        !skip { lines[++n] = $0 }
+        { l = $0; if (sub(/\r$/, "", l)) crlf = 1 }
+        l == b { skip = 1; next }
+        l == e { skip = 0; next }
+        !skip { lines[++n] = $0; plain[n] = l }
         END {
+            if (skip) exit 3                                  # a begin without an end: never guess where the block stops
+            cr = crlf ? "\r" : ""
             body = ENVIRON["KIT_BLOCK"]
+            gsub(/\r\n/, "\n", body)
             if (body != "" && substr(body, length(body)) != "\n") body = body "\n"
-            while (n > 0 && lines[n] == "") n--
+            if (cr != "") gsub(/\n/, "\r\n", body)
+            while (n > 0 && plain[n] == "") n--
             for (i = 1; i <= n; i++) print lines[i]
-            if (body != "") { if (n > 0) print ""; print b; printf "%s", body; print e }
-        }' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+            if (body != "") { if (n > 0) print cr; print b cr; printf "%s", body; print e cr }
+        }' "$f" > "$tmp" || rc=$?
+    if [ $rc != 0 ]; then
+        rm -f "$tmp"
+        [ $rc = 3 ] && warn "$f 裡有 kit 的開始標記，但找不到結束標記（$3）：kit 不動這個檔案，請手動修好（刪掉開始那行，或補上結束那行）"
+        return 1
+    fi
     if cmp -s "$tmp" "$f"; then rm -f "$tmp"
+    elif [ -L "$f" ]; then cat "$tmp" > "$f"; rm -f "$tmp"   # keep the link
     elif [ -s "$tmp" ]; then mv -f "$tmp" "$f"
     else rm -f "$tmp" "$f"                                    # nothing left: kit made it
     fi
@@ -339,7 +413,7 @@ rules_body() { # rules_body import|inline : rule names on stdin -> text for the 
     while IFS= read -r n; do
         [ -n "$n" ] || continue
         p=$(find_item rule "$n") || { warn "rule $n not found in any source"; continue; }
-        if [ "$1" = import ]; then printf '@%s\n' "$p"
+        if [ "$1" = import ]; then printf '@%s\n' "${p// /\\ }"
         else printf '<!-- rule: %s -->\n' "$n"; cat "$p"; [ -z "$(tail -c1 "$p")" ] || echo; fi
     done
 }
@@ -368,7 +442,8 @@ sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin
             warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉）"; continue
         fi
         [ "$h" = "$old" ] && [ -d "$dst" ] && continue
-        rm -rf "$dst"; cp -R "$p" "$dst"; state_set "$kind" "$n" "$h"; say "  skill $n → $dir"
+        rm -rf "$dst"; cp -R "$p" "$dst" || { warn "沒辦法複製 skill $n 到 $dir"; rm -rf "$dst"; continue; }
+        state_set "$kind" "$n" "$h"; say "  skill $n → $dir"
     done
     for n in $(state_list "$kind"); do
         printf '%s\n' "$names" | grep -qxF "$n" && continue
@@ -377,20 +452,35 @@ sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin
 }
 
 sync_mcp_json() { # sync_mcp_json FILE STATEKIND : wanted MCP names on stdin -> FILE's mcpServers
-    local f=$1 kind=$2 names n p k sum ops
-    names=$(cat); ops=$(mktemp)
+    # A server the user already has under that name (not kit's) is never replaced, so never removed either.
+    # state.tsv changes only after FILE was written: if that fails, the next sync tries again.
+    local f=$1 kind=$2 names n p k sum ops old sets="" dels=""
+    names=$(cat); ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
     for n in $names; do
         p=$(find_item mcp "$n") || { warn "mcp $n not found in any source"; continue; }
         k=$(mcp_json "$p") || continue
         sum=$(printf '%s' "$k" | cksum | awk '{print $1}')
-        [ "$(state_get "$kind" "$n")" = "$sum" ] && continue
-        printf 'set\tmcpServers.%s\t%s\n' "$n" "$k" >> "$ops"; state_set "$kind" "$n" "$sum"; say "  mcp $n → $f"
+        old=$(state_get "$kind" "$n")
+        [ "$old" = "$sum" ] && continue
+        if [ -z "$old" ] && [ -f "$f" ] && json_get "$f" "mcpServers.$n" >/dev/null; then
+            [ -n "$(state_get skipped "$f#mcp.$n")" ] || { warn "$f 已經有自己的 MCP ${n}，不是 kit 放的，kit 不動它（只提醒這一次）"; state_set skipped "$f#mcp.$n" 1; }
+            continue
+        fi
+        printf 'set\tmcpServers.%s\t%s\n' "$n" "$k" >> "$ops"; sets="$sets$n $sum
+"; say "  mcp $n → $f"
     done
     for n in $(state_list "$kind"); do
         printf '%s\n' "$names" | grep -qxF "$n" && continue
-        printf 'del\tmcpServers.%s\n' "$n" >> "$ops"; state_del "$kind" "$n"; say "  removed mcp $n ← $f"
+        printf 'del\tmcpServers.%s\n' "$n" >> "$ops"; dels="$dels$n
+"; say "  removed mcp $n ← $f"
     done
-    [ -s "$ops" ] && { mkdir -p "$(dirname "$f")"; json_edit "$f" "$ops"; prune_empty "$f" mcpServers; }
+    if [ -s "$ops" ]; then
+        mkdir -p "$(dirname "$f")"; json_edit "$f" "$ops"; prune_empty "$f" mcpServers
+        while read -r n sum; do [ -z "$n" ] || { state_set "$kind" "$n" "$sum"; state_del skipped "$f#mcp.$n"; }; done <<EOF
+$sets
+EOF
+        for n in $dels; do state_del "$kind" "$n"; done
+    fi
     rm -f "$ops"
 }
 
@@ -416,12 +506,13 @@ EOF
         tools=""; first=1
         for t in $(required_deny | sed -n "s/^mcp__${n}__//p"); do [ $first = 1 ] || tools="$tools, "; first=0; tools="$tools$(json_str "$t")"; done
         [ -n "$tools" ] && printf 'disabled_tools = [%s]\n' "$tools"
-        yaml "$p" | awk -F'\t' '$1 ~ /^env\./ { k = substr($1, 5); sub(/^[^\t]*\t/, ""); print k "\t" $0 }' > "$KIT_CONF/.env.tmp"
-        if [ -s "$KIT_CONF/.env.tmp" ]; then
+        local envs; envs=$(yaml "$p" | awk -F'\t' '$1 ~ /^env\./ { k = substr($1, 5); sub(/^[^\t]*\t/, ""); print k "\t" $0 }')
+        if [ -n "$envs" ]; then
             printf '\n[mcp_servers.%s.env]\n' "$(toml_key "$n")"
-            while IFS="$TAB" read -r k v; do printf '%s = %s\n' "$(toml_key "$k")" "$(json_str "$v")"; done < "$KIT_CONF/.env.tmp"
+            while IFS="$TAB" read -r k v; do printf '%s = %s\n' "$(toml_key "$k")" "$(json_str "$v")"; done <<EOF
+$envs
+EOF
         fi
-        rm -f "$KIT_CONF/.env.tmp"
         echo
     done
 }
@@ -433,44 +524,55 @@ apply_claude() {
     skills=$(printf '%s\n' "$want" | sed -n 's/^skill://p')
     mcps=$(printf '%s\n' "$want" | sed -n 's/^mcp://p')
 
+    # (no pipelines here: a file kit cannot write stops kit, before state.tsv says it was done)
     # Claude: rules as @imports, skills, MCP in ~/.claude.json
-    printf '%s\n' "$rules" | set_rules "$CLAUDE_DIR/CLAUDE.md" import
-    printf '%s\n' "$skills" | sync_skills "$CLAUDE_DIR/skills" skill
-    printf '%s\n' "$mcps" | sync_mcp_json "$CLAUDE_JSON" mcp
+    set_rules "$CLAUDE_DIR/CLAUDE.md" import <<< "$rules"
+    sync_skills "$CLAUDE_DIR/skills" skill <<< "$skills"
+    sync_mcp_json "$CLAUDE_JSON" mcp <<< "$mcps"
 
     # Codex and omp share ~/.agents/skills; their AGENTS.md get the rule text itself
-    if has_codex || has_omp; then printf '%s\n' "$skills" | sync_skills "$AGENTS_SKILLS" skill.agents; fi
+    if has_codex || has_omp; then sync_skills "$AGENTS_SKILLS" skill.agents <<< "$skills"; fi
     if has_codex; then
-        printf '%s\n' "$rules" | set_rules "$CODEX_DIR/AGENTS.md" inline
-        KIT_BLOCK=$(printf '%s\n' "$mcps" | codex_mcp_toml) replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END"
+        set_rules "$CODEX_DIR/AGENTS.md" inline <<< "$rules"
+        KIT_BLOCK=$(codex_mcp_toml <<< "$mcps") replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END"
     fi
     if has_omp; then
-        printf '%s\n' "$rules" | set_rules "$OMP_DIR/AGENTS.md" inline
-        printf '%s\n' "$mcps" | sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp
+        set_rules "$OMP_DIR/AGENTS.md" inline <<< "$rules"
+        sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp <<< "$mcps"
     fi
 
-    ops=$(mktemp); : > "$ops"
+    ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
     # tool deny rules -> ~/.claude/settings.json
-    : > "$ops"
-    local deny; deny=$(required_deny)
+    local deny add="" del=""; deny=$(required_deny)
     while IFS= read -r n; do
         [ -n "$n" ] || continue
         [ -n "$(state_get deny "$n")" ] && continue
-        printf 'addstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; state_set deny "$n" 1; say "  deny $n"
+        printf 'addstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; add="$add$n
+"; say "  deny $n"
     done <<EOF
 $deny
 EOF
     for n in $(state_list deny); do
         printf '%s\n' "$deny" | grep -qxF "$n" && continue
-        printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; state_del deny "$n"; say "  removed deny $n"
+        printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; del="$del$n
+"; say "  removed deny $n"
     done
     # update automatically when Claude starts -> settings.json hooks.SessionStart
     local hj old; hj=$(hook_json); old=$(state_get hook SessionStart)
     if [ "$hj" != "$old" ]; then
         [ -n "$old" ] && printf 'rmjson\thooks.SessionStart\t%s\n' "$old" >> "$ops"
-        printf 'addjson\thooks.SessionStart\t%s\n' "$hj" >> "$ops"; state_set hook SessionStart "$hj"
+        printf 'addjson\thooks.SessionStart\t%s\n' "$hj" >> "$ops"
     fi
-    [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
+    if [ -s "$ops" ]; then
+        json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny
+        while IFS= read -r n; do [ -z "$n" ] || state_set deny "$n" 1; done <<EOF
+$add
+EOF
+        while IFS= read -r n; do [ -z "$n" ] || state_del deny "$n"; done <<EOF
+$del
+EOF
+        [ "$hj" = "$old" ] || state_set hook SessionStart "$hj"
+    fi
     rm -f "$ops"
 }
 
@@ -491,6 +593,7 @@ sync_hook() { # run by Claude at start: sync in the background, at most every 10
     (
         trap 'rmdir "$lock" 2>/dev/null' EXIT
         printf '== %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        KIT_LOCKED=1
         GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20 NO_NAG=1 cmd_sync
     ) </dev/null >>"$log" 2>&1 &
     exit 0
@@ -518,12 +621,13 @@ cmd_init() {
     fi
     set -- "${args[@]}"
     for s in "$@"; do
+        has_creds "$s" && die "網址裡有帳號或 token（$(url_safe "$s")）：不要把密碼放進網址，先用 git clone 登入一次（Git 的認證管理會記住），再用不含帳號的網址"
         is_url "$s" || s=$(cd "$s" 2>/dev/null && pwd) || die "找不到資料夾：$s"
         srcs="$srcs$s
 "
     done
     write_machine "$srcs" "" ""
-    for s in $(m_sources); do fetch_source "$s"; done
+    while IFS= read -r s; do [ -z "$s" ] || fetch_source "$s"; done <<< "$(m_sources)"
     add_includes
     write_machine "$(m_sources)" "$(recommended_items)" ""
     say "kit：設定好 $(m_sources | wc -l | tr -d ' ') 個來源"
@@ -587,7 +691,7 @@ EOF
 cmd_sync() {
     need_init
     local s
-    for s in $(m_sources); do fetch_source "$s"; done
+    while IFS= read -r s; do [ -z "$s" ] || fetch_source "$s"; done <<< "$(m_sources)"
     add_includes
     apply_claude
     local new=""
@@ -715,7 +819,7 @@ cmd_list_json() { # what kit list shows, as JSON for programs (the Herdr panel);
     while IFS= read -r s; do
         [ -n "$s" ] || continue
         [ $first = 1 ] || printf ','; first=0
-        printf '\n    {"name": %s, "source": %s, "dir": %s, "push": %s}' "$(json_s "$(src_name "$s")")" "$(json_s "$s")" "$(json_s "$(src_dir "$s")")" "$(json_s "$(push_mode "$(src_dir "$s")")")"
+        printf '\n    {"name": %s, "source": %s, "dir": %s, "push": %s}' "$(json_s "$(src_name "$s")")" "$(json_s "$(url_safe "$s")")" "$(json_s "$(src_dir "$s")")" "$(json_s "$(push_mode "$(src_dir "$s")")")"
     done <<EOF
 $(m_sources)
 EOF
@@ -826,7 +930,7 @@ cmd_run() {
     if [ "${1:-}" = --tool ]; then tool=${2:-}; shift 2 || die "--tool 後面要接 claude、codex 或 omp"; fi
     case $tool in claude|codex|omp) ;; *) die "--tool 只能是 claude、codex 或 omp";; esac
     local f; f=$(find_item agent "$name") || die "找不到 agent ${name}（打 kit list 看有哪些）"
-    QUIET=1 cmd_sync 2>/dev/null || true
+    if take_lock soft; then ( QUIET=1 cmd_sync ) 2>/dev/null; release_lock; fi   # busy (another kit is syncing): start as it is
 
     local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-run.XXXXXX")
     local n p d k
@@ -913,21 +1017,24 @@ cmd_uninstall() {
     local self=0; [ "${1:-}" = "--self" ] && self=1
     local n ops k v
     local f
-    for f in "$CLAUDE_DIR/CLAUDE.md" "$CODEX_DIR/AGENTS.md" "$OMP_DIR/AGENTS.md"; do KIT_BLOCK= replace_block "$f" "$BEGIN_MARK" "$END_MARK"; done
-    KIT_BLOCK= replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END"
+    local left=0
+    for f in "$CLAUDE_DIR/CLAUDE.md" "$CODEX_DIR/AGENTS.md" "$OMP_DIR/AGENTS.md"; do KIT_BLOCK= replace_block "$f" "$BEGIN_MARK" "$END_MARK" || left=1; done
+    KIT_BLOCK= replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END" || left=1
     QUIET=1
-    : | sync_skills "$CLAUDE_DIR/skills" skill
-    : | sync_skills "$AGENTS_SKILLS" skill.agents
-    : | sync_mcp_json "$CLAUDE_JSON" mcp
-    : | sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp
+    sync_skills "$CLAUDE_DIR/skills" skill < /dev/null
+    sync_skills "$AGENTS_SKILLS" skill.agents < /dev/null
+    sync_mcp_json "$CLAUDE_JSON" mcp < /dev/null           # stops kit (state.tsv kept) when the file cannot be written
+    sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp < /dev/null
     QUIET=
-    ops=$(mktemp); : > "$ops"
+    ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX"); : > "$ops"
     while IFS="$TAB" read -r k n v; do
         [ "$k" = deny ] && printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"
         [ "$k" = hook ] && printf 'rmjson\thooks.%s\t%s\n' "$n" "$v" >> "$ops"
     done < "${STATE:-/dev/null}" 2>/dev/null
     [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
-    rm -f "$ops" "$STATE" "$MACHINE"
+    rm -f "$ops"
+    [ $left = 0 ] || die "有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall"
+    rm -f "$STATE" "$MACHINE"
     say "kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）"
     say "     來源的 clone 還留在 $KIT_SRC"
     if [ $self = 1 ]; then
@@ -1106,7 +1213,7 @@ private_words() { # private_words OUT [DIR...] : nonblank lines of the private w
     } | sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//' | awk 'NF && !seen[$0]++' > "$out"
 }
 check_dirs() { # check_dirs DIR... : print problems, return 1 if any
-    local d f n k v hosts names pw rel line h ref fm range
+    local d f n k v hosts mhosts names pw rel line h ref fm range
     names=$(mktemp "${TMPDIR:-/tmp}/kit-check.XXXXXX"); pw="$names.pw"
     PROBLEM_FILE="$names.problems"; : > "$PROBLEM_FILE"
     # every item name, from the folders checked and the configured sources
@@ -1125,6 +1232,8 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
     private_words "$pw"
     for d in "$@"; do
         [ -d "$d" ] || { problem "找不到資料夾 $d"; continue; }
+        mhosts=$( { yget "$d/kit.yaml" allowed_hosts; yget "$d/kit.yaml" content_hosts
+                    [ -f "$MACHINE" ] && src_dirs | while IFS= read -r v; do yget "$v/kit.yaml" allowed_hosts; yget "$v/kit.yaml" content_hosts; done; } | tr 'A-Z' 'a-z' | awk 'NF && !seen[$0]++')
         # format of each item
         for f in "$d"/skills/*/SKILL.md "$d"/agents/*.md; do
             [ -f "$f" ] || continue
@@ -1147,7 +1256,12 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
             valid_name "$(basename "$f" .yaml)" || problem "$rel: 名字只能用小寫英文、數字和 -"
             [ -n "$(yget "$f" command)" ] || problem "$rel: 少了 command"
             for v in $(yget "$f" command) $(yget "$f" args); do
-                case $v in git+*|github:*|*://*|git@*) problem "$rel: MCP 只能從公司允許的套件來源裝，不能用 $v 這種寫法";; esac
+                case $v in
+                    git+*|github:*|git@*) problem "$rel: MCP 只能從公司允許的套件來源裝，不能用 $v 這種寫法";;
+                    *://*)    # a package index etc.: only a host the sources list (allowed_hosts or content_hosts)
+                        h=$(printf '%s' "${v#*://}" | sed -E 's#^[^@/]*@##; s#[:/?#].*$##' | tr 'A-Z' 'a-z')
+                        printf '%s\n' "$mhosts" | grep -qxF "$h" || problem "$rel: MCP 只能從公司允許的套件來源裝：$h 不在 allowed_hosts 或 content_hosts";;
+                esac
             done
         done
         if [ -f "$d/kit.yaml" ]; then
@@ -1170,7 +1284,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
         ( cd "$d" && find . -mindepth 2 -name .git | sed 's#^\./##; s#$#: 裡面不能有別的 git repo#' ) >> "$names.files"
         while IFS= read -r line; do problem "$line"; done < "$names.files"
         # URLs only to content_hosts (when the source lists them)
-        hosts=$( { yget "$d/kit.yaml" content_hosts; [ -f "$MACHINE" ] && src_dirs | while IFS= read -r v; do yget "$v/kit.yaml" content_hosts; done; } | awk 'NF && !seen[$0]++')
+        hosts=$( { yget "$d/kit.yaml" content_hosts; [ -f "$MACHINE" ] && src_dirs | while IFS= read -r v; do yget "$v/kit.yaml" content_hosts; done; } | tr 'A-Z' 'a-z' | awk 'NF && !seen[$0]++')
         if [ -n "$hosts" ]; then
             LC_ALL=C grep -rnIoE --exclude-dir=.git '(https?|ssh|git)://[^][ "<>()`'"'"']+|git@[A-Za-z0-9.-]+:' "$d" 2>/dev/null | while IFS= read -r line; do
                 v=${line#*:*:}; h=$(url_host "$v")
@@ -1188,7 +1302,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
             if [ -n "$v" ]; then
                 if [ -n "${KIT_CI_BASE:-}" ]; then range="$KIT_CI_BASE..HEAD"; else range="-1"; fi
                 git -C "$d" log --format='%h %ae' "$range" 2>/dev/null | while read -r h line; do
-                    printf '%s\n' "$v" | grep -qxF "${line##*@}" || problem "commit $h: 作者 email 不是公司網域"
+                    printf '%s\n' "$v" | grep -qixF "${line##*@}" || problem "commit $h: 作者 email 不是公司網域"
                 done
             fi
         fi
@@ -1371,6 +1485,25 @@ push_items() { # changed item files (one per line) -> verb<TAB>kind:name, one pe
         else printf 'add\t%s:%s\n' "$k" "$n"; fi
     done | awk -F'\t' '!seen[$2]++'
 }
+changed_files() { # changed files here, one per line, exactly as named (a rename: the new and the old name)
+    git status --porcelain -z --untracked-files=all | tr '\0' '\n' |
+        awk '{ if (old) { old = 0; print; next } if (substr($0, 1, 1) == "R") old = 1; print substr($0, 4) }'
+}
+git_add_commit() { # git_add_commit MSG FILE... : commit exactly these files (names taken literally, not as patterns)
+    local msg=$1; shift
+    GIT_LITERAL_PATHSPECS=1 git add -A -- "$@" && GIT_LITERAL_PATHSPECS=1 git commit -q -m "$msg" -- "$@"
+}
+author_check() { # author_check DIR : with author_domains in kit.yaml, the commit's author and committer must use one
+    local doms e
+    doms=$(yget "$1/kit.yaml" author_domains | tr 'A-Z' 'a-z')
+    [ -n "$doms" ] || return 0
+    e=$( { git var GIT_AUTHOR_IDENT; git var GIT_COMMITTER_IDENT; } 2>/dev/null | sed -n 's/.*<\([^>]*\)>.*/\1/p')
+    [ -n "$e" ] || die "git 還不知道你的名字和信箱，什麼都沒送。請打  git config --global user.name \"你的名字\"  和  git config --global user.email 你的公司信箱"
+    for e in $e; do
+        printf '%s\n' "$doms" | grep -qxF "$(printf '%s' "${e##*@}" | tr 'A-Z' 'a-z')" ||
+            die "git 的作者信箱 $e 不是公司網域（要是 $(printf '%s' "$doms" | paste -sd' ' -)），什麼都沒送。請打  git config user.email 你的公司信箱（也看看 GIT_AUTHOR_EMAIL、GIT_COMMITTER_EMAIL）"
+    done
+}
 token_file_ok() { # warn when the token file can be read by others
     local m; m=$(ls -l "$1" 2>/dev/null | cut -c5-10)
     [ "$m" = "------" ] || warn "${1} 的權限太開放了，請打  chmod 600 $1"
@@ -1396,11 +1529,13 @@ push_direct() { # push_direct DIR FILES MSG DRY : kit.yaml says push: direct: co
     say "commit：${msg}"
     [ -n "$dry" ] && { say "（--dry-run：沒有 commit，沒有送）"; return 0; }
     while IFS= read -r f; do [ -n "$f" ] && list+=("$f"); done <<< "$files"
-    { git add -A -- "${list[@]}" && git commit -q -m "$msg" -- "${list[@]}"; } || die "commit 失敗，什麼都沒送"
+    git_add_commit "$msg" "${list[@]}" || die "commit 失敗，什麼都沒送"
+    local err; err=$(mktemp "${TMPDIR:-/tmp}/kit-git.XXXXXX")
     for r in $remotes; do
-        if git_safe push -q --no-recurse-submodules "$r" "HEAD:refs/heads/$cur"; then say "已推到 ${r}"
-        else warn "沒辦法推到 ${r}（落後了要先 git pull？沒網路？）"; fail=1; fi
+        if git_safe push -q --no-recurse-submodules "$r" "HEAD:refs/heads/$cur" 2>"$err"; then say "已推到 ${r}"
+        else warn "沒辦法推到 ${r}（落後了要先 git pull？沒網路？），git 說："; git_err "$err"; fail=1; fi
     done
+    rm -f "$err"
     [ $fail = 0 ] || die "commit 已經在本機的 ${cur}，有的 remote 沒推成功（看上面）"
     return 0
 }
@@ -1420,7 +1555,7 @@ cmd_push() {
 
     # what changed: only item files are sent
     local all files items other
-    all=$(git -c core.quotePath=false status --porcelain --untracked-files=all | cut -c4- | sed 's/.* -> //')
+    all=$(changed_files)
     files=$(printf '%s\n' "$all" | grep -E '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$')
     other=$(printf '%s\n' "$all" | grep -vxF -f <(printf '%s\n' "$files"; echo '##none##') | awk 'NF')
     [ -n "$files" ] || { say "沒有要送的（$(basename "$dir") 裡沒有改過的 rule、skill、mcp、agent）"; return 0; }
@@ -1429,12 +1564,7 @@ cmd_push() {
 
     # checks: any problem stops everything
     check_dirs "$PUSH_DIR" || die "kit check 有問題，什麼都沒送（改好再 kit push）"
-    local doms email
-    doms=$(yget kit.yaml author_domains)
-    if [ -n "$doms" ]; then
-        email=$(git config user.email)
-        printf '%s\n' "$doms" | grep -qxF "${email##*@}" || die "git 的 user.email 不是公司網域（要是 $(printf '%s' "$doms" | paste -sd' ' -)），什麼都沒送。請打  git config user.email 你的公司信箱"
-    fi
+    author_check .
     local msg="" v
     for v in add update remove; do
         local l; l=$(printf '%s\n' "$items" | awk -F'\t' -v v="$v" '$1 == v { print $2 }' | paste -sd, - | sed 's/,/, /g')
@@ -1451,10 +1581,14 @@ cmd_push() {
     local origin; origin=$(git remote get-url origin 2>/dev/null) ||
         die "$(basename "$dir") 沒有 origin，不知道要開 PR 到哪，什麼都沒送（團隊來源要有 origin；自己的來源想直接推到它的 remote，在 kit.yaml 加一行  push: direct）"
     check_host "$origin"; check_push_urls origin
-    local api web owner_repo
+    local api web owner_repo token_to=""
     owner_repo=$(url_path "$origin")
-    if [ -n "${KIT_GITEA_API:-}" ]; then api=${KIT_GITEA_API%/}; check_host "$api"; web=${api%/api/v1}
-    elif is_url "$origin"; then web="https://$(url_host "$origin")"; api="$web/api/v1"
+    # the Gitea token goes only to the Gitea you named (KIT_GITEA_API), or to origin's host when this source's own
+    # kit.yaml lists it in allowed_hosts; anywhere else kit prints the link and you open the PR yourself
+    if [ -n "${KIT_GITEA_API:-}" ]; then api=${KIT_GITEA_API%/}; check_host "$api"; web=${api%/api/v1}; token_to=1
+    elif is_url "$origin"; then
+        web="https://$(url_host "$origin")"; api="$web/api/v1"
+        yget kit.yaml allowed_hosts | tr 'A-Z' 'a-z' | grep -qxF "$(url_host "$origin")" && token_to=1
     else api=""; web=""
     fi
 
@@ -1464,7 +1598,10 @@ cmd_push() {
     base="kit/${names}-$(date +%Y%m%d)"; b=$base
     remote=$(git_safe ls-remote --heads origin 2>/dev/null | awk '{ sub(/^refs\/heads\//, "", $2); print $2 }')
     while git show-ref --verify -q "refs/heads/$b" || printf '%s\n' "$remote" | grep -qxF "$b"; do i=$((i+1)); b="$base-$i"; done
-    local into; into=$(git symbolic-ref --short -q refs/remotes/origin/HEAD); into=${into#origin/}; [ -n "$into" ] || into=main
+    # where the PR goes: origin's default branch (as this clone knows it, else as origin says)
+    local into; into=$(git symbolic-ref --short -q refs/remotes/origin/HEAD); into=${into#origin/}
+    [ -n "$into" ] || into=$(git_safe ls-remote --symref origin HEAD 2>/dev/null | awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
+    [ -n "$into" ] || into=main
 
     say "要送的檔案（$(basename "$dir")）："
     printf '%s\n' "$files" | sed 's/^/  /'
@@ -1474,20 +1611,25 @@ cmd_push() {
 
     # commit on the new branch, then go back to where you were
     # the branch starts from origin's base, so unpushed local commits are never sent
-    local orig start=HEAD; orig=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
+    local orig start; orig=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
     git_safe fetch -q --no-recurse-submodules origin "+refs/heads/$into:refs/remotes/origin/$into" 2>/dev/null || warn "沒辦法更新 origin/${into}（沒網路？）"
-    git rev-parse -q --verify "refs/remotes/origin/$into" >/dev/null && start="refs/remotes/origin/$into"
-    git checkout -q -b "$b" "$start" || die "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送"
+    git rev-parse -q --verify "refs/remotes/origin/$into" >/dev/null ||
+        die "找不到 origin 的 ${into} 分支（沒網路？還是 origin 的主分支不叫 ${into}？），什麼都沒送"
+    start="refs/remotes/origin/$into"
+    git checkout -q --no-track -b "$b" "$start" || die "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送"
     local list=() f
     while IFS= read -r f; do list+=("$f"); done <<EOF
 $files
 EOF
-    if ! { git add -A -- "${list[@]}" && git commit -q -m "$msg" -- "${list[@]}"; }; then
+    if ! git_add_commit "$msg" "${list[@]}"; then
         git checkout -q "$orig"; git branch -q -D "$b" 2>/dev/null
         die "commit 失敗，什麼都沒送"
     fi
     git checkout -q "$orig" || warn "沒辦法切回 ${orig}，你現在在 $b"
-    git_safe push -q --no-recurse-submodules origin "refs/heads/$b:refs/heads/$b" || die "沒辦法 push 分支 ${b}（沒網路？）。commit 留在本機的 $b"
+    local err; err=$(mktemp "${TMPDIR:-/tmp}/kit-git.XXXXXX")
+    git_safe push -q --no-recurse-submodules origin "refs/heads/$b:refs/heads/$b" 2>"$err" ||
+        { warn "沒辦法 push 分支 ${b}，git 說："; git_err "$err"; die "commit 留在本機的 ${b}（沒網路？沒權限？）"; }
+    rm -f "$err"
     say "已送出分支 ${b}。改的檔案已從這裡移到那個分支，PR 合併後打 git pull 就會回來；想先看可以  git checkout ${b}"
 
     # pull request
@@ -1496,9 +1638,11 @@ EOF
     if [ -n "${KIT_GITEA_TOKEN:-}" ]; then tok=$KIT_GITEA_TOKEN
     elif [ -f "$tf" ]; then token_file_ok "$tf"; tok=$(tr -d ' \r\n' < "$tf")
     fi
-    if [ -n "$tok" ] && [ -n "$api" ]; then
+    if [ -n "$tok" ] && [ -n "$api" ] && [ -z "$token_to" ]; then
+        say "kit.yaml 的 allowed_hosts 沒有列 $(url_host "$origin")，kit 不把 Gitea token 送過去；PR 請自己開（或設 KIT_GITEA_API）"
+    elif [ -n "$tok" ] && [ -n "$api" ]; then
         local tmp code pr body
-        tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-push.XXXXXX"); chmod 700 "$tmp"
+        tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-push.XXXXXX"); chmod 700 "$tmp"; KIT_TMPDIR=$tmp     # removed on exit, even on Ctrl-C
         ( umask 077; printf 'Authorization: token %s\n' "$tok" > "$tmp/h" )   # never on the command line
         body="由 kit push 送出：
 $(printf '%s\n' "$items" | awk -F'\t' '{ print "- " $1 " " $2 }')"
@@ -1507,7 +1651,7 @@ $(printf '%s\n' "$items" | awk -F'\t' '{ print "- " $1 " " $2 }')"
         code=$(curl -sS --max-time 30 -o "$tmp/resp" -w '%{http_code}' -X POST -H @"$tmp/h" -H 'Content-Type: application/json' \
             --data-binary @"$tmp/body" "$api/repos/$owner_repo/pulls" 2>/dev/null)
         pr=$(json_get "$tmp/resp" html_url | sed 's/^"//; s/"$//')
-        rm -rf "$tmp"
+        rm -rf "$tmp"; KIT_TMPDIR=
         case $code in 2??) [ -n "$pr" ] && { say "已開 PR：$pr"; return 0; };; esac
         warn "沒辦法自動開 PR（Gitea 回 ${code:-沒回應}）"
     elif [ -z "$tok" ]; then
@@ -1720,8 +1864,10 @@ panel_src() { # the panel's files: next to the installed kit, else in the repo k
     done
     return 1
 }
+has_id() { grep -Eq "\"id\"[[:space:]]*:[[:space:]]*\"$1\"" "$2"; }   # has_id ID FILE : a layout node with this id
 layout_without_panel() { # layout_without_panel FILE OUT : FILE without the panel's blocks
-    printf 'rmwhere\tcontent.mod\tkit\nrmwhere\tid\tkit-toggle\nrmwhere\tid\tkit-panel\nrmwhere\tcontent.mod\tkit-agents\nrmwhere\tid\tkit-agents-toggle\nrmwhere\tid\tkit-agents-panel\nswapwhere\tcontent.mod\tkit-pane\tpane\n' > "$2.ops"
+    # rmholder first: a column holding only kit's block goes too, whatever its id became
+    printf 'rmholder\tcontent.mod\tkit\nrmholder\tcontent.mod\tkit-agents\nrmwhere\tcontent.mod\tkit\nrmwhere\tid\tkit-toggle\nrmwhere\tid\tkit-panel\nrmwhere\tcontent.mod\tkit-agents\nrmwhere\tid\tkit-agents-toggle\nrmwhere\tid\tkit-agents-panel\nswapwhere\tcontent.mod\tkit-pane\tpane\n' > "$2.ops"
     LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$2.ops" "$1" > "$2"; local rc=$?
     rm -f "$2.ops"; return $rc
 }
@@ -1756,16 +1902,16 @@ cmd_herdr_panel() {
                 tmp=$(mktemp "$lf.kit.XXXXXX")
                 # Kit's button and panel already there (maybe moved or resized by hand): keep them where they are,
                 # only add what is missing. Otherwise start clean (old or half-placed blocks taken out first).
-                if grep -q '"kit-toggle"' "$lf" && grep -q '"kit-panel"' "$lf"; then cp "$lf" "$tmp.1"
+                if has_id kit-toggle "$lf" && has_id kit-panel "$lf"; then cp "$lf" "$tmp.1"
                 else layout_without_panel "$lf" "$tmp.1"; fi &&
-                    { grep -q '"kit-agents-toggle"' "$tmp.1" || printf 'addnear\tcontent.mod\ttabs\t%s\n' "$AGENTS_TOGGLE"
-                      grep -q '"kit-toggle"' "$tmp.1" || printf 'addnear\tcontent.mod\ttabs\t%s\n' "$PANEL_TOGGLE"
-                      grep -q '"kit-panel"' "$tmp.1" || printf 'addnear\tcontent.tab\tactive\t%s\n' "$PANEL_NODE"
-                      grep -q '"kit-agents-panel"' "$tmp.1" || printf 'addnear\tcontent.tab\tactive\t%s\n' "$AGENTS_NODE"
+                    { has_id kit-agents-toggle "$tmp.1" || printf 'addnear\tcontent.mod\ttabs\t%s\n' "$AGENTS_TOGGLE"
+                      has_id kit-toggle "$tmp.1" || printf 'addnear\tcontent.mod\ttabs\t%s\n' "$PANEL_TOGGLE"
+                      has_id kit-panel "$tmp.1" || printf 'addnear\tcontent.tab\tactive\t%s\n' "$PANEL_NODE"
+                      has_id kit-agents-panel "$tmp.1" || printf 'addnear\tcontent.tab\tactive\t%s\n' "$AGENTS_NODE"
                       printf 'swapwhere\tcontent.mod\tpane\tkit-pane\n'; } > "$tmp.ops" &&
                     LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$tmp.ops" "$tmp.1" > "$tmp"
                 rm -f "$tmp.1" "$tmp.ops"
-                if ! grep -q '"kit-toggle"' "$tmp" || ! grep -q '"kit-panel"' "$tmp"; then
+                if ! has_id kit-toggle "$tmp" || ! has_id kit-panel "$tmp"; then
                     rm -f "$tmp"; tmp=""; place=right
                     say "kit：版面 $name 找不到分頁列（tabs）或工作區，沒改它：panel 會先出現在右邊"
                 elif cmp -s "$tmp" "$lf"; then rm -f "$tmp"; tmp=""     # already like this: no backup, no write
@@ -1931,6 +2077,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 EOF
 }
 
+# the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook takes it itself)
+case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent) [ "${2:-}" = --hook ] || take_lock;; esac
 case ${1:-} in
     init)      shift; cmd_init "$@";;
     sync)      shift

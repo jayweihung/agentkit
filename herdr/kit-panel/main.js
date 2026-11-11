@@ -105,13 +105,20 @@ async function kit(args, timeout, machine = null) {
   }
   return { code: -1, out: "", err: machine ? `連不到 ${machine}，或那台沒裝 kit：${clean(last)}` : `沒辦法執行 kit：${last}` };
 }
+// kit push --dry-run's list of files (the indented lines), to compare before the real push
+const sendList = (out) => String(out ?? "").split("\n").filter((l) => /^  \S/.test(l)).map((l) => l.trim()).sort().join("\n");
+// big windows that said within 2 minutes that they are open
+function liveEditors() {
+  const all = shared(EDITORS) ?? {}, now = Date.now(), out = {};
+  for (const [k, v] of Object.entries(all)) if (v && now - (v.at ?? 0) < 120000) out[k] = v;
+  return out;
+}
 // the item files git sees as changed in a source folder (relative to it); -z: names exactly as they are
 async function gitChanges(dir) {
-  const top = await exec("git", ["-C", dir, "rev-parse", "--show-toplevel"], { timeout: 15000 });
+  // where the folder sits in its repo, as git itself spells it (symlinks, junctions, drive letters don't matter)
+  const top = await exec("git", ["-C", dir, "rev-parse", "--show-prefix"], { timeout: 15000 });
   if (top.code !== 0) return [];
-  const root = slash(String(top.stdout).trim()), d = slash(dir);
-  const pre = d === root ? "" : d.startsWith(root + "/") ? d.slice(root.length + 1) + "/" : null;
-  if (pre === null) return [];
+  const pre = String(top.stdout).replace(/[\r\n]+$/, "");
   const r = await exec("git", ["-C", dir, "status", "--porcelain", "-z", "--untracked-files=all"], { timeout: 15000 });
   if (r.code !== 0) return [];
   const parts = String(r.stdout).split("\0"), files = [];
@@ -177,6 +184,7 @@ export default class KitPanel extends View {
       const p = blockProps() ?? {};
       this.where = `editor:${p.item?.path ?? ""}`;
       if (p.item) cx.spawn(async (cx) => { await this.openItem(p.item, cx, p.value, p.orig); cx.notify(); });
+      cx.timer.every(30000, () => this.mark());
       return;
     }
     if (this.role === "pane") {
@@ -184,6 +192,8 @@ export default class KitPanel extends View {
       this.where = `pane:${this.target.key}`;
       const c = (shared(PANE_CACHE) ?? {})[this.target.key];
       if (!c || Date.now() - (c.started ?? 0) > 10000) this.want();
+      this.openedAt = Date.now();
+      cx.timer.every(2000, (cx) => { if (!this.data) cx.notify(); });   // so a load nobody answers shows up (below)
       return;
     }
     this.where = this.role;
@@ -199,7 +209,7 @@ export default class KitPanel extends View {
   }
 
   async close(cx) {
-    if (this.mine) setShared(BUSY, null);
+    this.endBusy();
     if (this.role === "editor" && this.edit) {
       const ed = { ...(shared(EDITORS) ?? {}) };
       delete ed[this.edit.item.path];
@@ -246,13 +256,15 @@ export default class KitPanel extends View {
     setShared(PANE_WANT, want);
   }
 
+  // one action at a time across every copy of the panel; only the copy that took the lock gives it back
   startBusy(label, ttl) {
     if (this.busy) return false;
-    setShared(BUSY, { label, at: Date.now(), ttl });
-    this.mine = true;
+    const id = `${Date.now()}-${Math.random()}`;
+    setShared(BUSY, { label, at: Date.now(), ttl, id });
+    this.mine = id;
     return true;
   }
-  endBusy() { if (this.mine) setShared(BUSY, null); this.mine = false; }
+  endBusy() { if (this.mine && shared(BUSY)?.id === this.mine) setShared(BUSY, null); this.mine = false; }
 
   // add / rm / sync: one at a time, the result (kit's own words) shown above the list
   act(label, args, cx, ttl = SHORT) {
@@ -276,7 +288,7 @@ export default class KitPanel extends View {
   // 送出, step 1: what kit push would send from each changed source (--dry-run), shown for 確定送出
   planPush(cx) {
     const dirty = this.data?.dirty ?? [];
-    if (!dirty.length || !this.startBusy("檢查", SHORT)) return;
+    if (!dirty.length || !this.startBusy("檢查", SHORT * dirty.length)) return;
     this.setMsg(null);
     cx.notify();
     cx.spawn(async (cx) => {
@@ -284,7 +296,7 @@ export default class KitPanel extends View {
         const plan = [];
         for (const x of dirty) {
           const r = await kit(["push", "--to", x.name, "--dry-run"], SHORT);
-          plan.push({ name: x.name, push: x.push, ok: r.code === 0 && !/沒有要送的/.test(r.out), text: clean([r.out, r.err].filter(Boolean).join("\n")) });
+          plan.push({ name: x.name, push: x.push, ok: r.code === 0 && !/沒有要送的/.test(r.out), files: sendList(r.out), text: clean([r.out, r.err].filter(Boolean).join("\n")) });
         }
         this.plan = plan;
       } finally { this.endBusy(); cx.notify(); }
@@ -296,6 +308,14 @@ export default class KitPanel extends View {
     cx.notify();
     cx.spawn(async (cx) => {
       try {
+        const again = await kit(["push", "--to", p.name, "--dry-run"], SHORT);
+        const ok = again.code === 0 && !/沒有要送的/.test(again.out), files = sendList(again.out);
+        if (!ok || files !== p.files) {
+          const np = { ...p, ok, files, text: clean([again.out, again.err].filter(Boolean).join("\n")) };
+          this.plan = (this.plan ?? []).map((x) => (x.name === p.name ? np : x));
+          this.setMsg({ ok: false, label: `送出 ${p.name}`, text: "要送的檔案跟剛才列的不一樣了（剛剛有存檔或改過），什麼都沒送。請再看一次下面的清單。", at: Date.now() });
+          return;
+        }
         const r = await kit(["push", "--to", p.name], LONG);
         let text = clean([r.out, r.err].filter(Boolean).join("\n")) || (r.code === 0 ? "送出了" : `失敗（${r.code}）`);
         if (r.code === 0 && p.push !== "direct" && /PR|分支/.test(text)) text += "\n\n改的檔案現在在送出的分支上：PR 合併、kit sync 之後才會回到這裡。";
@@ -308,6 +328,11 @@ export default class KitPanel extends View {
 
   async moveIntoBar(cx) {
     this.moveErr = null;
+    if (Object.values(liveEditors()).some((e) => e.dirty)) {
+      this.moveErr = "有大視窗還沒存檔：換版面會把它關掉。先存檔或關掉大視窗，再按一次。";
+      cx.notify();
+      return;
+    }
     try {
       let name = shared("layout");
       if (SHIPPED.includes(name)) {
@@ -340,12 +365,14 @@ export default class KitPanel extends View {
     if (this.role === "panel" && !find(layout(), TOGGLE)) root.child(this.moveBanner(t, z));
     if (msg) root.child(this.message(t, z, msg));
     const d = this.data;
+    if (!d && this.role === "pane" && !this.loading && Date.now() - (this.openedAt ?? 0) > 8000)
+      return root.child(div().p(14).text_color(t.muted).child("讀不到這個 agent（它可能換了資料夾，或已經關掉）。關掉這個視窗，再按一次它上面的 Kit 按鈕。"));
     if (!d) return root.child(div().p(14).text_color(t.muted).child("讀取中…"));
     if (d.error) return root.child(this.problem(t, z, d.error));
     if (this.role === "pane" && d.here?.user) return root.child(v_flex().p(14).gap(6)
       .child(div().font_semibold().child(`這個 agent 用 ${d.here.user} 帳號跑`))
       .child(div().text_size(z - 1).text_color(t.muted).child(d.here.user === "root"
-        ? "root 只用你在 Mac 上簽過的版本，這裡看不到也不能改。要換版本：在 Mac 上 kit approve，再請它 kit sync。"
+        ? "root 只用簽過的版本（kit approve），這裡看不到也不能改。要換版本：簽一個新的 kit approve，再請它 kit sync。"
         : "這裡只看得到你自己帳號的 kit，看不到也不能改它的。")));
     if (d.kit_version_wanted) root.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked)
       .child(`團隊要 kit ${d.kit_version_wanted} 以上，你的是 ${d.kit}。請在終端機打  kit self-update`));
@@ -551,7 +578,7 @@ export default class KitPanel extends View {
     const name = this.newName.value().trim(), kind = this.kind, to = this.making?.source;
     if (!name) return;
     if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) { this.setMsg({ ok: false, label: "新增", text: "名字只能用小寫英文、數字和 -", at: Date.now() }); cx.notify(); return; }
-    if (!this.startBusy("新增", SHORT)) return;
+    if (!this.startBusy("新增", SHORT + LOAD_TTL)) return;
     cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -605,14 +632,14 @@ export default class KitPanel extends View {
   // a big window says which file it holds and whether it has unsaved edits (so 放大 never replaces those)
   mark() {
     if (this.role !== "editor" || !this.edit) return;
-    setShared(EDITORS, { ...(shared(EDITORS) ?? {}), [this.edit.item.path]: { dirty: this.edit.dirty } });
+    setShared(EDITORS, { ...(shared(EDITORS) ?? {}), [this.edit.item.path]: { dirty: this.edit.dirty, at: Date.now() } });
   }
 
   // the open file moves to a big window (what you typed goes along, saved or not); the panel goes back to its list
   enlarge(cx) {
     const e = this.edit;
     if (!e) return;
-    if ((shared(EDITORS) ?? {})[e.item.path]?.dirty) {
+    if (liveEditors()[e.item.path]?.dirty) {
       this.setMsg({ ok: false, label: "放大", text: "這個檔案已經開在大視窗裡，還沒存檔。先去那裡存檔或關掉。", at: Date.now() });
       cx.notify();
       return;
@@ -672,7 +699,7 @@ export default class KitPanel extends View {
   // ---------- shared pieces ----------
   moveBanner(t, z) {
     return v_flex().flex_none().px(12).py(10).gap(6).bg(t.raised).border_b(1).border_color(t.border)
-      .child(div().text_size(z - 1).text_color(this.moveErr ? t.blocked : t.muted).child(this.moveErr ?? "這個面板還在版面最外面。按下面的按鈕，會放進上排（一顆 kit 按鈕，按了開關面板），每個 agent 視窗上也會有 kit 按鈕。"))
+      .child(div().text_size(z - 1).text_color(this.moveErr ? t.blocked : t.muted).child(this.moveErr ?? "這個面板還在版面最外面。按下面的按鈕，會放進上排（Agents、Kit 兩顆按鈕，按了開關面板），每個 agent 視窗上也會有 Kit 按鈕。"))
       .child(h_flex().child(this.btn(t, z, "move", "放進上排", { kind: "primary", on: (cx) => cx.spawn(async (cx) => this.moveIntoBar(cx)) })));
   }
 
