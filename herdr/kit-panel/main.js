@@ -302,7 +302,8 @@ export default class KitPanel extends View {
   endBusy() { if (this.mine && shared(BUSY)?.id === this.mine) setShared(BUSY, null); this.mine = false; }
 
   // add / rm / sync: one at a time, the result (kit's own words) shown above the list
-  act(label, args, cx, ttl = SHORT) {
+  // okText: one plain sentence instead of kit's own lines when it worked (kit's warnings, stderr, still shown under it)
+  act(label, args, cx, ttl = SHORT, okText = null) {
     if (!this.startBusy(label, ttl)) return;
     this.setMsg(null);
     cx.notify();
@@ -311,7 +312,8 @@ export default class KitPanel extends View {
       try {
         const r = await kit(args, ttl, machine);
         const text = clean([r.out, r.err].filter(Boolean).join("\n"));
-        this.setMsg({ ok: r.code === 0, label, text: text || (r.code === 0 ? "完成" : `失敗（${r.code}）`), at: Date.now() });
+        if (r.code === 0 && okText) this.setMsg({ ok: true, plain: true, label, text: [okText, clean(r.err ?? "")].filter(Boolean).join("\n"), at: Date.now() });
+        else this.setMsg({ ok: r.code === 0, label, text: text || (r.code === 0 ? "完成" : `失敗（${r.code}）`), at: Date.now() });
       } finally {
         this.endBusy();
         this.changed(machine);
@@ -521,16 +523,17 @@ export default class KitPanel extends View {
     if (inDir) head.child(badge("Kit · 這個資料夾", t.done));
     if (i.new) head.child(badge("新", t.done));
     const dirArgs = (verb) => [verb, "--dir", f.dir, i.kind, i.name];
+    const fd = f ? shortDir(f.dir) : "";
     const action = h_flex().flex_none().gap(4).items_center();
     // An agent started in a folder only changes that folder; the account is changed only from one started in the home
     // folder (there the folder buttons make no sense: the home folder is the account). No button that reaches further
     // than the folder the agent runs in.
     if (canDir) {
-      if (inDir) action.child(this.btn(t, z, `rmdir-${i.kind}-${i.name}`, "從資料夾拿掉", { small: true, off: busy, on: (cx) => this.act(`從資料夾拿掉 ${i.name}`, dirArgs("rm"), cx) }));
-      else if (i.status === "unused") action.child(this.btn(t, z, `adddir-${i.kind}-${i.name}`, "加到這個資料夾", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加到這個資料夾 ${i.name}`, dirArgs("add"), cx) }));
+      if (inDir) action.child(this.btn(t, z, `rmdir-${i.kind}-${i.name}`, "從資料夾拿掉", { small: true, off: busy, on: (cx) => this.act(`從資料夾拿掉 ${i.name}`, dirArgs("rm"), cx, SHORT, `已從 ${fd} 拿掉 ${i.name}。在 ${fd} 開新的對話就不會有了。`) }));
+      else if (i.status === "unused") action.child(this.btn(t, z, `adddir-${i.kind}-${i.name}`, "加到這個資料夾", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加到這個資料夾 ${i.name}`, dirArgs("add"), cx, SHORT, `已加到 ${fd}：${i.name}。在 ${fd}（含子資料夾）開新的對話才會讀到，別的地方不受影響。`) }));
     } else if (i.status === "required") action.child(div().text_size(z - 1.5).text_color(t.dim).child("拿不掉"));
-    else if (i.status === "used") action.child(this.btn(t, z, `rm-${i.kind}-${i.name}`, "從帳號拿掉", { small: true, off: busy, on: (cx) => this.act(`從帳號拿掉 ${i.name}`, ["rm", i.kind, i.name], cx) }));
-    else if (!inDir) action.child(this.btn(t, z, `add-${i.kind}-${i.name}`, "加到整個帳號", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加到整個帳號 ${i.name}`, ["add", i.kind, i.name], cx) }));
+    else if (i.status === "used") action.child(this.btn(t, z, `rm-${i.kind}-${i.name}`, "從帳號拿掉", { small: true, off: busy, on: (cx) => this.act(`從帳號拿掉 ${i.name}`, ["rm", i.kind, i.name], cx, SHORT, `已從整個帳號拿掉 ${i.name}。開新的對話就不會有了。`) }));
+    else if (!inDir) action.child(this.btn(t, z, `add-${i.kind}-${i.name}`, "加到整個帳號", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加到整個帳號 ${i.name}`, ["add", i.kind, i.name], cx, SHORT, `已加到整個帳號：${i.name}。每個資料夾開新的對話都會讀到。`) }));
     const sub = [i.description, i.source].filter(Boolean).join(" · ");
     return h_flex().id(`row-${i.kind}-${i.name}`).gap(8).items_center().px(8).py(5).rounded(6).hover((s) => s.bg(t.hover))
       .child(v_flex().flex_1().min_w(0).gap(1)
@@ -881,8 +884,10 @@ export default class KitPanel extends View {
   message(t, z, msg) {
     return h_flex().flex_none().mx(10).mt(8).p(8).gap(8).items_start().rounded(6).bg(t.raised)
       .border_1().border_color(msg.ok ? t.border : t.ansi1)
-      .child(div().flex_1().min_w(0).text_size(z - 1).font_family(mono()).text_color(msg.ok ? t.foreground : t.ansi1)
-        .child(`${msg.label}：${msg.ok ? "" : "失敗\n"}${squeeze(msg.text)}`))
+      .child(msg.plain
+        ? div().flex_1().min_w(0).text_size(z - 1).text_color(t.foreground).child(msg.text)
+        : div().flex_1().min_w(0).text_size(z - 1).font_family(mono()).text_color(msg.ok ? t.foreground : t.ansi1)
+          .child(`${msg.label}：${msg.ok ? "" : "失敗\n"}${squeeze(msg.text)}`))
       .child(div().id("msg-close").flex_none().px(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
         .on_mouse_down("left", stop).on_click((_e, cx) => { this.setMsg(null); cx.notify(); }).child("✕"));
   }
