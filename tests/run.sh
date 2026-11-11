@@ -156,7 +156,7 @@ cp "$HOME/.claude.json" "$T/cj.bak"
 printf 'set\tprojects|%s|mcpServers|lm\t{"command": "y"}\nset\tmcpServers|um\t{"command": "z"}\n' "$PP" > "$T/cj.ops"
 LC_ALL=C awk -f "$JA" -v ops="$T/cj.ops" -v sep="|" "$T/cj.bak" > "$HOME/.claude.json"
 kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here.json" 2>&1; rc=$?
-check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"agent\": null, \"items\": [" "$T/here.json"'
+check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"agent\": null, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": []}, \"items\": [" "$T/here.json"'
 check "list --json --dir: rules here and above, AGENTS.md for codex/omp" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"CLAUDE.md\", \"path\": \"$PP/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \".claude/rules/r1.md\", \"path\": \"$PP/.claude/rules/r1.md\", \"tools\": \"claude\", \"description\": \"Rule one\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"$PU/CLAUDE.md\", \"path\": \"$PU/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"Project rules\"}" "$T/here.json" &&
@@ -176,7 +176,7 @@ check "list --json --pid: numbers only" '[ $rc -ne 0 ] && echo "$out" | grep -q 
 RUND="$HOME/.config/agentkit/run"; mkdir -p "$RUND"; echo gerrit > "$RUND/$$"
 ( : ) & dp=$!; wait $dp; echo gone > "$RUND/$dp"
 kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here2.json" 2>&1
-check "list --json --pid: the agent kit run started there" 'grep -qF "\"user\": null, \"agent\": {\"name\": \"gerrit\", \"source\": \"team\", \"rules\": [\"gerrit-flow\"], \"skills\": [\"gerrit-review\"], \"mcp\": [\"gerrit\"]}, \"items\": [" "$T/here2.json"'
+check "list --json --pid: the agent kit run started there" 'grep -qF "\"user\": null, \"agent\": {\"name\": \"gerrit\", \"source\": \"team\", \"rules\": [\"gerrit-flow\"], \"skills\": [\"gerrit-review\"], \"mcp\": [\"gerrit\"]}, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": []}, \"items\": [" "$T/here2.json"'
 check "list --json --pid: the marker of a kit run that ended is dropped" '[ ! -e "$RUND/$dp" ] && [ -e "$RUND/$$" ]'
 if command -v pwsh >/dev/null 2>&1; then
     echo gone > "$RUND/$dp"
@@ -688,6 +688,57 @@ check "uninstall: codex toml byte-identical" 'cmp -s "$T/codex.orig" "$H4/.codex
 check "uninstall: omp mcp.json byte-identical" 'cmp -s "$T/omp.orig" "$H4/.omp/agent/mcp.json"'
 check "uninstall: omp AGENTS.md (made by kit) gone" '[ ! -e "$H4/.omp/agent/AGENTS.md" ]'
 check "uninstall: ~/.agents/skills emptied" '[ -z "$(ls -A "$H4/.agents/skills" 2>/dev/null)" ]'
+echo "$pass $fail" > "$T/sub"
+)
+read pass fail < "$T/sub"
+
+# ---------- a folder's own (kit add --dir): only agents started there get it ----------
+H5="$T/home5"; mkdir -p "$H5/.codex" "$H5/.omp/agent"
+printf 'model = "gpt-5"\n\n[mcp_servers.mine]\ncommand = "x"\n' > "$H5/.codex/config.toml"; cp -p "$H5/.codex/config.toml" "$T/codex5.orig"
+P="$T/fproj"; mkdir -p "$P/sub/deeper"; P=$(cd "$P" && pwd -P)
+printf '# my notes\n' > "$P/CLAUDE.md"; printf '{\n  "mcpServers": {\n    "own": {\n      "command": "y"\n    }\n  }\n}\n' > "$P/.mcp.json"
+cp "$P/CLAUDE.md" "$T/p.claude"; cp "$P/.mcp.json" "$T/p.mcp"
+(
+export HOME="$H5"
+kit init "$TEAM" >/dev/null 2>&1
+out=$(kit add --dir "$P" skill gerrit-review 2>&1); rc=$?
+check "add --dir: done, says where" '[ $rc -eq 0 ] && echo "$out" | grep -qF "$P"'
+check "add --dir: .agentkit lists it" 'grep -qx "skill:gerrit-review" "$P/.agentkit"'
+check "add --dir: Claude and Codex/omp skill folders" '[ -f "$P/.claude/skills/gerrit-review/SKILL.md" ] && [ -f "$P/.agents/skills/gerrit-review/SKILL.md" ]'
+check "add --dir: not the account" '[ ! -e "$H5/.claude/skills/gerrit-review" ] && [ ! -e "$H5/.agents/skills/gerrit-review" ] && ! kit list | grep -q "^\* *skill:gerrit-review"'
+out=$(kit add --dir "$P/sub/deeper" rule gerrit-flow 2>&1)
+check "add --dir from a sub-folder goes to the folder that has .agentkit" '[ ! -e "$P/sub/deeper/.agentkit" ] && grep -qx "rule:gerrit-flow" "$P/.agentkit"'
+check "add --dir rule: CLAUDE.md keeps the user text, imports the rule" 'head -1 "$P/CLAUDE.md" | grep -qx "# my notes" && grep -q "^@.*rules/gerrit-flow.md" "$P/CLAUDE.md"'
+check "add --dir rule: AGENTS.md (Codex, omp) has the text" 'grep -q "Only comment, never submit." "$P/AGENTS.md"'
+check "add --dir: account rules untouched" '! grep -q gerrit-flow "$H5/.claude/CLAUDE.md"'
+check "codex: project_root_markers at the top, user part kept, valid TOML" 'head -1 "$H5/.codex/config.toml" | grep -q "agentkit:top:begin" && grep -qF "project_root_markers = [\".git\", \".agentkit\"]" "$H5/.codex/config.toml" && grep -qx "model = \"gpt-5\"" "$H5/.codex/config.toml" && { ! python3 -c "import tomllib" 2>/dev/null || python3 -c "import tomllib,sys;d=tomllib.load(open(sys.argv[1],\"rb\"));assert d[\"project_root_markers\"]==[\".git\",\".agentkit\"] and d[\"model\"]==\"gpt-5\"" "$H5/.codex/config.toml"; }'
+kit add --dir "$P" mcp gerrit >/dev/null 2>&1
+check "add --dir mcp: .mcp.json has it, the user's server kept" '[ "$(jget "$P/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && [ "$(jget "$P/.mcp.json" mcpServers.own.command)" = "\"y\"" ]'
+check "add --dir mcp: Claude does not ask (settings.local.json)" 'jget "$P/.claude/settings.local.json" enabledMcpjsonServers | grep -q "\"gerrit\""'
+check "add --dir mcp: the folder's Codex config" 'grep -q "^\[mcp_servers.gerrit\]" "$P/.codex/config.toml"'
+check "add --dir mcp: Codex trusts the folder (valid TOML)" 'grep -qF "[projects.\"$P\"]" "$H5/.codex/config.toml" && { ! python3 -c "import tomllib" 2>/dev/null || python3 -c "import tomllib,sys;d=tomllib.load(open(sys.argv[1],\"rb\"));assert d[\"projects\"][sys.argv[2]][\"trust_level\"]==\"trusted\"" "$H5/.codex/config.toml" "$P"; }'
+check "add --dir mcp: not the account" '! jget "$H5/.claude.json" mcpServers.gerrit >/dev/null'
+kit list --json --dir "$P/sub" > "$T/here5.json" 2>/dev/null
+check "list --json: folder = the one with .agentkit, its items" 'python3 -c "import json,sys;h=json.load(open(sys.argv[1]))[\"here\"];f=h[\"folder\"];assert f[\"dir\"]==sys.argv[2] and f[\"why\"]==\"\" and set(f[\"items\"])=={\"skill:gerrit-review\",\"rule:gerrit-flow\",\"mcp:gerrit\"}" "$T/here5.json" "$P"'
+check "list --json: kit's folder things are not listed again as the folder's own" 'python3 -c "import json,sys;h=json.load(open(sys.argv[1]))[\"here\"];n=[(i[\"kind\"],i[\"name\"]) for i in h[\"items\"]];assert (\"skill\",\"gerrit-review\") not in n and not any(i[\"path\"].endswith(\"AGENTS.md\") for i in h[\"items\"]) and any(i[\"path\"].endswith(\"/CLAUDE.md\") for i in h[\"items\"])" "$T/here5.json"'
+out=$(kit add --dir "$H5" skill gerrit-review 2>&1); rc=$?
+check "add --dir: refuses the home folder" '[ $rc -ne 0 ] && echo "$out" | grep -q "家目錄" && [ ! -e "$H5/.agentkit" ]'
+out=$(kit add --dir "$T" skill gerrit-review 2>&1); rc=$?
+check "add --dir: refuses a folder the home folder is in" '[ $rc -ne 0 ] && [ ! -e "$T/.agentkit" ]'
+out=$(kit rm --dir "$P" skill gerrit-workflow 2>&1); rc=$?
+check "rm --dir: only what the folder added" '[ $rc -ne 0 ] && echo "$out" | grep -q "沒有加"'
+printf 'review v2\n' >> "$TEAM/skills/gerrit-review/SKILL.md"; kit sync >/dev/null 2>&1
+check "sync updates the folder's copy" 'grep -q "review v2" "$P/.claude/skills/gerrit-review/SKILL.md" && grep -q "review v2" "$P/.agents/skills/gerrit-review/SKILL.md"'
+kit rm --dir "$P" skill gerrit-review >/dev/null 2>&1; kit rm --dir "$P" rule gerrit-flow >/dev/null 2>&1; kit rm --dir "$P" mcp gerrit >/dev/null 2>&1
+check "rm --dir all: the folder exactly as before" 'cmp -s "$P/CLAUDE.md" "$T/p.claude" && cmp -s "$P/.mcp.json" "$T/p.mcp" && [ "$(cd "$P" && ls -A | sort | tr "\n" " ")" = ".mcp.json CLAUDE.md sub " ]'
+check "rm --dir all: Codex config byte-identical" 'cmp -s "$H5/.codex/config.toml" "$T/codex5.orig"'
+check "rm --dir all: kit forgets the folder" '[ ! -e "$HOME/.config/agentkit/dirs" ] && ! grep -qF "dir:$P:" "$HOME/.config/agentkit/state.tsv"'
+kit add --dir "$P" skill gerrit-review >/dev/null 2>&1; kit add --dir "$P" mcp gerrit >/dev/null 2>&1
+Q="$T/gone"; mkdir -p "$Q"; Q=$(cd "$Q" && pwd -P); kit add --dir "$Q" skill gerrit-review >/dev/null 2>&1; rm -rf "$Q"; kit sync >/dev/null 2>&1
+check "sync: a folder that is gone leaves the list" '! grep -qxF "$Q" "$HOME/.config/agentkit/dirs" && grep -qxF "$P" "$HOME/.config/agentkit/dirs"'
+kit uninstall >/dev/null 2>&1
+check "uninstall: the folder exactly as before" 'cmp -s "$P/CLAUDE.md" "$T/p.claude" && cmp -s "$P/.mcp.json" "$T/p.mcp" && [ "$(cd "$P" && ls -A | sort | tr "\n" " ")" = ".mcp.json CLAUDE.md sub " ]'
+check "uninstall: Codex config byte-identical" 'cmp -s "$H5/.codex/config.toml" "$T/codex5.orig"'
 echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"

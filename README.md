@@ -26,8 +26,10 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
 
     kit init <團隊來源的網址>     第一次
     kit list [--json]             有哪些、在用哪些
-    kit add skill <名字>          開始用
+    kit add skill <名字>          開始用（整個帳號：每個資料夾、每個 agent 都有）
     kit rm  skill <名字>          不用了
+    kit add --dir <資料夾> skill <名字>   只加到這個資料夾（在這裡和子資料夾開的 agent 才有）
+    kit rm  --dir <資料夾> skill <名字>
     kit run <agent> [--tool codex|omp]   開一個做好的 agent（預設 Claude）
     kit sync                      更新
     kit self-update               更新 kit 本身

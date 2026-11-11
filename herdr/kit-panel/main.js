@@ -435,6 +435,10 @@ export default class KitPanel extends View {
   agentList(t, z, d) {
     const items = d.items ?? [], here = d.here?.items ?? [], ag = d.here?.agent;
     const machine = this.target?.machine ?? "這台電腦";
+    // the folder's own (kit add --dir): the folder the agent runs in, or the one above it that already has some
+    const f = d.here?.folder, inDir = new Set(f?.items ?? []);
+    this.folder = f ? { dir: f.dir, why: f.why, has: inDir } : null;
+    const mine = (i) => inDir.has(`${i.kind}:${i.name}`);
     const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(8);
     const kindName = { rule: "規則", skill: "Skills", mcp: "MCP" };
     // 1. what kit run started it with: only this agent has it, for this run
@@ -452,7 +456,7 @@ export default class KitPanel extends View {
     // 2. what it reads besides: kit's for the whole account (can be taken off) and its folder's / account's own (look only)
     body.child(div().font_semibold().child(ag ? "另外也讀到的" : "這個 agent 在用的"));
     for (const kind of ["rule", "skill", "mcp"]) {
-      const kitRows = items.filter((i) => i.kind === kind && (i.status === "used" || i.status === "required"));
+      const kitRows = items.filter((i) => i.kind === kind && (i.status === "used" || i.status === "required" || mine(i)));
       const ownRows = here.filter((i) => i.kind === kind);
       const n = kitRows.length + ownRows.length;
       const folded = this.folded[`use-${kind}`] ?? n > 8;
@@ -463,16 +467,22 @@ export default class KitPanel extends View {
     }
     if (d.here?.error) body.child(div().text_size(z - 1.5).text_color(t.muted).child(`${shortDir(d.here.dir)}：${d.here.error}`));
     // 3. what kit has that the account does not use yet
-    const more = items.filter((i) => i.kind !== "agent" && i.status === "unused");
+    const more = items.filter((i) => i.kind !== "agent" && i.status === "unused" && !mine(i));
     const news = more.filter((i) => i.new).length;
     if (more.length) {
       const folded = this.folded.paneMore ?? false;
       body.child(div().mt(6).border_t(1).border_color(t.border));
-      body.child(this.secHead(t, z, "paneMore", `可以加到整個帳號的（${more.length}）`, folded, news ? `${news} 個新的` : ""));
+      body.child(this.secHead(t, z, "paneMore", `還沒用的（${more.length}）`, folded, news ? `${news} 個新的` : ""));
       if (!folded) body.child(v_flex().gap(2).children(more.map((i) => this.row(t, z, i))));
     }
-    body.child(div().mt(6).p(8).rounded(6).bg(t.raised).text_size(z - 1.5).text_color(t.muted)
-      .child(`「加到整個帳號」「從帳號拿掉」改的是 ${machine} 上你這個帳號的全部：Claude Code、Codex、omp（有裝的）和每個 agent 都會一起有或一起沒有，不只這一個。只想給某個 agent，請點 kit run 開的 agent，在它的視窗按「加上」。正在跑的要重開才會讀到。`));
+    const where = f ? shortDir(f.dir) : "這個資料夾";
+    body.child(v_flex().mt(6).p(8).gap(4).rounded(6).bg(t.raised).text_size(z - 1.5).text_color(t.muted)
+      .children(f && !f.why
+        ? [`這裡只改 ${where}：加的東西只有在 ${where}（含子資料夾）開的 agent 讀得到，整個帳號和別的資料夾都不受影響。會寫進 ${where} 的 .agentkit、CLAUDE.md、AGENTS.md、.claude/、.agents/ 等檔案。omp 不支援資料夾自己的 MCP。`,
+           "標「整個帳號」「團隊必備」的是整個帳號的，這裡不能改：要改，請在家目錄（~）開的 agent 改。"]
+        : [`這裡改的是整個帳號：${machine} 上你這個帳號的 Claude Code、Codex、omp（有裝的）和每個 agent、每個資料夾都會有或都沒有。`,
+           "只想給某個資料夾：請在那個資料夾開的 agent 改。"])
+      .child("正在跑的要開新的對話才會讀到。"));
     if (!items.length && !here.length && !ag) body.child(div().text_color(t.muted).child("來源裡還沒有東西。"));
     return body;
   }
@@ -498,19 +508,29 @@ export default class KitPanel extends View {
       .when(Boolean(sub), (el) => el.child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child(sub)));
   }
 
-  // one of kit's things for the account: in use (從帳號拿掉), required (拿不掉) or not (加到整個帳號)
+  // one of kit's things: for this folder (加到這個資料夾 / 從資料夾拿掉) and for the account (加到整個帳號 / 從帳號拿掉;
+  // required ones cannot be taken off)
   row(t, z, i) {
-    const busy = Boolean(this.busy);
+    const busy = Boolean(this.busy), f = this.folder, inDir = Boolean(f?.has.has(`${i.kind}:${i.name}`));
+    const canDir = Boolean(f && !f.why);
     const badge = (text, color) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(color).child(text);
     const head = h_flex().gap(5).items_center().min_w(0)
-      .child(div().min_w(0).truncate().font_semibold().text_color(i.status === "unused" ? t.muted : t.foreground).child(i.name));
+      .child(div().min_w(0).truncate().font_semibold().text_color(i.status === "unused" && !inDir ? t.muted : t.foreground).child(i.name));
     if (i.status === "required") head.child(badge("Kit · 團隊必備", t.accent));
     if (i.status === "used") head.child(badge("Kit · 整個帳號", t.working));
+    if (inDir) head.child(badge("Kit · 這個資料夾", t.done));
     if (i.new) head.child(badge("新", t.done));
-    let action;
-    if (i.status === "required") action = div().flex_none().text_size(z - 1.5).text_color(t.dim).child("拿不掉");
-    else if (i.status === "used") action = this.btn(t, z, `rm-${i.kind}-${i.name}`, "從帳號拿掉", { small: true, off: busy, on: (cx) => this.act(`從帳號拿掉 ${i.name}`, ["rm", i.kind, i.name], cx) });
-    else action = this.btn(t, z, `add-${i.kind}-${i.name}`, "加到整個帳號", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加到整個帳號 ${i.name}`, ["add", i.kind, i.name], cx) });
+    const dirArgs = (verb) => [verb, "--dir", f.dir, i.kind, i.name];
+    const action = h_flex().flex_none().gap(4).items_center();
+    // An agent started in a folder only changes that folder; the account is changed only from one started in the home
+    // folder (there the folder buttons make no sense: the home folder is the account). No button that reaches further
+    // than the folder the agent runs in.
+    if (canDir) {
+      if (inDir) action.child(this.btn(t, z, `rmdir-${i.kind}-${i.name}`, "從資料夾拿掉", { small: true, off: busy, on: (cx) => this.act(`從資料夾拿掉 ${i.name}`, dirArgs("rm"), cx) }));
+      else if (i.status === "unused") action.child(this.btn(t, z, `adddir-${i.kind}-${i.name}`, "加到這個資料夾", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加到這個資料夾 ${i.name}`, dirArgs("add"), cx) }));
+    } else if (i.status === "required") action.child(div().text_size(z - 1.5).text_color(t.dim).child("拿不掉"));
+    else if (i.status === "used") action.child(this.btn(t, z, `rm-${i.kind}-${i.name}`, "從帳號拿掉", { small: true, off: busy, on: (cx) => this.act(`從帳號拿掉 ${i.name}`, ["rm", i.kind, i.name], cx) }));
+    else if (!inDir) action.child(this.btn(t, z, `add-${i.kind}-${i.name}`, "加到整個帳號", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加到整個帳號 ${i.name}`, ["add", i.kind, i.name], cx) }));
     const sub = [i.description, i.source].filter(Boolean).join(" · ");
     return h_flex().id(`row-${i.kind}-${i.name}`).gap(8).items_center().px(8).py(5).rounded(6).hover((s) => s.bg(t.hover))
       .child(v_flex().flex_1().min_w(0).gap(1)
@@ -641,7 +661,7 @@ export default class KitPanel extends View {
       const name = this.newName.value().trim() || "名字";
       const rel = { rule: `rules/${name}.md`, skill: `skills/${name}/SKILL.md`, mcp: `mcp/${name}.yaml` }[kind];
       if (src?.dir) box.child(note(`會建立 ${shortDir(src.dir)}/${rel}，然後在這裡打開讓你寫。`, t.foreground));
-      box.child(note(`寫完存檔 → 清單上面黃色那條按「送出」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。`));
+      box.child(note(`寫完存檔 → 清單上面黃色那條按「送出」送上去 → 要用它就在 agent 視窗上的 Kit 清單按「加到這個資料夾」（在家目錄開的 agent 是「加到整個帳號」）。`));
       return box.child(h_flex().gap(6)
         .child(this.btn(t, z, "make", "建立並打開", { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.make(cx) }))
         .child(this.btn(t, z, "make-cancel", "取消", { small: true, on: (cx) => { this.making = null; cx.notify(); } })));
@@ -676,7 +696,7 @@ export default class KitPanel extends View {
       lines.push(note(`${lk.id} 還不在 ${lk.source} 的允許清單（kit.yaml 的 collect_sources）。按下去會一起加進清單，之後這個作者的東西就能收。`, t.working)); }
     else if (!lk.allowed) { block = block ?? "不在允許清單";
       lines.push(note(`${lk.id} 不在 ${lk.source} 的允許清單。這是團隊的倉，要請維護者把它加進 kit.yaml 的 collect_sources 才能收。`, t.ansi1)); }
-    lines.push(note("收進來後：用 git diff 看收了哪些檔案 → 清單上面黃色那條按「送出」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。"));
+    lines.push(note("收進來後：用 git diff 看收了哪些檔案 → 清單上面黃色那條按「送出」送上去 → 要用它就在 agent 視窗上的 Kit 清單按「加到這個資料夾」（在家目錄開的 agent 是「加到整個帳號」）。"));
     const act = block ? div().flex_none().text_size(z - 2).text_color(t.ansi1).child(`不能收：${block}`)
       : this.btn(t, z, "collect", this.busy === "收" ? "收進來中…" : label, { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.collect(x, allow, cx) });
     card.child(h_flex().gap(6).items_center()

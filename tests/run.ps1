@@ -205,11 +205,11 @@ $sp = @{ FilePath = $Exe; ArgumentList = @('-NoProfile', '-Command', 'exit 0'); 
 $dead = Start-Process @sp
 $dead.WaitForExit(); W (Join-Path $rund "$($dead.Id)") "gone`n"
 Kit list --json --dir $T --pid $PID
-Check 'list --json --pid: the agent kit run started there' { $out.Contains('"agent": {"name": "gerrit", "source": "team", "rules": ["gerrit-flow"], "skills": ["gerrit-review"], "mcp": ["gerrit"]}, "items": [') }
+Check 'list --json --pid: the agent kit run started there' { $out.Contains('"agent": {"name": "gerrit", "source": "team", "rules": ["gerrit-flow"], "skills": ["gerrit-review"], "mcp": ["gerrit"]}, "folder": {') }
 Check 'list --json --pid: the marker of a kit run that ended is dropped' { -not (Test-Path (Join-Path $rund "$($dead.Id)")) -and (Test-Path (Join-Path $rund "$PID")) }
 Remove-Item -LiteralPath (Join-Path $rund "$PID")
 Kit list --json --dir $T --pid $PID
-Check 'list --json --pid: no agent there' { $out.Contains('"user": null, "agent": null, "items": [') }
+Check 'list --json --pid: no agent there' { $out.Contains('"user": null, "agent": null, "folder": {') }
 if (-not $OnWindows) {
     W "$T/fakebin/claude" "#!/bin/sh`n`"`$FAKE_EXE`" -NoProfile -File `"`$FAKE_KIT`" list --json --dir `"`$PWD`" --pid `$PPID > `"`$FAKE_OUT`" 2>&1`n"
     & chmod +x "$T/fakebin/claude"
@@ -638,9 +638,47 @@ Check 'rm mcp clears codex and omp' { -not (ReadT "$H/.codex/config.toml").Conta
 Kit uninstall
 Check 'uninstall: codex AGENTS.md back' { (ReadT "$H/.codex/AGENTS.md") -eq "# my codex notes`n" }
 Check 'uninstall: codex toml byte-identical' { SameBytes "$T/codex.orig" "$H/.codex/config.toml" }
+
 Check 'uninstall: omp mcp.json byte-identical' { SameBytes "$T/omp.orig" "$H/.omp/agent/mcp.json" }
 Check 'uninstall: omp AGENTS.md (made by kit) gone' { -not (Test-Path "$H/.omp/agent/AGENTS.md") }
 Check 'uninstall: ~/.agents/skills emptied' { @(Get-ChildItem -Force "$H/.agents/skills" -ErrorAction SilentlyContinue).Count -eq 0 }
+
+# ---------- a folder's own (kit add --dir): only agents started there get it ----------
+Set-Home (Join-Path $T 'home5')
+W "$H/.codex/config.toml" "model = `"gpt-5`"`n`n[mcp_servers.mine]`ncommand = `"x`"`n"; W "$H/.omp/agent/x" ''
+Copy-Item "$H/.codex/config.toml" "$T/codex5.orig"
+$FP = Join-Path $T 'fproj'; [void](New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $FP 'sub') 'deeper'))
+W "$FP/CLAUDE.md" "# my notes`n"; W "$FP/.mcp.json" "{`n  `"mcpServers`": {`n    `"own`": {`n      `"command`": `"y`"`n    }`n  }`n}`n"
+Copy-Item "$FP/CLAUDE.md" "$T/fp.claude"; Copy-Item "$FP/.mcp.json" "$T/fp.mcp"
+Kit init $TEAM
+$FR = & { $script:OnWindows = $OnWindows; if ($OnWindows) { (Get-Item -LiteralPath $FP).FullName } else { "$(& /bin/sh -c 'cd "$1" && pwd -P' sh $FP)".Trim() } }
+Kit add --dir $FP skill gerrit-review
+Check 'add --dir: done, says where' { $rc -eq 0 -and $out.Contains($FR) }
+Check 'add --dir: .agentkit lists it, Claude and Codex/omp skill folders' { (ReadT "$FP/.agentkit").Contains("skill:gerrit-review`n") -and (Test-Path "$FP/.claude/skills/gerrit-review/SKILL.md") -and (Test-Path "$FP/.agents/skills/gerrit-review/SKILL.md") }
+Check 'add --dir: not the account' { -not (Test-Path "$H/.claude/skills/gerrit-review") -and -not (Test-Path "$H/.agents/skills/gerrit-review") }
+Kit add --dir (Join-Path (Join-Path $FP 'sub') 'deeper') rule gerrit-flow
+Check 'add --dir from a sub-folder goes to the folder that has .agentkit' { -not (Test-Path "$FP/sub/deeper/.agentkit") -and (ReadT "$FP/.agentkit").Contains("rule:gerrit-flow") }
+Check 'add --dir rule: CLAUDE.md keeps the user text and imports it; AGENTS.md has the text' { $c = ReadT "$FP/CLAUDE.md"; $c.StartsWith("# my notes`n") -and $c.Contains('rules/gerrit-flow.md') -and (ReadT "$FP/AGENTS.md").Contains('Only comment, never submit.') }
+Check 'codex: project_root_markers at the top, user part kept' { $c = ReadT "$H/.codex/config.toml"; $c.StartsWith('# agentkit:top:begin') -and $c.Contains('project_root_markers = [".git", ".agentkit"]') -and $c.Contains("model = `"gpt-5`"") }
+Kit add --dir $FP mcp gerrit
+Check 'add --dir mcp: .mcp.json has it and the own; Claude does not ask' { (JGet "$FP/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (JGet "$FP/.mcp.json" 'mcpServers.own.command') -eq '"y"' -and (Flat (JGet "$FP/.claude/settings.local.json" 'enabledMcpjsonServers')) -eq '["gerrit"]' }
+Check 'add --dir mcp: the folder Codex config, and Codex trusts the folder' { (ReadT "$FP/.codex/config.toml").Contains('[mcp_servers.gerrit]') -and (ReadT "$H/.codex/config.toml").Contains("[projects.`"$($FR.Replace('\', '\\'))`"]`ntrust_level = `"trusted`"") }
+Kit list --json --dir (Join-Path $FP 'sub')
+Check 'list --json: the folder with .agentkit, its items' { $out.Contains("`"folder`": {`"dir`": $(& { '"' + $FR.Replace('\', '\\') + '"' }), `"why`": `"`", `"items`": [`"skill:gerrit-review`", `"rule:gerrit-flow`", `"mcp:gerrit`"]}") }
+if (-not $OnWindows) {
+    $env:HOME = $H; $bash = (& /bin/sh -c "cd '$Repo' && HOME='$H' unix/kit list --json --dir '$FP/sub' 2>&1") -join "`n"
+    Check 'list --json --dir with a folder of its own: unix/kit prints the same' { $bash -ceq $out }
+}
+Kit add --dir $H skill gerrit-review
+Check 'add --dir: refuses the home folder' { $rc -ne 0 -and $out.Contains('家目錄') -and -not (Test-Path "$H/.agentkit") }
+Kit rm --dir $FP skill gerrit-workflow
+Check 'rm --dir: only what the folder added' { $rc -ne 0 -and $out.Contains('沒有加') }
+Kit rm --dir $FP skill gerrit-review; Kit rm --dir $FP rule gerrit-flow; Kit rm --dir $FP mcp gerrit
+Check 'rm --dir all: the folder exactly as before' { (SameBytes "$T/fp.claude" "$FP/CLAUDE.md") -and (SameBytes "$T/fp.mcp" "$FP/.mcp.json") -and ((@(Get-ChildItem -LiteralPath $FP -Force | ForEach-Object { $_.Name } | Sort-Object) -join ' ') -eq '.mcp.json CLAUDE.md sub') }
+Check 'rm --dir all: Codex config byte-identical, kit forgets the folder' { (SameBytes "$T/codex5.orig" "$H/.codex/config.toml") -and -not (Test-Path "$H/.config/agentkit/dirs") }
+Kit add --dir $FP skill gerrit-review; Kit add --dir $FP mcp gerrit
+Kit uninstall
+Check 'uninstall: the folder and Codex config exactly as before' { (SameBytes "$T/fp.claude" "$FP/CLAUDE.md") -and (SameBytes "$T/fp.mcp" "$FP/.mcp.json") -and -not (Test-Path "$FP/.agentkit") -and (SameBytes "$T/codex5.orig" "$H/.codex/config.toml") }
 
 # ---------- collect / outdated (other people's skills; a local repo plays the author) ----------
 function FileUrl([string]$p) { $p = $p.Replace('\', '/'); if ($p.StartsWith('/')) { "file://$p" } else { "file:///$p" } }

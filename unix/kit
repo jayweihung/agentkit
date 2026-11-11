@@ -27,6 +27,10 @@ END_MARK='<!-- agentkit:end -->'
 TOML_BEGIN='# agentkit:begin (managed by kit, do not edit)'
 TOML_END='# agentkit:end'
 KINDS="rule skill mcp agent"
+TOP_BEGIN='# agentkit:top:begin (managed by kit, do not edit)'
+TOP_END='# agentkit:top:end'
+DIRS_LIST="$KIT_CONF/dirs"                  # the folders that have their own (kit add --dir), one per line
+DIR_FILE=.agentkit                          # in such a folder: what it has; Codex also takes it as the project root
 
 # ---------- small helpers ----------
 die()  { printf 'kit: %s\n' "$*" >&2; exit 1; }
@@ -484,12 +488,16 @@ EOF
     rm -f "$ops"
 }
 
+toml_user() { # toml_user FILE : FILE without kit's blocks (what the user wrote)
+    awk -v b="$TOML_BEGIN" -v e="$TOML_END" -v tb="$TOP_BEGIN" -v te="$TOP_END" \
+        '$0 == b || $0 == tb { s = 1 } !s { print } $0 == e || $0 == te { s = 0 }' "$1" 2>/dev/null
+}
 toml_key() { case $1 in *[!A-Za-z0-9_-]*|"") json_str "$1";; *) printf '%s' "$1";; esac; }
 
 codex_mcp_toml() { # wanted MCP names on stdin -> [mcp_servers.x] tables for Codex
     local names n p cmd a first out tools t user
     names=$(cat)
-    user=$(awk -v b="$TOML_BEGIN" -v e="$TOML_END" '$0 == b { s = 1 } !s { print } $0 == e { s = 0 }' "$CODEX_DIR/config.toml" 2>/dev/null)
+    user=$(toml_user "${CODEX_USER_TOML:-$CODEX_DIR/config.toml}")
     for n in $names; do
         p=$(find_item mcp "$n") || { warn "mcp $n not found in any source"; continue; }
         cmd=$(yget "$p" command); [ -n "$cmd" ] || { warn "$p has no command"; continue; }
@@ -534,7 +542,8 @@ apply_claude() {
     if has_codex || has_omp; then sync_skills "$AGENTS_SKILLS" skill.agents <<< "$skills"; fi
     if has_codex; then
         set_rules "$CODEX_DIR/AGENTS.md" inline <<< "$rules"
-        KIT_BLOCK=$(codex_mcp_toml <<< "$mcps") replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END"
+        KIT_BLOCK="$(codex_mcp_toml <<< "$mcps")$(codex_trust)" replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END"
+        KIT_BLOCK=$(codex_top) replace_top_block "$CODEX_DIR/config.toml" "$TOP_BEGIN" "$TOP_END"
     fi
     if has_omp; then
         set_rules "$OMP_DIR/AGENTS.md" inline <<< "$rules"
@@ -597,6 +606,164 @@ sync_hook() { # run by Claude at start: sync in the background, at most every 10
         GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20 NO_NAG=1 cmd_sync
     ) </dev/null >>"$log" 2>&1 &
     exit 0
+}
+
+replace_top_block() { # replace_block, but at the top of FILE: TOML keys outside any table must come before the tables
+    # Kit's block is followed by one empty line, which goes with it again: without the block the file is as it was.
+    local f=$1 tmp rc=0
+    if [ ! -f "$f" ]; then [ -n "${KIT_BLOCK:-}" ] || return 0; mkdir -p "$(dirname "$f")"; : > "$f"; fi
+    tmp=$(mktemp "$f.kit.XXXXXX") || { warn "沒辦法在 $f 旁邊寫暫存檔"; return 1; }
+    cp -p "$f" "$tmp"
+    awk -v b="$2" -v e="$3" '
+        { l = $0; if (sub(/\r$/, "", l)) crlf = 1 }
+        l == b { skip = 1; next }
+        l == e { skip = 0; after = 1; next }
+        after { after = 0; if (l == "") next }
+        !skip { lines[++n] = $0 }
+        END {
+            if (skip) exit 3
+            cr = crlf ? "\r" : ""
+            body = ENVIRON["KIT_BLOCK"]
+            gsub(/\r\n/, "\n", body)
+            if (body != "" && substr(body, length(body)) != "\n") body = body "\n"
+            if (cr != "") gsub(/\n/, "\r\n", body)
+            if (body != "") { print b cr; printf "%s", body; print e cr; if (n > 0) print cr }
+            for (i = 1; i <= n; i++) print lines[i]
+        }' "$f" > "$tmp" || rc=$?
+    if [ $rc != 0 ]; then
+        rm -f "$tmp"
+        [ $rc = 3 ] && warn "$f 裡有 kit 的開始標記，但找不到結束標記（$3）：kit 不動這個檔案，請手動修好"
+        return 1
+    fi
+    if cmp -s "$tmp" "$f"; then rm -f "$tmp"
+    elif [ -L "$f" ]; then cat "$tmp" > "$f"; rm -f "$tmp"
+    elif [ -s "$tmp" ]; then mv -f "$tmp" "$f"
+    else rm -f "$tmp" "$f"
+    fi
+}
+
+# ---------- a folder's own (kit add --dir) ----------
+# Only agents started in that folder (or below it) get these; the account and other folders do not.
+# The folder's .agentkit lists them; kit puts them where each tool looks in a project:
+#   Claude: CLAUDE.md, .claude/skills, .mcp.json (+ .claude/settings.local.json so it does not ask each time)
+#   Codex:  AGENTS.md, .agents/skills, .codex/config.toml (Codex reads it only in a trusted folder: kit trusts it)
+#   omp:    reads Claude's and Codex's; its MCP only from the account (kit does not turn on omp's project MCP)
+home_real() { (cd "$HOME" 2>/dev/null && pwd -P) || printf '%s' "$HOME"; }
+dir_why_not() { # dir_why_not DIR : why DIR cannot have its own (empty when it can)
+    local h; h=$(home_real)
+    case $1 in
+        /|"$h") printf '這是家目錄（或根目錄）：放在這裡等於整個帳號，請用「加到整個帳號」，或換一個資料夾';;
+        *) case $h in "$1"/*) printf '家目錄在這個資料夾裡面：放在這裡等於整個帳號，請換一個資料夾';; esac;;
+    esac
+}
+dir_root() { # dir_root DIR : the folder kit uses for DIR: the nearest one at or above it with .agentkit, else DIR
+    local d a h; h=$(home_real)
+    d=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+    a=$d
+    while [ "$a" != / ] && [ "$a" != "$h" ]; do
+        [ -f "$a/$DIR_FILE" ] && { printf '%s\n' "$a"; return 0; }
+        a=$(dirname "$a")
+    done
+    printf '%s\n' "$d"
+}
+dir_items() { [ -f "$1/$DIR_FILE" ] && awk '{ sub(/\r$/, "") } /^(rule|skill|mcp):[^ ]+$/' "$1/$DIR_FILE" | awk '!seen[$0]++'; }
+dir_kind() { printf 'dir:%s:%s' "$1" "$2"; }       # dir_kind DIR KIND : state.tsv kind for a folder's own (kit keeps it with the rest)
+dirs_registered() { [ -f "$DIRS_LIST" ] && awk 'NF && !seen[$0]++' "$DIRS_LIST"; }
+dirs_set() { # dirs_set DIR add|rm : the list of folders kit has to keep up to date
+    local t; mkdir -p "$KIT_CONF"; touch "$DIRS_LIST"
+    t=$(mktemp "$DIRS_LIST.XXXXXX") || die "沒辦法寫 $DIRS_LIST"
+    { grep -vxF -- "$1" "$DIRS_LIST"; [ "$2" = add ] && printf '%s\n' "$1"; } > "$t"
+    if [ -s "$t" ]; then mv -f "$t" "$DIRS_LIST"; else rm -f "$t" "$DIRS_LIST"; fi
+}
+dir_write() { # dir_write DIR ITEMS : the folder's .agentkit (gone when nothing is left)
+    if [ -z "$2" ]; then rm -f "$1/$DIR_FILE"; return; fi
+    { printf '# kit：這個資料夾自己的規則、skill、MCP。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。\n'
+      printf '# 用  kit add --dir <資料夾> 種類 名字  /  kit rm --dir …  改（或在 Herdr 的 Kit 清單按「加到這個資料夾」）。\n'
+      printf '%s\n' "$2"; } > "$1/$DIR_FILE"
+}
+drop_made() { # drop_made FILE : a JSON file kit made that is empty again goes away
+    [ -n "$(state_get made "$1")" ] || return 0
+    [ -f "$1" ] && [ "$(tr -d ' \t\r\n' < "$1")" = "{}" ] && { rm -f "$1" "$1.kit-backup"; state_del made "$1"; }
+    [ -f "$1" ] || state_del made "$1"
+}
+dir_claude_allow() { # dir_claude_allow DIR : MCP names on stdin -> .claude/settings.local.json enabledMcpjsonServers
+    local dir=$1 f="$1/.claude/settings.local.json" names n ops add="" del="" km ka
+    km=$(dir_kind "$dir" mcp); ka=$(dir_kind "$dir" allow)
+    names=$(cat); ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
+    for n in $names; do
+        [ -n "$(state_get "$km" "$n")" ] || continue        # only the servers kit put in .mcp.json
+        [ -n "$(state_get "$ka" "$n")" ] && continue
+        printf 'addstr\tenabledMcpjsonServers\t%s\n' "$n" >> "$ops"; add="$add $n"
+    done
+    for n in $(state_list "$ka"); do
+        printf '%s\n' "$names" | grep -qxF "$n" && [ -n "$(state_get "$km" "$n")" ] && continue
+        printf 'rmstr\tenabledMcpjsonServers\t%s\n' "$n" >> "$ops"; del="$del $n"
+    done
+    if [ -s "$ops" ]; then
+        [ -f "$f" ] || state_set made "$f" 1
+        json_edit "$f" "$ops"; prune_empty "$f" enabledMcpjsonServers
+        for n in $add; do state_set "$ka" "$n" 1; done
+        for n in $del; do state_del "$ka" "$n"; done
+    fi
+    rm -f "$ops"; drop_made "$f"
+}
+apply_dir() { # apply_dir DIR : the folder's .agentkit -> the tools' files in it
+    local dir=$1 want rules skills mcps d
+    want=$(dir_items "$dir")
+    rules=$(printf '%s\n' "$want" | sed -n 's/^rule://p')
+    skills=$(printf '%s\n' "$want" | sed -n 's/^skill://p')
+    mcps=$(printf '%s\n' "$want" | sed -n 's/^mcp://p')
+    set_rules "$dir/CLAUDE.md" import <<< "$rules"
+    sync_skills "$dir/.claude/skills" "$(dir_kind "$dir" skill)" <<< "$skills"
+    [ -f "$dir/.mcp.json" ] || [ -z "$mcps" ] || state_set made "$dir/.mcp.json" 1
+    sync_mcp_json "$dir/.mcp.json" "$(dir_kind "$dir" mcp)" <<< "$mcps"
+    drop_made "$dir/.mcp.json"
+    dir_claude_allow "$dir" <<< "$mcps"
+    # kit's backups of the user's own files go when kit has nothing left in them
+    [ -n "$(state_list "$(dir_kind "$dir" mcp)")" ] || rm -f "$dir/.mcp.json.kit-backup"
+    [ -n "$(state_list "$(dir_kind "$dir" allow)")" ] || rm -f "$dir/.claude/settings.local.json.kit-backup"
+    if has_codex || has_omp || [ -n "$(state_list "$(dir_kind "$dir" skill.agents)")" ]; then
+        set_rules "$dir/AGENTS.md" inline <<< "$rules"
+        sync_skills "$dir/.agents/skills" "$(dir_kind "$dir" skill.agents)" <<< "$skills"
+    fi
+    if has_codex || [ -f "$dir/.codex/config.toml" ]; then
+        local CODEX_USER_TOML="$dir/.codex/config.toml"
+        KIT_BLOCK=$(codex_mcp_toml <<< "$mcps") replace_block "$dir/.codex/config.toml" "$TOML_BEGIN" "$TOML_END"
+    fi
+    if [ -n "$mcps" ] && has_omp && [ -z "$(state_get told omp-mcp)" ]; then
+        warn "omp 只讀整個帳號的 MCP：資料夾自己的 MCP 只有 Claude Code 和 Codex 會用"; state_set told omp-mcp 1
+    fi
+    for d in .claude/skills .agents/skills .claude .agents .codex; do rmdir "$dir/$d" 2>/dev/null; done
+    return 0
+}
+apply_dirs() { # kit sync: every folder with its own; a folder that is gone (or has no .agentkit any more) leaves the list
+    local d
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        if [ -d "$d" ]; then apply_dir "$d"; fi
+        [ -n "$(dir_items "$d")" ] || dirs_set "$d" rm
+    done <<EOF
+$(dirs_registered)
+EOF
+}
+codex_trust() { # [projects."DIR"] trust for each folder with its own MCP (Codex reads a folder's config.toml only then)
+    local d user
+    user=$(toml_user "$CODEX_DIR/config.toml")
+    while IFS= read -r d; do
+        [ -n "$d" ] && dir_items "$d" | grep -q '^mcp:' || continue
+        printf '%s\n' "$user" | grep -qF "[projects.$(json_str "$d")]" && continue
+        printf '[projects.%s]\ntrust_level = "trusted"\n\n' "$(json_str "$d")"
+    done <<EOF
+$(dirs_registered)
+EOF
+}
+codex_top() { # project_root_markers with .agentkit, so Codex started in a sub-folder still finds the folder's own
+    [ -n "$(dirs_registered)" ] || return 0
+    if toml_user "$CODEX_DIR/config.toml" | grep -q '^[[:space:]]*project_root_markers[[:space:]]*='; then
+        [ -n "$(state_get told codex-markers)" ] || { warn "Codex 的 config.toml 已經有自己的 project_root_markers：請自己加上 \".agentkit\"，不然在子資料夾開 Codex 讀不到資料夾自己的"; state_set told codex-markers 1; }
+        return 0
+    fi
+    printf 'project_root_markers = [".git", "%s"]\n' "$DIR_FILE"
 }
 
 # ---------- commands ----------
@@ -693,6 +860,7 @@ cmd_sync() {
     local s
     while IFS= read -r s; do [ -z "$s" ] || fetch_source "$s"; done <<< "$(m_sources)"
     add_includes
+    apply_dirs                                               # first: a folder that is gone leaves the list Codex's trust comes from
     apply_claude
     local new=""
     for i in $(available); do [ -n "$(state_get seen "$i")" ] || new="$new $i"; done
@@ -724,25 +892,33 @@ here_short() { # a path as the panel shows it: inside DIR relative to it, else w
         *) printf '%s' "$2";;
     esac
 }
+kit_only() { # kit_only FILE : FILE has nothing but kit's block (kit made it for a folder's own)
+    [ -z "$(awk -v b="$BEGIN_MARK" -v e="$END_MARK" '{ sub(/\r$/, "") } $0 == b { s = 1 } !s && NF { print; exit } $0 == e { s = 0 }' "$1")" ]
+}
 here_rows() { # here_rows DIR : what an agent started in DIR gets that kit does not manage
     # lines: scope<TAB>kind<TAB>name<TAB>path<TAB>tools   (scope dir = DIR and the folders above it, user = this account)
-    local dir=$1 a f n LC_ALL=C
+    # (the folder's own that kit put there, kit add --dir, are not listed: the panel shows them as kit's)
+    local dir=$1 a f n mine root LC_ALL=C
+    root=$(dir_root "$dir" 2>/dev/null); mine=$(dir_items "$root")
     a=$dir
     while :; do
         for f in "$a/CLAUDE.md" "$a/CLAUDE.local.md" "$a/.claude/CLAUDE.md"; do
-            [ -f "$f" ] && [ "$f" != "$CLAUDE_DIR/CLAUDE.md" ] && printf 'dir\trule\t%s\t%s\tclaude\n' "$(here_short "$dir" "$f")" "$f"
+            [ -f "$f" ] && [ "$f" != "$CLAUDE_DIR/CLAUDE.md" ] && ! kit_only "$f" && printf 'dir\trule\t%s\t%s\tclaude\n' "$(here_short "$dir" "$f")" "$f"
         done
         if [ "$a/.claude" != "$CLAUDE_DIR" ]; then
             for f in "$a"/.claude/rules/*.md; do [ -f "$f" ] && printf 'dir\trule\t%s\t%s\tclaude\n' "$(here_short "$dir" "$f")" "$f"; done
             for f in "$a"/.claude/skills/*/SKILL.md; do
-                [ -f "$f" ] && printf 'dir\tskill\t%s\t%s\tclaude\n' "$(basename "$(dirname "$f")")" "$f"
+                [ -f "$f" ] || continue; n=$(basename "$(dirname "$f")")
+                [ "$a" = "$root" ] && printf '%s\n' "$mine" | grep -qxF "skill:$n" && continue
+                printf 'dir\tskill\t%s\t%s\tclaude\n' "$n" "$f"
             done
         fi
-        [ -f "$a/AGENTS.md" ] && printf 'dir\trule\t%s\t%s\tcodex omp\n' "$(here_short "$dir" "$a/AGENTS.md")" "$a/AGENTS.md"
+        [ -f "$a/AGENTS.md" ] && ! kit_only "$a/AGENTS.md" && printf 'dir\trule\t%s\t%s\tcodex omp\n' "$(here_short "$dir" "$a/AGENTS.md")" "$a/AGENTS.md"
         [ "$a" = / ] && break
         a=$(dirname "$a")
     done
     [ -f "$dir/.mcp.json" ] && json_keys "$dir/.mcp.json" mcpServers | while IFS= read -r n; do
+        [ "$dir" = "$root" ] && printf '%s\n' "$mine" | grep -qxF "mcp:$n" && continue
         printf 'dir\tmcp\t%s\t%s\tclaude\n' "$n" "$dir/.mcp.json"; done
     [ -f "$CLAUDE_JSON" ] && json_keys "$CLAUDE_JSON" "projects$TAB$dir${TAB}mcpServers" | while IFS= read -r n; do
         printf 'dir\tmcp\t%s\t%s\tclaude\n' "$n" "$CLAUDE_JSON"; done
@@ -795,6 +971,8 @@ here_json() { # here_json DIR PID : the "here" part of kit list --json --dir
         "$( [ -n "$agent" ] && agent_json "$agent" || echo null)"
     if [ -n "$user" ]; then printf ', "items": []}'; return; fi
     if [ ! -d "$dir" ]; then printf ', "error": %s, "items": []}' "$(json_s "找不到這個資料夾")"; return; fi
+    local froot; froot=$(dir_root "$dir")
+    printf ', "folder": {"dir": %s, "why": %s, "items": %s}' "$(json_s "$froot")" "$(json_s "$(dir_why_not "$froot")")" "$(dir_items "$froot" | json_arr)"
     printf ', "items": ['
     while IFS="$TAB" read -r sc k n f t; do
         [ -n "$k" ] || continue
@@ -880,10 +1058,13 @@ cmd_list() {
 
 cmd_add_rm() {
     local verb=$1; shift
-    [ $# -eq 2 ] || die "用法：kit $verb rule|skill|mcp <名字>"
+    local dir=""
+    if [ "${1:-}" = --dir ]; then [ $# -ge 2 ] || die "--dir 後面要接資料夾"; dir=$2; shift 2; fi
+    [ $# -eq 2 ] || die "用法：kit $verb [--dir 資料夾] rule|skill|mcp <名字>"
     need_init
     local k=$1 n=$2 i="$1:$2" added removed
     case " rule skill mcp " in *" $k "*) ;; *) die "種類只能是 rule、skill、mcp";; esac
+    if [ -n "$dir" ]; then dir_add_rm "$verb" "$dir" "$k" "$n"; return; fi
     find_item "$k" "$n" > /dev/null || die "找不到 ${i}（打 kit list 看有哪些）"
     added=$(m_added); removed=$(m_removed)
     if [ "$verb" = add ]; then
@@ -896,6 +1077,28 @@ cmd_add_rm() {
     fi
     write_machine "$(m_sources)" "$added" "$removed"
     apply_claude
+}
+
+dir_add_rm() { # dir_add_rm add|rm DIR KIND NAME : only that folder (and below it) gets it, or no longer
+    local verb=$1 k=$3 n=$4 i="$3:$4" root why items
+    [ -d "$2" ] || die "找不到資料夾 $2"
+    root=$(dir_root "$2") || die "找不到資料夾 $2"
+    why=$(dir_why_not "$root"); [ -z "$why" ] || die "${root}：$why"
+    items=$(dir_items "$root")
+    if [ "$verb" = add ]; then
+        find_item "$k" "$n" > /dev/null || die "找不到 ${i}（打 kit list 看有哪些）"
+        printf '%s\n' "$items" | grep -qxF "$i" && { say "kit：$root 已經有 $i"; return 0; }
+        items=$(printf '%s\n%s\n' "$items" "$i" | awk 'NF')
+    else
+        printf '%s\n' "$items" | grep -qxF "$i" || die "$root 沒有加 ${i}（這個資料夾自己加的才拿得掉）"
+        items=$(printf '%s\n' "$items" | grep -vxF "$i")
+    fi
+    dir_write "$root" "$items"
+    if [ -n "$items" ]; then dirs_set "$root" add; else dirs_set "$root" rm; fi
+    apply_dir "$root"
+    has_codex && apply_claude                                # Codex: the folder's trust and the root marker
+    if [ "$verb" = add ]; then say "kit：$i 加到 ${root}（只有在這裡和子資料夾開的 agent 讀得到，開新的才會讀到）"
+    else say "kit：$i 從 $root 拿掉了"; fi
 }
 
 toml_str() { # quote a string for TOML (a basic string; newlines escaped)
@@ -1017,9 +1220,17 @@ cmd_uninstall() {
     local self=0; [ "${1:-}" = "--self" ] && self=1
     local n ops k v
     local f
-    local left=0
+    local left=0 d
+    while IFS= read -r d; do                                 # the folders' own: kit's files out, .agentkit gone
+        [ -n "$d" ] || continue
+        [ -d "$d" ] && { rm -f "$d/$DIR_FILE"; QUIET=1 apply_dir "$d"; }
+        dirs_set "$d" rm
+    done <<EOF
+$(dirs_registered)
+EOF
     for f in "$CLAUDE_DIR/CLAUDE.md" "$CODEX_DIR/AGENTS.md" "$OMP_DIR/AGENTS.md"; do KIT_BLOCK= replace_block "$f" "$BEGIN_MARK" "$END_MARK" || left=1; done
     KIT_BLOCK= replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END" || left=1
+    KIT_BLOCK= replace_top_block "$CODEX_DIR/config.toml" "$TOP_BEGIN" "$TOP_END" || left=1
     QUIET=1
     sync_skills "$CLAUDE_DIR/skills" skill < /dev/null
     sync_skills "$AGENTS_SKILLS" skill.agents < /dev/null
@@ -2170,8 +2381,11 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
      --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（給 Herdr 的 Agent 面板）
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
-  kit add rule|skill|mcp <名字>     開始用
+  kit add rule|skill|mcp <名字>     開始用（整個帳號：每個資料夾、每個 agent 都有）
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
+  kit add --dir <資料夾> rule|skill|mcp <名字>
+                                    只加到這個資料夾：在這裡（含子資料夾）開的 agent 才有
+  kit rm  --dir <資料夾> rule|skill|mcp <名字>
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
 
