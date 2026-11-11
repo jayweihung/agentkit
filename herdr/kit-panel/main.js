@@ -535,11 +535,33 @@ export default class KitPanel extends View {
     else if (i.status === "used") action.child(this.btn(t, z, `rm-${i.kind}-${i.name}`, "從帳號拿掉", { small: true, off: busy, on: (cx) => this.act(`從帳號拿掉 ${i.name}`, ["rm", i.kind, i.name], cx, SHORT, `已從整個帳號拿掉 ${i.name}。開新的對話就不會有了。`) }));
     else if (!inDir) action.child(this.btn(t, z, `add-${i.kind}-${i.name}`, "加到整個帳號", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加到整個帳號 ${i.name}`, ["add", i.kind, i.name], cx, SHORT, `已加到整個帳號：${i.name}。每個資料夾開新的對話都會讀到。`) }));
     const sub = [i.description, i.source].filter(Boolean).join(" · ");
-    return h_flex().id(`row-${i.kind}-${i.name}`).gap(8).items_center().px(8).py(5).rounded(6).hover((s) => s.bg(t.hover))
+    const row = h_flex().gap(8).items_center()
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(head)
         .when(Boolean(sub), (el) => el.child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child(sub))))
       .child(action);
+    const missing = (i.needs ?? []).filter((x) => !x.ok);
+    return v_flex().id(`row-${i.kind}-${i.name}`).gap(4).px(8).py(5).rounded(6).hover((s) => s.bg(t.hover))
+      .child(row)
+      .children(missing.map((x) => this.needLine(t, z, x)));
+  }
+
+  // a program a skill needs that this machine lacks (or has too old): 安裝 shows kit's command first, 確定安裝 runs it
+  needLine(t, z, x) {
+    const busy = Boolean(this.busy), asking = this.asking === x.tool;
+    const what = `需要 ${x.title}${x.min ? ` ${x.min} 以上` : ""}（${x.have ? `這台是 ${x.have}，太舊` : "這台沒有"}）`;
+    const line = h_flex().gap(6).items_center().flex_wrap().pl(2).text_size(z - 1.5)
+      .child(div().text_color(t.working).child(`⚠ ${what}`));
+    if (!x.install) return line.child(div().text_color(t.muted).child("請自己裝：這台沒有 kit 可以用的安裝方式"));
+    if (!asking) return line.child(this.btn(t, z, `need-${x.tool}`, x.have ? "升級" : "安裝", { small: true, off: busy, on: (cx) => { this.asking = x.tool; cx.notify(); } }));
+    return v_flex().gap(4).pl(2).text_size(z - 1.5)
+      .child(div().text_color(t.working).child(`⚠ ${what}`))
+      .child(h_flex().gap(6).items_center().flex_wrap()
+        .child(div().text_color(t.muted).child("會執行："))
+        .child(div().px(5).rounded(4).bg(t.raised).font_family(mono()).child(x.install)))
+      .child(h_flex().gap(6)
+        .child(this.btn(t, z, `need-go-${x.tool}`, "確定安裝", { small: true, kind: "primary", off: busy, on: (cx) => { this.asking = null; this.act(`安裝 ${x.title}`, ["install-tool", x.tool, ...(x.min ? ["--min", x.min] : [])], cx, LONG); } }))
+        .child(this.btn(t, z, `need-no-${x.tool}`, "取消", { small: true, off: busy, on: (cx) => { this.asking = null; cx.notify(); } })));
   }
 
   // ---------- the repository ----------

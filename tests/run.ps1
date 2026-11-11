@@ -680,6 +680,44 @@ Kit add --dir $FP skill gerrit-review; Kit add --dir $FP mcp gerrit
 Kit uninstall
 Check 'uninstall: the folder and Codex config exactly as before' { (SameBytes "$T/fp.claude" "$FP/CLAUDE.md") -and (SameBytes "$T/fp.mcp" "$FP/.mcp.json") -and -not (Test-Path "$FP/.agentkit") -and (SameBytes "$T/codex5.orig" "$H/.codex/config.toml") }
 
+# ---------- the programs a skill needs (kit tools / install-tool, "needs" in list --json) ----------
+Set-Home (Join-Path $T 'home6')
+$NT = Join-Path $T 'needteam'
+W "$NT/skills/drawer/SKILL.md" "---`nname: drawer`ndescription: draws`n---`nRun ``node bin/draw.mjs <in>`` to draw.`n"
+W "$NT/skills/drawer/package.json" "{`"name`": `"drawer`", `"engines`": {`"node`": `">=18`"}}`n"
+W "$NT/skills/plain/SKILL.md" "---`nname: plain`ndescription: only text`n---`nNo node, no python here.`n"
+W "$NT/skills/plain/package.json" "{`"name`": `"plain`"}`n"; W "$NT/skills/plain/scripts/check.py" "print(1)`n"
+W "$NT/skills/told/SKILL.md" "---`nname: told`ndescription: says`nrequires: [node>=20, frob]`n---`nx`n"
+W "$NT/kit.yaml" "name: needteam`nrequires:`n  plain: [git]`n"
+Kit init $NT
+Kit list --json
+$items = @{}; foreach ($m in [regex]::Matches($out, '"name": "(drawer|plain|told)".*?"needs": (\[[^\]]*\])')) { $items[$m.Groups[1].Value] = $m.Groups[2].Value }
+Check 'needs: SKILL.md runs node, package.json gives the lowest version' { $items['drawer'] -match '"tool": "node", "title": "Node.js", "min": "18"' }
+Check 'needs: a package.json or a .py of the author says nothing; kit.yaml requires does' { $items['plain'] -match '"tool": "git"' -and $items['plain'] -notmatch '"tool": "(node|python)"' }
+Check 'needs: SKILL.md requires; an unknown program has no install' { $items['told'] -match '"min": "20"' -and $items['told'] -match '"tool": "frob", "title": "frob", "min": "", "have": "", "ok": false, "install": ""' }
+if (-not $OnWindows) {
+    $FB = Join-Path $T 'fakebin6'; [void](New-Item -ItemType Directory -Force -Path $FB)
+    W "$FB/node" "#!/bin/sh`necho v16.2.0`n"
+    W "$FB/brew" "#!/bin/sh`necho `"`$*`" >> '$T/brew6.log'`n[ `"`$1`" = upgrade ] && printf '#!/bin/sh\necho v26.1.0\n' > '$FB/node'`nexit 0`n"
+    & chmod +x "$FB/node" "$FB/brew"
+    $savedP = $env:PATH; $env:PATH = "$FB" + [IO.Path]::PathSeparator + '/usr/bin:/bin'
+    Kit list --json
+    Check 'needs: too old here, kit says the upgrade' { $out -match '"tool": "node", "title": "Node.js", "min": "18", "have": "16.2.0", "ok": false, "install": "brew upgrade node"' }
+    Kit tools
+    Check 'tools: what this machine has and how kit would install it' { $out -match '(?m)^node +16\.2\.0 +brew install node$' }
+    $env:KIT_DRY_RUN = '1'; Kit install-tool node --min 18; Remove-Item env:KIT_DRY_RUN
+    Check 'install-tool --min, dry run: only says the upgrade' { $out.Contains('執行 brew upgrade node') -and -not (Test-Path "$T/brew6.log") }
+    Kit install-tool node --min 18
+    Check 'install-tool --min: runs kit''s upgrade, then looks again' { $rc -eq 0 -and (ReadT "$T/brew6.log") -eq "upgrade node`n" -and $out.Contains('Node.js 26.1.0 裝好了') }
+    Remove-Item "$T/brew6.log"
+    W "$NT/tools/frob.yaml" "name: frob`ntitle: Frob`ninstall:`n  mac: [`"sh -c evil`", `"brew frob;rm`", `"curl x`", `"brew frob`"]`n  linux: [`"sh -c evil`", `"brew frob;rm`", `"curl x`", `"brew frob`"]`n"
+    Kit install-tool frob
+    Check 'install-tool: a recipe can only pick a known manager and a plain package name' { (ReadT "$T/brew6.log") -eq "install frob`n" -and $out.Contains('執行 brew install frob') }
+    $env:PATH = $savedP
+}
+Kit install-tool nope
+Check 'install-tool: no recipe, says how to add one' { $rc -ne 0 -and $out.Contains('tools/nope.yaml') }
+
 # ---------- collect / outdated (other people's skills; a local repo plays the author) ----------
 function FileUrl([string]$p) { $p = $p.Replace('\', '/'); if ($p.StartsWith('/')) { "file://$p" } else { "file:///$p" } }
 function G { & git @args 2>&1 | Out-Null }

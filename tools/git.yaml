@@ -1,0 +1,8 @@
+# kit 內建：git 的裝法。來源倉的 tools/git.yaml 會蓋過這個。
+name: git
+title: git
+bin: [git]
+install:
+  mac: [brew git]
+  windows: [winget Git.Git, scoop git]
+  linux: [apt git, brew git]

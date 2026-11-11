@@ -620,7 +620,7 @@ check "claude.json byte-identical after everything" 'cmp -s "$HOME/.claude.json"
 check "uninstall removes mcp" '! jget "$HOME/.claude.json" mcpServers.gerrit >/dev/null'
 
 # ---------- install / self-update / uninstall --self ----------
-R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../templates" "$HERE/../herdr" "$HERE/../VERSION" "$R/"
+R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../templates" "$HERE/../herdr" "$HERE/../tools" "$HERE/../VERSION" "$R/"
 ( cd "$R" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm v1 )
 U="$T/clone2"; git clone -q "$R" "$U"
 touch "$HOME/.bashrc"
@@ -739,6 +739,50 @@ check "sync: a folder that is gone leaves the list" '! grep -qxF "$Q" "$HOME/.co
 kit uninstall >/dev/null 2>&1
 check "uninstall: the folder exactly as before" 'cmp -s "$P/CLAUDE.md" "$T/p.claude" && cmp -s "$P/.mcp.json" "$T/p.mcp" && [ "$(cd "$P" && ls -A | sort | tr "\n" " ")" = ".mcp.json CLAUDE.md sub " ]'
 check "uninstall: Codex config byte-identical" 'cmp -s "$H5/.codex/config.toml" "$T/codex5.orig"'
+echo "$pass $fail" > "$T/sub"
+)
+read pass fail < "$T/sub"
+
+# ---------- the programs a skill needs (kit tools / install-tool, "needs" in list --json) ----------
+H6="$T/home6"; FB="$T/fakebin"; mkdir -p "$H6" "$FB"
+printf '#!/bin/sh\necho v16.2.0\n' > "$FB/node"; chmod +x "$FB/node"
+printf '#!/bin/sh\necho "$*" >> "%s/brew.log"\n[ "$1" = upgrade ] && printf "#!/bin/sh\\necho v26.1.0\\n" > "%s/node" && chmod +x "%s/node"\nexit 0\n' "$T" "$FB" "$FB" > "$FB/brew"; chmod +x "$FB/brew"
+NT="$T/needteam"; mkdir -p "$NT/skills/drawer/bin" "$NT/skills/plain/scripts" "$NT/skills/told" "$NT/tools"
+printf -- '---\nname: drawer\ndescription: draws\n---\nRun `node bin/draw.mjs <in>` to draw.\n' > "$NT/skills/drawer/SKILL.md"; echo 'x' > "$NT/skills/drawer/bin/draw.mjs"
+printf '{"name": "drawer", "engines": {"node": ">=18"}}\n' > "$NT/skills/drawer/package.json"
+printf -- '---\nname: plain\ndescription: only text\n---\nNo node, no python here.\n' > "$NT/skills/plain/SKILL.md"
+printf '{"name": "plain", "private": true}\n' > "$NT/skills/plain/package.json"; echo 'print(1)' > "$NT/skills/plain/scripts/check.py"
+printf -- '---\nname: told\ndescription: says what it needs\nrequires: [node>=20, frob]\n---\nx\n' > "$NT/skills/told/SKILL.md"
+printf 'name: needteam\nrequires:\n  plain: [git]\n' > "$NT/kit.yaml"
+(
+export HOME="$H6" PATH="$FB:/usr/bin:/bin"
+kit init "$NT" >/dev/null 2>&1
+kit list --json > "$T/needs.json" 2>/dev/null
+nd() { python3 -c "import json,sys;d={i['name']:i for i in json.load(open(sys.argv[1]))['items']};print(json.dumps(d[sys.argv[2]]['needs'],sort_keys=True))" "$T/needs.json" "$1"; }
+check "needs: SKILL.md runs node, package.json gives the lowest version, too old here, brew is there" '[ "$(nd drawer)" = "[{\"have\": \"16.2.0\", \"install\": \"brew upgrade node\", \"min\": \"18\", \"ok\": false, \"title\": \"Node.js\", \"tool\": \"node\"}]" ]'
+check "needs: a package.json or a .py of the author says nothing; kit.yaml requires does" 'nd plain | grep -q "\"tool\": \"git\"" && ! nd plain | grep -q "\"tool\": \"node\"" && ! nd plain | grep -q python'
+check "needs: SKILL.md requires, an unknown program has no install" 'nd told | grep -q "\"min\": \"20\"" && nd told | grep -q "\"install\": \"\", \"min\": \"\", \"ok\": false, \"title\": \"frob\", \"tool\": \"frob\""'
+check "needs: kit.ps1 prints the same list" '! command -v pwsh >/dev/null || [ "$(pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json 2>/dev/null)" = "$(cat "$T/needs.json")" ]'
+out=$(kit tools 2>&1)
+check "tools: what this machine has and how kit would install it" 'echo "$out" | grep -qE "^node +16.2.0 +brew install node$"'
+out=$(kit install-tool node 2>&1)
+check "install-tool: there (no lowest version asked)" 'echo "$out" | grep -qF "已經有 Node.js 16.2.0" && [ ! -e "$T/brew.log" ]'
+out=$(KIT_DRY_RUN=1 kit install-tool node --min 18 2>&1)
+check "install-tool --min, dry run: too old -> only says the upgrade command" 'echo "$out" | grep -qF "執行 brew upgrade node" && [ ! -e "$T/brew.log" ]'
+out=$(kit install-tool node --min 18 2>&1); rc=$?
+check "install-tool --min: runs kit's upgrade, then looks again" '[ $rc -eq 0 ] && [ "$(cat "$T/brew.log")" = "upgrade node" ] && echo "$out" | grep -qF "Node.js 26.1.0 裝好了"'
+out=$(kit install-tool node --min 18 2>&1)
+check "install-tool --min: new enough now" 'echo "$out" | grep -qF "已經有 Node.js 26.1.0"'
+out=$(kit install-tool frob 2>&1); rc=$?
+check "install-tool: no recipe, says how to add one" '[ $rc -ne 0 ] && echo "$out" | grep -qF "tools/frob.yaml"'
+# a source's recipe wins over kit's, but only "manager package" with a manager kit knows; never a command
+rm -f "$T/brew.log"
+printf 'name: frob\ntitle: Frob\ninstall:\n  mac: ["sh -c evil", "brew frob;rm", "curl x", "brew frob"]\n  linux: ["sh -c evil", "brew frob;rm", "curl x", "brew frob"]\n' > "$NT/tools/frob.yaml"
+out=$(kit install-tool frob 2>&1)
+check "install-tool: a recipe can only pick a known manager and a plain package name" '[ "$(cat "$T/brew.log")" = "install frob" ] && echo "$out" | grep -qF "執行 brew install frob"'
+printf 'name: node\ntitle: Node\ninstall:\n  mac: [scoop node]\n  linux: [scoop node]\n' > "$NT/tools/node.yaml"; rm -f "$FB/node"
+out=$(kit install-tool node 2>&1); rc=$?
+check "install-tool: the source recipe wins; no manager here, says to install it yourself" '[ $rc -ne 0 ] && echo "$out" | grep -qF "請自己裝 Node"'
 echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"

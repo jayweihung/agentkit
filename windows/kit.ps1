@@ -1020,6 +1020,142 @@ function Dir-AddRm([string]$verb, [string]$dir, [string]$k, [string]$n) { # only
     else { Say "kit：$i 從 $root 拿掉了" }
 }
 
+# ---------- the programs a skill needs (node, python, ...) and how to install them ----------
+# A recipe is tools/<name>.yaml in a source (it wins) or kit's own tools/. It names the program (bin) and, per system,
+# "manager package" pairs; kit uses the first this machine can. The command itself is always kit's own: a recipe
+# can only pick a manager kit knows (brew, apt as root, winget, scoop, pip) and a package name.
+function Tool-Os { if ($OnWindows) { 'windows' } elseif ((Test-Path variable:IsMacOS) -and $IsMacOS) { 'mac' } else { 'linux' } }
+function Tool-OkName([string]$n) { $n -cmatch '^[a-z0-9][a-z0-9-]*$' }
+function Pkg-Ok([string]$p) { $p -cmatch '^[A-Za-z0-9@._+/][A-Za-z0-9@._+/-]*$' }
+function Tool-File([string]$n) { # its recipe: a source's tools/NAME.yaml first, else kit's own
+    if (-not (Tool-OkName $n)) { return $null }
+    if (Test-Path -LiteralPath $Machine) { foreach ($d in Src-Dirs) { $f = Join-Path (Join-Path $d 'tools') "$n.yaml"; if (Test-Path -LiteralPath $f -PathType Leaf) { return $f } } }
+    foreach ($d in @((Join-Path $KitLib 'tools'), (Join-Path (Split-Path -Parent $KitLib) 'tools'))) { $f = Join-Path $d "$n.yaml"; if (Test-Path -LiteralPath $f -PathType Leaf) { return $f } }
+    $null
+}
+function Tool-Names { # every program kit has a recipe for
+    $dirs = @(); if (Test-Path -LiteralPath $Machine) { $dirs += @(foreach ($d in Src-Dirs) { Join-Path $d 'tools' }) }
+    $dirs += @((Join-Path $KitLib 'tools'), (Join-Path (Split-Path -Parent $KitLib) 'tools'))
+    $all = @(foreach ($d in $dirs) {
+        if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
+        $names = [string[]]@(Get-ChildItem -LiteralPath $d -File -Filter '*.yaml' | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_.Name) })
+        [Array]::Sort($names, [StringComparer]::Ordinal); $names
+    })
+    @(Uniq $all | Where-Object { Tool-OkName $_ })
+}
+function Tool-Title([string]$n) { $f = Tool-File $n; if ($f) { $t = @(YGet $f 'title'); if ($t.Count -gt 0 -and $t[0]) { return [string]$t[0] } }; $n }
+function Tool-Have([string]$n) { # the version this machine has ('' when not there)
+    $f = Tool-File $n; $bins = @(); if ($f) { $bins = @(YGet $f 'bin') }; if ($bins.Count -eq 0) { $bins = @($n) }
+    foreach ($b in $bins) {
+        if (-not (Pkg-Ok $b) -or $b.Contains('/')) { continue }                    # a program name, never a path
+        $c = @(Get-Command $b -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch 'WindowsApps' })   # not the Store stub
+        if ($c.Count -eq 0) { continue }
+        try { $o = "$(& $c[0].Source --version 2>&1)" } catch { continue }
+        $m = [regex]::Match($o, '[0-9]+(\.[0-9]+)+'); if ($m.Success) { return $m.Value }
+    }
+    ''
+}
+function Ver-Ge([string]$a, [string]$b) { # A is B or newer (numbers compared part by part)
+    $x = $a.Split('.'); $y = $b.Split('.'); $n = [Math]::Max($x.Count, $y.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+        $p = if ($i -lt $x.Count) { [long]("0" + ($x[$i] -replace '[^0-9]', '')) } else { 0 }; $q = if ($i -lt $y.Count) { [long]("0" + ($y[$i] -replace '[^0-9]', '')) } else { 0 }
+        if ($p -gt $q) { return $true }; if ($p -lt $q) { return $false }
+    }
+    $true
+}
+function Tool-Pick([string]$n) { # @(manager, package): the first in the recipe this machine can use; $null when none
+    $f = Tool-File $n; if (-not $f) { return $null }
+    foreach ($l in @(YGet $f "install.$(Tool-Os)")) {
+        $w = @("$l".Trim() -split '\s+'); if ($w.Count -ne 2 -or -not (Pkg-Ok $w[1])) { continue }
+        $ok = switch ($w[0]) {
+            { $_ -in 'brew', 'scoop', 'winget' } { Has-Command $w[0]; break }
+            'apt' { (-not $OnWindows) -and (Has-Command 'apt-get') -and "$(& id -u 2>$null)".Trim() -eq '0'; break }
+            'pip' { (Has-Command 'python3') -or (Has-Command 'python'); break }
+            default { $false }
+        }
+        if ($ok) { return , $w }
+    }
+    $null
+}
+function Tool-Argv([string]$mode, [string]$m, [string]$pkg) { # install|upgrade: the command (kit's own, never the recipe's)
+    $up = ($mode -eq 'upgrade')
+    switch ($m) {
+        'brew' { , @('brew', $(if ($up) { 'upgrade' } else { 'install' }), $pkg) }
+        'apt' { , @('apt-get', 'install', '-y', $pkg) }                       # installs or upgrades
+        'pip' { $py = if (Has-Command 'python3') { 'python3' } else { 'python' }; , @(@($py, '-m', 'pip', 'install', '--user') + @(if ($up) { '--upgrade' }) + @($pkg)) }
+        'winget' { if ($up) { , @('winget', 'upgrade', '--id', $pkg, '-e', '--accept-source-agreements', '--accept-package-agreements') } else { , @('winget', 'install', '--id', $pkg, '-e', '--scope', 'user', '--accept-source-agreements', '--accept-package-agreements') } }
+        'scoop' { , @('scoop', $(if ($up) { 'update' } else { 'install' }), $pkg) }
+    }
+}
+function Tool-Cmd([string]$n, [string]$mode = 'install') { $mp = Tool-Pick $n; if (-not $mp) { return '' }; (Tool-Argv $mode $mp[0] $mp[1]) -join ' ' }
+function Skill-Needs([string]$d, [string]$src = '') { # @(name, min) per program the skill needs (min may be '')
+    # written: SKILL.md "requires: [node>=18, python]", or the source's kit.yaml "requires: {<skill>: [...]}"
+    # seen: what SKILL.md tells the agent to run (node x.mjs, npx, python3 x.py, pip install ...), requirements.txt /
+    # pyproject.toml; package.json's engines.node gives the lowest Node (files alone say nothing: often only for the author)
+    $sk = Join-Path $d 'SKILL.md'; $raw = New-Object System.Collections.Generic.List[string]; $low = @{}
+    if (Test-Path -LiteralPath $sk -PathType Leaf) {
+        try { foreach ($v in @(YGet-From (Yaml-Lines $sk -Frontmatter) 'requires')) { $raw.Add([string]$v) } } catch { }
+        $t = Read-Text $sk
+        if ($t -match '(^|[^A-Za-z0-9_-])(node\s+(-[A-Za-z-]+\s+)*[./A-Za-z0-9_-]+\.(mjs|cjs|js)([^A-Za-z0-9]|$)|npx\s+[A-Za-z@]|npm\s+(run|install|ci|exec)([^A-Za-z]|$))') { $raw.Add('node') }
+        if ($t -match '(^|[^A-Za-z0-9_-])(python3?\s+(-m\s+[A-Za-z]|[./A-Za-z0-9_-]+\.py([^A-Za-z0-9]|$))|pip3?\s+install|uv\s+run)') { $raw.Add('python') }
+    }
+    if ($src) { foreach ($v in @(YGet (Join-Path $src 'kit.yaml') "requires.$(Split-Path -Leaf $d)")) { $raw.Add([string]$v) } }
+    $pj = Join-Path $d 'package.json'
+    if (Test-Path -LiteralPath $pj -PathType Leaf) { $e = Json-Get $pj 'engines.node'; if ($e) { $m = [regex]::Match($e, '[0-9]+(\.[0-9]+)*'); if ($m.Success) { $low['node'] = $m.Value } } }
+    if ((Test-Path -LiteralPath (Join-Path $d 'requirements.txt')) -or (Test-Path -LiteralPath (Join-Path $d 'pyproject.toml'))) { $raw.Add('python') }
+    $ord = New-Object System.Collections.Generic.List[string]; $min = @{}
+    foreach ($r in $raw) {
+        $parts = $r -split '>=', 2; $n = ($parts[0] -replace '\s', ''); $m = if ($parts.Count -gt 1) { $parts[1] -replace '\s', '' } else { '' }
+        if (-not (Tool-OkName $n)) { continue }
+        if (-not $min.ContainsKey($n)) { $ord.Add($n); $min[$n] = '' }
+        if ($m -match '^[0-9]+(\.[0-9]+)*$' -and (-not $min[$n] -or -not (Ver-Ge $min[$n] $m) -or $min[$n] -eq '')) { if (-not $min[$n] -or (Ver-Ge $m $min[$n])) { $min[$n] = $m } }
+    }
+    @(foreach ($n in $ord) { $m = $min[$n]; if ($low.ContainsKey($n) -and (-not $m -or ((Ver-Ge $low[$n] $m) -and $low[$n] -ne $m))) { $m = $low[$n] }; , @($n, $m) })
+}
+$script:ToolHave = @{}
+function Needs-Json([string]$d, [string]$src) { # [{"tool", "title", "min", "have", "ok", "install"}]
+    $parts = @(foreach ($x in @(Skill-Needs $d $src)) {
+        $n = $x[0]; $m = $x[1]
+        if (-not $script:ToolHave.ContainsKey($n)) { $script:ToolHave[$n] = Tool-Have $n }   # one look per program per run
+        $h = $script:ToolHave[$n]
+        $ok = [bool]$h -and (-not $m -or (Ver-Ge $h $m))
+        "{`"tool`": $(Json-S $n), `"title`": $(Json-S (Tool-Title $n)), `"min`": $(Json-S $m), `"have`": $(Json-S $h), `"ok`": $(if ($ok) { 'true' } else { 'false' }), `"install`": $(Json-S $(if ($ok) { '' } elseif ($h) { Tool-Cmd $n 'upgrade' } else { Tool-Cmd $n 'install' }))}"
+    })
+    '[' + ($parts -join ', ') + ']'
+}
+function Cmd-Tools($rest) { # kit tools : the programs kit knows how to install, what this machine has
+    foreach ($n in Tool-Names) {
+        $h = Tool-Have $n; $c = Tool-Cmd $n
+        Say ('{0,-8} {1,-12} {2}' -f $n, $(if ($h) { $h } else { '（沒有）' }), $(if ($c) { $c } else { '（這台沒有可以用的安裝方式）' }))
+    }
+}
+function Cmd-InstallTool($rest) { # kit install-tool <name> : install a program with kit's recipe (what the panel's 安裝 runs)
+    $rest = @($rest); $n = ''; $min = ''; $mode = 'install'
+    for ($i = 0; $i -lt $rest.Count; $i++) {
+        $a = [string]$rest[$i]
+        if ($a -eq '--min') { if ($i + 1 -ge $rest.Count) { Die '--min 後面要接版本' }; $i++; $min = [string]$rest[$i]; if ($min -notmatch '^[0-9.]+$') { Die '--min 後面要接版本（像 18 或 3.10）' } }
+        elseif ($a.StartsWith('-') -or $n) { Die '用法：kit install-tool <程式名> [--min 版本]' }
+        else { $n = $a }
+    }
+    if (-not $n) { Die '用法：kit install-tool <程式名> [--min 版本]（打 kit tools 看有哪些）' }
+    $f = Tool-File $n; if (-not $f) { Die "kit 不知道怎麼裝 ${n}（打 kit tools 看有哪些；要加就在來源倉放 tools/${n}.yaml）" }
+    $h = Tool-Have $n
+    if ($h) { if (-not $min -or (Ver-Ge $h $min)) { Say "kit：這台已經有 $(Tool-Title $n) $h"; return }; $mode = 'upgrade' }
+    $mp = Tool-Pick $n; if (-not $mp) { Die "這台沒有可以用的安裝方式：請自己裝 $(Tool-Title $n)$(if ($min) { " $min 以上" })（$(Tool-Os) 的裝法寫在 $f）" }
+    $argv = [string[]](Tool-Argv $mode $mp[0] $mp[1])
+    Say "kit：執行 $($argv -join ' ')"
+    if ($env:KIT_DRY_RUN) { return }
+    $rest2 = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] })
+    & $argv[0] @rest2
+    if ($LASTEXITCODE -ne 0) { Die "安裝失敗（上面是 $($argv[0]) 說的原因）" }
+    # a new program may be on a PATH this process has not seen yet: read the user's and the machine's again
+    if ($OnWindows) { $env:PATH = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User') }
+    $h = Tool-Have $n
+    if (-not $h) { Die "裝完了，但還是找不到 $(Tool-Title $n)：開一個新的終端機再試，或檢查 PATH" }
+    if ($min -and -not (Ver-Ge $h $min)) { Die "裝完了，但 $(Tool-Title $n) 還是 ${h}，不到 ${min}：可能有別的舊版排在 PATH 前面" }
+    Say "kit：$(Tool-Title $n) $h 裝好了"
+}
+
 # ---------- commands ----------
 function Need-Init { if (-not (Test-Path -LiteralPath $Machine)) { Die '還沒設定：先打  kit init <網址或資料夾>' } }
 function Seen-All { foreach ($i in Available) { if ($null -eq (State-Get 'seen' $i)) { State-Set 'seen' $i 1 } } }
@@ -1309,7 +1445,8 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
         if ($k -eq 'agent') { $status = 'agent' }
         $new = if ($null -eq (State-Get 'seen' $i)) { 'true' } else { 'false' }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
-        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p)), `"path`": $(Json-S $p)}")
+        $nj = if ($k -eq 'skill') { ', "needs": ' + (Needs-Json (Split-Path -Parent $p) $dir) } else { '' }
+        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p)), `"path`": $(Json-S $p)$nj}")
     }
     [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))")
     if ($hereDir) { [void]$sb.Append((Here-Json $hereDir $herePid)) }
@@ -2683,6 +2820,9 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit add --dir <資料夾> rule|skill|mcp <名字>
                                     只加到這個資料夾：在這裡（含子資料夾）開的 agent 才有
   kit rm  --dir <資料夾> rule|skill|mcp <名字>
+  kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
+  kit install-tool <程式名> [--min 版本]
+                                    用 kit 的裝法裝，太舊就升級（Herdr 的「安裝」按鈕就是這個）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
 
@@ -2725,6 +2865,8 @@ try {
         }
         { $_ -in 'list', 'ls' } { Cmd-List $rest }
         'add' { Cmd-AddRm 'add' $rest }
+        'tools' { Cmd-Tools $rest }
+        'install-tool' { Cmd-InstallTool $rest }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
         'run' { Cmd-Run $rest }
         'agents' { Cmd-Agents $rest }

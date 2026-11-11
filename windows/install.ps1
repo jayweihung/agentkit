@@ -24,6 +24,9 @@ Copy-Item -LiteralPath (Join-Path $repo 'windows\kit.ps1') -Destination (Join-Pa
 Copy-Item -LiteralPath (Join-Path $repo 'VERSION') -Destination (Join-Path $lib 'VERSION') -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $lib 'templates') | Out-Null
 Copy-Item -Path (Join-Path $repo 'templates\*') -Destination (Join-Path $lib 'templates') -Force
+$tl = Join-Path $lib 'tools'; if (Test-Path -LiteralPath $tl) { Remove-Item -LiteralPath $tl -Recurse -Force }   # how kit installs node, python, git
+New-Item -ItemType Directory -Force -Path $tl | Out-Null
+Copy-Item -Path (Join-Path $repo 'tools\*.yaml') -Destination $tl -Force
 $hp = Join-Path $lib 'herdr'   # kit herdr-panel install copies the panel from here
 if (Test-Path -LiteralPath $hp) { Remove-Item -LiteralPath $hp -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $hp | Out-Null

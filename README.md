@@ -61,6 +61,28 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | Codex | ✅ | ✅（列在提示裡，用到時才讀） | ✅ | ✗ | 只限 MCP 工具 |
 | omp | ✅ | ✅ | ✗（要用 `kit add mcp` 加到全域） | ✅ | ✗ |
 
+## skill 需要的程式（node、python…）
+
+有的 skill 要靠別的程式才能跑，例如 archify 要 Node.js 18 以上。kit 會自己看出來，缺了就幫你裝（你按了才裝）。
+
+    kit tools                          kit 會裝哪些程式、這台有沒有、會用什麼指令裝
+    kit install-tool node [--min 18]   裝 Node.js（太舊就升級）
+
+- **怎麼看出來的**：`SKILL.md` 裡叫 agent 跑的指令（`node x.mjs`、`npx …`、`python3 x.py`、`pip install …`），`requirements.txt`／`pyproject.toml`，`package.json` 的 `engines.node`（最低版本）。也可以自己寫：`SKILL.md` 的 `requires: [node>=18]`，或來源 `kit.yaml` 的 `requires: {archify: [node>=18]}`（收來的 skill 不用改原作者的檔案）。
+- **怎麼裝**：每個程式一個 `tools/<名字>.yaml`。kit 內建 node、python、git；來源倉放同名的檔案會蓋過內建的，放新的就多支援一個程式。
+
+      name: node
+      title: Node.js
+      bin: [node]                     # 用來看版本的程式名
+      install:
+        mac: [brew node]
+        windows: [winget OpenJS.NodeJS.LTS, scoop nodejs-lts]
+        linux: [apt nodejs, brew node]   # apt 只有 root 用得到；沒有能用的就請你自己裝
+
+  每個系統列「套件管理器 套件名」，kit 依序用這台第一個能用的。**只能寫這兩個字**：管理器只認 brew、apt、winget、scoop、pip，實際執行的指令是 kit 自己組的（例如 `brew install node`、太舊時 `brew upgrade node`），檔案裡寫別的指令會被略過。
+- **在哪裡看到**：Herdr 的 Kit 清單，skill 下面會出現「⚠ 需要 Node.js 18 以上（這台沒有）［安裝］」。按「安裝」先顯示 kit 要執行的指令，按「確定安裝」才執行。
+- 從網路收來的 skill 不會帶 `tools/` 進來：只有你自己倉裡、或團隊審過的 `tools/` 會用到。
+
 ## Herdr 的 kit 面板
 
 不想打指令的話，可以在 Herdr 裡用（Windows、Mac、Linux 都一樣）：

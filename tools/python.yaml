@@ -1,0 +1,8 @@
+# kit 內建：Python 的裝法。來源倉的 tools/python.yaml 會蓋過這個。
+name: python
+title: Python 3
+bin: [python3, python]
+install:
+  mac: [brew python]
+  windows: [winget Python.Python.3.12, scoop python]
+  linux: [apt python3, brew python]

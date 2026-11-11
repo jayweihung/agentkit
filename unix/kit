@@ -766,6 +766,155 @@ codex_top() { # project_root_markers with .agentkit, so Codex started in a sub-f
     printf 'project_root_markers = [".git", "%s"]\n' "$DIR_FILE"
 }
 
+# ---------- the programs a skill needs (node, python, ...) and how to install them ----------
+# A recipe is tools/<name>.yaml in a source (it wins) or kit's own tools/. It names the program (bin) and, per system,
+# "manager package" pairs; kit uses the first this machine can. The command itself is always kit's own: a recipe
+# can only pick a manager kit knows (brew, apt as root, winget, scoop, pip) and a package name.
+tool_os() { case $(uname -s 2>/dev/null) in Darwin) echo mac;; MINGW*|MSYS*|CYGWIN*) echo windows;; *) echo linux;; esac; }
+tool_ok_name() { case $1 in ""|-*|*[!a-z0-9-]*) return 1;; *) return 0;; esac; }
+pkg_ok() { case $1 in ""|-*|*[!A-Za-z0-9@._+/-]*) return 1;; *) return 0;; esac; }
+tool_file() { # tool_file NAME -> its recipe: a source's tools/NAME.yaml first, else kit's own
+    local d
+    tool_ok_name "$1" || return 1
+    while IFS= read -r d; do [ -n "$d" ] && [ -f "$d/tools/$1.yaml" ] && { printf '%s\n' "$d/tools/$1.yaml"; return 0; }; done <<EOF
+$( [ -f "$MACHINE" ] && src_dirs)
+EOF
+    for d in "$KIT_LIB/tools" "$KIT_LIB/../tools"; do [ -f "$d/$1.yaml" ] && { printf '%s\n' "$d/$1.yaml"; return 0; }; done
+    return 1
+}
+tool_names() { # every program kit has a recipe for
+    { [ -f "$MACHINE" ] && src_dirs | while IFS= read -r d; do for f in "$d"/tools/*.yaml; do [ -f "$f" ] && basename "$f" .yaml; done; done
+      for f in "$KIT_LIB"/tools/*.yaml "$KIT_LIB"/../tools/*.yaml; do [ -f "$f" ] && basename "$f" .yaml; done; } | awk '!seen[$0]++' | while IFS= read -r n; do tool_ok_name "$n" && echo "$n"; done
+}
+tool_title() { local f t; f=$(tool_file "$1") && t=$(yget "$f" title | head -n 1); printf '%s' "${t:-$1}"; }
+tool_have() { # tool_have NAME -> the version this machine has (empty: not there)
+    local f b bins v
+    f=$(tool_file "$1") && bins=$(yget "$f" bin); [ -n "${bins:-}" ] || bins=$1
+    for b in $bins; do
+        pkg_ok "$b" && case $b in */*) false;; esac || continue      # a program name, never a path
+        command -v "$b" >/dev/null 2>&1 || continue
+        v=$("$b" --version 2>&1 </dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1)
+        [ -n "$v" ] && { printf '%s\n' "$v"; return 0; }
+    done
+    return 0
+}
+ver_ge() { # ver_ge HAVE MIN : HAVE is MIN or newer (numbers compared part by part)
+    awk -v a="$1" -v b="$2" 'BEGIN { n = split(a, x, "."); m = split(b, y, "."); if (m > n) n = m
+        for (i = 1; i <= n; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 } exit 0 }'
+}
+tool_pick() { # tool_pick NAME -> "manager package": the first in the recipe this machine can use
+    local f m p rest
+    f=$(tool_file "$1") || return 1
+    while read -r m p rest; do
+        [ -n "$m" ] && [ -z "$rest" ] && pkg_ok "$p" || continue
+        case $m in
+            brew|scoop|winget) command -v "$m" >/dev/null 2>&1 || continue;;
+            apt) [ "$(id -u 2>/dev/null)" = 0 ] && command -v apt-get >/dev/null 2>&1 || continue;;
+            pip) command -v python3 >/dev/null 2>&1 || continue;;
+            *) continue;;
+        esac
+        printf '%s %s\n' "$m" "$p"; return 0
+    done <<EOF
+$(yget "$f" "install.$(tool_os)")
+EOF
+    return 1
+}
+tool_argv() { # tool_argv install|upgrade MANAGER PACKAGE -> the command, one word per line (kit's own, never the recipe's)
+    case $1:$2 in
+        install:brew) printf '%s\n' brew install "$3";;
+        upgrade:brew) printf '%s\n' brew upgrade "$3";;
+        *:apt) printf '%s\n' apt-get install -y "$3";;                # installs or upgrades
+        install:pip) printf '%s\n' python3 -m pip install --user "$3";;
+        upgrade:pip) printf '%s\n' python3 -m pip install --user --upgrade "$3";;
+        install:winget) printf '%s\n' winget install --id "$3" -e --scope user --accept-source-agreements --accept-package-agreements;;
+        upgrade:winget) printf '%s\n' winget upgrade --id "$3" -e --accept-source-agreements --accept-package-agreements;;
+        install:scoop) printf '%s\n' scoop install "$3";;
+        upgrade:scoop) printf '%s\n' scoop update "$3";;
+    esac
+}
+tool_cmd() { local mp; mp=$(tool_pick "$1") || return 0; tool_argv "${2:-install}" $mp | tr '\n' ' ' | sed 's/ $//'; }
+skill_needs() { # skill_needs SKILLDIR [SOURCEDIR] -> name<TAB>min per program the skill needs (min may be empty)
+    # written: SKILL.md "requires: [node>=18, python]", or the source's kit.yaml "requires: {<skill>: [...]}"
+    # seen: what SKILL.md tells the agent to run (node x.mjs, npx, python3 x.py, pip install ...), requirements.txt /
+    # pyproject.toml; package.json's engines.node gives the lowest Node (files alone say nothing: often only for the author)
+    local d=$1 src=${2:-} v
+    {
+        [ -f "$d/SKILL.md" ] && fm_val "$(fm_of "$d/SKILL.md")" requires
+        [ -n "$src" ] && yget "$src/kit.yaml" "requires.$(basename "$d")"
+        if [ -f "$d/SKILL.md" ]; then
+            grep -qE '(^|[^A-Za-z0-9_-])(node[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*[./A-Za-z0-9_-]+\.(mjs|cjs|js)([^A-Za-z0-9]|$)|npx[[:space:]]+[A-Za-z@]|npm[[:space:]]+(run|install|ci|exec)([^A-Za-z]|$))' "$d/SKILL.md" && echo node
+            grep -qE '(^|[^A-Za-z0-9_-])(python3?[[:space:]]+(-m[[:space:]]+[A-Za-z]|[./A-Za-z0-9_-]+\.py([^A-Za-z0-9]|$))|pip3?[[:space:]]+install|uv[[:space:]]+run)' "$d/SKILL.md" && echo python
+        fi
+        if [ -f "$d/package.json" ]; then
+            v=$(json_get "$d/package.json" engines.node | tr -d '"' | grep -oE '[0-9]+(\.[0-9]+)*' | head -n 1)
+            [ -n "$v" ] && echo "node>=$v.min"
+        fi
+        if [ -f "$d/requirements.txt" ] || [ -f "$d/pyproject.toml" ]; then echo python; fi
+    } | awk -F'>=' '{ n = $1; gsub(/[ \t]/, "", n); m = $2; gsub(/[ \t]/, "", m)
+            if (n !~ /^[a-z0-9][a-z0-9-]*$/) next
+            only = sub(/\.min$/, "", m)                       # package.json: only a lowest version, not a need by itself
+            if (only) { if (m != "") low[n] = m; next }
+            if (!(n in seen)) { seen[n] = 1; ord[++k] = n }
+            if (m ~ /^[0-9]+(\.[0-9]+)*$/ && (min[n] == "" || newer(m, min[n]))) min[n] = m }
+        function newer(a, b,   x, y, i, p, q) { p = split(a, x, "."); q = split(b, y, "."); if (q > p) p = q
+            for (i = 1; i <= p; i++) { if (x[i] + 0 > y[i] + 0) return 1; if (x[i] + 0 < y[i] + 0) return 0 } return 0 }
+        END { for (i = 1; i <= k; i++) { n = ord[i]; m = min[n]
+                  if ((n in low) && (m == "" || newer(low[n], m))) m = low[n]
+                  print n "\t" m } }'
+}
+needs_json() { # needs_json SKILLDIR SOURCEDIR -> [{"tool", "title", "min", "have", "ok", "install"}]
+    local n m h ok first=1 c
+    printf '['
+    while IFS="$TAB" read -r n m; do
+        [ -n "$n" ] || continue
+        c=$(printf '%s' "$n" | tr '-' '_')
+        eval "h=\${TOOL_HAVE_$c-__}"
+        [ "$h" = __ ] && { h=$(tool_have "$n"); eval "TOOL_HAVE_$c=\$h"; }   # one look per program per run
+        ok=false; [ -n "$h" ] && { [ -z "$m" ] || ver_ge "$h" "$m"; } && ok=true
+        [ $first = 1 ] || printf ', '; first=0
+        printf '{"tool": %s, "title": %s, "min": %s, "have": %s, "ok": %s, "install": %s}' "$(json_s "$n")" "$(json_s "$(tool_title "$n")")" \
+            "$(json_s "$m")" "$(json_s "$h")" "$ok" "$(json_s "$( [ $ok = true ] || tool_cmd "$n" "$( [ -n "$h" ] && echo upgrade || echo install)")")"
+    done <<EOF
+$(skill_needs "$1" "$2")
+EOF
+    printf ']'
+}
+cmd_tools() { # kit tools : the programs kit knows how to install, what this machine has
+    local n h c
+    for n in $(tool_names); do
+        h=$(tool_have "$n"); c=$(tool_cmd "$n")
+        printf '%-8s %-12s %s\n' "$n" "${h:-（沒有）}" "${c:-（這台沒有可以用的安裝方式）}"
+    done
+}
+cmd_install_tool() { # kit install-tool <name> [--min VERSION] : install (or, too old, upgrade) with kit's recipe (the panel's 安裝)
+    local n="" min="" f h mp mode=install
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --min) [ $# -ge 2 ] || die "--min 後面要接版本"; min=$2; shift 2
+                   case $min in *[!0-9.]*|"") die "--min 後面要接版本（像 18 或 3.10）";; esac;;
+            -*) die "用法：kit install-tool <程式名> [--min 版本]";;
+            *) [ -z "$n" ] || die "用法：kit install-tool <程式名> [--min 版本]"; n=$1; shift;;
+        esac
+    done
+    [ -n "$n" ] || die "用法：kit install-tool <程式名> [--min 版本]（打 kit tools 看有哪些）"
+    f=$(tool_file "$n") || die "kit 不知道怎麼裝 ${n}（打 kit tools 看有哪些；要加就在來源倉放 tools/${n}.yaml）"
+    h=$(tool_have "$n")
+    if [ -n "$h" ]; then
+        { [ -z "$min" ] || ver_ge "$h" "$min"; } && { say "kit：這台已經有 $(tool_title "$n") $h"; return 0; }
+        mode=upgrade
+    fi
+    mp=$(tool_pick "$n") || die "這台沒有可以用的安裝方式：請自己裝 $(tool_title "$n")${min:+ $min 以上}（$(tool_os) 的裝法寫在 ${f}）"
+    set -- $(tool_argv $mode $mp)
+    say "kit：執行 $*"
+    [ -n "${KIT_DRY_RUN:-}" ] && return 0
+    "$@" || die "安裝失敗（上面是 $1 說的原因）"
+    hash -r 2>/dev/null
+    h=$(tool_have "$n")
+    [ -n "$h" ] || die "裝完了，但還是找不到 $(tool_title "$n")：開一個新的終端機再試，或檢查 PATH"
+    [ -z "$min" ] || ver_ge "$h" "$min" || die "裝完了，但 $(tool_title "$n") 還是 ${h}，不到 ${min}：可能有別的舊版排在 PATH 前面"
+    say "kit：$(tool_title "$n") $h 裝好了"
+}
+
 # ---------- commands ----------
 need_init() { [ -f "$MACHINE" ] || die "還沒設定：先打  kit init <網址或資料夾>"; }
 
@@ -1014,8 +1163,9 @@ EOF
         new=false; [ -n "$(state_get seen "$i")" ] || new=true
         d=$(item_path "" "$k" "$n"); d=${p%"$d"}               # the source folder that has it
         [ $first = 1 ] || printf ','; first=0
-        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "source": %s, "description": %s, "path": %s}' \
-            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")" "$(json_s "$p")"
+        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "source": %s, "description": %s, "path": %s%s}' \
+            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")" "$(json_s "$p")" \
+            "$( [ "$k" = skill ] && printf ', "needs": %s' "$(needs_json "$(dirname "$p")" "${d%/}")")"
     done
     printf '\n  ],\n  "kit_version_wanted": %s' "$(json_s "$(wanted_version)")"
     [ -n "${HERE_DIR:-}" ] && here_json "$HERE_DIR" "${HERE_PID:-}"
@@ -2386,6 +2536,9 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit add --dir <資料夾> rule|skill|mcp <名字>
                                     只加到這個資料夾：在這裡（含子資料夾）開的 agent 才有
   kit rm  --dir <資料夾> rule|skill|mcp <名字>
+  kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
+  kit install-tool <程式名> [--min 版本]
+                                    用 kit 的裝法裝，太舊就升級（Herdr 的「安裝」按鈕就是這個）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
 
@@ -2436,6 +2589,8 @@ case ${1:-} in
     uninstall) shift; cmd_uninstall "$@";;
     self-update) cmd_self_update;;
     approve)   shift; cmd_approve "$@";;
+    tools)     shift; cmd_tools "$@";;
+    install-tool) shift; cmd_install_tool "$@";;
     collect)   shift; cmd_collect "$@";;
     outdated)  shift; cmd_outdated "$@";;
     herdr-panel) shift; cmd_herdr_panel "$@";;

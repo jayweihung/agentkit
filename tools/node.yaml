@@ -1,0 +1,10 @@
+# kit 內建：Node.js 的裝法。來源倉的 tools/node.yaml 會蓋過這個。
+# install 每個系統列一種或幾種「套件管理器 套件名」，kit 依序用這台第一個能用的。
+# 能用的管理器只有：brew、apt（要是 root）、winget、scoop、pip。實際指令由 kit 組，這裡不能寫指令。
+name: node
+title: Node.js
+bin: [node]
+install:
+  mac: [brew node]
+  windows: [winget OpenJS.NodeJS.LTS, scoop nodejs-lts]
+  linux: [apt nodejs, brew node]
