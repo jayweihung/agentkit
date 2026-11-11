@@ -754,6 +754,9 @@ printf -- '---\nname: plain\ndescription: only text\n---\nNo node, no python her
 printf '{"name": "plain", "private": true}\n' > "$NT/skills/plain/package.json"; echo 'print(1)' > "$NT/skills/plain/scripts/check.py"
 printf -- '---\nname: told\ndescription: says what it needs\nrequires: [node>=20, frob]\n---\nx\n' > "$NT/skills/told/SKILL.md"
 printf 'name: needteam\nrequires:\n  plain: [git]\n' > "$NT/kit.yaml"
+mkdir -p "$NT/skills/packed/scripts"; printf -- '---\nname: packed\ndescription: has npm packages\n---\nRun `node scripts/run.mjs`.\n' > "$NT/skills/packed/SKILL.md"
+echo 'x' > "$NT/skills/packed/scripts/run.mjs"; printf '{"name": "packed", "dependencies": {"left-pad": "1.3.0"}}\n' > "$NT/skills/packed/package.json"
+printf '{"lockfileVersion": 3}\n' > "$NT/skills/packed/package-lock.json"; printf 'registry=http://elsewhere.invalid/\n' > "$NT/skills/packed/.npmrc"
 (
 export HOME="$H6" PATH="$FB:/usr/bin:/bin"
 kit init "$NT" >/dev/null 2>&1
@@ -783,6 +786,38 @@ check "install-tool: a recipe can only pick a known manager and a plain package 
 printf 'name: node\ntitle: Node\ninstall:\n  mac: [scoop node]\n  linux: [scoop node]\n' > "$NT/tools/node.yaml"; rm -f "$FB/node"
 out=$(kit install-tool node 2>&1); rc=$?
 check "install-tool: the source recipe wins; no manager here, says to install it yourself" '[ $rc -ne 0 ] && echo "$out" | grep -qF "請自己裝 Node"'
+# a skill's own npm packages (kit install-deps): only when asked, in kit's folder, no package scripts, linked into each copy
+pk() { kit list --json 2>/dev/null | python3 -c "import json,sys;d={i['name']:i for i in json.load(sys.stdin)['items']};print(json.dumps(d[sys.argv[1]].get('packages'),sort_keys=True))" "$1"; }
+check "packages: no npm here, nothing to run it with" '[ "$(pk packed)" = "{\"had\": false, \"install\": \"\", \"kind\": \"npm\", \"ok\": false}" ] && [ "$(pk drawer)" = null ] && [ "$(pk plain)" = null ]'
+printf '#!/bin/sh\necho "$PWD $*" >> "%s/npm.log"\n[ -f .npmrc ] && exit 9\nmkdir -p node_modules/left-pad && echo x > node_modules/left-pad/index.js\n' "$T" > "$FB/npm"; chmod +x "$FB/npm"
+check "packages: a lock -> npm ci, no package scripts" '[ "$(pk packed)" = "{\"had\": false, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": false}" ]'
+kit add skill packed >/dev/null 2>&1
+out=$(KIT_DRY_RUN=1 kit install-deps packed 2>&1)
+check "install-deps, dry run: only says the command" 'echo "$out" | grep -qF "執行 npm ci --ignore-scripts --no-audit --no-fund" && [ ! -e "$T/npm.log" ]'
+S6="$H6/.config/agentkit/deps/packed"; C6="$H6/.claude/skills/packed"
+out=$(kit install-deps packed 2>&1); rc=$?
+check "install-deps: npm ci in kit's folder, not the source, without the skill's .npmrc" '[ $rc -eq 0 ] && [ "$(cat "$T/npm.log")" = "$S6.new ci --ignore-scripts --no-audit --no-fund" ] && [ -f "$S6/node_modules/left-pad/index.js" ] && [ ! -e "$NT/skills/packed/node_modules" ] && [ ! -e "$S6/.npmrc" ] && [ ! -e "$S6.new" ]'
+check "install-deps: the copy kit put gets node_modules linked to it" '[ -L "$C6/node_modules" ] && [ -f "$C6/node_modules/left-pad/index.js" ]'
+check "packages: installed now" '[ "$(pk packed)" = "{\"had\": true, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": true}" ]'
+check "packages: kit.ps1 sees the same" '! command -v pwsh >/dev/null || [ "$(pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]'
+out=$(kit install-deps packed 2>&1)
+check "install-deps again: already there, npm not run" 'echo "$out" | grep -qF "已經裝好了" && [ "$(wc -l < "$T/npm.log")" -eq 1 ]'
+out=$(kit sync 2>&1)
+check "sync: the link is not a change to the skill" '! echo "$out" | grep -q "手動" && [ -L "$C6/node_modules" ]'
+echo '{"lockfileVersion": 3, "x": 1}' > "$NT/skills/packed/package-lock.json"; kit sync >/dev/null 2>&1
+check "the skill changed its lock: needs 更新, the new copy has no old packages" '[ "$(pk packed)" = "{\"had\": true, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": false}" ] && [ -f "$C6/SKILL.md" ] && [ ! -e "$C6/node_modules" ]'
+out=$(kit install-deps packed 2>&1); rc=$?
+check "install-deps after the change: again, and linked" '[ $rc -eq 0 ] && [ "$(wc -l < "$T/npm.log")" -eq 2 ] && [ -L "$C6/node_modules" ]'
+printf '#!/bin/sh\nexit 3\n' > "$FB/npm"; rm -rf "$S6"
+out=$(kit install-deps packed 2>&1); rc=$?
+check "install-deps: npm fails -> says so, nothing half-made" '[ $rc -ne 0 ] && echo "$out" | grep -qF "裝套件失敗" && [ ! -e "$S6" ] && [ ! -e "$S6.new" ]'
+out=$(kit install-deps drawer 2>&1); rc=$?
+check "install-deps: a skill without packages" '[ $rc -eq 0 ] && echo "$out" | grep -qF "不用另外裝套件"'
+printf '#!/bin/sh\nmkdir -p node_modules/left-pad && echo x > node_modules/left-pad/index.js\n' > "$FB/npm"; kit install-deps packed >/dev/null 2>&1
+kit rm skill packed >/dev/null 2>&1
+check "rm skill: the copy goes, kit's packages stay (the link only)" '[ ! -e "$C6" ] && [ -f "$S6/node_modules/left-pad/index.js" ]'
+kit uninstall >/dev/null 2>&1
+check "uninstall: kit's packages go too" '[ ! -e "$H6/.config/agentkit/deps" ]'
 echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"

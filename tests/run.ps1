@@ -689,6 +689,9 @@ W "$NT/skills/plain/SKILL.md" "---`nname: plain`ndescription: only text`n---`nNo
 W "$NT/skills/plain/package.json" "{`"name`": `"plain`"}`n"; W "$NT/skills/plain/scripts/check.py" "print(1)`n"
 W "$NT/skills/told/SKILL.md" "---`nname: told`ndescription: says`nrequires: [node>=20, frob]`n---`nx`n"
 W "$NT/kit.yaml" "name: needteam`nrequires:`n  plain: [git]`n"
+W "$NT/skills/packed/SKILL.md" "---`nname: packed`ndescription: has npm packages`n---`nRun ``node scripts/run.mjs``.`n"
+W "$NT/skills/packed/scripts/run.mjs" "x`n"; W "$NT/skills/packed/package.json" "{`"name`": `"packed`", `"dependencies`": {`"left-pad`": `"1.3.0`"}}`n"
+W "$NT/skills/packed/package-lock.json" "{`"lockfileVersion`": 3}`n"; W "$NT/skills/packed/.npmrc" "registry=http://elsewhere.invalid/`n"
 Kit init $NT
 Kit list --json
 $items = @{}; foreach ($m in [regex]::Matches($out, '"name": "(drawer|plain|told)".*?"needs": (\[[^\]]*\])')) { $items[$m.Groups[1].Value] = $m.Groups[2].Value }
@@ -717,6 +720,33 @@ if (-not $OnWindows) {
 }
 Kit install-tool nope
 Check 'install-tool: no recipe, says how to add one' { $rc -ne 0 -and $out.Contains('tools/nope.yaml') }
+# a skill's own npm packages (kit install-deps): only when asked, in kit's folder, no package scripts, linked into each copy
+$FB7 = Join-Path $T 'fakebin7'; [void](New-Item -ItemType Directory -Force -Path $FB7)
+if ($OnWindows) {
+    W "$FB7/npm.cmd" "@echo off`r`necho %CD% %*>> `"$T\npm7.log`"`r`nif exist .npmrc exit /b 9`r`nmkdir node_modules\left-pad`r`necho x> node_modules\left-pad\index.js`r`n"
+} else {
+    W "$FB7/npm" "#!/bin/sh`necho `"`$PWD `$*`" >> '$T/npm7.log'`n[ -f .npmrc ] && exit 9`nmkdir -p node_modules/left-pad && echo x > node_modules/left-pad/index.js`n"; & chmod +x "$FB7/npm"
+}
+$savedP = $env:PATH; $env:PATH = "$FB7" + [IO.Path]::PathSeparator + $env:PATH
+function PkOf([string]$n) { $m = [regex]::Match($out, '"name": "' + $n + '"[^\n]*?"packages": (\{[^}]*\})'); if ($m.Success) { $m.Groups[1].Value } else { $null } }
+Kit list --json
+Check 'packages: a lock -> npm ci, no package scripts' { (PkOf 'packed') -eq '{"kind": "npm", "ok": false, "had": false, "install": "npm ci --ignore-scripts --no-audit --no-fund"}' -and $null -eq (PkOf 'drawer') }
+Kit add skill packed
+$env:KIT_DRY_RUN = '1'; Kit install-deps packed; Remove-Item env:KIT_DRY_RUN
+Check 'install-deps, dry run: only says the command' { $out.Contains('執行 npm ci --ignore-scripts --no-audit --no-fund') -and -not (Test-Path "$T/npm7.log") }
+$S7 = Join-Path $H '.config/agentkit/deps/packed'; $C7 = Join-Path $H '.claude/skills/packed'
+Kit install-deps packed
+Check 'install-deps: npm ci in kit''s folder, not the source, without the skill''s .npmrc' { $rc -eq 0 -and (ReadT "$T/npm7.log").Trim().Replace('\', '/').EndsWith('.config/agentkit/deps/packed.new ci --ignore-scripts --no-audit --no-fund') -and (Test-Path "$S7/node_modules/left-pad/index.js") -and -not (Test-Path "$NT/skills/packed/node_modules") -and -not (Test-Path "$S7/.npmrc") }
+Check 'install-deps: the copy kit put gets node_modules linked to it' { (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType -and (Test-Path "$C7/node_modules/left-pad/index.js") }
+Kit list --json
+Check 'packages: installed now' { (PkOf 'packed') -eq '{"kind": "npm", "ok": true, "had": true, "install": "npm ci --ignore-scripts --no-audit --no-fund"}' }
+Kit sync
+Check 'sync: the link is not a change to the skill' { $out -notmatch '手動' -and (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType }
+Kit rm skill packed
+Check 'rm skill: the copy goes, kit''s packages stay (the link only)' { -not (Test-Path $C7) -and (Test-Path "$S7/node_modules/left-pad/index.js") }
+Kit uninstall
+Check 'uninstall: kit''s packages go too' { -not (Test-Path (Join-Path $H '.config/agentkit/deps')) }
+$env:PATH = $savedP
 
 # ---------- collect / outdated (other people's skills; a local repo plays the author) ----------
 function FileUrl([string]$p) { $p = $p.Replace('\', '/'); if ($p.StartsWith('/')) { "file://$p" } else { "file:///$p" } }

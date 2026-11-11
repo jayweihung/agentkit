@@ -103,6 +103,7 @@ Herdr 內建的版面（main 等）不能改：面板會先出現在右邊，按
   - 資料夾的 MCP：Claude Code 不會每次問（kit 在 `.claude/settings.local.json` 允許它）；Codex 只在信任的資料夾讀，kit 會在 `~/.codex/config.toml` 信任這個資料夾；omp 只讀整個帳號的 MCP，不支援資料夾的。Codex 在子資料夾開也讀得到，是因為 kit 在 `~/.codex/config.toml` 最上面加了 `project_root_markers`。
 - 「這次啟動帶的」：用 `kit run`（或 Agents 的「開啟」）開的 agent 才有，只有這個 agent 有，關掉就沒了。要改，到 Agents 改那個 agent。這時下面的標題會變成「另外也讀到的」。
 - **skill 需要的程式**：skill 要的程式（例如 archify 要 Node.js 18 以上）這台沒有或太舊時，那一項下面會出現「⚠ 需要 Node.js 18 以上（這台沒有）［安裝］」（太舊是［升級］）。按下去先顯示 kit 會執行的指令（例如 `brew install node`），按「確定安裝」才執行（就是 `kit install-tool node --min 18`）。kit 沒有這台能用的裝法時，只寫「請自己裝」。怎麼看出來、怎麼加新的程式，看 README 的「skill 需要的程式」。
+- **skill 自己的套件**：skill 要先 `npm install` 才能跑時，下面會出現「⚠ 需要先裝它自己的套件（npm）［安裝］」（skill 改過、要重裝時是「它的套件要更新［更新］」）。按下去先顯示 `npm ci --ignore-scripts --no-audit --no-fund`，按「確定安裝」才裝（就是 `kit install-deps <skill>`）：裝在 kit 自己的資料夾，不跑套件自己的安裝程式，再連到每個放了這個 skill 的地方。
 - `同步` = `kit sync`（拿來源的新版、裝上團隊必備的）；`⟳` 只是重新讀一次畫面，不改任何東西。
 - agent 開在別台主機（Herdr 的遠端 space）時，按鈕會到那台去問 kit。**每台要跑 agent 的主機都要裝好 kit**（`kit init` 過），不然會顯示「出錯了」。
 - 用別的帳號跑的 agent（例如 `sudo -i` 的 root）只會顯示「root 唯讀」，這裡看不到也不能改。
@@ -236,6 +237,7 @@ Herdr 內建的版面（main 等）不能改：面板會先出現在右邊，按
 | 視窗按鈕的清單 | `kit list --json --dir <資料夾> --pid <行程>` |
 | 加到整個帳號／從帳號拿掉 | `kit add` ／ `kit rm` |
 | 安裝／升級（skill 需要的程式） | `kit install-tool <程式> [--min 版本]` |
+| 安裝／更新（skill 自己的套件） | `kit install-deps <skill>` |
 | 加到這個資料夾／從資料夾拿掉 | `kit add --dir <資料夾>` ／ `kit rm --dir <資料夾>` |
 | 同步 | `kit sync` |
 | ⟳ | 只重新讀取畫面 |

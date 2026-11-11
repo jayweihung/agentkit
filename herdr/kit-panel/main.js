@@ -540,28 +540,43 @@ export default class KitPanel extends View {
         .child(head)
         .when(Boolean(sub), (el) => el.child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child(sub))))
       .child(action);
-    const missing = (i.needs ?? []).filter((x) => !x.ok);
+    // what is missing for it to run: programs (node, python ...), then its own npm packages
+    const missing = (i.needs ?? []).filter((x) => !x.ok).map((x) => ({
+      key: `${i.name}-${x.tool}`, install: x.install, label: x.have ? "升級" : "安裝", title: x.title,
+      what: `需要 ${x.title}${x.min ? ` ${x.min} 以上` : ""}（${x.have ? `這台是 ${x.have}，太舊` : "這台沒有"}）`,
+      none: "請自己裝：這台沒有 kit 可以用的安裝方式",
+      args: ["install-tool", x.tool, ...(x.min ? ["--min", x.min] : [])],
+    }));
+    const pk = i.packages;
+    if (pk && !pk.ok) missing.push({
+      key: `${i.name}-packages`, install: pk.install, label: pk.had ? "更新" : "安裝", title: `${i.name} 的套件`,
+      what: pk.had ? "它的套件要更新（skill 改過了）" : "需要先裝它自己的套件（npm）",
+      note: "裝在 kit 自己的資料夾，不跑套件自己的安裝程式",
+      none: "要先有 Node.js（npm）才能裝",
+      args: ["install-deps", i.name],
+    });
     return v_flex().id(`row-${i.kind}-${i.name}`).gap(4).px(8).py(5).rounded(6).hover((s) => s.bg(t.hover))
       .child(row)
       .children(missing.map((x) => this.needLine(t, z, x)));
   }
 
-  // a program a skill needs that this machine lacks (or has too old): 安裝 shows kit's command first, 確定安裝 runs it
+  // something a skill needs that this machine lacks (a program, or too old; its own packages): 安裝 shows kit's
+  // command first, 確定安裝 runs it
   needLine(t, z, x) {
-    const busy = Boolean(this.busy), asking = this.asking === x.tool;
-    const what = `需要 ${x.title}${x.min ? ` ${x.min} 以上` : ""}（${x.have ? `這台是 ${x.have}，太舊` : "這台沒有"}）`;
+    const busy = Boolean(this.busy), asking = this.asking === x.key;
     const line = h_flex().gap(6).items_center().flex_wrap().pl(2).text_size(z - 1.5)
-      .child(div().text_color(t.working).child(`⚠ ${what}`));
-    if (!x.install) return line.child(div().text_color(t.muted).child("請自己裝：這台沒有 kit 可以用的安裝方式"));
-    if (!asking) return line.child(this.btn(t, z, `need-${x.tool}`, x.have ? "升級" : "安裝", { small: true, off: busy, on: (cx) => { this.asking = x.tool; cx.notify(); } }));
+      .child(div().text_color(t.working).child(`⚠ ${x.what}`));
+    if (!x.install) return line.child(div().text_color(t.muted).child(x.none));
+    if (!asking) return line.child(this.btn(t, z, `need-${x.key}`, x.label, { small: true, off: busy, on: (cx) => { this.asking = x.key; cx.notify(); } }));
     return v_flex().gap(4).pl(2).text_size(z - 1.5)
-      .child(div().text_color(t.working).child(`⚠ ${what}`))
+      .child(div().text_color(t.working).child(`⚠ ${x.what}`))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .child(div().text_color(t.muted).child("會執行："))
         .child(div().px(5).rounded(4).bg(t.raised).font_family(mono()).child(x.install)))
+      .when(Boolean(x.note), (el) => el.child(div().text_color(t.muted).child(x.note)))
       .child(h_flex().gap(6)
-        .child(this.btn(t, z, `need-go-${x.tool}`, "確定安裝", { small: true, kind: "primary", off: busy, on: (cx) => { this.asking = null; this.act(`安裝 ${x.title}`, ["install-tool", x.tool, ...(x.min ? ["--min", x.min] : [])], cx, LONG); } }))
-        .child(this.btn(t, z, `need-no-${x.tool}`, "取消", { small: true, off: busy, on: (cx) => { this.asking = null; cx.notify(); } })));
+        .child(this.btn(t, z, `need-go-${x.key}`, "確定安裝", { small: true, kind: "primary", off: busy, on: (cx) => { this.asking = null; this.act(`安裝 ${x.title}`, x.args, cx, LONG); } }))
+        .child(this.btn(t, z, `need-no-${x.key}`, "取消", { small: true, off: busy, on: (cx) => { this.asking = null; cx.notify(); } })));
   }
 
   // ---------- the repository ----------

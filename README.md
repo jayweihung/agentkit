@@ -83,6 +83,27 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 - **在哪裡看到**：Herdr 的 Kit 清單，skill 下面會出現「⚠ 需要 Node.js 18 以上（這台沒有）［安裝］」。按「安裝」先顯示 kit 要執行的指令，按「確定安裝」才執行。
 - 從網路收來的 skill 不會帶 `tools/` 進來：只有你自己倉裡、或團隊審過的 `tools/` 會用到。
 
+### skill 自己的套件（npm install）
+
+少數 skill 帶自己的程式，要先 `npm install` 才能跑（`package.json` 有 `dependencies`）。kit 也會看出來，你按了才裝：
+
+    kit install-deps <skill>           裝這個 skill 的 npm 套件
+
+    來源裡的 skill（不動）              kit 自己的資料夾
+    skills/foo/package.json  ──複製──▶  ~/.config/agentkit/deps/foo/
+    skills/foo/package-lock.json        ├─ npm ci --ignore-scripts
+                                        └─ node_modules/
+                                              ▲
+    ~/.claude/skills/foo/node_modules ────────┘ 連過去（Windows 是 junction，不用管理員）
+    ~/.agents/skills/foo/node_modules ────────┘
+    ~/ai/.claude/skills/foo/node_modules ─────┘
+
+- 有 `package-lock.json` 用 `npm ci`（照鎖好的版本），沒有才用 `npm install`。
+- 一律加 `--ignore-scripts`：套件不能在安裝時跑它自己的程式。skill 帶的 `.npmrc` 不會用（不讓它換下載來源）。
+- 裝在 kit 自己的資料夾，不寫進來源（不會被 commit 或推上去）。每個放了這個 skill 的地方（帳號、資料夾、`kit run` 的 agent）都連到同一份。
+- skill 更新後 `package.json`／`package-lock.json` 變了，就要再按一次「更新」；舊的套件不會連到新版上。
+- `kit uninstall` 會一起刪掉。要先有 Node.js：沒有的話先裝上面那一行的 Node.js。
+
 ## Herdr 的 kit 面板
 
 不想打指令的話，可以在 Herdr 裡用（Windows、Mac、Linux 都一樣）：
