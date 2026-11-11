@@ -730,14 +730,14 @@ check "rm --dir: only what the folder added" '[ $rc -ne 0 ] && echo "$out" | gre
 printf 'review v2\n' >> "$TEAM/skills/gerrit-review/SKILL.md"; kit sync >/dev/null 2>&1
 check "sync updates the folder's copy" 'grep -q "review v2" "$P/.claude/skills/gerrit-review/SKILL.md" && grep -q "review v2" "$P/.agents/skills/gerrit-review/SKILL.md"'
 kit rm --dir "$P" skill gerrit-review >/dev/null 2>&1; kit rm --dir "$P" rule gerrit-flow >/dev/null 2>&1; kit rm --dir "$P" mcp gerrit >/dev/null 2>&1
-check "rm --dir all: the folder exactly as before" 'cmp -s "$P/CLAUDE.md" "$T/p.claude" && cmp -s "$P/.mcp.json" "$T/p.mcp" && [ "$(cd "$P" && ls -A | sort | tr "\n" " ")" = ".mcp.json CLAUDE.md sub " ]'
+check "rm --dir all: the folder exactly as before" 'cmp -s "$P/CLAUDE.md" "$T/p.claude" && cmp -s "$P/.mcp.json" "$T/p.mcp" && [ "$(cd "$P" && ls -A | LC_ALL=C sort | tr "\n" " ")" = ".mcp.json CLAUDE.md sub " ]'
 check "rm --dir all: Codex config byte-identical" 'cmp -s "$H5/.codex/config.toml" "$T/codex5.orig"'
 check "rm --dir all: kit forgets the folder" '[ ! -e "$HOME/.config/agentkit/dirs" ] && ! grep -qF "dir:$P:" "$HOME/.config/agentkit/state.tsv"'
 kit add --dir "$P" skill gerrit-review >/dev/null 2>&1; kit add --dir "$P" mcp gerrit >/dev/null 2>&1
 Q="$T/gone"; mkdir -p "$Q"; Q=$(cd "$Q" && pwd -P); kit add --dir "$Q" skill gerrit-review >/dev/null 2>&1; rm -rf "$Q"; kit sync >/dev/null 2>&1
 check "sync: a folder that is gone leaves the list" '! grep -qxF "$Q" "$HOME/.config/agentkit/dirs" && grep -qxF "$P" "$HOME/.config/agentkit/dirs"'
 kit uninstall >/dev/null 2>&1
-check "uninstall: the folder exactly as before" 'cmp -s "$P/CLAUDE.md" "$T/p.claude" && cmp -s "$P/.mcp.json" "$T/p.mcp" && [ "$(cd "$P" && ls -A | sort | tr "\n" " ")" = ".mcp.json CLAUDE.md sub " ]'
+check "uninstall: the folder exactly as before" 'cmp -s "$P/CLAUDE.md" "$T/p.claude" && cmp -s "$P/.mcp.json" "$T/p.mcp" && [ "$(cd "$P" && ls -A | LC_ALL=C sort | tr "\n" " ")" = ".mcp.json CLAUDE.md sub " ]'
 check "uninstall: Codex config byte-identical" 'cmp -s "$H5/.codex/config.toml" "$T/codex5.orig"'
 echo "$pass $fail" > "$T/sub"
 )
@@ -789,10 +789,11 @@ out=$(kit install-tool frob 2>&1)
 check "install-tool: a recipe can only pick a known manager and a plain package name" '[ "$(cat "$T/brew.log")" = "install frob" ] && echo "$out" | grep -qF "執行 brew install frob"'
 printf 'name: node\ntitle: Node\ninstall:\n  mac: [scoop node]\n  linux: [scoop node]\n' > "$NT/tools/node.yaml"; rm -f "$FB/node"
 out=$(kit install-tool node 2>&1); rc=$?
-check "install-tool: the source recipe wins; no manager here, says to install it yourself" '[ $rc -ne 0 ] && echo "$out" | grep -qF "請自己裝 Node"'
+# (a machine with node in /usr/bin, like a Linux server, cannot play "no node here")
+check "install-tool: the source recipe wins; no manager here, says to install it yourself" 'PATH=/usr/bin:/bin command -v node >/dev/null || { [ $rc -ne 0 ] && echo "$out" | grep -qF "請自己裝 Node"; }'
 # a skill's own npm packages (kit install-deps): only when asked, in kit's folder, no package scripts, linked into each copy
 pk() { kit list --json 2>/dev/null | python3 -c "import json,sys;d={i['name']:i for i in json.load(sys.stdin)['items']};p=[x for x in d[sys.argv[1]].get('packages') or [] if x['kind']==sys.argv[2]];print(json.dumps(p[0] if p else None,sort_keys=True))" "$1" "${2:-npm}"; }
-check "packages: no npm here, nothing to run it with" '[ "$(pk packed)" = "{\"bad\": \"\", \"had\": false, \"install\": \"\", \"kind\": \"npm\", \"ok\": false}" ] && [ "$(pk drawer)" = null ] && [ "$(pk plain)" = null ] && [ "$(pk plain pip)" = null ]'
+check "packages: no npm here, nothing to run it with" '{ PATH=/usr/bin:/bin command -v npm >/dev/null || [ "$(pk packed)" = "{\"bad\": \"\", \"had\": false, \"install\": \"\", \"kind\": \"npm\", \"ok\": false}" ]; } && [ "$(pk drawer)" = null ] && [ "$(pk plain)" = null ] && [ "$(pk plain pip)" = null ]'
 printf '#!/bin/sh\necho "$PWD $*" >> "%s/npm.log"\n[ -f .npmrc ] && exit 9\nmkdir -p node_modules/left-pad && echo x > node_modules/left-pad/index.js\n' "$T" > "$FB/npm"; chmod +x "$FB/npm"
 check "packages: a lock -> npm ci, no package scripts" '[ "$(pk packed)" = "{\"bad\": \"\", \"had\": false, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": false}" ]'
 kit add skill packed >/dev/null 2>&1
