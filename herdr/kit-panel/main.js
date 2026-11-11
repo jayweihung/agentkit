@@ -552,8 +552,10 @@ export default class KitPanel extends View {
       missing.push({
         key: `${i.name}-${pk.kind}`, install: pk.bad ? "" : pk.install, label: pk.had ? "更新" : "安裝", title: `${i.name} 的 ${lang} 套件`,
         what: pk.had ? `它的 ${lang} 套件要更新（skill 改過了）` : `需要先裝它自己的 ${lang} 套件`,
-        note: py ? "裝在 kit 自己的 venv，只裝現成的 wheel，不跑套件自己的安裝程式" : "裝在 kit 自己的資料夾，不跑套件自己的安裝程式",
-        none: pk.bad ? `kit 不裝：requirements.txt 第 ${pk.bad}（只能寫套件名和版本）` : py ? "要先有 Python 才能裝" : "要先有 Node.js（npm）才能裝",
+        note: py ? "裝在 kit 自己的 venv，只裝現成的 wheel，不跑套件自己的安裝程式" : "裝在 kit 自己的資料夾，只裝 npm registry 上的版本，不跑套件自己的安裝程式",
+        none: !pk.bad ? (py ? "要先有 Python 才能裝" : "要先有 Node.js（npm）才能裝")
+          : py ? `kit 不裝：requirements.txt 第 ${pk.bad}（只能寫套件名和版本）`
+          : `kit 不裝：${pk.bad}（只能裝 npm registry 上的版本，不能是 git、網址、檔案或連結）`,
         args: ["install-deps", i.name, pk.kind],
       });
     }

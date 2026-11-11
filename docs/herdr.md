@@ -54,6 +54,8 @@ Herdr 內建的版面（main 等）不能改：面板會先出現在右邊，按
 │ >                                                                    │
 ```
 
+按鈕右邊的「context 35% 139k/400k」是這個 agent 的 context 用了多少（`kit context`，70% 以上變黃、90% 以上變紅，最多寫 100%）。agent 在工作時每 15 秒問一次，閒置時每分鐘一次。問不到（kit 正忙、那台連不上）時，先留著上一次的數字；那台的 kit 太舊、還沒有 `kit context` 時不顯示，10 分鐘後再問（那台 `kit self-update` 之後就會出現）。
+
 按下去會跳出這個 agent 的清單：
 
 在 `~/ai` 開的 agent（只能改這個資料夾）：
@@ -102,8 +104,8 @@ Herdr 內建的版面（main 等）不能改：面板會先出現在右邊，按
   - 只想給某一個 agent：請點 `kit run` 開的 agent，用它視窗裡的「加上」「拿掉」。
   - 資料夾的 MCP：Claude Code 不會每次問（kit 在 `.claude/settings.local.json` 允許它）；Codex 只在信任的資料夾讀，kit 會在 `~/.codex/config.toml` 信任這個資料夾；omp 只讀整個帳號的 MCP，不支援資料夾的。Codex 在子資料夾開也讀得到，是因為 kit 在 `~/.codex/config.toml` 最上面加了 `project_root_markers`。
 - 「這次啟動帶的」：用 `kit run`（或 Agents 的「開啟」）開的 agent 才有，只有這個 agent 有，關掉就沒了。要改，到 Agents 改那個 agent。這時下面的標題會變成「另外也讀到的」。
-- **skill 需要的程式**：skill 要的程式（例如 archify 要 Node.js 18 以上）這台沒有或太舊時，那一項下面會出現「⚠ 需要 Node.js 18 以上（這台沒有）［安裝］」（太舊是［升級］）。按下去先顯示 kit 會執行的指令（例如 `brew install node`），按「確定安裝」才執行（就是 `kit install-tool node --min 18`）。kit 沒有這台能用的裝法時，只寫「請自己裝」。怎麼看出來、怎麼加新的程式，看 README 的「skill 需要的程式」。
-- **skill 自己的套件**：skill 要先 `npm install` 或 `pip install` 才能跑時，下面會出現「⚠ 需要先裝它自己的 npm 套件［安裝］」或「⚠ 需要先裝它自己的 Python 套件［安裝］」（skill 改過、要重裝時是［更新］）。按下去先顯示要執行的指令，按「確定安裝」才裝（就是 `kit install-deps <skill> npm|pip`）：裝在 kit 自己的資料夾（Python 是自己的 venv），不跑套件自己的安裝程式，再連到每個放了這個 skill 的地方。`requirements.txt` 有 kit 不接受的寫法時，只寫「kit 不裝：第幾行」。
+- **skill 需要的程式**：skill 要的程式（例如 archify 要 Node.js 18 以上）這台沒有或太舊時，那一項下面會出現「⚠ 需要 Node.js 18 以上（這台沒有）［安裝］」（太舊是［升級］）。按下去先顯示 kit 會執行的指令（例如 `brew install node`），按「確定安裝」才執行（就是 `kit install-tool node --min 18`）；那種裝法失敗，kit 會換配方裡的下一種。kit 沒有這台能用的裝法時，只寫「請自己裝」。node、python、git 一律用 kit 內建的裝法（來源倉蓋不掉）。怎麼看出來、怎麼加新的程式，看 README 的「skill 需要的程式」。
+- **skill 自己的套件**：skill 要先 `npm install` 或 `pip install` 才能跑時，下面會出現「⚠ 需要先裝它自己的 npm 套件［安裝］」或「⚠ 需要先裝它自己的 Python 套件［安裝］」（skill 改過、要重裝時是［更新］）。按下去先顯示要執行的指令，按「確定安裝」才裝（就是 `kit install-deps <skill> npm|pip`）：裝在 kit 自己的資料夾（Python 是自己的 venv），不跑套件自己的安裝程式，再連到每個放了這個 skill 的地方。`requirements.txt` 有 kit 不接受的寫法時，只寫「kit 不裝：requirements.txt 第幾行」；npm 套件不是 registry 上的版本（git、網址、檔案、連結，或 lock 裡有這種套件）時，只寫「kit 不裝：」和是哪一個（例如 `package.json: dependencies.tool = github:someone/tool`），沒有［安裝］。npm 一律 `--ignore-scripts --omit=dev`。
 - `同步` = `kit sync`（拿來源的新版、裝上團隊必備的）；`⟳` 只是重新讀一次畫面，不改任何東西。
 - agent 開在別台主機（Herdr 的遠端 space）時，按鈕會到那台去問 kit。**每台要跑 agent 的主機都要裝好 kit**（`kit init` 過），不然會顯示「出錯了」。
 - 用別的帳號跑的 agent（例如 `sudo -i` 的 root）只會顯示「root 唯讀」，這裡看不到也不能改。
@@ -237,7 +239,7 @@ Herdr 內建的版面（main 等）不能改：面板會先出現在右邊，按
 | 視窗按鈕的清單 | `kit list --json --dir <資料夾> --pid <行程>` |
 | 加到整個帳號／從帳號拿掉 | `kit add` ／ `kit rm` |
 | 安裝／升級（skill 需要的程式） | `kit install-tool <程式> [--min 版本]` |
-| 窗格上方的 context 35%（每 15 秒，閒置時每分鐘） | `kit context --pid <pid> --tool <claude\|codex\|omp> --dir <資料夾>` |
+| 窗格上方的 context 35%（每 15 秒，閒置時每分鐘；kit 太舊時每 10 分鐘） | `kit context --pid <pid> --tool <claude\|codex\|omp> --dir <資料夾>` |
 | 安裝／更新（skill 自己的套件） | `kit install-deps <skill> [npm\|pip]` |
 | 加到這個資料夾／從資料夾拿掉 | `kit add --dir <資料夾>` ／ `kit rm --dir <資料夾>` |
 | 同步 | `kit sync` |
