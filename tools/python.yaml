@@ -1,4 +1,4 @@
-# kit 內建：Python 的裝法。來源倉的 tools/python.yaml 會蓋過這個。
+# kit 內建：Python 的裝法。來源倉不能蓋過這個（來源倉的 tools/python.yaml 不算數）。
 name: python
 title: Python 3
 bin: [python3, python]

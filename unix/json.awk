@@ -5,6 +5,9 @@
 #   awk -f json.awk -v get=PATH input.json        # print the raw value at PATH
 #   awk -f json.awk -v keys=PATH input.json       # print the keys of the object at PATH, one per line
 #                                                 # (PATH "" = the top; -v sep=X joins PATH with X, not ".")
+#   awk -f json.awk -v leaves=1 input.json        # every value that is not an object or array (and every
+#                                                 # empty one), in file order: its keys (or item numbers)
+#                                                 # joined by TAB, a TAB, its raw text; keys without quotes
 #
 # Output is formatted like JSON.stringify(value, null, 2): 2-space indent,
 # key order kept, strings copied byte for byte. A trailing newline is kept
@@ -68,6 +71,7 @@ END {
     if (pos <= ntok) fail("extra data after JSON")
 
     if (sep == "") sep = "."
+    if (leaves) { dump(root, ""); exit 0 }
     if (keys != "" || keys_top) {
         n = (keys == "") ? root : find_path(root, keys)
         if (n == 0 || T[n] != "o") exit 1
@@ -179,6 +183,16 @@ function ser(n, ind,    out, i, ind2) {
     if (out == "{\n") return "{}"
     if (out == "[\n") return "[]"
     return out "\n" ind ((T[n] == "o") ? "}" : "]")
+}
+
+function dump(n, path,    i, k) { # -v leaves=1
+    if (T[n] == "v") { printf "%s\t%s\n", path, V[n]; return }
+    if (N[n] == 0) { printf "%s\t%s\n", path, (T[n] == "o") ? "{}" : "[]"; return }
+    for (i = 1; i <= N[n]; i++) {
+        if (C[n, i] == 0) continue
+        k = (T[n] == "o") ? substr(K[n, i], 2, length(K[n, i]) - 2) : i
+        dump(C[n, i], (n == root) ? k : path "\t" k)
+    }
 }
 
 # ---------- paths and operations ----------

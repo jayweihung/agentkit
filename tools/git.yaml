@@ -1,4 +1,4 @@
-# kit 內建：git 的裝法。來源倉的 tools/git.yaml 會蓋過這個。
+# kit 內建：git 的裝法。來源倉不能蓋過這個（來源倉的 tools/git.yaml 不算數）。
 name: git
 title: git
 bin: [git]

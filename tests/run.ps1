@@ -691,10 +691,20 @@ W "$NT/skills/told/SKILL.md" "---`nname: told`ndescription: says`nrequires: [nod
 W "$NT/kit.yaml" "name: needteam`nrequires:`n  plain: [git]`n"
 W "$NT/skills/packed/SKILL.md" "---`nname: packed`ndescription: has npm packages`n---`nRun ``node scripts/run.mjs``.`n"
 W "$NT/skills/packed/scripts/run.mjs" "x`n"; W "$NT/skills/packed/package.json" "{`"name`": `"packed`", `"dependencies`": {`"left-pad`": `"1.3.0`"}}`n"
-W "$NT/skills/packed/package-lock.json" "{`"lockfileVersion`": 3}`n"; W "$NT/skills/packed/.npmrc" "registry=http://elsewhere.invalid/`n"
+W "$NT/skills/packed/package-lock.json" "{`"lockfileVersion`": 3, `"packages`": {`"`": {`"dependencies`": {`"left-pad`": `"1.3.0`"}}, `"node_modules/left-pad`": {`"version`": `"1.3.0`", `"resolved`": `"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz`", `"integrity`": `"sha512-XI5MPzVNApjAyhQzphX8BkmKsKUxD4LdyK24iZeQEGg9ylg3cs3KHoxHhvlaXRBmtqI9zaxOttfQ9EE5zORWb4w==`"}}}`n"
+W "$NT/skills/packed/.npmrc" "registry=http://elsewhere.invalid/`n"
+# npm packages kit must not install: a git dependency; a lock with a package from git; a lock on another registry
+foreach ($n in 'npmgit', 'npmlock', 'npmreg') { W "$NT/skills/$n/SKILL.md" "---`nname: $n`ndescription: x`n---`nx`n" }
+W "$NT/skills/npmgit/package.json" "{`"name`": `"npmgit`", `"dependencies`": {`"left-pad`": `"1.3.0`"}, `"optionalDependencies`": {`"tool`": `"github:someone/tool`"}}`n"
+W "$NT/skills/npmlock/package.json" "{`"name`": `"npmlock`", `"dependencies`": {`"tool`": `"^1.0.0`"}}`n"
+W "$NT/skills/npmlock/package-lock.json" "{`"lockfileVersion`": 1, `"dependencies`": {`"tool`": {`"version`": `"1.0.0`", `"resolved`": `"https://registry.npmjs.org/tool/-/tool-1.0.0.tgz`", `"integrity`": `"sha512-x`", `"dependencies`": {`"sub`": {`"version`": `"git+ssh://git@github.com/someone/sub.git#abc`", `"resolved`": `"git+ssh://git@github.com/someone/sub.git#abc`"}}}}}`n"
+W "$NT/skills/npmreg/package.json" "{`"name`": `"npmreg`", `"dependencies`": {`"tool`": `"^1.0.0`"}}`n"
+W "$NT/skills/npmreg/package-lock.json" "{`"lockfileVersion`": 3, `"packages`": {`"`": {}, `"node_modules/tool`": {`"version`": `"1.0.0`", `"resolved`": `"https://npm.example.com/r/tool/-/tool-1.0.0.tgz`", `"integrity`": `"sha512-x`"}}}`n"
+W "$NT/skills/asks/SKILL.md" "---`nname: asks`ndescription: x`nrequires: [noprobe]`n---`nx`n"
 W "$NT/skills/pyskill/SKILL.md" "---`nname: pyskill`ndescription: python packages`n---`nRun ``python3 scripts/go.py``.`n"
-W "$NT/skills/pyskill/requirements.txt" "# what it needs`nrequests==2.32.0`n"
+W "$NT/skills/pyskill/requirements.txt" "# what it needs`nrequests==2.32.0`ncertifi ; sys_platform != 'win32' and python_version < `"4`"  # ok`n"
 W "$NT/skills/pybad/SKILL.md" "---`nname: pybad`ndescription: b`n---`nx`n"; W "$NT/skills/pybad/requirements.txt" "requests`n-e git+http://elsewhere.invalid/x`n"
+W "$NT/skills/pymark/SKILL.md" "---`nname: pymark`ndescription: b`n---`nx`n"; W "$NT/skills/pymark/requirements.txt" "requests ; python_version >= `"3.8`" --config-settings=x=y`n"
 Kit init $NT
 Kit list --json
 $items = @{}; foreach ($m in [regex]::Matches($out, '"name": "(drawer|plain|told)".*?"needs": (\[[^\]]*\])')) { $items[$m.Groups[1].Value] = $m.Groups[2].Value }
@@ -704,10 +714,13 @@ Check 'needs: SKILL.md requires; an unknown program has no install' { $items['to
 if (-not $OnWindows) {
     $FB = Join-Path $T 'fakebin6'; [void](New-Item -ItemType Directory -Force -Path $FB)
     W "$FB/node" "#!/bin/sh`necho v16.2.0`n"
-    W "$FB/brew" "#!/bin/sh`necho `"`$*`" >> '$T/brew6.log'`n[ `"`$1`" = upgrade ] && printf '#!/bin/sh\necho v26.1.0\n' > '$FB/node'`nexit 0`n"
-    & chmod +x "$FB/node" "$FB/brew"
+    W "$FB/brew" "#!/bin/sh`necho `"`$*`" >> '$T/brew6.log'`n[ `"`$1`" = upgrade ] && printf '#!/bin/sh\necho v26.1.0\n' > '$FB/node'`ncase `$2 in bad*) exit 1;; frob) printf '#!/bin/sh\necho frob 1.2.3\n' > '$FB/frob'; chmod +x '$FB/frob';; esac`nexit 0`n"
+    W "$FB/apt-get" "#!/bin/sh`nexit 1`n"                       # (a Linux run as root: never the real one)
+    W "$FB/noprobe" "#!/bin/sh`necho ran >> '$T/noprobe6.log'`necho noprobe 1.0`n"
+    & chmod +x "$FB/node" "$FB/brew" "$FB/apt-get" "$FB/noprobe"
     $savedP = $env:PATH; $env:PATH = "$FB" + [IO.Path]::PathSeparator + '/usr/bin:/bin'
     Kit list --json
+    Check 'needs: a program kit has no recipe for is not run to look at it' { $out -match '"tool": "noprobe", "title": "noprobe", "min": "", "have": "", "ok": false, "install": ""' -and -not (Test-Path "$T/noprobe6.log") }
     Check 'needs: too old here, kit says the upgrade' { $out -match '"tool": "node", "title": "Node.js", "min": "18", "have": "16.2.0", "ok": false, "install": "brew upgrade node"' }
     Kit tools
     Check 'tools: what this machine has and how kit would install it' { $out -match '(?m)^node +16\.2\.0 +brew install node$' }
@@ -716,9 +729,29 @@ if (-not $OnWindows) {
     Kit install-tool node --min 18
     Check 'install-tool --min: runs kit''s upgrade, then looks again' { $rc -eq 0 -and (ReadT "$T/brew6.log") -eq "upgrade node`n" -and $out.Contains('Node.js 26.1.0 裝好了') }
     Remove-Item "$T/brew6.log"
-    W "$NT/tools/frob.yaml" "name: frob`ntitle: Frob`ninstall:`n  mac: [`"sh -c evil`", `"brew frob;rm`", `"curl x`", `"brew frob`"]`n  linux: [`"sh -c evil`", `"brew frob;rm`", `"curl x`", `"brew frob`"]`n"
+    $bad = '"sh -c evil", "brew frob;rm", "curl x", "brew user/tap/frob", "brew -frob", "brew ../frob", "brew frob"'
+    W "$NT/tools/frob.yaml" "name: frob`ntitle: Frob`ninstall:`n  mac: [$bad]`n  linux: [$bad]`n"
     Kit install-tool frob
-    Check 'install-tool: a recipe can only pick a known manager and a plain package name' { (ReadT "$T/brew6.log") -eq "install frob`n" -and $out.Contains('執行 brew install frob') }
+    Check 'install-tool: a recipe can only pick a known manager and a plain package name' { (ReadT "$T/brew6.log") -eq "install frob`n" -and $out.Contains('執行 brew install frob') -and $out.Contains('Frob 1.2.3 裝好了') }
+    Remove-Item "$T/brew6.log", "$FB/frob"
+    W "$NT/tools/frob.yaml" "name: frob`ntitle: Frob`ninstall:`n  mac: [brew badfrob, brew frob]`n  linux: [brew badfrob, brew frob]`n"
+    Kit install-tool frob
+    Check 'install-tool: one way fails -> the next way in the recipe' { $rc -eq 0 -and (ReadT "$T/brew6.log") -eq "install badfrob`ninstall frob`n" -and $out.Contains('用 brew 裝失敗') -and $out.Contains('Frob 1.2.3 裝好了') }
+    W "$NT/tools/frob.yaml" "name: frob`ntitle: Frob`ninstall:`n  mac: [brew badfrob]`n  linux: [brew badfrob]`n"; Remove-Item "$FB/frob"
+    Kit install-tool frob
+    Check 'install-tool: every way fails -> says so' { $rc -ne 0 -and $out.Contains('每一種裝法都沒有成功（最後是 brew）') }
+    W "$NT/tools/pyfrob.yaml" "name: pyfrob`ninstall:`n  mac: [pip pyfrob]`n  linux: [pip pyfrob]`n"
+    $env:KIT_DRY_RUN = '1'; Kit install-tool pyfrob; Remove-Item env:KIT_DRY_RUN
+    Check 'install-tool (pip): wheels only, for this account' { $out.Contains('執行 python3 -m pip install --user --only-binary=:all: pyfrob') }
+    W "$NT/tools/node.yaml" "name: node`ntitle: Node`ninstall:`n  mac: [scoop node]`n  linux: [scoop node]`n"; Remove-Item "$FB/node", "$T/brew6.log" -ErrorAction SilentlyContinue
+    Kit install-tool node
+    Check 'install-tool: kit''s own recipe wins over a source''s' { (Test-Path /usr/bin/node) -or ($out.Contains('執行 brew install node') -and (ReadT "$T/brew6.log") -eq "install node`n" -and -not $out.Contains('scoop')) }
+    W "$NT/tools/slowtool.yaml" "name: slowtool`nbin: [slowtool]`ninstall:`n  mac: [brew slowtool]`n  linux: [brew slowtool]`n"; W "$FB/slowtool" "#!/bin/sh`nsleep 30`necho slowtool 1.0`n"
+    W "$NT/tools/chatty.yaml" "name: chatty`nbin: [chatty]`ninstall:`n  mac: [brew chatty]`n  linux: [brew chatty]`n"; W "$FB/chatty" "#!/bin/sh`nexec yes 'chatty 2.5'`n"
+    & chmod +x "$FB/slowtool" "$FB/chatty"
+    $env:KIT_PROBE_WAIT = '1'; $t0 = Get-Date; Kit tools; $took = ((Get-Date) - $t0).TotalSeconds; Remove-Item env:KIT_PROBE_WAIT
+    Check 'tools: a --version that hangs is given up, one that never stops is cut' { $took -lt 30 -and $out -match '(?m)^slowtool +（沒有）' -and $out -match '(?m)^chatty +2\.5 ' }
+    foreach ($f in "$NT/tools/slowtool.yaml", "$NT/tools/chatty.yaml", "$NT/tools/pyfrob.yaml", "$NT/tools/node.yaml", "$FB/slowtool", "$FB/chatty") { Remove-Item $f -ErrorAction SilentlyContinue }
     $env:PATH = $savedP
 }
 Kit install-tool nope
@@ -733,21 +766,59 @@ if ($OnWindows) {
 $savedP = $env:PATH; $env:PATH = "$FB7" + [IO.Path]::PathSeparator + $env:PATH
 function PkOf([string]$n, [string]$k = 'npm') { $m = [regex]::Match($out, '"name": "' + $n + '"[^\n]*?"packages": \[[^\n]*?(\{"kind": "' + $k + '"[^}]*\})'); if ($m.Success) { $m.Groups[1].Value } else { $null } }
 Kit list --json
-Check 'packages: a lock -> npm ci, no package scripts' { (PkOf 'packed') -eq '{"kind": "npm", "ok": false, "had": false, "install": "npm ci --ignore-scripts --no-audit --no-fund", "bad": ""}' -and $null -eq (PkOf 'drawer') }
+Check 'packages: a lock -> npm ci, no package scripts' { (PkOf 'packed') -eq '{"kind": "npm", "ok": false, "had": false, "install": "npm ci --ignore-scripts --omit=dev --no-audit --no-fund", "bad": ""}' -and $null -eq (PkOf 'drawer') }
 Kit add skill packed
 $env:KIT_DRY_RUN = '1'; Kit install-deps packed; Remove-Item env:KIT_DRY_RUN
-Check 'install-deps, dry run: only says the command' { $out.Contains('執行 npm ci --ignore-scripts --no-audit --no-fund') -and -not (Test-Path "$T/npm7.log") }
+Check 'install-deps, dry run: only says the command' { $out.Contains('執行 npm ci --ignore-scripts --omit=dev --no-audit --no-fund') -and -not (Test-Path "$T/npm7.log") }
 $S7 = Join-Path $H '.config/agentkit/deps/packed'; $C7 = Join-Path $H '.claude/skills/packed'
 Kit install-deps packed
-Check 'install-deps: npm ci in kit''s folder, not the source, without the skill''s .npmrc' { $rc -eq 0 -and (ReadT "$T/npm7.log").Trim().Replace('\', '/').EndsWith('.config/agentkit/deps/packed.new ci --ignore-scripts --no-audit --no-fund') -and (Test-Path "$S7/node_modules/left-pad/index.js") -and -not (Test-Path "$NT/skills/packed/node_modules") -and -not (Test-Path "$S7/.npmrc") }
+Check 'install-deps: npm ci in a new folder next to kit''s, not the source, without the skill''s .npmrc' { $rc -eq 0 -and (ReadT "$T/npm7.log").Trim().Replace('\', '/') -match '\.config/agentkit/deps/packed\.new\.[a-z0-9]+ ci --ignore-scripts --omit=dev --no-audit --no-fund$' -and (Test-Path "$S7/node_modules/left-pad/index.js") -and -not (Test-Path "$NT/skills/packed/node_modules") -and -not (Test-Path "$S7/.npmrc") -and @(Get-ChildItem -LiteralPath (Split-Path -Parent $S7) -Filter 'packed.new.*').Count -eq 0 }
 Check 'install-deps: the copy kit put gets node_modules linked to it' { (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType -and (Test-Path "$C7/node_modules/left-pad/index.js") }
 Kit list --json
-Check 'packages: installed now' { (PkOf 'packed') -eq '{"kind": "npm", "ok": true, "had": true, "install": "npm ci --ignore-scripts --no-audit --no-fund", "bad": ""}' }
+Check 'packages: installed now' { (PkOf 'packed') -eq '{"kind": "npm", "ok": true, "had": true, "install": "npm ci --ignore-scripts --omit=dev --no-audit --no-fund", "bad": ""}' }
 Kit sync
 Check 'sync: the link is not a change to the skill' { $out -notmatch '手動' -and (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType }
+# kit run: the agent's folder gets the links too, and goes with them (never into kit's store); a dry run has none
+W "$NT/agents/packer.md" "---`nname: packer`ndescription: x`nskills: [packed]`n---`nx`n"
+$env:KIT_DRY_RUN = '1'; Kit run packer; Remove-Item env:KIT_DRY_RUN
+$rt = (@($out -split "`n" | Where-Object { $_.StartsWith('tmp=') })[0]).Substring(4).TrimEnd("`r")
+Check 'run, dry run: the agent''s folder to look at, without kit''s links' { (Test-Path "$rt/.claude/skills/packed/SKILL.md") -and -not (Test-Path "$rt/.claude/skills/packed/node_modules") -and -not (Test-Path "$rt/.kit-pid") }
+Remove-Item -LiteralPath $rt -Recurse -Force
+$SR = Join-Path ([IO.Path]::GetTempPath()) "kit-run.kittest$PID"; [void](New-Item -ItemType Directory -Force -Path "$SR/x"); W "$SR/.kit-pid" "999999`n"
+[void](New-Item -ItemType $(if ($OnWindows) { 'Junction' } else { 'SymbolicLink' }) -Path "$SR/x/node_modules" -Target "$S7/node_modules")
+if ($OnWindows) { W "$FB7/claude.cmd" "@echo off`r`necho %*> `"$T\claude.args`"`r`nif not exist `"%2\.claude\skills\packed\node_modules\left-pad`" exit /b 4`r`nexit /b 3`r`n" }
+else { W "$FB7/claude" "#!/bin/sh`necho `"`$*`" > '$T/claude.args'`n[ -L `"`$2/.claude/skills/packed/node_modules`" ] || exit 4`nexit 3`n"; & chmod +x "$FB7/claude" }
+Kit run packer
+$rt = ([regex]::Match((ReadT "$T/claude.args"), '--add-dir (\S+)')).Groups[1].Value.Trim('"')
+Check 'run: the agent''s folder has kit''s links; its exit code; the folder gone, kit''s packages still there' { $rc -eq 3 -and $rt -and -not (Test-Path -LiteralPath $rt) -and (Test-Path "$S7/node_modules/left-pad/index.js") }
+Check 'run: the folder of a run that was killed goes (its links only)' { -not (Test-Path -LiteralPath $SR) -and (Test-Path "$S7/node_modules/left-pad/index.js") }
+foreach ($f in "$FB7/claude", "$FB7/claude.cmd", "$NT/agents/packer.md") { Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue }
+# what kit does not install: git, a URL, another registry without your ~/.npmrc
+Kit list --json
+Check 'packages: a git dependency is shown as refused' { (PkOf 'npmgit') -eq '{"kind": "npm", "ok": false, "had": false, "install": "npm install --ignore-scripts --omit=dev --no-audit --no-fund", "bad": "package.json: optionalDependencies.tool = github:someone/tool"}' }
+Check 'packages: a lock (v1) with a package from git, or one from another registry, is refused' { (PkOf 'npmlock') -match '"bad": "package-lock.json: node_modules/tool/node_modules/sub: resolved git\+ssh://git@github.com/someone/sub.git#abc"' -and (PkOf 'npmreg') -match '"bad": "package-lock.json: node_modules/tool: resolved https://npm.example.com/r/tool/-/tool-1.0.0.tgz"' }
+if (Test-Path "$T/npm7.log") { Remove-Item "$T/npm7.log" }
+Kit install-deps npmgit
+Check 'install-deps: refuses a git dependency, npm not run' { $rc -ne 0 -and $out.Contains('kit 不裝這些 npm 套件') -and $out.Contains('github:someone/tool') -and -not (Test-Path "$T/npm7.log") -and -not (Test-Path (Join-Path $H '.config/agentkit/deps/npmgit')) }
+W "$H/.npmrc" "registry = https://npm.example.com/r`n"
+Kit list --json
+Check 'packages: your own ~/.npmrc registry is fine' { (PkOf 'npmreg') -match '"bad": ""' }
+Remove-Item -Force "$H/.npmrc"
+if (-not $OnWindows) {
+    $env:HOME = $H; $bash = (& /bin/sh -c "cd '$Repo' && HOME='$H' PATH='$FB7':`"`$PATH`" unix/kit list --json 2>&1") -join "`n"; Kit list --json
+    Check 'packages (refused): unix/kit says the same' { $bash -ceq $out }
+}
+# npm fails: nothing half-made
+if ($OnWindows) { W "$FB7/npm.cmd" "@echo off`r`nmkdir node_modules\x`r`nexit /b 3`r`n" } else { W "$FB7/npm" "#!/bin/sh`nmkdir -p node_modules/x`nexit 3`n" }
+Remove-Item -LiteralPath $S7 -Recurse -Force
+Kit install-deps packed
+Check 'install-deps: npm fails -> says so, nothing half-made' { $rc -ne 0 -and $out.Contains('裝套件失敗') -and -not (Test-Path $S7) -and @(Get-ChildItem -LiteralPath (Split-Path -Parent $S7) -Filter 'packed.new.*').Count -eq 0 }
+if ($OnWindows) { W "$FB7/npm.cmd" "@echo off`r`nmkdir node_modules\left-pad`r`necho x> node_modules\left-pad\index.js`r`n" } else { W "$FB7/npm" "#!/bin/sh`nmkdir -p node_modules/left-pad && echo x > node_modules/left-pad/index.js`n" }
+Kit install-deps packed
 # Python: a venv of the skill's own (fake python here), requirements.txt with names and versions only
 Kit list --json
 Check 'packages (pip): a requirements.txt with options is shown as refused' { (PkOf 'pybad' 'pip') -match '"bad": "2: -e git\+http://elsewhere.invalid/x"' }
+Check 'packages (pip): an option after a marker is refused too' { (PkOf 'pymark' 'pip').Contains('"bad": "1: requests ; python_version >= \"3.8\" --config-settings=x=y"') }
 Kit install-deps pybad
 Check 'install-deps (pip): refuses options in requirements.txt' { $rc -ne 0 -and $out.Contains('第 2: -e') -and -not (Test-Path (Join-Path $H '.config/agentkit/pydeps/pybad')) }
 if (-not $OnWindows) {
@@ -760,12 +831,36 @@ if (-not $OnWindows) {
     $S8 = Join-Path $H '.config/agentkit/pydeps/pyskill'; $C8 = Join-Path $H '.claude/skills/pyskill'
     Check 'install-deps (pip): a venv in kit''s folder, pip run there with wheels only' { $rc -eq 0 -and (ReadT "$T/pip7.log").Trim().EndsWith('pydeps/pyskill -m pip install --only-binary=:all: --no-input --disable-pip-version-check -r requirements.txt') -and (Test-Path "$S8/venv/bin/python") -and -not (Test-Path "$NT/skills/pyskill/.venv") }
     Check 'install-deps (pip): the copy gets .venv linked, the instructions say to use it' { (Get-Item -LiteralPath "$C8/.venv" -Force).LinkType -and (ReadT (Join-Path $H '.claude/CLAUDE.md')).Contains('.venv/bin/python') }
+    # the python line is the account's (for the account's skills), never in a folder's own files
+    $PD = Join-Path $T 'pyproj'; W "$PD/CLAUDE.md" "# mine`n"; Copy-Item "$PD/CLAUDE.md" "$T/pd.orig"
+    Kit add --dir $PD skill pyskill
+    Check 'add --dir with kit''s venv: the folder''s copy gets .venv, its CLAUDE.md is not touched' { (Get-Item -LiteralPath "$PD/.claude/skills/pyskill/.venv" -Force).LinkType -and (SameBytes "$T/pd.orig" "$PD/CLAUDE.md") -and -not (Test-Path "$PD/AGENTS.md") }
+    Kit rm --dir $PD skill pyskill
+    Check 'rm --dir with kit''s venv: the folder exactly as before' { (SameBytes "$T/pd.orig" "$PD/CLAUDE.md") -and ((@(Get-ChildItem -LiteralPath $PD -Force | ForEach-Object { $_.Name }) -join ' ') -eq 'CLAUDE.md') }
+    Kit rm skill pyskill
+    Check 'python line: gone with the skill (kit''s venv stays)' { $cm = Join-Path $H '.claude/CLAUDE.md'; (Test-Path "$S8/venv/bin/python") -and (-not (Test-Path $cm) -or -not (ReadT $cm).Contains('.venv/bin/python')) }
+    Kit add skill pyskill
+    $env:HOME = $H; $bash = (& /bin/sh -c "cd '$Repo' && HOME='$H' PATH='$FB7':`"`$PATH`" unix/kit list --json 2>&1") -join "`n"; Kit list --json
+    Check 'packages (pip, installed): unix/kit says the same' { $bash -ceq $out }
+    # pip fails: the venv kit had goes back
+    W "$NT/skills/pyskill/requirements.txt" "requests==2.33.0`n"
+    W "$FB7/python3" "#!/bin/sh`n[ `"`$1 `$2`" = '-m venv' ] || exec '$realPy' `"`$@`"`nmkdir -p `"`$3/bin`" && printf '#!/bin/sh\nexit 4\n' > `"`$3/bin/python`" && chmod +x `"`$3/bin/python`"`n"
+    Kit install-deps pyskill pip
+    Check 'install-deps (pip): pip fails -> the old venv stays' { $rc -ne 0 -and $out.Contains('裝套件失敗') -and (ReadT "$S8/.kit-src/requirements.txt").Contains('2.32.0') -and (Test-Path "$S8/venv/bin/python") -and -not (Test-Path "$S8.old") }
     Remove-Item "$FB7/python3"
 }
 Kit rm skill packed
 Check 'rm skill: the copy goes, kit''s packages stay (the link only)' { -not (Test-Path $C7) -and (Test-Path "$S7/node_modules/left-pad/index.js") }
 Kit uninstall
 Check 'uninstall: kit''s packages go too' { -not (Test-Path (Join-Path $H '.config/agentkit/deps')) -and -not (Test-Path (Join-Path $H '.config/agentkit/pydeps')) }
+# a skill's hash is its own files, not what a link in it points at (PowerShell 5.1 would follow a junction)
+W "$T/hashme/a.txt" "a`n"; W "$T/linked/b.txt" "b`n"
+$h1 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashme" 2>&1 | ForEach-Object { "$_" }) -join ''
+[void](New-Item -ItemType $(if ($OnWindows) { 'Junction' } else { 'SymbolicLink' }) -Path "$T/hashme/node_modules" -Target "$T/linked")
+$h2 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashme" 2>&1 | ForEach-Object { "$_" }) -join ''
+W "$T/hashme/c.txt" "c`n"
+$h3 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashme" 2>&1 | ForEach-Object { "$_" }) -join ''
+Check 'skill hash: a link (junction) in it does not count, its own files do' { $h1 -match '^[0-9A-F]{16}$' -and $h1 -eq $h2 -and $h3 -ne $h1 }
 $env:PATH = $savedP
 
 # ---------- how full an agent's context is (kit context, kit statusline) ----------
@@ -781,6 +876,11 @@ W "$H/.omp/agent/sessions/x/s1.jsonl" ("{`"type`":`"session`",`"version`":3,`"id
     "{`"type`":`"message`",`"message`":{`"role`":`"assistant`",`"usage`":{`"input`":4,`"cacheRead`":149319,`"cacheWrite`":222},`"contextSnapshot`":{`"promptTokens`":149545},`"stopReason`":`"stop`"}}`n")
 Kit context --pid 1 --tool omp --dir $P7
 Check 'context (omp): the folder''s session, its last reply' { $out -match '"used": 149545, "window": (1000000|200000), "pct": (15|75), "source": "session", "model": "anthropic/claude-opus-5-5"' }
+# what came after that reply, like omp's footer: its text at 4 bytes a token, an image 1600; omp's "details" not
+$z6 = '0' * 600; $z9 = '0' * 900
+Add-Content -LiteralPath "$H/.omp/agent/sessions/x/s1.jsonl" -Encoding UTF8 -NoNewline -Value ("{`"type`":`"message`",`"message`":{`"role`":`"toolResult`",`"content`":[{`"type`":`"text`",`"text`":`"0123456789abcdef\`"23`"},{`"type`":`"image`",`"data`":`"$z6`",`"mimeType`":`"image/png`"}],`"details`":{`"text`":`"$z9`"}}}`n")
+Kit context --pid 1 --tool omp --dir $P7
+Check 'context (omp): plus what came after the reply (text / 4, an image 1600, not "details")' { $out -match '"used": 151150, ' }
 $cp = [string]$PID
 W "$H/.config/agentkit/ctx/claude-$cp.json" "{`"pid`": $cp, `"session`": `"abc`", `"used`": 139600, `"window`": 400000, `"pct`": 35, `"model`": `"claude-opus-5-5`"}`n"
 Kit context --pid $cp --tool claude-code --dir $P7
@@ -789,6 +889,56 @@ $sl = '{"model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_wind
 
 $o = $sl | & $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit statusline 2>&1
 Check 'statusline: a short line for Claude' { "$o".Trim() -eq 'Opus 5.5 · context 35%（139k / 400k）' }
+if (-not $OnWindows) {
+    # under a "claude" process (one look at every process): the numbers kept for it
+    W "$T/sl7.json" $sl; $FB8 = Join-Path $T 'fakebin8'
+    W "$FB8/claude" "#!/bin/sh`necho `$`$ > '$T/cpid7'`n'$Exe' -NoProfile -File '$Kit' statusline < '$T/sl7.json'`n"; & chmod +x "$FB8/claude"
+    $o = & "$FB8/claude"; $cp7 = "$(ReadT "$T/cpid7")".Trim()
+    Check 'statusline: under claude, the numbers kept for that process' { "$o".Trim() -eq 'Opus 5.5 · context 35%（139k / 400k）' -and (Test-Path "$H/.config/agentkit/ctx/claude-$cp7.json") }
+}
+# Claude: a reply Claude Code made itself ("<synthetic>") does not count; past the window -> 100 %
+$PC = Join-Path $T 'ctxclaude'; [void](New-Item -ItemType Directory -Force -Path $PC); $PC = (Resolve-Path $PC).ProviderPath
+$CD = Join-Path (Join-Path $H '.claude/projects') ($PC -replace '[^A-Za-z0-9]', '-')
+W "$CD/t.jsonl" ("{`"type`":`"assistant`",`"message`":{`"model`":`"claude-sonnet-4-5`",`"usage`":{`"input_tokens`":250000}}}`n" +
+    "{`"type`":`"assistant`",`"message`":{`"model`":`"<synthetic>`",`"usage`":{`"input_tokens`":0,`"output_tokens`":0}}}`n")
+Kit context --pid 1 --tool claude --dir $PC
+Check 'context (claude): not a <synthetic> reply; past the window -> 100 %' { $out.Trim() -eq '{"tool": "claude", "used": 250000, "window": 200000, "pct": 100, "source": "transcript", "model": "claude-sonnet-4-5"}' }
+# a long log is read from its end; nothing there -> all of it, the same answer
+Add-Content -LiteralPath "$CD/t.jsonl" -Encoding UTF8 -NoNewline -Value ("{`"type`":`"user`",`"message`":{`"content`":`"$('0' * 400)`"}}`n")
+Add-Content -LiteralPath $RO -Encoding UTF8 -NoNewline -Value ("{`"type`":`"event_msg`",`"payload`":{`"type`":`"agent_message`",`"message`":`"$('0' * 400)`"}}`n")
+Add-Content -LiteralPath "$H/.omp/agent/sessions/x/s1.jsonl" -Encoding UTF8 -NoNewline -Value ("{`"type`":`"note`",`"text`":`"$('0' * 400)`"}`n")
+$same = $true
+foreach ($a in @(@('claude', $PC), @('codex', $P7), @('omp', $P7))) {
+    Kit context --pid 1 --tool $a[0] --dir $a[1]; $whole = $out
+    $env:KIT_CTX_TAIL = '100'; Kit context --pid 1 --tool $a[0] --dir $a[1]; Remove-Item env:KIT_CTX_TAIL
+    if ($out -ne $whole -or $whole -notmatch '"used": [0-9]') { $same = $false; [Console]::WriteLine("  differs: $($a[0]): $whole / $out") }
+}
+Check 'context: a long log is read from its end; nothing there -> all of it, the same answer' { $same }
+Kit context --pid
+Check 'context: --pid with nothing after it -> how to use it' { $rc -eq 1 -and $out.Contains('用法：kit context') }
+if (-not $OnWindows) {
+    $same = $true
+    foreach ($a in @("--pid 1 --tool codex --dir '$P7'", "--pid 1 --tool omp --dir '$P7'", "--pid 1 --tool claude --dir '$PC'")) {
+        $u = (& /bin/sh -c "cd '$Repo' && HOME='$H' unix/kit context $a 2>&1") -join "`n"
+        $u2 = (& /bin/sh -c "cd '$Repo' && HOME='$H' KIT_CTX_TAIL=100 unix/kit context $a 2>&1") -join "`n"
+        Invoke-Expression "Kit context $a"
+        if ($u -cne $out -or $u2 -cne $out) { $same = $false; [Console]::WriteLine("  differs: $a") }
+    }
+    Check 'context: unix/kit says the same' { $same }
+}
+# Claude's statusLine: kit's when there is none; taken out by you, it stays out (said once); kit sync --force puts it back
+Set-Home (Join-Path $T 'home7b')
+Kit init $TEAM
+Check 'sync: kit''s statusLine in settings.json' { (JGet "$H/.claude/settings.json" 'statusLine.command') -match 'statusline' }
+W "$T/del7.ops" "del`tstatusLine`n"
+$sj = ReadT "$H/.claude/settings.json"; $sj2 = [regex]::Replace($sj, ',?\s*"statusLine": \{[^}]*\}', ''); W "$H/.claude/settings.json" $sj2
+Kit sync
+Check 'statusLine taken out by you: not put back, kit says so and how to get it back' { $null -eq (JGet "$H/.claude/settings.json" 'statusLine') -and $out.Contains('kit sync --force') }
+Kit sync
+Check 'statusLine taken out by you: said once, still out' { -not $out.Contains('statusLine') -and $null -eq (JGet "$H/.claude/settings.json" 'statusLine') }
+Kit sync --force
+Check 'kit sync --force: kit''s statusLine back' { (JGet "$H/.claude/settings.json" 'statusLine.command') -match 'statusline' }
+Kit uninstall
 
 # ---------- collect / outdated (other people's skills; a local repo plays the author) ----------
 function FileUrl([string]$p) { $p = $p.Replace('\', '/'); if ($p.StartsWith('/')) { "file://$p" } else { "file:///$p" } }

@@ -469,12 +469,18 @@ function Text-Hash([string]$s) {
     $sha = [Security.Cryptography.SHA256]::Create()
     ([BitConverter]::ToString($sha.ComputeHash($Utf8.GetBytes($s)))).Replace('-', '').Substring(0, 16)
 }
-function Dir-Hash([string]$dir) { # content hash of a directory
+function Dir-Hash([string]$dir) { # content hash of a directory: its files, not what links (junctions) point at
+    # (like find -type f; PowerShell 5.1 -Recurse goes into junctions: node_modules / .venv would count as hand edits)
     $base = (Resolve-Path -LiteralPath $dir).ProviderPath.TrimEnd('\', '/')
     $sha = [Security.Cryptography.SHA256]::Create()
-    $lines = foreach ($f in (Get-ChildItem -LiteralPath $base -Recurse -File -Force | Where-Object { $_.Name -ne '.DS_Store' })) {
-        $rel = $f.FullName.Substring($base.Length + 1).Replace('\', '/')
-        $rel + ' ' + [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($f.FullName)))
+    $stack = New-Object System.Collections.Stack; $stack.Push($base)
+    $lines = while ($stack.Count -gt 0) {
+        foreach ($e in @(Get-ChildItem -LiteralPath $stack.Pop() -Force)) {
+            if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            if ($e.PSIsContainer) { $stack.Push($e.FullName); continue }
+            if ($e.Name -eq '.DS_Store') { continue }
+            $e.FullName.Substring($base.Length + 1).Replace('\', '/') + ' ' + [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($e.FullName)))
+        }
     }
     $sorted = [string[]]@($lines); [Array]::Sort($sorted, [StringComparer]::Ordinal)
     Text-Hash ($sorted -join "`n")
@@ -727,10 +733,16 @@ function Rules-Body($names, [string]$mode) { # text for the instructions file
         if ($mode -eq 'import') { [void]$sb.Append('@' + $p.Replace('\', '/').Replace(' ', '\ ') + "`n") }
         else { $t = Read-Text $p; [void]$sb.Append("<!-- rule: $n -->`n").Append($t); if (-not $t.EndsWith("`n")) { [void]$sb.Append("`n") } }
     }
-    [void]$sb.Append((Py-Hint))
     $sb.ToString()
 }
-function Set-Rules([string]$f, $names, [string]$mode) { [void](Replace-Block $f $BeginMark $EndMark (Rules-Body $names $mode)) }
+function Set-Rules([string]$f, $names, [string]$mode, [string]$more = '') { [void](Replace-Block $f $BeginMark $EndMark ((Rules-Body $names $mode) + $more)) }   # MORE: text after the rules
+function Apply-Rules($want) { # the account's instructions (Claude, Codex, omp): the rules, and the python line when one of
+    # the skills has kit's venv (a folder's own instructions never get it: kit only adds what it was asked to)
+    $rules = Of-Kind $want 'rule'; $hint = Py-Hint (Of-Kind $want 'skill')
+    Set-Rules (Join-Path $ClaudeDir 'CLAUDE.md') $rules 'import' $hint
+    if (Has-Codex) { Set-Rules (Join-Path $CodexDir 'AGENTS.md') $rules 'inline' $hint }
+    if (Has-Omp) { Set-Rules (Join-Path $OmpDir 'AGENTS.md') $rules 'inline' $hint }
+}
 
 function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills into DIR
     $names = @($names | Where-Object { $_ })
@@ -805,21 +817,19 @@ function Apply-All {
     $want = Wanted
     $rules = Of-Kind $want 'rule'; $skills = Of-Kind $want 'skill'; $mcps = Of-Kind $want 'mcp'
 
-    # Claude: rules as @imports, skills, MCP in ~/.claude.json
-    Set-Rules (Join-Path $ClaudeDir 'CLAUDE.md') $rules 'import'
+    # Claude: rules as @imports (Codex and omp: AGENTS.md gets the rule text itself), skills, MCP in ~/.claude.json
+    Apply-Rules $want
     Sync-Skills (Join-Path $ClaudeDir 'skills') 'skill' $skills
     Sync-McpJson $ClaudeJson 'mcp' $mcps
 
-    # Codex and omp share ~/.agents/skills; their AGENTS.md get the rule text itself
+    # Codex and omp share ~/.agents/skills
     $codex = Has-Codex; $omp = Has-Omp
     if ($codex -or $omp) { Sync-Skills $AgentsSkills 'skill.agents' $skills }
     if ($codex) {
-        Set-Rules (Join-Path $CodexDir 'AGENTS.md') $rules 'inline'
         [void](Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd ((Codex-Mcp-Toml $mcps) + (Codex-Trust)))
         [void](Replace-TopBlock (Join-Path $CodexDir 'config.toml') $TopBegin $TopEnd (Codex-Top))
     }
     if ($omp) {
-        Set-Rules (Join-Path $OmpDir 'AGENTS.md') $rules 'inline'
         Sync-McpJson (Join-Path $OmpDir 'mcp.json') 'mcp.omp' $mcps
     }
 
@@ -841,18 +851,23 @@ function Apply-All {
         $ops.Add(@('addjson', 'hooks.SessionStart', $hj))
     }
     # Claude's status line: kit statusline keeps the numbers kit context shows (only when there is no status line of
-    # your own; kit's is replaced when its command changes)
+    # your own; kit's is replaced when its command changes). Taken out by you: kit leaves it out (kit sync --force
+    # puts it back).
     $sj = Statusline-Json; $sold = State-Get 'statusline' 'claude'; $snew = $false
     $sf = Join-Path $ClaudeDir 'settings.json'
     $scur = if (Test-Path -LiteralPath $sf) { Flat-Json (Json-Get $sf 'statusLine') } else { '' }
-    if (-not $scur -or ($sold -and $scur -eq (Flat-Json $sold))) {
+    if (-not $scur -and $sold -and -not $script:Force) {
+        State-Del 'statusline' 'claude'; State-Set 'told' 'statusline-removed' 1
+        Warn '你拿掉了 kit 放的 statusLine：kit 不會再加回來，Herdr 上 Claude 的 context 用量改從對話紀錄估（要加回來：kit sync --force）'
+    } elseif (-not $scur -and $null -ne (State-Get 'told' 'statusline-removed') -and -not $script:Force) {
+    } elseif (-not $scur -or ($sold -and $scur -eq (Flat-Json $sold))) {
         if (-not $scur -or $sj -ne $sold) { $ops.Add(@('set', 'statusLine', $sj)); $snew = $true }
     } elseif ($null -eq (State-Get 'told' 'statusline')) {
         Warn 'Claude 已經有自己的 statusLine：kit 不動它，Herdr 上 Claude 的 context 用量改從對話紀錄估（只提醒這一次）'; State-Set 'told' 'statusline' 1
     }
     if ($ops.Count -gt 0) {
         Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny
-        if ($snew) { State-Set 'statusline' 'claude' $sj }
+        if ($snew) { State-Set 'statusline' 'claude' $sj; State-Del 'told' 'statusline-removed' }
         foreach ($n in $add) { State-Set 'deny' $n 1 }
         foreach ($n in $del) { State-Del 'deny' $n }
         if ($hj -ne $old) { State-Set 'hook' 'SessionStart' $hj }
@@ -1041,16 +1056,35 @@ function Dir-AddRm([string]$verb, [string]$dir, [string]$k, [string]$n) { # only
 }
 
 # ---------- the programs a skill needs (node, python, ...) and how to install them ----------
-# A recipe is tools/<name>.yaml in a source (it wins) or kit's own tools/. It names the program (bin) and, per system,
-# "manager package" pairs; kit uses the first this machine can. The command itself is always kit's own: a recipe
-# can only pick a manager kit knows (brew, apt as root, winget, scoop, pip) and a package name.
+# A recipe is kit's own tools/<name>.yaml (node, python, git: a source cannot replace these) or tools/<name>.yaml in a
+# source, for other programs. It names the program (bin) and, per system, "manager package" pairs; kit tries them in
+# order, the ones this machine can use. The command itself is always kit's own: a recipe can only pick a manager kit
+# knows (brew, apt as root, winget, scoop, pip) and a plain package name (no path, file, tap, URL or option).
+# Only programs with a recipe are looked at (their --version run, at most 4 KB of it, for a few seconds).
 function Tool-Os { if ($OnWindows) { 'windows' } elseif ((Test-Path variable:IsMacOS) -and $IsMacOS) { 'mac' } else { 'linux' } }
 function Tool-OkName([string]$n) { $n -cmatch '^[a-z0-9][a-z0-9-]*$' }
-function Pkg-Ok([string]$p) { $p -cmatch '^[A-Za-z0-9@._+/][A-Za-z0-9@._+/-]*$' }
-function Tool-File([string]$n) { # its recipe: a source's tools/NAME.yaml first, else kit's own
+function Bin-Ok([string]$b) { $b -cmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*$' }   # a program name, never a path
+function Pkg-Ok([string]$m, [string]$p) { # a plain package name for that manager
+    # (brew: no tap/formula path, so node@20 but not user/tap/node; scoop: name or main|extras|versions/name)
+    if ($m -eq 'scoop' -and $p -cmatch '^(main|extras|versions)/') { $p = $p.Substring($p.IndexOf('/') + 1) }
+    if ($m -eq 'brew') { return $p -cmatch '^[A-Za-z0-9][A-Za-z0-9@._+-]*$' }
+    $p -cmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*$'
+}
+$script:Clt = $null
+function Clt-Stub([string]$p) { # a Mac without the Command Line Tools, where /usr/bin/git and python3 only open an install window
+    if ((Tool-Os) -ne 'mac' -or ($p -cne '/usr/bin/git' -and $p -cne '/usr/bin/python3')) { return $false }
+    if ($null -eq $script:Clt) { $script:Clt = $false; try { [void](& xcode-select -p 2>$null); $script:Clt = ($LASTEXITCODE -eq 0) } catch { } }
+    -not $script:Clt
+}
+function Prog-Path([string]$name) { # the program NAME on PATH (not the Windows Store stub, not the Mac's install stub)
+    $c = @(Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch 'WindowsApps' })
+    if ($c.Count -eq 0 -or (Clt-Stub $c[0].Source)) { return $null }
+    $c[0].Source
+}
+function Tool-File([string]$n) { # its recipe: kit's own first, else a source's tools/NAME.yaml
     if (-not (Tool-OkName $n)) { return $null }
-    if (Test-Path -LiteralPath $Machine) { foreach ($d in Src-Dirs) { $f = Join-Path (Join-Path $d 'tools') "$n.yaml"; if (Test-Path -LiteralPath $f -PathType Leaf) { return $f } } }
     foreach ($d in @((Join-Path $KitLib 'tools'), (Join-Path (Split-Path -Parent $KitLib) 'tools'))) { $f = Join-Path $d "$n.yaml"; if (Test-Path -LiteralPath $f -PathType Leaf) { return $f } }
+    if (Test-Path -LiteralPath $Machine) { foreach ($d in Src-Dirs) { $f = Join-Path (Join-Path $d 'tools') "$n.yaml"; if (Test-Path -LiteralPath $f -PathType Leaf) { return $f } } }
     $null
 }
 function Tool-Names { # every program kit has a recipe for
@@ -1064,14 +1098,32 @@ function Tool-Names { # every program kit has a recipe for
     @(Uniq $all | Where-Object { Tool-OkName $_ })
 }
 function Tool-Title([string]$n) { $f = Tool-File $n; if ($f) { $t = @(YGet $f 'title'); if ($t.Count -gt 0 -and $t[0]) { return [string]$t[0] } }; $n }
-function Tool-Have([string]$n) { # the version this machine has ('' when not there)
-    $f = Tool-File $n; $bins = @(); if ($f) { $bins = @(YGet $f 'bin') }; if ($bins.Count -eq 0) { $bins = @($n) }
+function Tool-Version([string]$exe) { # what EXE --version says: at most 4 KB, given up after KIT_PROBE_WAIT seconds
+    $ms = 5000; if ("$env:KIT_PROBE_WAIT" -match '^[0-9]+$') { $ms = 1000 * [int]$env:KIT_PROBE_WAIT }
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe; $psi.Arguments = '--version'; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.RedirectStandardInput = $true
+    try { $p = [Diagnostics.Process]::Start($psi) } catch { return '' }
+    try {
+        $p.StandardInput.Close()
+        $bo = New-Object char[] 4096; $be = New-Object char[] 4096
+        $to = $p.StandardOutput.ReadBlockAsync($bo, 0, 4096); $te = $p.StandardError.ReadBlockAsync($be, 0, 4096)
+        [void]$to.Wait($ms)
+        if (-not $p.HasExited) { try { $p.Kill($true) } catch { try { $p.Kill() } catch { } } }   # it waits, or never stops talking (like yes); with what it started (PowerShell 7)
+        [void]$to.Wait(1000); [void]$te.Wait(1000)
+        $out = ''
+        if ($to.IsCompleted -and -not $to.IsFaulted) { $out += [string]::new($bo, 0, $to.Result) }
+        if ($te.IsCompleted -and -not $te.IsFaulted) { $out += [string]::new($be, 0, $te.Result) }
+        $out
+    } catch { '' } finally { $p.Dispose() }
+}
+function Tool-Have([string]$n) { # the version this machine has ('' when not there, or kit has no recipe for N)
+    $f = Tool-File $n; if (-not $f) { return '' }
+    $bins = @(YGet $f 'bin'); if ($bins.Count -eq 0) { $bins = @($n) }
     foreach ($b in $bins) {
-        if (-not (Pkg-Ok $b) -or $b.Contains('/')) { continue }                    # a program name, never a path
-        $c = @(Get-Command $b -CommandType Application -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch 'WindowsApps' })   # not the Store stub
-        if ($c.Count -eq 0) { continue }
-        try { $o = "$(& $c[0].Source --version 2>&1)" } catch { continue }
-        $m = [regex]::Match($o, '[0-9]+(\.[0-9]+)+'); if ($m.Success) { return $m.Value }
+        if (-not (Bin-Ok $b)) { continue }
+        $p = Prog-Path $b; if (-not $p) { continue }
+        $m = [regex]::Match((Tool-Version $p), '[0-9]+(\.[0-9]+)+'); if ($m.Success) { return $m.Value }
     }
     ''
 }
@@ -1083,43 +1135,52 @@ function Ver-Ge([string]$a, [string]$b) { # A is B or newer (numbers compared pa
     }
     $true
 }
-function Tool-Pick([string]$n) { # @(manager, package): the first in the recipe this machine can use; $null when none
-    $f = Tool-File $n; if (-not $f) { return $null }
-    foreach ($l in @(YGet $f "install.$(Tool-Os)")) {
-        $w = @("$l".Trim() -split '\s+'); if ($w.Count -ne 2 -or -not (Pkg-Ok $w[1])) { continue }
+function Tool-Picks([string]$n) { # @(manager, package) pairs: the ones in the recipe this machine can use, in order
+    $f = Tool-File $n; if (-not $f) { return @() }
+    @(foreach ($l in @(YGet $f "install.$(Tool-Os)")) {
+        $w = @("$l".Trim() -split '\s+'); if ($w.Count -ne 2 -or -not (Pkg-Ok $w[0] $w[1])) { continue }
         $ok = switch ($w[0]) {
             { $_ -in 'brew', 'scoop', 'winget' } { Has-Command $w[0]; break }
             'apt' { (-not $OnWindows) -and (Has-Command 'apt-get') -and "$(& id -u 2>$null)".Trim() -eq '0'; break }
-            'pip' { (Has-Command 'python3') -or (Has-Command 'python'); break }
+            'pip' { [bool](Py-Path); break }
             default { $false }
         }
-        if ($ok) { return , $w }
-    }
-    $null
+        if ($ok) { , $w }
+    })
 }
-function Tool-Argv([string]$mode, [string]$m, [string]$pkg) { # install|upgrade: the command (kit's own, never the recipe's)
+function Tool-Argv([string]$mode, [string]$m, [string]$pkg) { # install|upgrade|machine: the command (kit's own, never the recipe's)
+    # (machine: winget again without --scope user, for a package that only has an installer for the whole machine)
     $up = ($mode -eq 'upgrade')
     switch ($m) {
         'brew' { , @('brew', $(if ($up) { 'upgrade' } else { 'install' }), $pkg) }
         'apt' { , @('apt-get', 'install', '-y', $pkg) }                       # installs or upgrades
-        'pip' { $py = if (Has-Command 'python3') { 'python3' } else { 'python' }; , @(@($py, '-m', 'pip', 'install', '--user') + @(if ($up) { '--upgrade' }) + @($pkg)) }
-        'winget' { if ($up) { , @('winget', 'upgrade', '--id', $pkg, '-e', '--accept-source-agreements', '--accept-package-agreements') } else { , @('winget', 'install', '--id', $pkg, '-e', '--scope', 'user', '--accept-source-agreements', '--accept-package-agreements') } }
+        'pip' { $py = if ($OnWindows) { 'python' } else { 'python3' }; , @(@($py, '-m', 'pip', 'install', '--user', '--only-binary=:all:') + @(if ($up) { '--upgrade' }) + @($pkg)) }   # wheels only: no setup.py runs
+        'winget' {
+            if ($up) { , @('winget', 'upgrade', '--id', $pkg, '-e', '--accept-source-agreements', '--accept-package-agreements') }
+            elseif ($mode -eq 'machine') { , @('winget', 'install', '--id', $pkg, '-e', '--accept-source-agreements', '--accept-package-agreements') }
+            else { , @('winget', 'install', '--id', $pkg, '-e', '--scope', 'user', '--accept-source-agreements', '--accept-package-agreements') }
+        }
         'scoop' { , @('scoop', $(if ($up) { 'update' } else { 'install' }), $pkg) }
     }
 }
-function Tool-Cmd([string]$n, [string]$mode = 'install') { $mp = Tool-Pick $n; if (-not $mp) { return '' }; (Tool-Argv $mode $mp[0] $mp[1]) -join ' ' }
+function Tool-Cmd([string]$n, [string]$mode = 'install') { $mp = @(Tool-Picks $n); if ($mp.Count -eq 0) { return '' }; (Tool-Argv $mode $mp[0][0] $mp[0][1]) -join ' ' }
 function Skill-Needs([string]$d, [string]$src = '') { # @(name, min) per program the skill needs (min may be '')
     # written: SKILL.md "requires: [node>=18, python]", or the source's kit.yaml "requires: {<skill>: [...]}"
     # seen: what SKILL.md tells the agent to run (node x.mjs, npx, python3 x.py, pip install ...), requirements.txt /
     # pyproject.toml; package.json's engines.node gives the lowest Node (files alone say nothing: often only for the author)
+    # (the same order and the same line-by-line, case-sensitive look as unix/kit)
     $sk = Join-Path $d 'SKILL.md'; $raw = New-Object System.Collections.Generic.List[string]; $low = @{}
-    if (Test-Path -LiteralPath $sk -PathType Leaf) {
-        try { foreach ($v in @(YGet-From (Yaml-Lines $sk -Frontmatter) 'requires')) { $raw.Add([string]$v) } } catch { }
-        $t = Read-Text $sk
-        if ($t -match '(^|[^A-Za-z0-9_-])(node\s+(-[A-Za-z-]+\s+)*[./A-Za-z0-9_-]+\.(mjs|cjs|js)([^A-Za-z0-9]|$)|npx\s+[A-Za-z@]|npm\s+(run|install|ci|exec)([^A-Za-z]|$))') { $raw.Add('node') }
-        if ($t -match '(^|[^A-Za-z0-9_-])(python3?\s+(-m\s+[A-Za-z]|[./A-Za-z0-9_-]+\.py([^A-Za-z0-9]|$))|pip3?\s+install|uv\s+run)') { $raw.Add('python') }
-    }
+    $has = Test-Path -LiteralPath $sk -PathType Leaf
+    if ($has) { try { foreach ($v in @(YGet-From (Yaml-Lines $sk -Frontmatter) 'requires')) { $raw.Add([string]$v) } } catch { } }
     if ($src) { foreach ($v in @(YGet (Join-Path $src 'kit.yaml') "requires.$(Split-Path -Leaf $d)")) { $raw.Add([string]$v) } }
+    if ($has) {
+        $node = $false; $py = $false
+        foreach ($l in (Read-Text $sk) -split "`n") {
+            if (-not $node -and $l -cmatch '(^|[^A-Za-z0-9_-])(node[ \t]+(-[A-Za-z-]+[ \t]+)*[./A-Za-z0-9_-]+\.(mjs|cjs|js)([^A-Za-z0-9]|$)|npx[ \t]+[A-Za-z@]|npm[ \t]+(run|install|ci|exec)([^A-Za-z]|$))') { $node = $true }
+            if (-not $py -and $l -cmatch '(^|[^A-Za-z0-9_-])(python3?[ \t]+(-m[ \t]+[A-Za-z]|[./A-Za-z0-9_-]+\.py([^A-Za-z0-9]|$))|pip3?[ \t]+install|uv[ \t]+run)') { $py = $true }
+        }
+        if ($node) { $raw.Add('node') }; if ($py) { $raw.Add('python') }
+    }
     $pj = Join-Path $d 'package.json'
     if (Test-Path -LiteralPath $pj -PathType Leaf) { $e = Json-Get $pj 'engines.node'; if ($e) { $m = [regex]::Match($e, '[0-9]+(\.[0-9]+)*'); if ($m.Success) { $low['node'] = $m.Value } } }
     if ((Test-Path -LiteralPath (Join-Path $d 'requirements.txt')) -or (Test-Path -LiteralPath (Join-Path $d 'pyproject.toml'))) { $raw.Add('python') }
@@ -1132,14 +1193,24 @@ function Skill-Needs([string]$d, [string]$src = '') { # @(name, min) per program
     }
     @(foreach ($n in $ord) { $m = $min[$n]; if ($low.ContainsKey($n) -and (-not $m -or ((Ver-Ge $low[$n] $m) -and $low[$n] -ne $m))) { $m = $low[$n] }; , @($n, $m) })
 }
-$script:ToolHave = @{}
+$script:ToolCache = $null
+function Tool-Cache { # every program kit has a recipe for: its title, what this machine has, kit's install / upgrade commands (once a run)
+    if ($null -ne $script:ToolCache) { return }
+    $script:ToolCache = @{}
+    foreach ($n in Tool-Names) {
+        $mp = @(Tool-Picks $n); $c = @{ have = (Tool-Have $n); title = (Tool-Title $n); install = ''; upgrade = '' }
+        if ($mp.Count -gt 0) { $c.install = (Tool-Argv 'install' $mp[0][0] $mp[0][1]) -join ' '; $c.upgrade = (Tool-Argv 'upgrade' $mp[0][0] $mp[0][1]) -join ' ' }
+        $script:ToolCache[$n] = $c
+    }
+}
 function Needs-Json([string]$d, [string]$src) { # [{"tool", "title", "min", "have", "ok", "install"}]
+    Tool-Cache
     $parts = @(foreach ($x in @(Skill-Needs $d $src)) {
-        $n = $x[0]; $m = $x[1]
-        if (-not $script:ToolHave.ContainsKey($n)) { $script:ToolHave[$n] = Tool-Have $n }   # one look per program per run
-        $h = $script:ToolHave[$n]
+        $n = $x[0]; $m = $x[1]; $c = $script:ToolCache[$n]                  # no recipe: not looked at
+        $h = if ($c) { $c.have } else { '' }; $t = if ($c) { $c.title } else { $n }
         $ok = [bool]$h -and (-not $m -or (Ver-Ge $h $m))
-        "{`"tool`": $(Json-S $n), `"title`": $(Json-S (Tool-Title $n)), `"min`": $(Json-S $m), `"have`": $(Json-S $h), `"ok`": $(if ($ok) { 'true' } else { 'false' }), `"install`": $(Json-S $(if ($ok) { '' } elseif ($h) { Tool-Cmd $n 'upgrade' } else { Tool-Cmd $n 'install' }))}"
+        $i = if ($ok -or -not $c) { '' } elseif ($h) { $c.upgrade } else { $c.install }
+        "{`"tool`": $(Json-S $n), `"title`": $(Json-S $t), `"min`": $(Json-S $m), `"have`": $(Json-S $h), `"ok`": $(if ($ok) { 'true' } else { 'false' }), `"install`": $(Json-S $i)}"
     })
     '[' + ($parts -join ', ') + ']'
 }
@@ -1161,13 +1232,24 @@ function Cmd-InstallTool($rest) { # kit install-tool <name> : install a program 
     $f = Tool-File $n; if (-not $f) { Die "kit 不知道怎麼裝 ${n}（打 kit tools 看有哪些；要加就在來源倉放 tools/${n}.yaml）" }
     $h = Tool-Have $n
     if ($h) { if (-not $min -or (Ver-Ge $h $min)) { Say "kit：這台已經有 $(Tool-Title $n) $h"; return }; $mode = 'upgrade' }
-    $mp = Tool-Pick $n; if (-not $mp) { Die "這台沒有可以用的安裝方式：請自己裝 $(Tool-Title $n)$(if ($min) { " $min 以上" })（$(Tool-Os) 的裝法寫在 $f）" }
-    $argv = [string[]](Tool-Argv $mode $mp[0] $mp[1])
-    Say "kit：執行 $($argv -join ' ')"
-    if ($env:KIT_DRY_RUN) { return }
-    $rest2 = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] })
-    & $argv[0] @rest2
-    if ($LASTEXITCODE -ne 0) { Die "安裝失敗（上面是 $($argv[0]) 說的原因）" }
+    $picks = @(Tool-Picks $n); if ($picks.Count -eq 0) { Die "這台沒有可以用的安裝方式：請自己裝 $(Tool-Title $n)$(if ($min) { " $min 以上" })（$(Tool-Os) 的裝法寫在 $f）" }
+    # each way in the recipe in turn, until one works
+    $ok = $false; $last = ''
+    foreach ($mp in $picks) {
+        $tries = @(, [string[]](Tool-Argv $mode $mp[0] $mp[1]))
+        if ($mp[0] -eq 'winget' -and $mode -eq 'install') { $tries += , [string[]](Tool-Argv 'machine' $mp[0] $mp[1]) }
+        for ($t = 0; $t -lt $tries.Count; $t++) {
+            $argv = $tries[$t]
+            if ($t -eq 0) { Say "kit：執行 $($argv -join ' ')" } else { Say "kit：winget 沒有只裝給這個帳號的版本，改成一般安裝：$($argv -join ' ')" }
+            if ($env:KIT_DRY_RUN) { return }
+            $rest2 = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] })
+            $rc = 1; try { & $argv[0] @rest2; $rc = $LASTEXITCODE } catch { Warn $_.Exception.Message }
+            if ($rc -eq 0) { $ok = $true; break }
+        }
+        if ($ok) { break }
+        $last = $mp[0]; Warn "用 $($mp[0]) 裝失敗（上面是它說的原因）"
+    }
+    if (-not $ok) { Die "安裝失敗：$(Tool-Title $n) 的每一種裝法都沒有成功（最後是 ${last}）" }
     # a new program may be on a PATH this process has not seen yet: read the user's and the machine's again
     if ($OnWindows) { $env:PATH = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User') }
     $h = Tool-Have $n
@@ -1178,10 +1260,12 @@ function Cmd-InstallTool($rest) { # kit install-tool <name> : install a program 
 
 # ---------- a skill's own packages (npm, pip) ----------
 # The same as unix/kit: installed only when asked (kit install-deps, the panel's 安裝), in kit's own folders, never in
-# the source. npm: $KitConf/deps/<skill>/node_modules, --ignore-scripts, without the skill's .npmrc. pip:
-# $KitConf/pydeps/<skill>/venv, --only-binary=:all: (nothing is built, no setup.py runs), requirements.txt with only
-# package names and versions. Each copy of the skill gets node_modules / .venv as a link (on Windows a junction: no
-# admin needed); the instructions block tells agents to run the skill's .py with that .venv's python.
+# the source. npm: $KitConf/deps/<skill>/node_modules, --ignore-scripts --omit=dev, without the skill's .npmrc;
+# package.json may only ask for versions from the registry (no git, URL, file, link, workspace), and a lock must point
+# every package at a registry tarball with its integrity. pip: $KitConf/pydeps/<skill>/venv, --only-binary=:all:
+# (nothing is built, no setup.py runs), requirements.txt with only package names and versions. Each copy of the skill
+# gets node_modules / .venv as a link (on Windows a junction: no admin needed); the account's instructions block tells
+# agents to run the skill's .py with that .venv's python.
 function Deps-Store([string]$n) { Join-Path (Join-Path $KitConf 'deps') $n }
 function PyDeps-Store([string]$n) { Join-Path (Join-Path $KitConf 'pydeps') $n }
 $script:PipArgs = @('-m', 'pip', 'install', '--only-binary=:all:', '--no-input', '--disable-pip-version-check', '-r', 'requirements.txt')
@@ -1201,13 +1285,110 @@ function PyPkgs-Need([string]$d) { # a requirements.txt naming something (and no
     @((Read-Text $rq) -split "`n" | Where-Object { $_ -notmatch '^\s*(#.*)?$' }).Count -gt 0
 }
 function Py-ReqsBad([string]$f) { # the first line that is not a plain requirement (name[extras] versions ; markers)
+    # markers only with marker characters, and no option anywhere (pip takes "--no-binary" and such on a line too)
     $v = '(===|==|>=|<=|~=|!=|<|>)[ \t]*[A-Za-z0-9.*+!_-]+'
-    $re = '^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?[ \t]*(\[[A-Za-z0-9._, -]*\])?[ \t]*(' + $v + '([ \t]*,[ \t]*' + $v + ')*)?[ \t]*(;[^#]*)?$'
+    $re = '^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?[ \t]*(\[[A-Za-z0-9._, -]*\])?[ \t]*(' + $v + '([ \t]*,[ \t]*' + $v + ')*)?[ \t]*(;[A-Za-z0-9_.<>=!~"() \t'']*)?\z'
     $ls = (Read-Text $f) -split "`n"; if ($ls.Count -gt 0 -and $ls[-1] -eq '') { $ls = @($ls[0..($ls.Count - 2)]) }
     for ($i = 0; $i -lt $ls.Count; $i++) {
         $l = $ls[$i].TrimEnd("`r") -replace '(^|[ \t])#.*$', ''; $l = $l.Trim(" `t")
         if ($l -eq '') { continue }
-        if ($l -cnotmatch $re) { return "$($i + 1): $($ls[$i].TrimEnd("`r"))" }
+        if ($l -cmatch '(^|[ \t])-' -or $l -cnotmatch $re) { return "$($i + 1): $($ls[$i].TrimEnd("`r"))" }
+    }
+    ''
+}
+function Json-Leaves($n, [string[]]$path, $out) { # like json.awk -v leaves=1: @(keys..., raw text) per value, and per empty {} / []
+    if ($n.t -eq 'v' -or $n.v.Count -eq 0) {
+        $raw = if ($n.t -eq 'v') { $n.raw } elseif ($n.t -eq 'o') { '{}' } else { '[]' }
+        if ($path.Count -eq 0) { $path = @('') }
+        $out.Add([string[]]@($path + $raw)); return
+    }
+    for ($i = 0; $i -lt $n.v.Count; $i++) {
+        $k = if ($n.t -eq 'o') { $n.k[$i].Substring(1, $n.k[$i].Length - 2) } else { [string]($i + 1) }
+        Json-Leaves $n.v[$i] ([string[]]@($path + $k)) $out
+    }
+}
+function Json-LeavesOf([string]$f) { # $null when the file is not JSON
+    $out = New-Object System.Collections.Generic.List[object]
+    try { Json-Leaves (Json-Parse (Read-Text $f)) @() $out } catch { return $null }
+    , $out
+}
+function Npm-Registry { # the registry in your own ~/.npmrc (an https URL, ending in /), if you set one
+    $f = Join-Path $UserHome '.npmrc'; $r = ''
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return '' }
+    foreach ($l in (Read-Text $f) -split "`n") {
+        $l = $l.TrimEnd("`r")
+        if ($l -cmatch '^[ \t]*registry[ \t]*=') { $r = ($l -replace '^[^=]*=[ \t]*', '') -replace '[ \t]+$', '' }
+    }
+    if ($r -cnotmatch '^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~%/-]*)?\z') { return '' }
+    if (-not $r.EndsWith('/')) { $r += '/' }
+    $r
+}
+function Npm-Unq([string]$v) { if ($v -cmatch '^".*"\z') { $v.Substring(1, $v.Length - 2) } else { $v } }
+function Npm-SpecOk([string]$v) { # a version, range or dist-tag from the registry (an alias npm:name@version too)
+    if ($v -cnotmatch '^".*"\z') { return $false }
+    $s = Npm-Unq $v
+    if ($s.StartsWith('npm:', [StringComparison]::Ordinal)) {
+        $s = $s.Substring(4); $j = if ($s.Length -gt 1) { $s.IndexOf('@', 1) } else { -1 }
+        if ($j -lt 0) { $nm = $s; $s = '' } else { $nm = $s.Substring(0, $j); $s = $s.Substring($j + 1) }
+        if ($nm -cnotmatch '^(@[A-Za-z0-9._~-]+/)?[A-Za-z0-9._~-]+\z' -or $nm -cmatch '^[._]') { return $false }
+    }
+    ($s -cmatch '^[A-Za-z0-9 .*^~<>=|+-]*\z') -and -not $s.StartsWith('.')
+}
+function Npm-TarballOk([string]$v, [string]$reg) {
+    if ($v -cnotmatch '^".*"\z') { return $false }
+    $s = Npm-Unq $v
+    if ($s.StartsWith('https://registry.npmjs.org/', [StringComparison]::Ordinal)) { $s = $s.Substring(27) }
+    elseif ($reg -and $s.StartsWith($reg, [StringComparison]::Ordinal)) { $s = $s.Substring($reg.Length) }
+    else { return $false }
+    ($s -cmatch '^[A-Za-z0-9@._~%+/-]+\.tgz\z') -and $s.Contains('/-/')
+}
+function Npm-Bad([string]$d) { # why kit does not install its npm packages (the first reason; '': fine), the same as unix/kit
+    # dependencies, optionalDependencies, peerDependencies (npm 7+ installs them) and overrides: versions or dist-tags
+    # from the registry only (an alias npm:name@version too); never git, github:, user/repo, a URL, file:, link:,
+    # workspace: or a path
+    $rows = Json-LeavesOf (Join-Path $d 'package.json')
+    if ($null -eq $rows) { return 'package.json: 讀不懂' }
+    foreach ($r in $rows) {
+        $val = $r[-1]
+        if (@('dependencies', 'optionalDependencies', 'peerDependencies') -ccontains $r[0] -and -not ($r.Count -eq 2 -and $val -cmatch '^(\{\}|\[\])\z')) {
+            if ($r.Count -ne 3 -or -not (Npm-SpecOk $val)) { return "package.json: $($r[0]).$($r[1]) = $(Npm-Unq $val)" }
+        }
+        if ($r[0] -ceq 'overrides' -and $r.Count -ge 3 -and -not (Npm-SpecOk $val) -and (Npm-Unq $val) -cnotmatch '^\$[A-Za-z0-9@._/~-]+\z') {
+            return "package.json: $($r[0..($r.Count - 2)] -join '.') = $(Npm-Unq $val)"
+        }
+    }
+    $lock = Join-Path $d 'package-lock.json'
+    if (-not (Test-Path -LiteralPath $lock -PathType Leaf)) { return '' }
+    $rows = Json-LeavesOf $lock
+    if ($null -eq $rows) { return 'package-lock.json: 讀不懂' }
+    # every package (lockfile v2/v3 "packages", or v1 "dependencies"): a tarball on registry.npmjs.org (or your
+    # ~/.npmrc registry), with integrity; never a link; bundled ones come inside their parent's tarball
+    $reg = Npm-Registry; $lab = @{}; $ord = New-Object System.Collections.Generic.List[string]; $f = @{}; $has = $false
+    foreach ($r in $rows) {
+        if ($r[0] -ceq 'packages' -and $r.Count -ge 3) {
+            if ($r[1] -eq '') { continue }
+            $p = "p`t$($r[1])"
+            if (-not $lab.ContainsKey($p)) { $lab[$p] = $r[1]; $ord.Add($p) }
+            if ($r.Count -eq 4) { $f["$p`t$($r[2])"] = $r[3] }
+            $has = $true; continue
+        }
+        if ($r[0] -ceq 'dependencies' -and $r.Count -ge 4) {
+            $l = "node_modules/$($r[1])"; $i = 2
+            while ($i + 2 -lt $r.Count - 1 -and $r[$i] -ceq 'dependencies') { $l += "/node_modules/$($r[$i + 1])"; $i += 2 }
+            $p = "v`t$l"
+            if (-not $lab.ContainsKey($p)) { $lab[$p] = $l; $ord.Add($p) }
+            if ($i -eq $r.Count - 2) { $f["$p`t$($r[$i])"] = $r[-1] }
+        }
+    }
+    foreach ($p in $ord) {
+        $v1 = $p.StartsWith('v')
+        if ($has -eq $v1) { continue }                         # a lock with "packages": only those count
+        $g = { param($k) $x = "$p`t$k"; if ($f.ContainsKey($x)) { [string]$f[$x] } else { '' } }
+        if ((& $g 'link') -ceq 'true') { return "package-lock.json: $($lab[$p]): link" }
+        if ((& $g $(if ($v1) { 'bundled' } else { 'inBundle' })) -ceq 'true') { continue }
+        $rs = & $g 'resolved'
+        if (-not (Npm-TarballOk $rs $reg)) { return "package-lock.json: $($lab[$p]): resolved $(if ($rs -eq '') { '（沒有）' } else { Npm-Unq $rs })" }
+        if ((& $g 'integrity') -cnotmatch '^"sha[0-9]+-') { return "package-lock.json: $($lab[$p]): 沒有 integrity" }
     }
     ''
 }
@@ -1232,15 +1413,15 @@ function PyDeps-Fresh([string]$d, [string]$s) {
 }
 function Pkgs-Cmd([string]$d) { # npm ci with a lock (the exact versions), else npm install
     $sub = if (Test-Path -LiteralPath (Join-Path $d 'package-lock.json') -PathType Leaf) { 'ci' } else { 'install' }
-    [string[]]@('npm', $sub, '--ignore-scripts', '--no-audit', '--no-fund')
+    [string[]]@('npm', $sub, '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund')
 }
 function Npm-Path { # on Windows npm.cmd (npm.ps1 may be blocked by the execution policy)
     $c = if ($OnWindows) { Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue } else { Get-Command 'npm' -CommandType Application -ErrorAction SilentlyContinue }
     if ($c) { @($c)[0].Source } else { $null }
 }
-function Py-Path { # python3 (on Windows python.exe, not the Microsoft Store stub)
-    $name = if ($OnWindows) { 'python.exe' } else { 'python3' }
-    foreach ($c in @(Get-Command $name -CommandType Application -All -ErrorAction SilentlyContinue)) { if ($c.Source -notmatch 'WindowsApps') { return $c.Source } }
+function Py-Path { # python3 (on Windows python.exe, not the Microsoft Store stub; on a Mac not the install stub)
+    if (-not $OnWindows) { return (Prog-Path 'python3') }
+    foreach ($c in @(Get-Command 'python.exe' -CommandType Application -All -ErrorAction SilentlyContinue)) { if ($c.Source -notmatch 'WindowsApps') { return $c.Source } }
     $null
 }
 function Drop-DepsLink([string]$dst) { # take the links out of a skill copy first: removing the copy never goes into kit's store
@@ -1262,13 +1443,13 @@ function Link-Deps([string]$n, [string]$dst) { # the packages kit installed for 
     $s = PyDeps-Store $n
     if ((Test-Path -LiteralPath (Join-Path $dst 'requirements.txt') -PathType Leaf) -and (PyDeps-Fresh $dst $s)) { Link-One (Join-Path $dst '.venv') (Join-Path $s 'venv') }
 }
-function Py-Hint { # the line for the instructions block, once kit has a venv for some skill
-    $root = Join-Path $KitConf 'pydeps'
-    if (-not (Test-Path -LiteralPath $root)) { return '' }
-    foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
-        if (Test-Path -LiteralPath (Join-Path $d.FullName 'venv') -PathType Container) {
-            return '- skill 資料夾裡有 `.venv`（kit 裝的 Python 套件）時，執行那個 skill 的 Python 程式要用它自己的 python：`<skill 資料夾>/.venv/bin/python`（Windows：`<skill 資料夾>\.venv\Scripts\python.exe`），不要另外 pip install。' + "`n"
-        }
+function Py-Hint($skills) { # the line for the instructions block, when kit has a venv for one of these skills
+    foreach ($n in @($skills)) {
+        if (-not $n -or -not (Test-Path -LiteralPath (Join-Path (PyDeps-Store $n) 'venv') -PathType Container)) { continue }
+        $p = Find-Item 'skill' $n; if (-not $p) { continue }
+        $d = Split-Path -Parent $p
+        if (-not (Test-Path -LiteralPath (Join-Path $d 'requirements.txt') -PathType Leaf) -or -not (PyDeps-Fresh $d (PyDeps-Store $n))) { continue }
+        return '- skill 資料夾裡有 `.venv`（kit 裝的 Python 套件）時，執行那個 skill 的 Python 程式要用它自己的 python：`<skill 資料夾>/.venv/bin/python`（Windows：`<skill 資料夾>\.venv\Scripts\python.exe`），不要另外 pip install。' + "`n"
     }
     ''
 }
@@ -1276,10 +1457,11 @@ function Packages-Json([string]$d, [string]$n) { # ', "packages": [...]' when th
     $items = @()
     if (Pkgs-Need $d) {
         $s = Deps-Store $n
-        $ok = if (Deps-Fresh $d $s) { 'true' } else { 'false' }
+        $fresh = Deps-Fresh $d $s; $ok = if ($fresh) { 'true' } else { 'false' }
         $had = if (Test-Path -LiteralPath (Join-Path $s 'node_modules') -PathType Container) { 'true' } else { 'false' }
         $c = if (Npm-Path) { (Pkgs-Cmd $d) -join ' ' } else { '' }
-        $items += '{"kind": "npm", "ok": ' + $ok + ', "had": ' + $had + ', "install": ' + (Json-S $c) + ', "bad": ""}'
+        $bad = if ($fresh) { '' } else { Npm-Bad $d }               # (installed: it was looked at then)
+        $items += '{"kind": "npm", "ok": ' + $ok + ', "had": ' + $had + ', "install": ' + (Json-S $c) + ', "bad": ' + (Json-S $bad) + '}'
     }
     if (PyPkgs-Need $d) {
         $s = PyDeps-Store $n
@@ -1293,26 +1475,47 @@ function Packages-Json([string]$d, [string]$n) { # ', "packages": [...]' when th
     if ($items.Count -eq 0) { return '' }
     ', "packages": [' + ($items -join ', ') + ']'
 }
-function Swap-Store([string]$new, [string]$s) {
-    if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Recurse -Force }
-    Move-Item -LiteralPath $new -Destination $s
+function Remove-Tree([string]$p) { # a folder and what is in it; links (junctions) in it are taken out first, never followed
+    # (PowerShell 5.1's Remove-Item -Recurse goes into a junction and empties what it points at)
+    if (-not (Test-Path -LiteralPath $p)) { return }
+    $i = Get-Item -LiteralPath $p -Force
+    if ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) { if ($i.PSIsContainer) { [IO.Directory]::Delete($p) } else { [IO.File]::Delete($p) }; return }
+    $stack = New-Object System.Collections.Stack; $stack.Push($i.FullName)
+    while ($stack.Count -gt 0) {
+        foreach ($e in @(Get-ChildItem -LiteralPath $stack.Pop() -Force -Directory -ErrorAction SilentlyContinue)) {
+            if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($e.FullName) } else { $stack.Push($e.FullName) }
+        }
+    }
+    Remove-Item -LiteralPath $p -Recurse -Force
 }
+function Remove-Store([string]$p) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force } }   # kit's own: no links in it
 function Install-Npm([string]$d, [string]$s) {
+    $bad = Npm-Bad $d
+    if ($bad) { Die "kit 不裝這些 npm 套件（只能裝 npm registry 上的版本，不能是 git、網址、檔案或連結）：$bad" }
     $npm = Npm-Path; if (-not $npm) { Die '要先有 Node.js（npm）：Kit 清單上按 Node.js 的「安裝」，或打 kit install-tool node' }
     $argv = Pkgs-Cmd $d
     Say "kit：在 $s 執行 $($argv -join ' ')（不跑套件自己的安裝程式）"
     if ($env:KIT_DRY_RUN) { return }
-    $new = "$s.new"
-    if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Recurse -Force }
-    Ensure-Dir (Join-Path $new '.kit-src')
-    $files = @('package.json', 'package-lock.json') | Where-Object { Test-Path -LiteralPath (Join-Path $d $_) -PathType Leaf }
-    foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $d $f) -Destination (Join-Path $new $f) }
-    $a = @($argv[1..($argv.Count - 1)])
-    Push-Location -LiteralPath $new
-    try { & $npm @a; $rc = $LASTEXITCODE } finally { Pop-Location }
-    if ($rc -ne 0) { Remove-Item -LiteralPath $new -Recurse -Force -ErrorAction SilentlyContinue; Die '裝套件失敗（上面是 npm 說的原因）' }
-    foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $d $f) -Destination (Join-Path (Join-Path $new '.kit-src') $f) }
-    Swap-Store $new $s
+    # built in a folder of its own next to the store (gone again when npm fails or kit is stopped), then swapped in
+    $new = "$s.new." + [IO.Path]::GetRandomFileName().Replace('.', '')
+    $done = $false
+    try {
+        Ensure-Dir (Join-Path $new '.kit-src')
+        $files = @('package.json', 'package-lock.json') | Where-Object { Test-Path -LiteralPath (Join-Path $d $_) -PathType Leaf }
+        foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $d $f) -Destination (Join-Path $new $f) }
+        $a = @($argv[1..($argv.Count - 1)])
+        Push-Location -LiteralPath $new
+        try { & $npm @a; $rc = $LASTEXITCODE } finally { Pop-Location }
+        if ($rc -ne 0) { Die '裝套件失敗（上面是 npm 說的原因）' }
+        foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $d $f) -Destination (Join-Path (Join-Path $new '.kit-src') $f) }
+        Remove-Store $s
+        Move-Item -LiteralPath $new -Destination $s
+        $done = $true
+    } finally { if (-not $done) { try { Remove-Store $new } catch { } } }
+}
+function Pip-Back([string]$s) { # a pip install that did not finish: the venv kit had before goes back in its place
+    Remove-Store $s
+    if (Test-Path -LiteralPath "$s.old") { Move-Item -LiteralPath "$s.old" -Destination $s }
 }
 function Install-Pip([string]$d, [string]$s) {
     $bad = Py-ReqsBad (Join-Path $d 'requirements.txt')
@@ -1320,24 +1523,36 @@ function Install-Pip([string]$d, [string]$s) {
     $py = Py-Path; if (-not $py) { Die '要先有 Python：Kit 清單上按 Python 的「安裝」，或打 kit install-tool python' }
     Say "kit：在 $s 執行 python -m venv venv，再用它的 python $($PipArgs -join ' ')（只裝現成的 wheel，不跑套件的安裝程式）"
     if ($env:KIT_DRY_RUN) { return }
-    # a venv remembers its own path (its launchers start with it): built where it stays, the old one kept until it works
+    # a venv remembers its own path (its launchers start with it): built where it stays, the old one kept until it works;
+    # failing or stopped (Ctrl-C), the old one goes back. An .old left over: that install never finished.
     $old = "$s.old"
-    if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }
+    if (Test-Path -LiteralPath $old) { Pip-Back $s }
     if (Test-Path -LiteralPath $s) { Move-Item -LiteralPath $s -Destination $old }
-    $back = { if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Recurse -Force -ErrorAction SilentlyContinue }; if (Test-Path -LiteralPath $old) { Move-Item -LiteralPath $old -Destination $s } }
-    Ensure-Dir (Join-Path $s '.kit-src')
-    Copy-Item -LiteralPath (Join-Path $d 'requirements.txt') -Destination (Join-Path $s 'requirements.txt')
-    Push-Location -LiteralPath $s
+    $done = $false
     try {
-        & $py -m venv venv; $rc = $LASTEXITCODE
-        if ($rc -eq 0) { $vpy = Venv-Python (Join-Path $s 'venv'); & $vpy @PipArgs; $rc2 = $LASTEXITCODE } else { $rc2 = 1 }
-    } finally { Pop-Location }
-    if ($rc -ne 0) { & $back; Die '沒辦法建立 Python 的 venv（上面是原因）' }
-    if ($rc2 -ne 0) { & $back; Die '裝套件失敗（上面是 pip 說的原因；只能裝有現成 wheel 的套件）' }
-    Copy-Item -LiteralPath (Join-Path $d 'requirements.txt') -Destination (Join-Path (Join-Path $s '.kit-src') 'requirements.txt')
-    if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }
+        Ensure-Dir (Join-Path $s '.kit-src')
+        Copy-Item -LiteralPath (Join-Path $d 'requirements.txt') -Destination (Join-Path $s 'requirements.txt')
+        Push-Location -LiteralPath $s
+        try {
+            & $py -m venv venv; $rc = $LASTEXITCODE
+            if ($rc -eq 0) { $vpy = Venv-Python (Join-Path $s 'venv'); & $vpy @PipArgs; $rc2 = $LASTEXITCODE } else { $rc2 = 1 }
+        } finally { Pop-Location }
+        if ($rc -ne 0) { Die '沒辦法建立 Python 的 venv（上面是原因）' }
+        if ($rc2 -ne 0) { Die '裝套件失敗（上面是 pip 說的原因；只能裝有現成 wheel 的套件）' }
+        Copy-Item -LiteralPath (Join-Path $d 'requirements.txt') -Destination (Join-Path (Join-Path $s '.kit-src') 'requirements.txt')
+        $done = $true
+    } finally { if ($done) { Remove-Store $old } else { try { Pip-Back $s } catch { } } }
+}
+function Link-Copies([string]$n) { # every copy of skill N kit put (the account, Codex and omp, each folder's own) gets the links
+    if ($null -ne (State-Get 'skill' $n)) { Link-Deps $n (Join-Path (Join-Path $ClaudeDir 'skills') $n) }
+    if ($null -ne (State-Get 'skill.agents' $n)) { Link-Deps $n (Join-Path $AgentsSkills $n) }
+    foreach ($d in @(Dirs-Registered)) {
+        if ($null -ne (State-Get (Dir-Kind $d 'skill') $n)) { Link-Deps $n (Join-Path (Join-Path (Join-Path $d '.claude') 'skills') $n) }
+        if ($null -ne (State-Get (Dir-Kind $d 'skill.agents') $n)) { Link-Deps $n (Join-Path (Join-Path (Join-Path $d '.agents') 'skills') $n) }
+    }
 }
 function Cmd-InstallDeps($rest) { # kit install-deps <skill> [npm|pip] : the skill's own packages, in kit's folders, no package scripts
+    # (it holds kit's lock the whole time: one install at a time, and no sync in between)
     $use = '用法：kit install-deps <skill 名字> [npm|pip]'
     $n = ''; $only = ''
     foreach ($a in @($rest)) {
@@ -1361,9 +1576,10 @@ function Cmd-InstallDeps($rest) { # kit install-deps <skill> [npm|pip] : the ski
     }
     if (-not $did) { Say "kit：$n 不用另外裝套件"; return }
     if ($env:KIT_DRY_RUN) { return }
-    # every copy kit put gets the links, and the instructions the python line (sync does both)
+    # every copy kit put gets the links, and the account's instructions the python line
     if (-not (Test-Path -LiteralPath $Machine)) { return }
-    if (Take-Lock -Soft) { $script:Quiet = $true; try { Cmd-Sync *> $null } catch { } finally { $script:Quiet = $false; Release-Lock } }
+    Link-Copies $n
+    Apply-Rules (Wanted)
 }
 
 # ---------- how full an agent's context is (kit context; kit statusline keeps Claude's) ----------
@@ -1387,14 +1603,9 @@ function Model-Window([string]$m) { # the context window Claude Code uses for a 
     if ($m -match '^(claude-|anthropic/)') { return '200000' }
     ''
 }
-function Proc-Info([int]$p) { # @{ parent; args } of a process ($null if gone)
-    if ($OnWindows) {
-        $c = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
-        if (-not $c) { return $null }
-        return @{ parent = [int]$c.ParentProcessId; args = [string]$c.CommandLine }
-    }
-    $pp = "$(& ps -o ppid= -p $p 2>$null)".Trim(); if (-not $pp) { return $null }
-    @{ parent = [int]$pp; args = "$(& ps -o args= -p $p 2>$null)".Trim() }
+function Proc-Args([int]$p) { # a process's command line ('' if gone)
+    if ($OnWindows) { $c = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue; if ($c) { return [string]$c.CommandLine }; return '' }
+    "$(& ps -o args= -p $p 2>$null)".Trim()
 }
 function Proc-Cwd([int]$p) {
     if ($OnWindows) { return '' }
@@ -1402,14 +1613,22 @@ function Proc-Cwd([int]$p) {
     if (Get-Command lsof -ErrorAction SilentlyContinue) { foreach ($l in @(& lsof -a -p $p -d cwd -Fn 2>$null)) { if ($l.StartsWith('n')) { return $l.Substring(1) } } }
     ''
 }
-function Claude-Pid { # the Claude process above this one (Claude runs the status line through a shell)
-    $i = Proc-Info $PID; if (-not $i) { return $null }
-    $p = $i.parent
-    for ($n = 0; $n -lt 8 -and $p -gt 1; $n++) {
-        $i = Proc-Info $p; if (-not $i) { return $null }
-        $w = @($i.args.Trim() -split '\s+' | ForEach-Object { ($_.Trim('"') -split '[\\/]')[-1] })
-        if ($w[0] -match '^claude(\.exe)?$' -or ($w.Count -gt 1 -and $w[1] -match '^(claude|claude\.js|cli\.js)$')) { return $p }
-        $p = $i.parent
+function Claude-Pid { # the Claude process above this one (Claude runs the status line through a shell): one look at every process
+    $up = @{}; $cl = @{}
+    if ($OnWindows) {
+        foreach ($c in @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CommandLine -ErrorAction SilentlyContinue)) { $up[[int]$c.ProcessId] = [int]$c.ParentProcessId; $cl[[int]$c.ProcessId] = [string]$c.CommandLine }
+    } else {
+        foreach ($l in @(& ps -A -o pid= -o ppid= -o args= 2>$null)) {
+            $w = "$l".Trim() -split '\s+', 3
+            if ($w.Count -ge 2 -and $w[0] -match '^[0-9]+$' -and $w[1] -match '^[0-9]+$') { $up[[int]$w[0]] = [int]$w[1]; $cl[[int]$w[0]] = $(if ($w.Count -gt 2) { $w[2] } else { '' }) }
+        }
+    }
+    if (-not $up.ContainsKey($PID)) { return $null }
+    $p = $up[$PID]
+    for ($n = 0; $n -lt 8 -and $p -gt 1 -and $up.ContainsKey($p); $n++) {
+        $w = @(@($cl[$p].Trim() -split '\s+')[0..1] | Where-Object { $null -ne $_ } | ForEach-Object { ($_.Trim('"') -split '[\\/]')[-1] })
+        if ($w.Count -gt 0 -and $w[0] -match '^claude(\.exe)?$' -or ($w.Count -gt 1 -and $w[1] -match '^(claude|claude\.js|cli\.js)$')) { return $p }
+        $p = $up[$p]
     }
     $null
 }
@@ -1417,6 +1636,7 @@ function Ctx-Json([string]$tool, [string]$u, [string]$w, [string]$src, [string]$
     $pct = 'null'
     if ($u -and $w -and [long]$w -gt 0) { $pct = [string][long][Math]::Floor(([long]$u * 100 + [long]$w / 2) / [long]$w) }
     if ($own) { $pct = $own }
+    if ($pct -ne 'null' -and [long]$pct -gt 100) { $pct = '100' }      # an estimate past the window: full
     '{"tool": ' + (Json-S $tool) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $pct + ', "source": ' + (Json-S $src) + ', "model": ' + (Json-S $m) + '}'
 }
 function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for kit context, print a short status line
@@ -1440,22 +1660,37 @@ function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for 
     $uk = if ($u) { [long]$u } else { 0 }
     if ($pct -and $w) { [Console]::Out.Write("$nm · context $pct%（$([long][Math]::Floor($uk / 1000))k / $([long][Math]::Floor([long]$w / 1000))k）`n") } else { [Console]::Out.Write("$nm`n") }
 }
-function Last-Match($lines, [string[]]$must, [string[]]$not = @()) { # the last line holding every MUST and no NOT: @{ n; line }
-    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        $l = [string]$lines[$i]; $ok = $true
-        foreach ($x in $must) { if (-not $l.Contains($x)) { $ok = $false; break } }
-        if ($ok) { foreach ($x in $not) { if ($l.Contains($x)) { $ok = $false; break } } }
-        if ($ok) { return @{ n = $i + 1; line = $l } }
-    }
-    $null
+# A log can be hundreds of MB: kit reads its last 8 MB (all of it only when those have nothing to go by), line by line
+# from a seek, never the whole file into memory.
+$script:CtxTail = [long]8388608; if ("$env:KIT_CTX_TAIL" -match '^[0-9]+$') { $script:CtxTail = [long]$env:KIT_CTX_TAIL }
+function Ctx-Open([string]$f, [long]$n) { # @(reader, cut): at the first whole line of the last N bytes of F (0: all of it); $null if unreadable
+    try {
+        $fs = New-Object IO.FileStream($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        $cut = ($n -gt 0 -and $fs.Length -gt $n)
+        if ($cut) { [void]$fs.Seek(-$n, [IO.SeekOrigin]::End) }
+        $r = New-Object IO.StreamReader($fs, $Utf8)
+        if ($cut) { [void]$r.ReadLine() }                         # (cut off in the middle)
+        , @($r, $cut)
+    } catch { $null }
 }
-function Read-Lines([string]$f, [int]$tail = 0) {
-    if ($tail -gt 0) { @(Get-Content -LiteralPath $f -Tail $tail -Encoding UTF8 -ErrorAction SilentlyContinue) } else { @(Get-Content -LiteralPath $f -Encoding UTF8 -ErrorAction SilentlyContinue) }
-}
-function Newest-Files([string]$dir, [string]$filter) {
+function Newest-Files([string]$dir, [string]$filter) { # files called FILTER under DIR changed in the last 7 days, newest first (40 at most)
     if (-not (Test-Path -LiteralPath $dir)) { return @() }
     $since = (Get-Date).AddDays(-7)
     @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter $filter -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $since } | Sort-Object LastWriteTime -Descending | Select-Object -First 40 | ForEach-Object { $_.FullName })
+}
+function Claude-Scan([string]$f, [long]$n) { # the last reply with its usage (not one Claude Code made itself: "<synthetic>", usage 0) and the last compaction
+    $o = Ctx-Open $f $n; $a = ''; $an = 0; $c = ''; $cn = 0; $i = 0
+    if ($o) {
+        try {
+            while ($null -ne ($l = $o[0].ReadLine())) {
+                $i++
+                if ($l.Contains('"type":"assistant"') -and $l.Contains('"usage"') -and -not $l.Contains('"model":"<synthetic>"')) { $a = $l; $an = $i }
+                if ($l.Contains('"compact_boundary"')) { $c = $l; $cn = $i }
+            }
+        } finally { $o[0].Dispose() }
+    }
+    $which = if ($cn -gt $an) { 'cut' } elseif ($an) { 'reply' } elseif ($o -and $o[1]) { 'more' } else { '' }
+    @{ which = $which; a = $a; c = $c }
 }
 function Claude-Ctx([string]$cpid, [string]$cwd) {
     $f = Join-Path $CtxDir "claude-$cpid.json"
@@ -1467,29 +1702,39 @@ function Claude-Ctx([string]$cpid, [string]$cwd) {
     $d = Join-Path (Join-Path $ClaudeDir 'projects') ($cwd -replace '[^A-Za-z0-9]', '-')
     $t = @(if (Test-Path -LiteralPath $d) { Get-ChildItem -LiteralPath $d -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 })
     if ($t.Count -eq 0) { return Ctx-Json 'claude' '' '' '' '' }
-    $ls = @(Read-Lines $t[0].FullName 400)
-    $a = Last-Match $ls @('"type":"assistant"', '"usage"'); $cut = Last-Match $ls @('"compact_boundary"')
-    $m = if ($a) { Str-Of 'model' $a.line } else { '' }; $w = Model-Window $m
-    if ($cut -and (-not $a -or $cut.n -gt $a.n)) { return Ctx-Json 'claude' (Num-Of 'postTokens' $cut.line) $w 'transcript' $m }
-    if (-not $a) { return Ctx-Json 'claude' '' '' 'transcript' '' }
-    Ctx-Json 'claude' ([string](Sum-Of (After-Key 'usage' $a.line) @('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))) $w 'transcript' $m
+    $s = Claude-Scan $t[0].FullName $CtxTail; if ($s.which -eq 'more') { $s = Claude-Scan $t[0].FullName 0 }
+    $m = Str-Of 'model' $s.a; $w = Model-Window $m
+    if ($s.which -eq 'cut') { return Ctx-Json 'claude' (Num-Of 'postTokens' $s.c) $w 'transcript' $m }
+    if (-not $s.a) { return Ctx-Json 'claude' '' '' 'transcript' '' }
+    Ctx-Json 'claude' ([string](Sum-Of (After-Key 'usage' $s.a) @('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))) $w 'transcript' $m
 }
 function Codex-Pct([long]$u, [long]$w) { # Codex's own "% context left" turned into % used (12000 tokens are its baseline)
     $b = 12000; if ($w -le $b) { return '100' }
     $e = $w - $b; $used = [Math]::Max([long]0, $u - $b); $rem = [Math]::Max([long]0, $e - $used)
     [string](100 - [long][Math]::Floor(($rem * 100 + [Math]::Floor($e / 2)) / $e))
 }
-function Codex-Ctx([string]$cwd) {
+function Codex-Scan([string]$f, [long]$n) { # its last token_count and turn_context
+    $o = Ctx-Open $f $n; $t = ''; $c = ''
+    if ($o) {
+        try {
+            while ($null -ne ($l = $o[0].ReadLine())) {
+                if ($l.Contains('"token_count"') -and $l.Contains('"last_token_usage"')) { $t = $l }
+                if ($l.Contains('"turn_context"')) { $c = $l }
+            }
+        } finally { $o[0].Dispose() }
+    }
+    @{ which = $(if ((-not $t -or -not $c) -and $o -and $o[1]) { 'more' } else { 'ok' }); t = $t; c = $c }
+}
+function Codex-Ctx([string]$cwd) { # the newest rollout started in that folder
     if (-not $cwd) { return Ctx-Json 'codex' '' '' '' '' }
     $want = '"cwd":' + (Json-S $cwd)
     foreach ($f in Newest-Files (Join-Path $CodexDir 'sessions') 'rollout-*.jsonl') {
         $first = "$(Get-Content -LiteralPath $f -TotalCount 1 -Encoding UTF8)"
         if (-not $first.Contains($want)) { continue }
-        $ls = @(Read-Lines $f)
-        $tc = Last-Match $ls @('"token_count"', '"last_token_usage"'); $tx = Last-Match $ls @('"turn_context"')
-        $m = if ($tx) { Str-Of 'model' $tx.line } else { '' }
-        if (-not $tc) { return Ctx-Json 'codex' '' '' 'rollout' $m }
-        $u = Num-Of 'total_tokens' (After-Key 'last_token_usage' $tc.line); $w = Num-Of 'model_context_window' $tc.line
+        $s = Codex-Scan $f $CtxTail; if ($s.which -eq 'more') { $s = Codex-Scan $f 0 }
+        $m = Str-Of 'model' $s.c
+        if (-not $s.t) { return Ctx-Json 'codex' '' '' 'rollout' $m }
+        $u = Num-Of 'total_tokens' (After-Key 'last_token_usage' $s.t); $w = Num-Of 'model_context_window' $s.t
         return Ctx-Json 'codex' $u $w 'rollout' $m $(if ($u -and $w) { Codex-Pct ([long]$u) ([long]$w) } else { '' })
     }
     Ctx-Json 'codex' '' '' '' ''
@@ -1502,6 +1747,30 @@ function Omp-Window([string]$m) {
         $w = "$(& sqlite3 -readonly "file:$($db.Replace('\', '/'))?mode=ro" $q 2>$null)".Trim()
     }
     if ($w -match '^[0-9]+$') { $w } else { Model-Window $id }
+}
+$script:TextRx = [regex]'"text":"(?:[^"\\]|\\.)*"'
+function Omp-Scan([string]$f, [long]$n) {
+    # the last finished reply, the last compaction, the last model change; and like omp's own footer, what came after
+    # that reply (tool results, your next message): their text at about 4 bytes a token, each image about 1600 tokens
+    # (only the message itself: what omp keeps for its screen, "details", is not sent to the model)
+    $o = Ctx-Open $f $n; $a = ''; $an = 0; $c = ''; $cn = 0; $m = ''; $tb = [long]0; $im = [long]0; $i = 0
+    if ($o) {
+        try {
+            while ($null -ne ($l = $o[0].ReadLine())) {
+                $i++
+                if ($l.Contains('"role":"assistant"') -and -not $l.Contains('"stopReason":"aborted"') -and -not $l.Contains('"stopReason":"error"')) { $a = $l; $an = $i; $tb = [long]0; $im = [long]0; continue }
+                if ($l.Contains('"type":"compaction"') -or $l.Contains('"type":"reset_boundary"')) { $c = $l; $cn = $i }
+                if ($l.Contains('"type":"model_change"')) { $m = $l }
+                if ($an -and $l.Contains('"type":"message"')) {
+                    $s = $l; $k = $s.IndexOf(',"details":', [StringComparison]::Ordinal); if ($k -ge 0) { $s = $s.Substring(0, $k) }
+                    $x = 0; while (($x = $s.IndexOf('"type":"image"', $x, [StringComparison]::Ordinal)) -ge 0) { $im++; $x += 14 }
+                    foreach ($t in $TextRx.Matches($s)) { $tb += $Utf8.GetByteCount($t.Value) - 9 }
+                }
+            }
+        } finally { $o[0].Dispose() }
+    }
+    $which = if ($cn -gt $an) { 'cut' } elseif ($an) { 'reply' } elseif ($o -and $o[1]) { 'more' } else { '' }
+    @{ which = $which; a = $a; c = $c; m = $m; tb = $tb; im = $im }
 }
 function Omp-Ctx([string]$opid, [string]$cwd) {
     $f = ''
@@ -1519,23 +1788,17 @@ function Omp-Ctx([string]$opid, [string]$cwd) {
         }
     }
     if (-not $f) { return Ctx-Json 'omp' '' '' '' '' }
-    $ls = @(Read-Lines $f)
-    $a = Last-Match $ls @('"role":"assistant"') @('"stopReason":"aborted"', '"stopReason":"error"')
-    $c1 = Last-Match $ls @('"type":"compaction"'); $c2 = Last-Match $ls @('"type":"reset_boundary"')
-    $cut = if ($c1 -and $c2) { if ($c1.n -gt $c2.n) { $c1 } else { $c2 } } elseif ($c1) { $c1 } else { $c2 }
-    $mc = Last-Match $ls @('"type":"model_change"'); $m = if ($mc) { Str-Of 'model' $mc.line } else { '' }
-    if (-not $m -and $a) { $m = (Str-Of 'provider' $a.line) + '/' + (Str-Of 'model' $a.line) }
+    $s = Omp-Scan $f $CtxTail; if ($s.which -eq 'more') { $s = Omp-Scan $f 0 }
+    $m = Str-Of 'model' $s.m
+    if ($s.a -and -not $m) { $m = (Str-Of 'provider' $s.a) + '/' + (Str-Of 'model' $s.a) }
     $w = if ($m) { Omp-Window $m } else { '' }
-    if ($cut -and (-not $a -or $cut.n -gt $a.n)) { return Ctx-Json 'omp' (Num-Of 'tokensAfter' $cut.line) $w 'session' $m }
-    if (-not $a) { return Ctx-Json 'omp' '' $w 'session' $m }
-    $u = Num-Of 'promptTokens' (After-Key 'contextSnapshot' $a.line)
-    if (-not $u) { $u = [string](Sum-Of (After-Key 'usage' $a.line) @('input', 'cacheRead', 'cacheWrite')) }
-    $rm = Num-Of 'historyRewriteTokensRemoved' $a.line
+    if ($s.which -eq 'cut') { return Ctx-Json 'omp' (Num-Of 'tokensAfter' $s.c) $w 'session' $m }
+    if (-not $s.a) { return Ctx-Json 'omp' '' $w 'session' $m }
+    $u = Num-Of 'promptTokens' (After-Key 'contextSnapshot' $s.a)
+    if (-not $u) { $u = [string](Sum-Of (After-Key 'usage' $s.a) @('input', 'cacheRead', 'cacheWrite')) }
+    $rm = Num-Of 'historyRewriteTokensRemoved' $s.a
     if ($rm) { $u = [string][Math]::Max([long]0, [long]$u - [long]$rm) }
-    # like omp's own footer: what came after that reply (tool results, your next message), about 4 bytes a token
-    $more = [long]0
-    for ($i = $a.n; $i -lt $ls.Count; $i++) { if (([string]$ls[$i]).Contains('"type":"message"')) { $more += [Text.Encoding]::UTF8.GetByteCount([string]$ls[$i]) + 1 } }
-    $u = [string]([long]$u + [long][Math]::Floor($more / 4))
+    $u = [string]([long]$u + [long][Math]::Floor($s.tb / 4) + $s.im * 1600)
     Ctx-Json 'omp' $u $w 'session' $m
 }
 function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] : how full that agent's context is (JSON)
@@ -1548,8 +1811,8 @@ function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] 
     }
     if ($cpid -notmatch '^[0-9]+$') { Die $use }
     if (-not $tool) {
-        $pi = Proc-Info ([int]$cpid)
-        if ($pi) { $w = @($pi.args.Trim() -split '\s+'); $s2 = ($w[0] + ':' + $(if ($w.Count -gt 1) { $w[1] } else { '' }))
+        $pa = Proc-Args ([int]$cpid)
+        if ($pa) { $w = @($pa.Trim() -split '\s+'); $s2 = ($w[0] + ':' + $(if ($w.Count -gt 1) { $w[1] } else { '' }))
             $b = ($w[0].Trim('"') -split '[\\/]')[-1]
             if ($b -like 'claude*' -or $s2 -match ':.*claude') { $tool = 'claude' } elseif ($b -like 'codex*' -or $s2 -match ':.*codex') { $tool = 'codex' } elseif ($b -like 'omp*' -or $s2 -match ':.*omp') { $tool = 'omp' } }
     }
@@ -1938,87 +2201,102 @@ function Cmd-Run($rest) {
     $f = Find-Item 'agent' $name; if (-not $f) { Die "找不到 agent ${name}（打 kit list 看有哪些）" }
     if (Take-Lock -Soft) { $script:Quiet = $true; try { Cmd-Sync } catch { } finally { $script:Quiet = $false; Release-Lock } }   # busy (another kit is syncing): start as it is
 
+    # the agent's folder, gone when kit ends (also on Ctrl-C); a dry run keeps it to look at, without kit's links in it.
+    # Folders of runs that were killed (their kit is gone) go now, their links (junctions) taken out first.
+    foreach ($o in @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'kit-run.*' -ErrorAction SilentlyContinue)) {
+        $pf = Join-Path $o.FullName '.kit-pid'
+        if (-not (Test-Path -LiteralPath $pf -PathType Leaf)) { continue }
+        $op = "$(Read-Text $pf)".Trim()
+        if ($op -match '^[0-9]+$' -and -not (Get-Process -Id ([int]$op) -ErrorAction SilentlyContinue)) { try { Remove-Tree $o.FullName } catch { } }
+    }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('kit-run.' + [IO.Path]::GetRandomFileName())
     $skdir = if ($tool -eq 'claude') { Join-Path $tmp '.claude/skills' } else { Join-Path $tmp 'skills' }
-    Ensure-Dir $skdir
-    $fm = $null
-    try { $fm = Yaml-Lines $f -Frontmatter } catch { Die "bad header in $f" }
-    $skills = @()
-    foreach ($n in YGet-From $fm 'skills') {
-        $p = Find-Item 'skill' $n; if (-not $p) { Warn "skill $n not found"; continue }
-        Copy-Item -LiteralPath (Split-Path -Parent $p) -Destination (Join-Path $skdir $n) -Recurse
-        Link-Deps $n (Join-Path $skdir $n)
-        $skills += $n
-    }
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($n in YGet-From $fm 'rules') {
-        $p = Find-Item 'rule' $n; if (-not $p) { Warn "rule $n not found"; continue }
-        [void]$sb.Append((Read-Text $p)).Append("`n")
-    }
-    [void]$sb.Append((Py-Hint))
-    $c = 0; foreach ($l in (Read-Text $f) -split "`n") { if ($c -ge 2) { [void]$sb.Append($l.TrimEnd("`r")).Append("`n") }; if ($l.TrimEnd("`r") -eq '---') { $c++ } }
-    if ($tool -eq 'codex' -and $skills.Count -gt 0) {
-        # Codex cannot load skills from an extra folder: list them, it reads one when needed
-        [void]$sb.Append("`n## Skills`nSkills you have. Before doing a task one of them covers, read its SKILL.md and follow it.`n")
-        foreach ($n in $skills) {
-            $sk = Join-Path (Join-Path $skdir $n) 'SKILL.md'; $desc = ''
-            try { $desc = @(YGet-From (Yaml-Lines $sk -Frontmatter) 'description')[0] } catch { }
-            [void]$sb.Append("- ${n}: $desc ($sk)`n")
-        }
-    }
-    $prompt = $sb.ToString()
-    Write-Text (Join-Path $tmp 'prompt.md') $prompt
-    $only = @(YGet-From $fm 'tools.only'); $deny = @(YGet-From $fm 'tools.deny')
-    $mcpNames = @(YGet-From $fm 'mcp')
-
-    $a = New-Object System.Collections.Generic.List[string]
-    switch ($tool) {
-        'claude' {
-            $mcps = @(foreach ($n in $mcpNames) {
-                $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
-                $k = Mcp-Json $p; if ($k) { (Json-Str $n) + ':' + $k }
-            })
-            Write-Text (Join-Path $tmp 'mcp.json') ('{"mcpServers":{' + ($mcps -join ',') + "}}`n")
-            $a.AddRange([string[]]@('--add-dir', $tmp, '--append-system-prompt-file', (Join-Path $tmp 'prompt.md'), '--mcp-config', (Join-Path $tmp 'mcp.json')))
-            if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add($only -join ',') }
-            foreach ($d in $deny) { $a.Add('--disallowedTools'); $a.Add($d) }
-        }
-        'codex' {
-            $a.Add('-c'); $a.Add('developer_instructions=' + (Arg-TomlStr $prompt))
-            foreach ($n in $mcpNames) {
-                $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
-                $y = Yaml-Lines $p; $cmd = @(YGet-From $y 'command')
-                if ($cmd.Count -eq 0 -or -not $cmd[0]) { Warn "$p has no command"; continue }
-                $v = '{command=' + (Arg-TomlStr $cmd[0])
-                $args2 = @(YGet-From $y 'args'); if ($args2.Count -gt 0) { $v += ',args=[' + ((@($args2) | ForEach-Object { Arg-TomlStr $_ }) -join ',') + ']' }
-                $envs = @(Mcp-Env $y); if ($envs.Count -gt 0) { $v += ',env={' + ((@($envs) | ForEach-Object { (Arg-TomlKey $_[0]) + '=' + (Arg-TomlStr $_[1]) }) -join ',') + '}' }
-                $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Arg-TomlStr $d.Substring("mcp__${n}__".Length) } })
-                if ($tools.Count -gt 0) { $v += ',disabled_tools=[' + ($tools -join ',') + ']' }
-                $a.Add('-c'); $a.Add("mcp_servers.$(Arg-TomlKey $n)=$v}")
-            }
-            if ($only.Count -gt 0) { Warn 'Codex 不能只開某些內建工具，tools.only 這次不套用' }
-            if (@($deny | Where-Object { -not $_.StartsWith('mcp__') }).Count -gt 0) { Warn 'Codex 只能禁用 MCP 的工具，其他的 tools.deny 這次不套用' }
-        }
-        'omp' {
-            Write-Text (Join-Path $tmp 'omp.yml') ("skills:`n  customDirectories:`n    - " + (Json-Str $skdir) + "`n")
-            $a.AddRange([string[]]@('--config', (Join-Path $tmp 'omp.yml'), '--append-system-prompt', (Join-Path $tmp 'prompt.md')))
-            if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add(($only -join ',').ToLowerInvariant()) }
-            if ($mcpNames.Count -gt 0) { Warn 'omp 不能在啟動時加 MCP：這個 agent 的 MCP 請用  kit add mcp <名字>  加到全域' }
-            if ($deny.Count -gt 0) { Warn 'omp 不能禁用單一工具，tools.deny 這次不套用' }
-        }
-    }
-    foreach ($x in $extra) { $a.Add($x) }
-    if ($env:KIT_DRY_RUN) { Say $tool; foreach ($x in $a) { Say $x }; Say "tmp=$tmp"; return }
-    # the same quoting rules on PowerShell 5.1 and 7 (Arg-TomlStr is written for them)
-    $PSNativeCommandArgumentPassing = 'Legacy'
-    # a marker (this process -> agent name), so the Herdr pane can tell which agent runs in it
     $mark = Join-Path (Join-Path $KitConf 'run') "$PID"
-    try { Ensure-Dir (Join-Path $KitConf 'run'); Write-Text $mark "$name`n" } catch { }
-    & $tool @($a.ToArray())
-    $rc = $LASTEXITCODE
-    foreach ($n in $skills) { Drop-DepsLink (Join-Path $skdir $n) }
-    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue
+    $dry = [bool]$env:KIT_DRY_RUN
+    Ensure-Dir $skdir
+    if (-not $dry) { Write-Text (Join-Path $tmp '.kit-pid') "$PID`n" }
+    try {
+        $fm = $null
+        try { $fm = Yaml-Lines $f -Frontmatter } catch { Die "bad header in $f" }
+        $skills = @()
+        foreach ($n in YGet-From $fm 'skills') {
+            $p = Find-Item 'skill' $n; if (-not $p) { Warn "skill $n not found"; continue }
+            Copy-Item -LiteralPath (Split-Path -Parent $p) -Destination (Join-Path $skdir $n) -Recurse
+            if (-not $dry) { Link-Deps $n (Join-Path $skdir $n) }
+            $skills += $n
+        }
+        $sb = New-Object System.Text.StringBuilder
+        foreach ($n in YGet-From $fm 'rules') {
+            $p = Find-Item 'rule' $n; if (-not $p) { Warn "rule $n not found"; continue }
+            [void]$sb.Append((Read-Text $p)).Append("`n")
+        }
+        [void]$sb.Append((Py-Hint (YGet-From $fm 'skills')))
+        $c = 0; foreach ($l in (Read-Text $f) -split "`n") { if ($c -ge 2) { [void]$sb.Append($l.TrimEnd("`r")).Append("`n") }; if ($l.TrimEnd("`r") -eq '---') { $c++ } }
+        if ($tool -eq 'codex' -and $skills.Count -gt 0) {
+            # Codex cannot load skills from an extra folder: list them, it reads one when needed
+            [void]$sb.Append("`n## Skills`nSkills you have. Before doing a task one of them covers, read its SKILL.md and follow it.`n")
+            foreach ($n in $skills) {
+                $sk = Join-Path (Join-Path $skdir $n) 'SKILL.md'; $desc = ''
+                try { $desc = @(YGet-From (Yaml-Lines $sk -Frontmatter) 'description')[0] } catch { }
+                [void]$sb.Append("- ${n}: $desc ($sk)`n")
+            }
+        }
+        $prompt = $sb.ToString()
+        Write-Text (Join-Path $tmp 'prompt.md') $prompt
+        $only = @(YGet-From $fm 'tools.only'); $deny = @(YGet-From $fm 'tools.deny')
+        $mcpNames = @(YGet-From $fm 'mcp')
+
+        $a = New-Object System.Collections.Generic.List[string]
+        switch ($tool) {
+            'claude' {
+                $mcps = @(foreach ($n in $mcpNames) {
+                    $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
+                    $k = Mcp-Json $p; if ($k) { (Json-Str $n) + ':' + $k }
+                })
+                Write-Text (Join-Path $tmp 'mcp.json') ('{"mcpServers":{' + ($mcps -join ',') + "}}`n")
+                $a.AddRange([string[]]@('--add-dir', $tmp, '--append-system-prompt-file', (Join-Path $tmp 'prompt.md'), '--mcp-config', (Join-Path $tmp 'mcp.json')))
+                if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add($only -join ',') }
+                foreach ($d in $deny) { $a.Add('--disallowedTools'); $a.Add($d) }
+            }
+            'codex' {
+                $a.Add('-c'); $a.Add('developer_instructions=' + (Arg-TomlStr $prompt))
+                foreach ($n in $mcpNames) {
+                    $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
+                    $y = Yaml-Lines $p; $cmd = @(YGet-From $y 'command')
+                    if ($cmd.Count -eq 0 -or -not $cmd[0]) { Warn "$p has no command"; continue }
+                    $v = '{command=' + (Arg-TomlStr $cmd[0])
+                    $args2 = @(YGet-From $y 'args'); if ($args2.Count -gt 0) { $v += ',args=[' + ((@($args2) | ForEach-Object { Arg-TomlStr $_ }) -join ',') + ']' }
+                    $envs = @(Mcp-Env $y); if ($envs.Count -gt 0) { $v += ',env={' + ((@($envs) | ForEach-Object { (Arg-TomlKey $_[0]) + '=' + (Arg-TomlStr $_[1]) }) -join ',') + '}' }
+                    $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Arg-TomlStr $d.Substring("mcp__${n}__".Length) } })
+                    if ($tools.Count -gt 0) { $v += ',disabled_tools=[' + ($tools -join ',') + ']' }
+                    $a.Add('-c'); $a.Add("mcp_servers.$(Arg-TomlKey $n)=$v}")
+                }
+                if ($only.Count -gt 0) { Warn 'Codex 不能只開某些內建工具，tools.only 這次不套用' }
+                if (@($deny | Where-Object { -not $_.StartsWith('mcp__') }).Count -gt 0) { Warn 'Codex 只能禁用 MCP 的工具，其他的 tools.deny 這次不套用' }
+            }
+            'omp' {
+                Write-Text (Join-Path $tmp 'omp.yml') ("skills:`n  customDirectories:`n    - " + (Json-Str $skdir) + "`n")
+                $a.AddRange([string[]]@('--config', (Join-Path $tmp 'omp.yml'), '--append-system-prompt', (Join-Path $tmp 'prompt.md')))
+                if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add(($only -join ',').ToLowerInvariant()) }
+                if ($mcpNames.Count -gt 0) { Warn 'omp 不能在啟動時加 MCP：這個 agent 的 MCP 請用  kit add mcp <名字>  加到全域' }
+                if ($deny.Count -gt 0) { Warn 'omp 不能禁用單一工具，tools.deny 這次不套用' }
+            }
+        }
+        foreach ($x in $extra) { $a.Add($x) }
+        if ($dry) { Say $tool; foreach ($x in $a) { Say $x }; Say "tmp=$tmp"; return }
+        # the same quoting rules on PowerShell 5.1 and 7 (Arg-TomlStr is written for them)
+        $PSNativeCommandArgumentPassing = 'Legacy'
+        # a marker (this process -> agent name), so the Herdr pane can tell which agent runs in it
+        try { Ensure-Dir (Join-Path $KitConf 'run'); Write-Text $mark "$name`n" } catch { }
+        & $tool @($a.ToArray())
+        $rc = $LASTEXITCODE
+    } finally {
+        # (on PowerShell 5.1 Remove-Item -Recurse would go into the junctions to kit's packages: they come out first)
+        if (-not $dry) {
+            try { Remove-Tree $tmp } catch { }
+            Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue
+        }
+    }
     exit $rc
 }
 function Cmd-Uninstall($rest) {
@@ -3271,7 +3549,7 @@ $cmd = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
 $rest = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
 try {
     # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook / --bg take it themselves)
-    if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
+    if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent', 'install-deps') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
     switch ($cmd) {
         'init' { Cmd-Init $rest }
         'sync' {
@@ -3306,6 +3584,7 @@ try {
         { $_ -in '--version', 'version' } { Say "kit $KitVersion" }
         { $_ -in '', '-h', '--help', 'help' } { Usage }
         '__json-get' { $v = Json-Get $rest[0] $rest[1]; if ($null -eq $v) { exit 1 }; Say $v }   # for tests
+        '__dir-hash' { Say (Dir-Hash @($rest)[0]) }                                                  # for tests
         default { Die "沒有這個指令：${cmd}（打 kit help）" }
     }
 } catch {

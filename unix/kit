@@ -34,8 +34,14 @@ DIR_FILE=.agentkit                          # in such a folder: what it has; Cod
 
 # ---------- small helpers ----------
 die()  { printf 'kit: %s\n' "$*" >&2; exit 1; }
-# on the way out (also after die or Ctrl-C): the temp folder with a token in it, and the lock if this kit took it
-on_exit() { [ -z "${KIT_TMPDIR:-}" ] || rm -rf "$KIT_TMPDIR"; [ -z "${KIT_LOCK_MINE:-}" ] || rmdir "$KIT_CONF/sync.lock" 2>/dev/null; }
+# on the way out (also after die or Ctrl-C): the temp folder (a token in it, or npm packages half installed), kit run's
+# folder and marker, the venv a stopped pip install had replaced, and the lock if this kit took it
+on_exit() {
+    [ -z "${KIT_TMPDIR:-}" ] || rm -rf "$KIT_TMPDIR"
+    [ -z "${KIT_RUN_TMP:-}" ] || { rm -rf "$KIT_RUN_TMP"; rm -f "$KIT_CONF/run/$$"; }
+    [ -z "${KIT_PIP_STORE:-}" ] || pip_back "$KIT_PIP_STORE"
+    [ -z "${KIT_LOCK_MINE:-}" ] || rmdir "$KIT_CONF/sync.lock" 2>/dev/null
+}
 trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
 take_lock() { # take_lock [soft] : one kit at a time changes state.tsv and the tools' files (the background sync takes the same lock)
@@ -422,10 +428,20 @@ rules_body() { # rules_body import|inline : rule names on stdin -> text for the 
     done
 }
 
-set_rules() { # set_rules FILE import|inline : rule names on stdin
+set_rules() { # set_rules FILE import|inline [MORE] : rule names on stdin; MORE (text) goes after the rules
     local f=$1 body
-    body=$(rules_body "$2"; py_hint)
+    body=$(rules_body "$2"; [ -z "${3:-}" ] || printf '%s\n' "$3")
     KIT_BLOCK="$body" replace_block "$f" "$BEGIN_MARK" "$END_MARK"
+}
+apply_rules() { # apply_rules WANTED : the account's instructions (Claude, Codex, omp): the rules, and the python line
+    # when one of the skills has kit's venv (a folder's own instructions never get it: kit only adds what it was asked to)
+    local rules hint
+    rules=$(printf '%s\n' "$1" | sed -n 's/^rule://p')
+    hint=$(py_hint $(printf '%s\n' "$1" | sed -n 's/^skill://p'))
+    set_rules "$CLAUDE_DIR/CLAUDE.md" import "$hint" <<< "$rules"
+    if has_codex; then set_rules "$CODEX_DIR/AGENTS.md" inline "$hint" <<< "$rules"; fi
+    if has_omp; then set_rules "$OMP_DIR/AGENTS.md" inline "$hint" <<< "$rules"; fi
+    return 0
 }
 
 sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin) into DIR
@@ -534,20 +550,18 @@ apply_claude() {
     mcps=$(printf '%s\n' "$want" | sed -n 's/^mcp://p')
 
     # (no pipelines here: a file kit cannot write stops kit, before state.tsv says it was done)
-    # Claude: rules as @imports, skills, MCP in ~/.claude.json
-    set_rules "$CLAUDE_DIR/CLAUDE.md" import <<< "$rules"
+    # Claude: rules as @imports (Codex and omp: AGENTS.md gets the rule text itself), skills, MCP in ~/.claude.json
+    apply_rules "$want"
     sync_skills "$CLAUDE_DIR/skills" skill <<< "$skills"
     sync_mcp_json "$CLAUDE_JSON" mcp <<< "$mcps"
 
-    # Codex and omp share ~/.agents/skills; their AGENTS.md get the rule text itself
+    # Codex and omp share ~/.agents/skills
     if has_codex || has_omp; then sync_skills "$AGENTS_SKILLS" skill.agents <<< "$skills"; fi
     if has_codex; then
-        set_rules "$CODEX_DIR/AGENTS.md" inline <<< "$rules"
         KIT_BLOCK="$(codex_mcp_toml <<< "$mcps")$(codex_trust)" replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END"
         KIT_BLOCK=$(codex_top) replace_top_block "$CODEX_DIR/config.toml" "$TOP_BEGIN" "$TOP_END"
     fi
     if has_omp; then
-        set_rules "$OMP_DIR/AGENTS.md" inline <<< "$rules"
         sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp <<< "$mcps"
     fi
 
@@ -574,17 +588,23 @@ EOF
         printf 'addjson\thooks.SessionStart\t%s\n' "$hj" >> "$ops"
     fi
     # Claude's status line: kit statusline keeps the numbers kit context shows (only when there is no status line of
-    # your own; kit's is replaced when its command changes)
+    # your own; kit's is replaced when its command changes). Taken out by you: kit leaves it out (kit sync --force
+    # puts it back).
     local sj sold scur snew=""; sj=$(statusline_json); sold=$(state_get statusline claude)
     scur=$(json_get "$CLAUDE_DIR/settings.json" statusLine | tr -d ' \t\r\n')
-    if [ -z "$scur" ] || { [ -n "$sold" ] && [ "$scur" = "$(printf '%s' "$sold" | tr -d ' \t\r\n')" ]; }; then
+    if [ -z "$scur" ] && [ -n "$sold" ] && [ -z "${FORCE:-}" ]; then
+        state_del statusline claude; state_set told statusline-removed 1
+        warn "你拿掉了 kit 放的 statusLine：kit 不會再加回來，Herdr 上 Claude 的 context 用量改從對話紀錄估（要加回來：kit sync --force）"
+    elif [ -z "$scur" ] && [ -n "$(state_get told statusline-removed)" ] && [ -z "${FORCE:-}" ]; then
+        :
+    elif [ -z "$scur" ] || { [ -n "$sold" ] && [ "$scur" = "$(printf '%s' "$sold" | tr -d ' \t\r\n')" ]; }; then
         [ -n "$scur" ] && [ "$sj" = "$sold" ] || { printf 'set\tstatusLine\t%s\n' "$sj" >> "$ops"; snew=1; }
     elif [ -z "$(state_get told statusline)" ]; then
         warn "Claude 已經有自己的 statusLine：kit 不動它，Herdr 上 Claude 的 context 用量改從對話紀錄估（只提醒這一次）"; state_set told statusline 1
     fi
     if [ -s "$ops" ]; then
         json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny
-        [ -z "$snew" ] || state_set statusline claude "$sj"
+        [ -z "$snew" ] || { state_set statusline claude "$sj"; state_del told statusline-removed; }
         while IFS= read -r n; do [ -z "$n" ] || state_set deny "$n" 1; done <<EOF
 $add
 EOF
@@ -784,19 +804,40 @@ codex_top() { # project_root_markers with .agentkit, so Codex started in a sub-f
 }
 
 # ---------- the programs a skill needs (node, python, ...) and how to install them ----------
-# A recipe is tools/<name>.yaml in a source (it wins) or kit's own tools/. It names the program (bin) and, per system,
-# "manager package" pairs; kit uses the first this machine can. The command itself is always kit's own: a recipe
-# can only pick a manager kit knows (brew, apt as root, winget, scoop, pip) and a package name.
-tool_os() { case $(uname -s 2>/dev/null) in Darwin) echo mac;; MINGW*|MSYS*|CYGWIN*) echo windows;; *) echo linux;; esac; }
+# A recipe is kit's own tools/<name>.yaml (node, python, git: a source cannot replace these) or tools/<name>.yaml in a
+# source, for other programs. It names the program (bin) and, per system, "manager package" pairs; kit tries them in
+# order, the ones this machine can use. The command itself is always kit's own: a recipe can only pick a manager kit
+# knows (brew, apt as root, winget, scoop, pip) and a plain package name (no path, file, tap, URL or option).
+# Only programs with a recipe are looked at (their --version run, at most 4 KB of it, for a few seconds).
+tool_os() { [ -n "${KIT_OS:-}" ] || case $(uname -s 2>/dev/null) in Darwin) KIT_OS=mac;; MINGW*|MSYS*|CYGWIN*) KIT_OS=windows;; *) KIT_OS=linux;; esac; echo "$KIT_OS"; }
 tool_ok_name() { case $1 in ""|-*|*[!a-z0-9-]*) return 1;; *) return 0;; esac; }
-pkg_ok() { case $1 in ""|-*|*[!A-Za-z0-9@._+/-]*) return 1;; *) return 0;; esac; }
-tool_file() { # tool_file NAME -> its recipe: a source's tools/NAME.yaml first, else kit's own
+bin_ok() { case $1 in ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._+-]*) return 1;; *) return 0;; esac; }   # a program name, never a path
+pkg_ok() { # pkg_ok MANAGER PACKAGE : a plain package name for that manager
+    # (brew: no tap/formula path, so node@20 but not user/tap/node; scoop: name or main|extras|versions/name)
+    local p=$2
+    [ "$1" = scoop ] && case $p in main/*|extras/*|versions/*) p=${p#*/};; esac
+    case $p in ""|[!A-Za-z0-9]*) return 1;; esac
+    case $1:$p in brew:*[!A-Za-z0-9@._+-]*) return 1;; brew:*) return 0;; *:*[!A-Za-z0-9._+-]*) return 1;; esac
+    return 0
+}
+clt_stub() { # clt_stub PATH : a Mac without the Command Line Tools, where /usr/bin/git and python3 only open an install window
+    [ "$(tool_os)" = mac ] || return 1
+    case $1 in /usr/bin/git|/usr/bin/python3) ;; *) return 1;; esac
+    [ -n "${KIT_CLT:-}" ] || { if xcode-select -p >/dev/null 2>&1; then KIT_CLT=yes; else KIT_CLT=no; fi; }
+    [ "$KIT_CLT" = no ]
+}
+prog_path() { # prog_path NAME : the program NAME on PATH (a file, not a shell function), not the Mac's install stub
+    local p; p=$(command -v "$1" 2>/dev/null) || return 1
+    case $p in /*) ;; *) return 1;; esac
+    ! clt_stub "$p" && printf '%s\n' "$p"
+}
+tool_file() { # tool_file NAME -> its recipe: kit's own first, else a source's tools/NAME.yaml
     local d
     tool_ok_name "$1" || return 1
+    for d in "$KIT_LIB/tools" "$KIT_LIB/../tools"; do [ -f "$d/$1.yaml" ] && { printf '%s\n' "$d/$1.yaml"; return 0; }; done
     while IFS= read -r d; do [ -n "$d" ] && [ -f "$d/tools/$1.yaml" ] && { printf '%s\n' "$d/tools/$1.yaml"; return 0; }; done <<EOF
 $( [ -f "$MACHINE" ] && src_dirs)
 EOF
-    for d in "$KIT_LIB/tools" "$KIT_LIB/../tools"; do [ -f "$d/$1.yaml" ] && { printf '%s\n' "$d/$1.yaml"; return 0; }; done
     return 1
 }
 tool_names() { # every program kit has a recipe for
@@ -804,13 +845,20 @@ tool_names() { # every program kit has a recipe for
       for f in "$KIT_LIB"/tools/*.yaml "$KIT_LIB"/../tools/*.yaml; do [ -f "$f" ] && basename "$f" .yaml; done; } | awk '!seen[$0]++' | while IFS= read -r n; do tool_ok_name "$n" && echo "$n"; done
 }
 tool_title() { local f t; f=$(tool_file "$1") && t=$(yget "$f" title | head -n 1); printf '%s' "${t:-$1}"; }
-tool_have() { # tool_have NAME -> the version this machine has (empty: not there)
-    local f b bins v
-    f=$(tool_file "$1") && bins=$(yget "$f" bin); [ -n "${bins:-}" ] || bins=$1
+tool_version() { # tool_version PROGRAM : what PROGRAM --version says: at most 4 KB, given up after KIT_PROBE_WAIT seconds
+    # (set -m: it runs in a process group of its own, so what it started goes too and nothing keeps the pipe open)
+    ( set -m
+      "$1" --version </dev/null 2>&1 & p=$!
+      { sleep "${KIT_PROBE_WAIT:-5}"; kill -TERM -- -"$p"; } >/dev/null 2>&1 & w=$!
+      wait "$p"; kill -TERM -- -"$p" -"$w" ) 2>/dev/null | head -c 4096
+}
+tool_have() { # tool_have NAME -> the version this machine has (empty: not there, or kit has no recipe for NAME)
+    local f b bins v p
+    f=$(tool_file "$1") || return 0
+    bins=$(yget "$f" bin); [ -n "$bins" ] || bins=$1
     for b in $bins; do
-        pkg_ok "$b" && case $b in */*) false;; esac || continue      # a program name, never a path
-        command -v "$b" >/dev/null 2>&1 || continue
-        v=$("$b" --version 2>&1 </dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1)
+        bin_ok "$b" && p=$(prog_path "$b") || continue
+        v=$(tool_version "$p" | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1)
         [ -n "$v" ] && { printf '%s\n' "$v"; return 0; }
     done
     return 0
@@ -819,37 +867,39 @@ ver_ge() { # ver_ge HAVE MIN : HAVE is MIN or newer (numbers compared part by pa
     awk -v a="$1" -v b="$2" 'BEGIN { n = split(a, x, "."); m = split(b, y, "."); if (m > n) n = m
         for (i = 1; i <= n; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 } exit 0 }'
 }
-tool_pick() { # tool_pick NAME -> "manager package": the first in the recipe this machine can use
+tool_picks() { # tool_picks NAME -> "manager package" lines: the ones in the recipe this machine can use, in order
     local f m p rest
     f=$(tool_file "$1") || return 1
     while read -r m p rest; do
-        [ -n "$m" ] && [ -z "$rest" ] && pkg_ok "$p" || continue
+        [ -n "$m" ] && [ -z "$rest" ] && pkg_ok "$m" "$p" || continue
         case $m in
             brew|scoop|winget) command -v "$m" >/dev/null 2>&1 || continue;;
             apt) [ "$(id -u 2>/dev/null)" = 0 ] && command -v apt-get >/dev/null 2>&1 || continue;;
-            pip) command -v python3 >/dev/null 2>&1 || continue;;
+            pip) prog_path python3 >/dev/null || continue;;
             *) continue;;
         esac
-        printf '%s %s\n' "$m" "$p"; return 0
+        printf '%s %s\n' "$m" "$p"
     done <<EOF
 $(yget "$f" "install.$(tool_os)")
 EOF
-    return 1
 }
-tool_argv() { # tool_argv install|upgrade MANAGER PACKAGE -> the command, one word per line (kit's own, never the recipe's)
+tool_argv() { # tool_argv install|upgrade|machine MANAGER PACKAGE -> the command, one word per line (kit's own, never the recipe's)
+    # (machine: winget again without --scope user, for a package that only has an installer for the whole machine)
     case $1:$2 in
         install:brew) printf '%s\n' brew install "$3";;
         upgrade:brew) printf '%s\n' brew upgrade "$3";;
         *:apt) printf '%s\n' apt-get install -y "$3";;                # installs or upgrades
-        install:pip) printf '%s\n' python3 -m pip install --user "$3";;
-        upgrade:pip) printf '%s\n' python3 -m pip install --user --upgrade "$3";;
+        install:pip) printf '%s\n' python3 -m pip install --user --only-binary=:all: "$3";;   # wheels only: no setup.py runs
+        upgrade:pip) printf '%s\n' python3 -m pip install --user --only-binary=:all: --upgrade "$3";;
         install:winget) printf '%s\n' winget install --id "$3" -e --scope user --accept-source-agreements --accept-package-agreements;;
+        machine:winget) printf '%s\n' winget install --id "$3" -e --accept-source-agreements --accept-package-agreements;;
         upgrade:winget) printf '%s\n' winget upgrade --id "$3" -e --accept-source-agreements --accept-package-agreements;;
         install:scoop) printf '%s\n' scoop install "$3";;
         upgrade:scoop) printf '%s\n' scoop update "$3";;
     esac
 }
-tool_cmd() { local mp; mp=$(tool_pick "$1") || return 0; tool_argv "${2:-install}" $mp | tr '\n' ' ' | sed 's/ $//'; }
+words() { local w s=""; while IFS= read -r w; do s="${s:+$s }$w"; done; printf '%s' "$s"; }   # lines -> one line
+tool_cmd() { local mp; mp=$(tool_picks "$1" | head -n 1); [ -z "$mp" ] || tool_argv "${2:-install}" $mp | words; }
 skill_needs() { # skill_needs SKILLDIR [SOURCEDIR] -> name<TAB>min per program the skill needs (min may be empty)
     # written: SKILL.md "requires: [node>=18, python]", or the source's kit.yaml "requires: {<skill>: [...]}"
     # seen: what SKILL.md tells the agent to run (node x.mjs, npx, python3 x.py, pip install ...), requirements.txt /
@@ -859,8 +909,8 @@ skill_needs() { # skill_needs SKILLDIR [SOURCEDIR] -> name<TAB>min per program t
         [ -f "$d/SKILL.md" ] && fm_val "$(fm_of "$d/SKILL.md")" requires
         [ -n "$src" ] && yget "$src/kit.yaml" "requires.$(basename "$d")"
         if [ -f "$d/SKILL.md" ]; then
-            grep -qE '(^|[^A-Za-z0-9_-])(node[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*[./A-Za-z0-9_-]+\.(mjs|cjs|js)([^A-Za-z0-9]|$)|npx[[:space:]]+[A-Za-z@]|npm[[:space:]]+(run|install|ci|exec)([^A-Za-z]|$))' "$d/SKILL.md" && echo node
-            grep -qE '(^|[^A-Za-z0-9_-])(python3?[[:space:]]+(-m[[:space:]]+[A-Za-z]|[./A-Za-z0-9_-]+\.py([^A-Za-z0-9]|$))|pip3?[[:space:]]+install|uv[[:space:]]+run)' "$d/SKILL.md" && echo python
+            LC_ALL=C grep -qE '(^|[^A-Za-z0-9_-])(node[ 	]+(-[A-Za-z-]+[ 	]+)*[./A-Za-z0-9_-]+\.(mjs|cjs|js)([^A-Za-z0-9]|$)|npx[ 	]+[A-Za-z@]|npm[ 	]+(run|install|ci|exec)([^A-Za-z]|$))' "$d/SKILL.md" && echo node
+            LC_ALL=C grep -qE '(^|[^A-Za-z0-9_-])(python3?[ 	]+(-m[ 	]+[A-Za-z]|[./A-Za-z0-9_-]+\.py([^A-Za-z0-9]|$))|pip3?[ 	]+install|uv[ 	]+run)' "$d/SKILL.md" && echo python
         fi
         if [ -f "$d/package.json" ]; then
             v=$(json_get "$d/package.json" engines.node | tr -d '"' | grep -oE '[0-9]+(\.[0-9]+)*' | head -n 1)
@@ -879,18 +929,27 @@ skill_needs() { # skill_needs SKILLDIR [SOURCEDIR] -> name<TAB>min per program t
                   if ((n in low) && (m == "" || newer(low[n], m))) m = low[n]
                   print n "\t" m } }'
 }
-needs_json() { # needs_json SKILLDIR SOURCEDIR -> [{"tool", "title", "min", "have", "ok", "install"}]
-    local n m h ok first=1 c
+tool_cache() { # every program kit has a recipe for: its title, what this machine has, kit's install and upgrade
+    # commands, kept in TC_*_<name> (looked at once per run, here, not in the subshells that print each skill)
+    local n c h t mp
+    for n in $(tool_names); do
+        c=${n//-/_}; h=$(tool_have "$n"); t=$(yget "$(tool_file "$n")" title | head -n 1); mp=$(tool_picks "$n" | head -n 1)
+        eval "TC_HAVE_$c=\$h; TC_TITLE_$c=\${t:-\$n}; TC_INST_$c=; TC_UPG_$c="
+        [ -z "$mp" ] || eval "TC_INST_$c=\$(tool_argv install \$mp | words); TC_UPG_$c=\$(tool_argv upgrade \$mp | words)"
+    done
+    TC_DONE=1
+}
+needs_json() { # needs_json SKILLDIR SOURCEDIR -> [{"tool", "title", "min", "have", "ok", "install"}] (after tool_cache)
+    local n m h t i ok first=1 c
     printf '['
     while IFS="$TAB" read -r n m; do
         [ -n "$n" ] || continue
-        c=$(printf '%s' "$n" | tr '-' '_')
-        eval "h=\${TOOL_HAVE_$c-__}"
-        [ "$h" = __ ] && { h=$(tool_have "$n"); eval "TOOL_HAVE_$c=\$h"; }   # one look per program per run
+        c=${n//-/_}; eval "h=\${TC_HAVE_$c-}; t=\${TC_TITLE_$c:-\$n}; i=\${TC_INST_$c-}"   # no recipe: not looked at
         ok=false; [ -n "$h" ] && { [ -z "$m" ] || ver_ge "$h" "$m"; } && ok=true
+        if [ $ok = true ]; then i=""; elif [ -n "$h" ]; then eval "i=\${TC_UPG_$c-}"; fi
         [ $first = 1 ] || printf ', '; first=0
-        printf '{"tool": %s, "title": %s, "min": %s, "have": %s, "ok": %s, "install": %s}' "$(json_s "$n")" "$(json_s "$(tool_title "$n")")" \
-            "$(json_s "$m")" "$(json_s "$h")" "$ok" "$(json_s "$( [ $ok = true ] || tool_cmd "$n" "$( [ -n "$h" ] && echo upgrade || echo install)")")"
+        printf '{"tool": %s, "title": %s, "min": %s, "have": %s, "ok": %s, "install": %s}' "$(json_s "$n")" "$(json_s "$t")" \
+            "$(json_s "$m")" "$(json_s "$h")" "$ok" "$(json_s "$i")"
     done <<EOF
 $(skill_needs "$1" "$2")
 EOF
@@ -920,11 +979,26 @@ cmd_install_tool() { # kit install-tool <name> [--min VERSION] : install (or, to
         { [ -z "$min" ] || ver_ge "$h" "$min"; } && { say "kit：這台已經有 $(tool_title "$n") $h"; return 0; }
         mode=upgrade
     fi
-    mp=$(tool_pick "$n") || die "這台沒有可以用的安裝方式：請自己裝 $(tool_title "$n")${min:+ $min 以上}（$(tool_os) 的裝法寫在 ${f}）"
-    set -- $(tool_argv $mode $mp)
-    say "kit：執行 $*"
-    [ -n "${KIT_DRY_RUN:-}" ] && return 0
-    "$@" || die "安裝失敗（上面是 $1 說的原因）"
+    mp=$(tool_picks "$n")
+    [ -n "$mp" ] || die "這台沒有可以用的安裝方式：請自己裝 $(tool_title "$n")${min:+ $min 以上}（$(tool_os) 的裝法寫在 ${f}）"
+    # each way in the recipe in turn, until one works (fd 3: an installer may read the terminal)
+    local m p ok="" last=""
+    while read -r m p <&3; do
+        [ -n "$m" ] || continue
+        set -- $(tool_argv $mode "$m" "$p")
+        say "kit：執行 $*"
+        [ -n "${KIT_DRY_RUN:-}" ] && return 0
+        "$@" && { ok=1; break; }
+        if [ "$m:$mode" = winget:install ]; then
+            set -- $(tool_argv machine "$m" "$p")
+            say "kit：winget 沒有只裝給這個帳號的版本，改成一般安裝：$*"
+            "$@" && { ok=1; break; }
+        fi
+        last=$m; warn "用 $m 裝失敗（上面是它說的原因）"
+    done 3<<EOF
+$mp
+EOF
+    [ -n "$ok" ] || die "安裝失敗：$(tool_title "$n") 的每一種裝法都沒有成功（最後是 ${last}）"
     hash -r 2>/dev/null
     h=$(tool_have "$n")
     [ -n "$h" ] || die "裝完了，但還是找不到 $(tool_title "$n")：開一個新的終端機再試，或檢查 PATH"
@@ -935,12 +1009,15 @@ cmd_install_tool() { # kit install-tool <name> [--min VERSION] : install (or, to
 # ---------- a skill's own packages (npm, pip) ----------
 # Some skills run their own scripts with packages: npm (package.json "dependencies") or pip (requirements.txt).
 # kit installs them only when you ask (kit install-deps, the panel's 安裝), into its own folders, never in the source:
-#   npm: $KIT_CONF/deps/<skill>/node_modules, npm ci (with a lock) or npm install, always --ignore-scripts, without
-#        the skill's .npmrc. Each copy of the skill gets node_modules linked there (Node finds it by itself).
+#   npm: $KIT_CONF/deps/<skill>/node_modules, npm ci (with a lock) or npm install, always --ignore-scripts --omit=dev,
+#        without the skill's .npmrc. package.json may only ask for versions from the registry (no git, URL, file,
+#        link, workspace: npm runs code while fetching a git package, --ignore-scripts or not), and a lock must
+#        point every package at a registry tarball with its integrity. Each copy of the skill gets node_modules
+#        linked there (Node finds it by itself).
 #   pip: $KIT_CONF/pydeps/<skill>/venv, a venv of its own; pip install --only-binary=:all: (wheels only: nothing
 #        is built, so no setup.py runs), and requirements.txt may only name packages and versions (no -r, -e,
-#        --index-url, URLs ...). Each copy gets .venv linked there; the instructions block tells agents to run the
-#        skill's .py with that .venv's python.
+#        --index-url, URLs, options ...). Each copy gets .venv linked there; the account's instructions block tells
+#        agents to run the skill's .py with that .venv's python.
 # .kit-src keeps the files they were installed for: when the skill changes them, it needs 更新 again.
 deps_store() { printf '%s\n' "$KIT_CONF/deps/$1"; }
 pydeps_store() { printf '%s\n' "$KIT_CONF/pydeps/$1"; }
@@ -956,10 +1033,75 @@ pypkgs_need() { # pypkgs_need SKILLDIR : it has a requirements.txt naming someth
     grep -qvE '^[[:space:]]*(#.*)?$' "$1/requirements.txt"
 }
 py_reqs_bad() { # py_reqs_bad FILE -> the first line that is not a plain requirement (name[extras] versions ; markers)
-    LC_ALL=C awk '{ l = $0; sub(/\r$/, "", l); sub(/(^|[ \t])#.*$/, "", l); gsub(/^[ \t]+|[ \t]+$/, "", l)
+    # Markers only with marker characters, and no option anywhere (pip takes "--no-binary" and such on a line too)
+    LC_ALL=C awk -v q="'" '{ l = $0; sub(/\r$/, "", l); sub(/(^|[ \t])#.*$/, "", l); gsub(/^[ \t]+|[ \t]+$/, "", l)
         if (l == "") next
         v = "(===|==|>=|<=|~=|!=|<|>)[ \t]*[A-Za-z0-9.*+!_-]+"
-        if (l !~ ("^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?[ \t]*(\\[[A-Za-z0-9._, -]*\\])?[ \t]*(" v "([ \t]*,[ \t]*" v ")*)?[ \t]*(;[^#]*)?$")) { print NR ": " $0; exit } }' "$1"
+        if (l ~ /(^|[ \t])-/ || l !~ ("^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?[ \t]*(\\[[A-Za-z0-9._, -]*\\])?[ \t]*(" v "([ \t]*,[ \t]*" v ")*)?[ \t]*(;[A-Za-z0-9_.<>=!~\"() \t" q "]*)?$")) { print NR ": " $0; exit } }' "$1"
+}
+npm_registry() { # the registry in your own ~/.npmrc (an https URL, ending in /), if you set one
+    [ -f "$HOME/.npmrc" ] || return 0
+    LC_ALL=C awk '{ sub(/\r$/, "") } /^[ \t]*registry[ \t]*=/ { r = $0; sub(/^[^=]*=[ \t]*/, "", r); sub(/[ \t]+$/, "", r) }
+        END { if (r ~ /^https:\/\/[A-Za-z0-9.-]+(:[0-9]+)?(\/[A-Za-z0-9._~%\/-]*)?$/) { if (r !~ /\/$/) r = r "/"; print r } }' "$HOME/.npmrc"
+}
+npm_bad() { # npm_bad SKILLDIR -> why kit does not install its npm packages (the first reason; empty: fine)
+    local d=$1 o
+    o=$(LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$d/package.json" 2>/dev/null) || { echo "package.json: 讀不懂"; return 0; }
+    # dependencies, optionalDependencies, peerDependencies (npm 7+ installs them) and overrides: versions or dist-tags
+    # from the registry only (an alias npm:name@version too); never git, github:, user/repo, a URL, file:, link:,
+    # workspace: or a path
+    o=$(printf '%s\n' "$o" | LC_ALL=C awk -F'\t' '
+        function unq(v) { return (v ~ /^".*"$/) ? substr(v, 2, length(v) - 2) : v }
+        function spec_ok(v,   s, i, nm) {
+            if (v !~ /^".*"$/) return 0
+            s = unq(v)
+            if (s ~ /^npm:/) {
+                s = substr(s, 5); i = index(substr(s, 2), "@")
+                if (i == 0) { nm = s; s = "" } else { nm = substr(s, 1, i); s = substr(s, i + 2) }
+                if (nm !~ /^(@[A-Za-z0-9._~-]+\/)?[A-Za-z0-9._~-]+$/ || nm ~ /^[._]/) return 0
+            }
+            return s ~ /^[A-Za-z0-9 .*^~<>=|+-]*$/ && s !~ /^[.]/
+        }
+        { val = $NF }
+        ($1 == "dependencies" || $1 == "optionalDependencies" || $1 == "peerDependencies") && !(NF == 2 && val ~ /^(\{\}|\[\])$/) {
+            if (NF != 3 || !spec_ok(val)) { print "package.json: " $1 "." $2 " = " unq(val); exit } }
+        $1 == "overrides" && NF >= 3 && !spec_ok(val) && unq(val) !~ /^\$[A-Za-z0-9@._\/~-]+$/ {
+            k = $1; for (i = 2; i < NF; i++) k = k "." $i; print "package.json: " k " = " unq(val); exit }')
+    [ -z "$o" ] || { printf '%s\n' "$o"; return 0; }
+    [ -f "$d/package-lock.json" ] || return 0
+    o=$(LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$d/package-lock.json" 2>/dev/null) || { echo "package-lock.json: 讀不懂"; return 0; }
+    # every package (lockfile v2/v3 "packages", or v1 "dependencies"): a tarball on registry.npmjs.org (or your
+    # ~/.npmrc registry), with integrity; never a link; bundled ones come inside their parent's tarball
+    printf '%s\n' "$o" | LC_ALL=C awk -F'\t' -v reg="$(npm_registry)" '
+        function unq(v) { return (v ~ /^".*"$/) ? substr(v, 2, length(v) - 2) : v }
+        function tarball_ok(v,   s) {
+            if (v !~ /^".*"$/) return 0
+            s = unq(v)
+            if (index(s, "https://registry.npmjs.org/") == 1) s = substr(s, 28)
+            else if (reg != "" && index(s, reg) == 1) s = substr(s, length(reg) + 1)
+            else return 0
+            return s ~ /^[A-Za-z0-9@._~%+\/-]+\.tgz$/ && index(s, "/-/") > 0
+        }
+        $1 == "packages" && NF >= 3 {
+            p = "p" SUBSEP $2; if ($2 == "") next
+            if (!(p in lab)) { lab[p] = $2; ord[++n] = p }
+            if (NF == 4) f[p, $3] = $4
+            has = 1; next }
+        $1 == "dependencies" && NF >= 4 {
+            l = "node_modules/" $2; i = 3
+            while (i + 2 < NF && $i == "dependencies") { l = l "/node_modules/" $(i + 1); i += 2 }
+            p = "v" SUBSEP l
+            if (!(p in lab)) { lab[p] = l; ord[++n] = p }
+            if (i == NF - 1) f[p, $i] = $NF }
+        END {
+            for (j = 1; j <= n; j++) {
+                p = ord[j]; v1 = (substr(p, 1, 1) == "v")
+                if (has == v1) continue                       # a lock with "packages": only those count
+                if (f[p, "link"] == "true") { print "package-lock.json: " lab[p] ": link"; exit }
+                if (f[p, v1 ? "bundled" : "inBundle"] == "true") continue
+                if (!tarball_ok(f[p, "resolved"])) { r = f[p, "resolved"]; print "package-lock.json: " lab[p] ": resolved " (r == "" ? "（沒有）" : unq(r)); exit }
+                if (f[p, "integrity"] !~ /^"sha[0-9]+-/) { print "package-lock.json: " lab[p] ": 沒有 integrity"; exit }
+            } }'
 }
 deps_fresh() { # deps_fresh SKILLDIR STORE : the store has this skill's npm packages, for this package.json (and lock)
     [ -d "$2/node_modules" ] && cmp -s "$1/package.json" "$2/.kit-src/package.json" || return 1
@@ -968,7 +1110,7 @@ deps_fresh() { # deps_fresh SKILLDIR STORE : the store has this skill's npm pack
 pydeps_fresh() { [ -x "$2/venv/bin/python" ] && cmp -s "$1/requirements.txt" "$2/.kit-src/requirements.txt"; }
 pkgs_cmd() { # the npm command, one word per line: npm ci with a lock (the exact versions), else npm install
     if [ -f "$1/package-lock.json" ]; then printf '%s\n' npm ci; else printf '%s\n' npm install; fi
-    printf '%s\n' --ignore-scripts --no-audit --no-fund
+    printf '%s\n' --ignore-scripts --omit=dev --no-audit --no-fund
 }
 PIP_ARGS="-m pip install --only-binary=:all: --no-input --disable-pip-version-check -r requirements.txt"
 link_deps() { # link_deps NAME DST : the packages kit installed for skill NAME show in its copy DST
@@ -983,64 +1125,88 @@ link_deps() { # link_deps NAME DST : the packages kit installed for skill NAME s
     fi
     return 0
 }
-py_hint() { # the line for the instructions block, once kit has a venv for some skill
-    local v
-    for v in "$KIT_CONF"/pydeps/*/venv; do
-        [ -d "$v" ] || continue
+py_hint() { # py_hint SKILL... : the line for the instructions block, when kit has a venv for one of these skills
+    local n p
+    for n in "$@"; do
+        [ -d "$KIT_CONF/pydeps/$n/venv" ] && p=$(find_item skill "$n") || continue
+        [ -f "${p%/*}/requirements.txt" ] && pydeps_fresh "${p%/*}" "$(pydeps_store "$n")" || continue
         printf '%s\n' '- skill 資料夾裡有 `.venv`（kit 裝的 Python 套件）時，執行那個 skill 的 Python 程式要用它自己的 python：`<skill 資料夾>/.venv/bin/python`（Windows：`<skill 資料夾>\.venv\Scripts\python.exe`），不要另外 pip install。'
         return 0
     done
 }
 packages_json() { # packages_json SKILLDIR NAME -> ', "packages": [...]' when the skill has packages to install
-    local d=$1 s ok had c items=""
+    local d=$1 s ok had c bad items=""
     if pkgs_need "$d"; then
-        s=$(deps_store "$2"); ok=false; had=false; c=""
+        s=$(deps_store "$2"); ok=false; had=false; c=""; bad=""
         deps_fresh "$d" "$s" && ok=true
         [ -d "$s/node_modules" ] && had=true
-        command -v npm >/dev/null 2>&1 && c=$(pkgs_cmd "$d" | tr '\n' ' ' | sed 's/ $//')
-        items='{"kind": "npm", "ok": '$ok', "had": '$had', "install": '$(json_s "$c")', "bad": ""}'
+        command -v npm >/dev/null 2>&1 && c=$(pkgs_cmd "$d" | words)
+        [ $ok = true ] || bad=$(npm_bad "$d")              # (installed: it was looked at then)
+        items='{"kind": "npm", "ok": '$ok', "had": '$had', "install": '$(json_s "$c")', "bad": '$(json_s "$bad")'}'
     fi
     if pypkgs_need "$d"; then
         s=$(pydeps_store "$2"); ok=false; had=false; c=""
         pydeps_fresh "$d" "$s" && ok=true
         [ -d "$s/venv" ] && had=true
-        command -v python3 >/dev/null 2>&1 && c="python3 -m venv venv; venv/bin/python $PIP_ARGS"
+        prog_path python3 >/dev/null && c="python3 -m venv venv; venv/bin/python $PIP_ARGS"
         items="${items:+$items, }"'{"kind": "pip", "ok": '$ok', "had": '$had', "install": '$(json_s "$c")', "bad": '$(json_s "$(py_reqs_bad "$d/requirements.txt")")'}'
     fi
     [ -z "$items" ] || printf ', "packages": [%s]' "$items"
 }
 install_npm() { # install_npm SKILLDIR STORE
-    local d=$1 s=$2
+    local d=$1 s=$2 new bad
+    bad=$(npm_bad "$d")
+    [ -z "$bad" ] || die "kit 不裝這些 npm 套件（只能裝 npm registry 上的版本，不能是 git、網址、檔案或連結）：$bad"
     command -v npm >/dev/null 2>&1 || die "要先有 Node.js（npm）：Kit 清單上按 Node.js 的「安裝」，或打 kit install-tool node"
     set -- $(pkgs_cmd "$d")
     say "kit：在 $s 執行 $*（不跑套件自己的安裝程式）"
     [ -n "${KIT_DRY_RUN:-}" ] && return 0
-    rm -rf "$s.new"; mkdir -p "$s.new/.kit-src" || die "沒辦法建立 $s.new"
-    cp "$d/package.json" "$s.new/"
-    [ -f "$d/package-lock.json" ] && cp "$d/package-lock.json" "$s.new/"
-    ( cd "$s.new" && "$@" ) || { rm -rf "$s.new"; die "裝套件失敗（上面是 npm 說的原因）"; }
-    cp "$d/package.json" "$s.new/.kit-src/"
-    [ -f "$d/package-lock.json" ] && cp "$d/package-lock.json" "$s.new/.kit-src/"
-    rm -rf "$s"; mv "$s.new" "$s" || die "沒辦法把套件放到 $s"
+    # built in a folder of its own next to the store (gone again when npm fails or kit is stopped), then swapped in
+    mkdir -p "${s%/*}" && new=$(mktemp -d "$s.new.XXXXXX") || die "沒辦法在 ${s%/*} 建立暫存資料夾"
+    KIT_TMPDIR=$new
+    mkdir -p "$new/.kit-src" && cp "$d/package.json" "$new/" || die "沒辦法寫 $new"
+    [ ! -f "$d/package-lock.json" ] || cp "$d/package-lock.json" "$new/"
+    ( cd "$new" && "$@" ) || die "裝套件失敗（上面是 npm 說的原因）"
+    cp "$d/package.json" "$new/.kit-src/"
+    [ ! -f "$d/package-lock.json" ] || cp "$d/package-lock.json" "$new/.kit-src/"
+    rm -rf "$s"; mv "$new" "$s" || die "沒辦法把套件放到 $s"
+    KIT_TMPDIR=
+}
+pip_back() { # pip_back STORE : a pip install that did not finish: the venv kit had before goes back in its place
+    rm -rf "$1"; [ ! -e "$1.old" ] || mv "$1.old" "$1"
 }
 install_pip() { # install_pip SKILLDIR STORE
     local d=$1 s=$2 bad
     bad=$(py_reqs_bad "$d/requirements.txt")
     [ -z "$bad" ] || die "requirements.txt 有 kit 不接受的寫法（只能寫套件名和版本）：第 $bad"
-    command -v python3 >/dev/null 2>&1 || die "要先有 Python：Kit 清單上按 Python 的「安裝」，或打 kit install-tool python"
+    prog_path python3 >/dev/null || die "要先有 Python：Kit 清單上按 Python 的「安裝」，或打 kit install-tool python"
     say "kit：在 $s 執行 python3 -m venv venv，再用它的 python ${PIP_ARGS}（只裝現成的 wheel，不跑套件的安裝程式）"
     [ -n "${KIT_DRY_RUN:-}" ] && return 0
-    # a venv remembers its own path (its scripts start with it): built where it stays, the old one kept until it works
-    rm -rf "$s.old"; [ ! -e "$s" ] || mv "$s" "$s.old" || die "沒辦法搬開舊的 $s"
-    back() { rm -rf "$s"; [ ! -e "$s.old" ] || mv "$s.old" "$s"; }
-    mkdir -p "$s/.kit-src" || { back; die "沒辦法建立 $s"; }
-    cp "$d/requirements.txt" "$s/"
-    ( cd "$s" && python3 -m venv venv ) || { back; die "沒辦法建立 Python 的 venv（上面是原因；Debian/Ubuntu 可能要先裝 python3-venv）"; }
-    ( cd "$s" && venv/bin/python $PIP_ARGS ) || { back; die "裝套件失敗（上面是 pip 說的原因；只能裝有現成 wheel 的套件）"; }
-    cp "$d/requirements.txt" "$s/.kit-src/"
-    rm -rf "$s.old"
+    # a venv remembers its own path (its scripts start with it): built where it stays, the old one kept until it works;
+    # failing or stopped (Ctrl-C), the old one goes back (on_exit). An .old left over: that install never finished.
+    [ ! -e "$s.old" ] || pip_back "$s"
+    [ ! -e "$s" ] || mv "$s" "$s.old" || die "沒辦法搬開舊的 $s"
+    KIT_PIP_STORE=$s
+    mkdir -p "$s/.kit-src" && cp "$d/requirements.txt" "$s/" || die "沒辦法建立 $s"
+    ( cd "$s" && python3 -m venv venv ) || die "沒辦法建立 Python 的 venv（上面是原因；Debian/Ubuntu 可能要先裝 python3-venv）"
+    ( cd "$s" && venv/bin/python $PIP_ARGS ) || die "裝套件失敗（上面是 pip 說的原因；只能裝有現成 wheel 的套件）"
+    cp "$d/requirements.txt" "$s/.kit-src/" || die "沒辦法寫 $s"
+    KIT_PIP_STORE=; rm -rf "$s.old"
+}
+link_copies() { # link_copies NAME : every copy of skill NAME kit put (the account, Codex and omp, each folder's own) gets the links
+    local d
+    [ -z "$(state_get skill "$1")" ] || link_deps "$1" "$CLAUDE_DIR/skills/$1"
+    [ -z "$(state_get skill.agents "$1")" ] || link_deps "$1" "$AGENTS_SKILLS/$1"
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ -z "$(state_get "$(dir_kind "$d" skill)" "$1")" ] || link_deps "$1" "$d/.claude/skills/$1"
+        [ -z "$(state_get "$(dir_kind "$d" skill.agents)" "$1")" ] || link_deps "$1" "$d/.agents/skills/$1"
+    done <<EOF
+$(dirs_registered)
+EOF
 }
 cmd_install_deps() { # kit install-deps <skill> [npm|pip] : the skill's own packages, in kit's folders, no package scripts
+    # (it holds kit's lock the whole time: one install at a time, and no sync in between)
     local n="" only="" p d did=0 a
     for a in "$@"; do
         case $a in
@@ -1064,10 +1230,10 @@ cmd_install_deps() { # kit install-deps <skill> [npm|pip] : the skill's own pack
     fi
     [ $did = 1 ] || { say "kit：$n 不用另外裝套件"; return 0; }
     [ -z "${KIT_DRY_RUN:-}" ] || return 0
-    # every copy kit put gets the links, and the instructions the python line (sync does both)
+    # every copy kit put gets the links, and the account's instructions the python line
     [ -f "$MACHINE" ] || return 0
-    if take_lock soft; then ( QUIET=1 cmd_sync ) >/dev/null 2>&1; release_lock; fi
-    return 0
+    link_copies "$n"
+    apply_rules "$(wanted)"
 }
 
 # ---------- how full an agent's context is (kit context; kit statusline keeps Claude's) ----------
@@ -1100,41 +1266,63 @@ proc_cwd() { # a process's folder (Linux /proc, else lsof)
     if [ -d "/proc/$1" ]; then readlink "/proc/$1/cwd" 2>/dev/null; return; fi
     command -v lsof >/dev/null 2>&1 && lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
 }
-claude_pid() { # the Claude process above this one (Claude runs the status line through a shell)
-    local pid=$PPID i=0 a w1 w2
-    while [ $i -lt 8 ] && [ "${pid:-0}" -gt 1 ] 2>/dev/null; do
-        a=$(proc_args "$pid"); set -- $a; w1=${1:-}; w2=${2:-}
-        case ${w1##*/}:${w2##*/} in claude:*|claude.exe:*|*:claude|*:claude.js|*:cli.js) printf '%s\n' "$pid"; return 0;; esac
-        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '); i=$((i + 1))
-    done
-    return 1
+claude_pid() { # the Claude process above this one (Claude runs the status line through a shell): one look at every process
+    { ps -A -o pid= -o ppid= -o args= 2>/dev/null || ps -o pid,ppid,args 2>/dev/null; } | awk -v p="$PPID" '
+        $1 ~ /^[0-9]+$/ { a = $3; b = $4; sub(/^.*\//, "", a); sub(/^.*\//, "", b); up[$1] = $2 + 0; w1[$1] = a; w2[$1] = b }
+        END { p += 0
+              for (i = 0; i < 8 && p > 1 && (p in up); i++) {
+                  if (w1[p] == "claude" || w1[p] == "claude.exe" || w2[p] == "claude" || w2[p] == "claude.js" || w2[p] == "cli.js") { print p; exit }
+                  p = up[p] } }'
 }
 ctx_json() { # ctx_json TOOL USED WINDOW SOURCE MODEL [PCT] -> the answer (PCT: the tool's own way of counting)
     local pct=null u=${2:-} w=${3:-}
     [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] 2>/dev/null && pct=$(( (u * 100 + w / 2) / w ))
     [ -z "${6:-}" ] || pct=$6
+    [ "$pct" != null ] && [ "$pct" -gt 100 ] 2>/dev/null && pct=100      # an estimate past the window: full
     printf '{"tool": %s, "used": %s, "window": %s, "pct": %s, "source": %s, "model": %s}\n' "$(json_s "$1")" "${u:-null}" "${w:-null}" "$pct" "$(json_s "$4")" "$(json_s "$5")"
 }
 cmd_statusline() { # what Claude's statusLine runs: keep the numbers for kit context, print a short status line
-    local j u w pct pid sid model name tmp
-    j=$(cat)
-    w=$(num_of context_window_size "$j")
-    pct=$(printf '%s' "$j" | grep -oE '"used_percentage"[[:space:]]*:[[:space:]]*[0-9]+(\.[0-9]+)?' | head -n 1 | grep -oE '[0-9.]+$' | awk '{ printf "%d", $1 + 0.5 }')
-    u=""; case $j in *'"current_usage"'*'{'*)
-        local cu; cu=$(after_key current_usage "$j")
-        case $cu in null*) ;; *) u=$(( $(num_of input_tokens "$cu" || :)0 / 10 + $(num_of cache_creation_input_tokens "$cu" || :)0 / 10 + $(num_of cache_read_input_tokens "$cu" || :)0 / 10 ));; esac;;
-    esac
-    sid=$(str_of session_id "$j"); model=$(str_of id "$(after_key model "$j")"); name=$(str_of display_name "$j")
-    if pid=$(claude_pid); then
-        mkdir -p "$CTX_DIR" 2>/dev/null && tmp="$CTX_DIR/.claude-$pid.$$" && {
+    # (it runs on every update of Claude's status line: one awk for what Claude hands over, one ps for the Claude process)
+    local w pct u sid model name pid tmp us
+    us=$(printf '\037')
+    IFS=$us read -r w pct u sid model name <<EOF
+$(LC_ALL=C awk -v us="$us" '
+    function after(s, k,   p) { p = 0; while (match(substr(s, p + 1), "\"" k "\"[ \t\r\n]*:[ \t\r\n]*")) p += RSTART + RLENGTH - 1; return p ? substr(s, p + 1) : s }
+    function num(s, k) { if (!match(s, "\"" k "\"[ \t\r\n]*:[ \t\r\n]*[0-9]+")) return ""; s = substr(s, RSTART, RLENGTH); sub(/^.*:[ \t\r\n]*/, "", s); return s }
+    function str(s, k) { if (!match(s, "\"" k "\"[ \t\r\n]*:[ \t\r\n]*\"[^\"]*\"")) return ""; s = substr(s, RSTART, RLENGTH); sub(/^[^:]*:[ \t\r\n]*"/, "", s); return substr(s, 1, length(s) - 1) }
+    { j = j $0 "\n" }
+    END {
+        pct = ""; if (match(j, /"used_percentage"[ \t\r\n]*:[ \t\r\n]*[0-9]+(\.[0-9]+)?/)) { v = substr(j, RSTART, RLENGTH); sub(/^[^:]*:[ \t\r\n]*/, "", v); pct = sprintf("%d", v + 0.5) }
+        u = ""; if (match(j, /"current_usage"/) && index(substr(j, RSTART), "{")) {
+            c = after(j, "current_usage"); if (c !~ /^null/) u = sprintf("%d", num(c, "input_tokens") + num(c, "cache_creation_input_tokens") + num(c, "cache_read_input_tokens")) }
+        printf "%s%s%s%s%s%s%s%s%s%s%s\n", num(j, "context_window_size"), us, pct, us, u, us, str(j, "session_id"), us, str(after(j, "model"), "id"), us, str(j, "display_name")
+    }')
+EOF
+    pid=$(claude_pid)
+    if [ -n "$pid" ]; then
+        { [ -d "$CTX_DIR" ] || mkdir -p "$CTX_DIR"; } 2>/dev/null && tmp="$CTX_DIR/.claude-$pid.$$" && {
             printf '{"pid": %s, "session": %s, "used": %s, "window": %s, "pct": %s, "model": %s}\n' "$pid" "$(json_s "$sid")" "${u:-null}" "${w:-null}" "${pct:-null}" "$(json_s "$model")" > "$tmp" && mv -f "$tmp" "$CTX_DIR/claude-$pid.json"; } 2>/dev/null
     fi
     [ -n "$pct" ] || { [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] && pct=$(( (u * 100 + w / 2) / w )); }
     if [ -n "$pct" ] && [ -n "$w" ]; then printf '%s · context %s%%（%sk / %sk）\n' "${name:-Claude}" "$pct" "$(( ${u:-0} / 1000 ))" "$(( w / 1000 ))"
     else printf '%s\n' "${name:-Claude}"; fi
 }
+# A log can be hundreds of MB: kit reads its last 8 MB (all of it only when those have nothing to go by), in one awk
+# pass. Each pass prints what it found, first "more" when it found nothing in a part of the file.
+CTX_TAIL=${KIT_CTX_TAIL:-8388608}
+ctx_scan() { # ctx_scan FILE AWKPROG [BYTES] : AWKPROG over the whole lines in the last BYTES of FILE (0: all; cut=1 when partial)
+    local n=${3:-$CTX_TAIL} size
+    size=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
+    if [ "$n" -gt 0 ] && [ "${size:-0}" -gt "$n" ]; then tail -c "$n" "$1" | LC_ALL=C awk -v cut=1 "$2"
+    else LC_ALL=C awk -v cut=0 "$2" "$1"; fi
+}
+ctx_read() { local o; o=$(ctx_scan "$1" "$2"); case $o in more*) ctx_scan "$1" "$2" 0;; *) printf '%s\n' "$o";; esac; }
+newest_files() { # newest_files DIR NAME : files called NAME under DIR changed in the last 7 days, newest first (40 at most)
+    [ -d "$1" ] || return 0
+    find "$1" -type f -name "$2" -mtime -7 -print0 2>/dev/null | xargs -0 -r ls -t 2>/dev/null | head -n 40
+}
 claude_ctx() { # claude_ctx PID CWD
-    local f="$CTX_DIR/claude-$1.json" j d t line u w m post cut
+    local f="$CTX_DIR/claude-$1.json" j d t which line cb u w m post
     if [ -n "$1" ] && [ -f "$f" ]; then
         j=$(cat "$f"); u=$(num_of used "$j"); w=$(num_of window "$j"); m=$(str_of model "$j")
         ctx_json claude "$u" "$w" statusline "$m"; return
@@ -1143,12 +1331,15 @@ claude_ctx() { # claude_ctx PID CWD
     d="$CLAUDE_DIR/projects/$(printf '%s' "$2" | sed 's|[^A-Za-z0-9]|-|g')"
     t=$(ls -t "$d"/*.jsonl 2>/dev/null | head -n 1)
     [ -n "$t" ] || { ctx_json claude "" "" "" ""; return; }
-    line=$(tail -n 400 "$t" | grep -n '"type":"assistant"' | grep '"usage"' | tail -n 1)
-    cut=$(tail -n 400 "$t" | grep -n '"compact_boundary"' | tail -n 1)
+    # the last reply with its usage (not one Claude Code made itself: "<synthetic>", usage 0) and the last compaction
+    { IFS= read -r which; IFS= read -r line; IFS= read -r cb; } <<EOF
+$(ctx_read "$t" 'cut && NR == 1 { next }
+    index($0, "\"type\":\"assistant\"") && index($0, "\"usage\"") && !index($0, "\"model\":\"<synthetic>\"") { a = $0; an = NR }
+    index($0, "\"compact_boundary\"") { c = $0; cn = NR }
+    END { print (cn > an ? "cut" : an ? "reply" : cut ? "more" : ""); print a; print c }')
+EOF
     m=$(str_of model "$line"); w=$(model_window "$m")
-    if [ -n "$cut" ] && [ "${cut%%:*}" -gt "${line%%:*}" ] 2>/dev/null || { [ -n "$cut" ] && [ -z "$line" ]; }; then
-        post=$(num_of postTokens "$cut"); ctx_json claude "$post" "$w" transcript "$m"; return
-    fi
+    if [ "$which" = cut ]; then post=$(num_of postTokens "$cb"); ctx_json claude "$post" "$w" transcript "$m"; return; fi
     [ -n "$line" ] || { ctx_json claude "" "" transcript ""; return; }
     j=$(after_key usage "$line")
     u=$(( $(num_of input_tokens "$j")0 / 10 + $(num_of cache_creation_input_tokens "$j")0 / 10 + $(num_of cache_read_input_tokens "$j")0 / 10 ))
@@ -1160,17 +1351,25 @@ codex_pct() { # codex_pct USED WINDOW : Codex's own "% context left" turned into
     e=$((w - b)); used=$((u > b ? u - b : 0)); rem=$((e > used ? e - used : 0))
     echo $(( 100 - (rem * 100 + e / 2) / e ))
 }
-codex_ctx() { # codex_ctx CWD : the newest rollout started in that folder
-    local f line u w m
+codex_ctx() { # codex_ctx CWD : the newest rollout started in that folder, its last token_count and turn_context
+    local f want which line m u w
     [ -n "$1" ] && [ -d "$CODEX_DIR/sessions" ] || { ctx_json codex "" "" "" ""; return; }
-    for f in $(find "$CODEX_DIR/sessions" -name 'rollout-*.jsonl' -mtime -7 2>/dev/null | xargs ls -t 2>/dev/null | head -n 40); do
-        head -n 1 "$f" | grep -qF "\"cwd\":$(json_s "$1")" || continue
-        line=$(grep '"token_count"' "$f" | grep '"last_token_usage"' | tail -n 1)
-        m=$(grep '"turn_context"' "$f" | tail -n 1); m=$(str_of model "$m")
+    want="\"cwd\":$(json_s "$1")"
+    while IFS= read -r f; do
+        [ -n "$f" ] && head -n 1 "$f" | grep -qF "$want" || continue
+        { IFS= read -r which; IFS= read -r line; IFS= read -r m; } <<EOF
+$(ctx_read "$f" 'cut && NR == 1 { next }
+    index($0, "\"token_count\"") && index($0, "\"last_token_usage\"") { t = $0 }
+    index($0, "\"turn_context\"") { c = $0 }
+    END { print ((t == "" || c == "") && cut ? "more" : "ok"); print t; print c }')
+EOF
+        m=$(str_of model "$m")
         [ -n "$line" ] || { ctx_json codex "" "" rollout "$m"; return; }
         u=$(num_of total_tokens "$(after_key last_token_usage "$line")"); w=$(num_of model_context_window "$line")
         ctx_json codex "$u" "$w" rollout "$m" "$( [ -n "$u" ] && [ -n "$w" ] && codex_pct "$u" "$w")"; return
-    done
+    done <<EOF
+$(newest_files "$CODEX_DIR/sessions" 'rollout-*.jsonl')
+EOF
     ctx_json codex "" "" "" ""
 }
 omp_window() { # omp_window provider/model -> the window omp's model list has for it (needs sqlite3), else kit's guess
@@ -1183,43 +1382,53 @@ omp_window() { # omp_window provider/model -> the window omp's model list has fo
     case $w in ""|*[!0-9]*) model_window "${1#*/}";; *) echo "$w";; esac
 }
 omp_ctx() { # omp_ctx PID CWD
-    local f="" tty line cut u m j rm
+    local f="" x tty want which a c m tb im u w j rm
     tty=$(ps -o tty= -p "$1" 2>/dev/null | tr -d ' ' | sed 's|^/dev/||; s|/|-|g')
     case $tty in ""|"?"|"??") ;; *) [ -f "$OMP_DIR/terminal-sessions/$tty" ] && f=$(sed -n 2p "$OMP_DIR/terminal-sessions/$tty");; esac
     if [ -z "$f" ] || [ ! -f "$f" ]; then
-        f=""
-        [ -n "$2" ] && for f in $(find "$OMP_DIR/sessions" -name '*.jsonl' -mtime -7 2>/dev/null | xargs ls -t 2>/dev/null | head -n 40); do
-            head -n 3 "$f" | grep '"type":"session"' | grep -qF "\"cwd\":$(json_s "$2")" && break; f=""
-        done
+        f=""; want="\"cwd\":$(json_s "$2")"
+        [ -n "$2" ] && while IFS= read -r x; do
+            [ -n "$x" ] && head -n 3 "$x" | grep '"type":"session"' | grep -qF "$want" && { f=$x; break; }
+        done <<EOF
+$(newest_files "$OMP_DIR/sessions" '*.jsonl')
+EOF
     fi
     [ -n "$f" ] || { ctx_json omp "" "" "" ""; return; }
-    line=$(grep -n '"role":"assistant"' "$f" | grep -v '"stopReason":"aborted"' | grep -v '"stopReason":"error"' | tail -n 1)
-    cut=$(grep -n -E '"type":"(compaction|reset_boundary)"' "$f" | tail -n 1)
-    m=$(grep '"type":"model_change"' "$f" | tail -n 1); m=$(str_of model "$m")
-    [ -n "$line" ] && [ -z "$m" ] && m="$(str_of provider "$line")/$(str_of model "$line")"
+    # the last finished reply, the last compaction, the last model change; and like omp's own footer, what came after
+    # that reply (tool results, your next message): their text at about 4 bytes a token, each image about 1600 tokens
+    # (only the message itself: what omp keeps for its screen, "details", is not sent to the model)
+    { IFS= read -r which; IFS= read -r a; IFS= read -r c; IFS= read -r m; IFS= read -r tb; IFS= read -r im; } <<EOF
+$(ctx_read "$f" 'cut && NR == 1 { next }
+    index($0, "\"role\":\"assistant\"") && !index($0, "\"stopReason\":\"aborted\"") && !index($0, "\"stopReason\":\"error\"") { a = $0; an = NR; tb = 0; im = 0; next }
+    index($0, "\"type\":\"compaction\"") || index($0, "\"type\":\"reset_boundary\"") { c = $0; cn = NR }
+    index($0, "\"type\":\"model_change\"") { m = $0 }
+    an && index($0, "\"type\":\"message\"") {
+        s = $0; i = index(s, ",\"details\":"); if (i) s = substr(s, 1, i - 1)
+        x = s; while ((i = index(x, "\"type\":\"image\"")) > 0) { im++; x = substr(x, i + 14) }
+        while (match(s, /"text":"([^"\\]|\\.)*"/)) { tb += RLENGTH - 9; s = substr(s, RSTART + RLENGTH) } }
+    END { print (cn > an ? "cut" : an ? "reply" : cut ? "more" : ""); print a; print c; print m; print tb + 0; print im + 0 }')
+EOF
+    m=$(str_of model "$m")
+    [ -n "$a" ] && [ -z "$m" ] && m="$(str_of provider "$a")/$(str_of model "$a")"
     w=$( [ -n "$m" ] && omp_window "$m")
-    if [ -n "$cut" ] && { [ -z "$line" ] || [ "${cut%%:*}" -gt "${line%%:*}" ]; }; then
-        ctx_json omp "$(num_of tokensAfter "$cut")" "$w" session "$m"; return
-    fi
-    [ -n "$line" ] || { ctx_json omp "" "$w" session "$m"; return; }
-    u=$(num_of promptTokens "$(after_key contextSnapshot "$line")")
-    if [ -z "$u" ]; then j=$(after_key usage "$line"); u=$(( $(num_of input "$j")0 / 10 + $(num_of cacheRead "$j")0 / 10 + $(num_of cacheWrite "$j")0 / 10 )); fi
-    rm=$(num_of historyRewriteTokensRemoved "$line"); [ -z "$rm" ] || u=$(( u > rm ? u - rm : 0 ))
-    # like omp's own footer: what came after that reply (tool results, your next message), about 4 bytes a token
-    u=$(( u + $(tail -n +$(( ${line%%:*} + 1 )) "$f" | grep '"type":"message"' | wc -c | tr -d ' ') / 4 ))
+    [ "$which" = cut ] && { ctx_json omp "$(num_of tokensAfter "$c")" "$w" session "$m"; return; }
+    [ -n "$a" ] || { ctx_json omp "" "$w" session "$m"; return; }
+    u=$(num_of promptTokens "$(after_key contextSnapshot "$a")")
+    if [ -z "$u" ]; then j=$(after_key usage "$a"); u=$(( $(num_of input "$j")0 / 10 + $(num_of cacheRead "$j")0 / 10 + $(num_of cacheWrite "$j")0 / 10 )); fi
+    rm=$(num_of historyRewriteTokensRemoved "$a"); [ -z "$rm" ] || u=$(( u > rm ? u - rm : 0 ))
+    u=$(( u + ${tb:-0} / 4 + ${im:-0} * 1600 ))
     ctx_json omp "$u" "$w" session "$m"
 }
 cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] : how full that agent's context is (JSON)
-    local pid="" tool="" dir="" a f p
+    local pid="" tool="" dir="" a f p use="用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]"
     while [ $# -gt 0 ]; do
         case $1 in
-            --pid) pid=${2:-}; shift 2 || true;;
-            --tool) tool=${2:-}; shift 2 || true;;
-            --dir) dir=${2:-}; shift 2 || true;;
-            *) die "用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]";;
+            --pid|--tool|--dir) [ $# -ge 2 ] || die "$use"
+                case $1 in --pid) pid=$2;; --tool) tool=$2;; *) dir=$2;; esac; shift 2;;
+            *) die "$use";;
         esac
     done
-    case $pid in ""|*[!0-9]*) die "用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]";; esac
+    case $pid in ""|*[!0-9]*) die "$use";; esac
     if [ -z "$tool" ]; then
         a=$(proc_args "$pid"); set -- $a
         case ${1##*/}:${2:-} in claude*|*:*claude*) tool=claude;; codex*|*:*codex*) tool=codex;; omp*|*:*omp*) tool=omp;; esac
@@ -1465,6 +1674,7 @@ EOF
 cmd_list_json() { # what kit list shows, as JSON for programs (the Herdr panel); kit.ps1 prints the same
     local want req i k n p d status new first s tools
     want=$(wanted); req=$(required_items)
+    tool_cache                                               # each program looked at once, not once per skill
     printf '{\n  "kit": %s,\n  "sources": [' "$(json_s "$KIT_VERSION")"
     first=1
     while IFS= read -r s; do
@@ -1609,8 +1819,14 @@ cmd_run() {
     local f; f=$(find_item agent "$name") || die "找不到 agent ${name}（打 kit list 看有哪些）"
     if take_lock soft; then ( QUIET=1 cmd_sync ) 2>/dev/null; release_lock; fi   # busy (another kit is syncing): start as it is
 
-    local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-run.XXXXXX")
-    local n p d k
+    # the agent's folder, gone when kit ends (also on Ctrl-C); a dry run keeps it to look at, without kit's links in it.
+    # Folders of runs that were killed (their kit is gone) go now.
+    local d; for d in "${TMPDIR:-/tmp}"/kit-run.*; do
+        [ -f "$d/.kit-pid" ] && ! kill -0 "$(cat "$d/.kit-pid")" 2>/dev/null && rm -rf "$d"
+    done
+    local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-run.XXXXXX") || die "沒辦法建立暫存資料夾"
+    [ -n "${KIT_DRY_RUN:-}" ] || { KIT_RUN_TMP=$tmp; echo $$ > "$tmp/.kit-pid"; }
+    local n p k
     local fm; fm=$(LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$f") || die "bad header in $f"
     fmget() { printf '%s\n' "$fm" | awk -F'\t' -v p="$1" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
 
@@ -1619,7 +1835,7 @@ cmd_run() {
     mkdir -p "$skdir"
     for n in $(fmget skills); do
         p=$(find_item skill "$n") || { warn "skill $n not found"; continue; }
-        cp -R "$(dirname "$p")" "$skdir/$n"; link_deps "$n" "$skdir/$n"
+        cp -R "$(dirname "$p")" "$skdir/$n"; [ -n "${KIT_DRY_RUN:-}" ] || link_deps "$n" "$skdir/$n"
     done
     # the agent's rules + its prompt
     {
@@ -1627,7 +1843,7 @@ cmd_run() {
             p=$(find_item rule "$n") || { warn "rule $n not found"; continue; }
             cat "$p"; echo
         done
-        py_hint
+        py_hint $(fmget skills)
         fm_body "$f"
         if [ $tool = codex ] && [ -n "$(ls "$skdir")" ]; then
             # Codex cannot load skills from an extra folder: list them, it reads one when needed
@@ -1685,9 +1901,11 @@ EOF
     [ -n "${KIT_DRY_RUN:-}" ] && { printf '%s\n' "$tool" "$@"; printf 'tmp=%s\n' "$tmp"; return 0; }
     # a marker (this process -> agent name), so the Herdr pane can tell which agent runs in it
     mkdir -p "$KIT_CONF/run" 2>/dev/null && printf '%s\n' "$name" > "$KIT_CONF/run/$$"
+    trap : INT                                               # Ctrl-C is the agent's; kit cleans up when it ends
     "$tool" "$@"
     local rc=$?
-    rm -rf "$tmp"; rm -f "$KIT_CONF/run/$$"
+    trap 'exit 130' INT
+    rm -rf "$tmp"; rm -f "$KIT_CONF/run/$$"; KIT_RUN_TMP=
     return $rc
 }
 
@@ -2895,7 +3113,7 @@ EOF
 }
 
 # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook takes it itself)
-case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent) [ "${2:-}" = --hook ] || take_lock;; esac
+case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent|install-deps) [ "${2:-}" = --hook ] || take_lock;; esac
 case ${1:-} in
     init)      shift; cmd_init "$@";;
     sync)      shift

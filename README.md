@@ -69,7 +69,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
     kit install-tool node [--min 18]   裝 Node.js（太舊就升級）
 
 - **怎麼看出來的**：`SKILL.md` 裡叫 agent 跑的指令（`node x.mjs`、`npx …`、`python3 x.py`、`pip install …`），`requirements.txt`／`pyproject.toml`，`package.json` 的 `engines.node`（最低版本）。也可以自己寫：`SKILL.md` 的 `requires: [node>=18]`，或來源 `kit.yaml` 的 `requires: {archify: [node>=18]}`（收來的 skill 不用改原作者的檔案）。
-- **怎麼裝**：每個程式一個 `tools/<名字>.yaml`。kit 內建 node、python、git；來源倉放同名的檔案會蓋過內建的，放新的就多支援一個程式。
+- **怎麼裝**：每個程式一個 `tools/<名字>.yaml`。kit 內建 node、python、git，**來源倉不能蓋過這三個**（同名的檔案不算數）；來源倉放別的名字，就多支援一個程式。
 
       name: node
       title: Node.js
@@ -79,7 +79,11 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
         windows: [winget OpenJS.NodeJS.LTS, scoop nodejs-lts]
         linux: [apt nodejs, brew node]   # apt 只有 root 用得到；沒有能用的就請你自己裝
 
-  每個系統列「套件管理器 套件名」，kit 依序用這台第一個能用的。**只能寫這兩個字**：管理器只認 brew、apt、winget、scoop、pip，實際執行的指令是 kit 自己組的（例如 `brew install node`、太舊時 `brew upgrade node`），檔案裡寫別的指令會被略過。
+  每個系統列「套件管理器 套件名」，kit 依序試這台能用的，一種裝失敗就換下一種。**只能寫這兩個字**：管理器只認 brew、apt、winget、scoop、pip，實際執行的指令是 kit 自己組的（例如 `brew install node`、太舊時 `brew upgrade node`），檔案裡寫別的指令會被略過。
+  - 套件名只能是單純的名字：英文字母或數字開頭，不能有 `/`（所以不能是 brew 的 `使用者/tap/套件`、路徑或網址）；scoop 可以寫 `main/`、`extras/`、`versions/` 開頭。
+  - pip 一律是 `python3 -m pip install --user --only-binary=:all: <套件>`：只裝現成的 wheel，套件的 `setup.py` 不會被執行。
+  - winget 先用 `--scope user`（只裝給這個帳號）；那個套件沒有這種安裝程式時，kit 會說一聲再改成一般安裝。
+- **怎麼看這台有沒有**：只看有配方的程式（沒有 `tools/<名字>.yaml` 的名字不會被執行），跑它的 `--version`，最多讀 4 KB、最多等 5 秒（`KIT_PROBE_WAIT` 可改）。Mac 沒裝 Command Line Tools 時，`/usr/bin/git`、`/usr/bin/python3` 只會跳出安裝視窗，kit 當作沒有。
 - **在哪裡看到**：Herdr 的 Kit 清單，skill 下面會出現「⚠ 需要 Node.js 18 以上（這台沒有）［安裝］」。按「安裝」先顯示 kit 要執行的指令，按「確定安裝」才執行。
 - 從網路收來的 skill 不會帶 `tools/` 進來：只有你自己倉裡、或團隊審過的 `tools/` 會用到。
 
@@ -91,7 +95,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 
     來源裡的 skill（不動）              kit 自己的資料夾
     skills/foo/package.json  ──複製──▶  ~/.config/agentkit/deps/foo/
-    skills/foo/package-lock.json        ├─ npm ci --ignore-scripts
+    skills/foo/package-lock.json        ├─ npm ci --ignore-scripts --omit=dev
                                         └─ node_modules/
                                               ▲
     ~/.claude/skills/foo/node_modules ────────┘ 連過去（Windows 是 junction，不用管理員）
@@ -99,17 +103,21 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
     ~/ai/.claude/skills/foo/node_modules ─────┘
 
 - 有 `package-lock.json` 用 `npm ci`（照鎖好的版本），沒有才用 `npm install`。
-- 一律加 `--ignore-scripts`：套件不能在安裝時跑它自己的程式。skill 帶的 `.npmrc` 不會用（不讓它換下載來源）。
+- 一律加 `--ignore-scripts`：套件不能在安裝時跑它自己的程式。`--omit=dev`：只裝執行時要的，不裝開發用的套件。skill 帶的 `.npmrc` 不會用（不讓它換下載來源）。
+- **只裝 npm registry 上的版本**：`package.json` 的 `dependencies`、`optionalDependencies`、`peerDependencies`、`overrides` 只能寫版本、版本範圍或標籤（像 `1.3.0`、`^2.0.0`、`latest`，或 `npm:別的名字@版本`）。寫 git、`github:`、`使用者/repo`、網址、`file:`、`link:`、`workspace:` 或路徑的，kit 整個不裝（npm 抓 git 套件時會跑它的程式，`--ignore-scripts` 也擋不住），清單上會寫是哪一個。
+- 有 `package-lock.json` 時，每個套件都要是 registry 上的 `.tgz`（`https://registry.npmjs.org/`，或你自己 `~/.npmrc` 設的 `registry=`，要是 https）而且有 `integrity`，不能是連結。沒有 lock 時只看得到 `package.json` 直接列的套件：再往下的套件由 npm 從 registry 抓。
 - 裝在 kit 自己的資料夾，不寫進來源（不會被 commit 或推上去）。每個放了這個 skill 的地方（帳號、資料夾、`kit run` 的 agent）都連到同一份。
 - skill 更新後 `package.json`／`package-lock.json` 變了，就要再按一次「更新」；舊的套件不會連到新版上。
+- 一次只有一個 kit 在裝（跟 `kit sync` 用同一把鎖）。先裝在旁邊一個新的資料夾，裝好才換上去：npm 失敗或你按 Ctrl-C，那個資料夾會刪掉，原本的不受影響。
 - `kit uninstall` 會一起刪掉。要先有 Node.js：沒有的話先裝上面那一行的 Node.js。
 
 Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/agentkit/pydeps/<skill>/venv`），skill 的資料夾裡連一個 `.venv` 過去：
 
 - 指令：`python3 -m venv venv`，再用那個 venv 的 python 跑 `-m pip install --only-binary=:all: --no-input -r requirements.txt`。
 - `--only-binary=:all:`：只裝現成的 wheel，不從原始碼編譯，所以套件的 `setup.py` 不會被執行。沒有 wheel 的套件會裝失敗，要自己處理。
-- `requirements.txt` 只能寫套件名、版本和條件（像 `requests==2.32.0`、`rich[jupyter]>=13 ; python_version >= "3.9"`）。有 `-r`、`-e`、`--index-url`、網址這類寫法，kit 整個不裝，清單上會寫第幾行有問題。
-- 有 venv 之後，kit 在 CLAUDE.md／AGENTS.md 的 kit 區塊多寫一行，請 agent 用 skill 資料夾裡的 `.venv/bin/python`（Windows：`.venv\Scripts\python.exe`）執行那個 skill 的程式，不要自己再 pip install。
+- `requirements.txt` 只能寫套件名、版本和條件（像 `requests==2.32.0`、`rich[jupyter]>=13 ; python_version >= "3.9"`）。條件（`;` 後面）只能有條件會用到的字：英數字、`_ . < > = ! ~ ( )`、引號和空白。有 `-r`、`-e`、`--index-url`、網址這類寫法，或任何地方有 ` -` 開頭的選項（條件後面也算），kit 整個不裝，清單上會寫第幾行有問題。
+- 重裝時舊的 venv 先留著，裝好才刪；pip 失敗或你按 Ctrl-C，舊的會放回去。
+- 有 venv 之後，kit 在帳號的 CLAUDE.md／AGENTS.md（Claude、Codex、omp）的 kit 區塊多寫一行，請 agent 用 skill 資料夾裡的 `.venv/bin/python`（Windows：`.venv\Scripts\python.exe`）執行那個 skill 的程式，不要自己再 pip install。只有帳號加了、kit 也幫它裝好 venv 的 skill 才會寫；資料夾自己的（`--dir`）CLAUDE.md／AGENTS.md 不寫這行，所以 `kit rm --dir`、`kit uninstall` 之後資料夾和原本一模一樣。`kit run` 的 agent 有這種 skill 時，提示裡也有這行。
 - Debian/Ubuntu 沒有 venv 時，要先裝 `python3-venv`（kit 會說）。
 
 ## agent 的 context 用了多少
@@ -122,11 +130,12 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 |---|---|---|
 | Claude | kit 放的 statusLine 每次更新都把 Claude 自己的數字存在 `~/.config/agentkit/ctx/claude-<pid>.json`；沒有的話讀那個資料夾最新的對話紀錄 | Claude 自己的（`/context` 一樣的上限，`autoCompactWindow` 有設就用它） |
 | Codex | 那個資料夾最新的 `~/.codex/sessions/**/rollout-*.jsonl`，最後一次的 `last_token_usage` | 跟 Codex 畫面的「% context left」一樣：先扣掉它固定的 12000 |
-| omp | 它的終端機指向的 session（`~/.omp/agent/terminal-sessions/<tty>`），或那個資料夾最新的 session；最後一個完成的回覆 | 跟 omp 頁尾一樣：再加上那之後的工具結果（約 4 bytes 一個 token）；上限用 omp 自己的模型清單 |
+| omp | 它的終端機指向的 session（`~/.omp/agent/terminal-sessions/<tty>`），或那個資料夾最新的 session；最後一個完成的回覆 | 跟 omp 頁尾一樣：再加上那之後的訊息（工具結果、你的下一句）：文字約 4 bytes 一個 token，一張圖約 1600 個 token（omp 自己畫面用的 `details` 不算，那不會送給模型）；上限用 omp 自己的模型清單 |
 
-壓縮（compaction）過、還沒有新回覆時，用壓縮後的大小。
+壓縮（compaction）過、還沒有新回覆時，用壓縮後的大小。Claude Code 自己產生的回覆（`"model":"<synthetic>"`，用量是 0）不算。估出來超過上限時 `pct` 寫 100。
+紀錄檔可能有幾百 MB：kit 只讀最後 8 MB（`KIT_CTX_TAIL` 可改，單位 byte），那一段找不到需要的才整個讀。
 
-**Claude 的 statusLine**：`kit sync` 會在 `~/.claude/settings.json` 加上 `statusLine`（執行 `kit statusline`），Claude 底下的狀態列會顯示「Opus 5.5 · context 35%（139k / 400k）」。你已經有自己的 statusLine 時 kit 不動它（只提醒一次），Claude 的用量改從對話紀錄估；Remote Control 的對話紀錄可能不即時。`kit uninstall` 會拿掉 kit 加的。
+**Claude 的 statusLine**：`kit sync` 會在 `~/.claude/settings.json` 加上 `statusLine`（執行 `kit statusline`），Claude 底下的狀態列會顯示「Opus 5.5 · context 35%（139k / 400k）」。你已經有自己的 statusLine 時 kit 不動它（只提醒一次），Claude 的用量改從對話紀錄估；Remote Control 的對話紀錄可能不即時。你把 kit 加的 statusLine 拿掉，kit 之後就不會再加回來（說一次）；要加回來打 `kit sync --force`。`kit uninstall` 會拿掉 kit 加的。
 
 ## Herdr 的 kit 面板
 
