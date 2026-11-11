@@ -314,6 +314,65 @@ function Json-RmHolder($n, [string]$key, [string]$raw) { # anywhere: remove arra
         Json-RmHolder $c $key $raw
     }
 }
+function Json-AddBefore($n, [string]$key, [string]$raw, [string]$json) { # like Json-AddNear, but right before the first such item
+    if ($n.t -eq 'v') { return }
+    $at = -1
+    $count = $n.v.Count
+    for ($i = 0; $i -lt $count; $i++) {
+        if ($n.t -eq 'a' -and $at -lt 0 -and (Json-ItemIs $n.v[$i] $key $raw)) { $at = $i }
+        Json-AddBefore $n.v[$i] $key $raw $json
+    }
+    if ($at -lt 0) { return }
+    $item = Json-Parse $json; $s = Json-Ser $item
+    foreach ($x in $n.v) { if ((Json-Ser $x) -ceq $s) { return } }
+    $n.v.Insert($at, $item)
+}
+function Json-SetKey($o, [string]$key, $v) { # object o gets KEY = node v (in place, or added last)
+    $i = Json-Child $o $key
+    if ($i -ge 0) { $o.v[$i] = $v } else { $o.k.Add((Json-Str $key)); $o.v.Add($v) }
+}
+function Json-NewObj { @{ t = 'o'; k = (New-Object System.Collections.Generic.List[string]); v = (New-Object System.Collections.Generic.List[object]) } }
+function Json-RowAround($n, [string]$key, [string]$raw, [string]$id) { # the item (KEY is the string) of a non-row's children goes into a new row ID
+    if ($n.t -eq 'v') { return }
+    if ($n.t -eq 'o') {
+        $a = Json-Find $n 'children'; $ty = Json-Find $n 'type'
+        $isRow = ($null -ne $ty) -and $ty.t -eq 'v' -and $ty.raw -ceq '"row"'
+        if ($null -ne $a -and $a.t -eq 'a' -and -not $isRow) {
+            for ($i = 0; $i -lt $a.v.Count; $i++) {
+                $c = $a.v[$i]
+                if (-not (Json-ItemIs $c $key $raw)) { continue }
+                $r = Json-NewObj
+                Json-SetKey $r 'id' @{ t = 'v'; raw = (Json-Str $id) }
+                Json-SetKey $r 'type' @{ t = 'v'; raw = '"row"' }
+                $sz = Json-Find $c 'size'; if ($null -ne $sz) { Json-SetKey $r 'size' $sz }
+                $ch = @{ t = 'a'; v = (New-Object System.Collections.Generic.List[object]) }; $ch.v.Add($c)
+                Json-SetKey $r 'children' $ch
+                Json-SetKey $c 'size' (Json-Parse '{"weight": 1}')
+                $a.v[$i] = $r
+            }
+        }
+    }
+    for ($i = 0; $i -lt $n.v.Count; $i++) { Json-RowAround $n.v[$i] $key $raw $id }
+}
+function Json-UnRow($n, [string]$rawId) { # the row with this id: one child left takes its place (and its size); none left: removed
+    if ($n.t -eq 'v') { return }
+    for ($i = $n.v.Count - 1; $i -ge 0; $i--) {
+        $c = $n.v[$i]
+        if ($n.t -eq 'a' -and (Json-ItemIs $c 'id' $rawId)) {
+            $ch = Json-Find $c 'children'
+            if ($null -ne $ch -and $ch.t -eq 'a') {
+                if ($ch.v.Count -eq 0) { $n.v.RemoveAt($i); continue }
+                if ($ch.v.Count -eq 1 -and $ch.v[0].t -eq 'o') {
+                    $x = $ch.v[0]; $sz = Json-Find $c 'size'
+                    if ($null -ne $sz) { Json-SetKey $x 'size' $sz }
+                    else { $j = Json-Child $x 'size'; if ($j -ge 0) { $x.k.RemoveAt($j); $x.v.RemoveAt($j) } }
+                    $n.v[$i] = $x; $c = $x
+                }
+            }
+        }
+        Json-UnRow $c $rawId
+    }
+}
 function Json-Apply($root, $ops) {
     foreach ($op in $ops) {
         switch ($op[0]) {
@@ -327,6 +386,9 @@ function Json-Apply($root, $ops) {
             'addnear' { Json-AddNear $root $op[1] (Json-Str $op[2]) $op[3] }
             'swapwhere' { Json-SwapWhere $root $op[1] (Json-Str $op[2]) (Json-Str $op[3]) }
             'rmholder' { Json-RmHolder $root $op[1] (Json-Str $op[2]) }
+            'addbefore' { Json-AddBefore $root $op[1] (Json-Str $op[2]) $op[3] }
+            'rowaround' { Json-RowAround $root $op[1] (Json-Str $op[2]) $op[3] }
+            'unrow'   { Json-UnRow $root (Json-Str $op[1]) }
             default   { throw "json: unknown op $($op[0])" }
         }
     }
@@ -2078,10 +2140,10 @@ function Layout-Edit([string]$f, $ops, [switch]$Clean) { # the layout text with 
     $ops = @($ops | Where-Object { $_ })
     if (-not $Clean -and (Has-Id $text 'kit-toggle') -and (Has-Id $text 'kit-panel')) {
         # Kit's button and panel already there (maybe moved or resized by hand): keep them, only add what is missing
-        $ops = @($ops | Where-Object { -not ($_[0] -eq 'addnear' -and $_[3] -match '^\{"id":"([^"]+)"' -and (Has-Id $text $Matches[1])) })
+        $ops = @($ops | Where-Object { -not (($_[0] -eq 'addnear' -or $_[0] -eq 'addbefore') -and $_[3] -match '^\{"id":"([^"]+)"' -and (Has-Id $text $Matches[1])) })
     }
     else { # start clean: old or half-placed blocks taken out first (a column holding only kit's block too, whatever its id became)
-        $ops = @(@('rmholder', 'content.mod', 'kit'), @('rmholder', 'content.mod', 'kit-agents'), @('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel'), @('rmwhere', 'content.mod', 'kit-agents'), @('rmwhere', 'id', 'kit-agents-toggle'), @('rmwhere', 'id', 'kit-agents-panel'), @('swapwhere', 'content.mod', 'kit-pane', 'pane')) + $ops
+        $ops = @(@('rmholder', 'content.mod', 'kit'), @('rmholder', 'content.mod', 'kit-agents'), @('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel'), @('rmwhere', 'content.mod', 'kit-agents'), @('rmwhere', 'id', 'kit-agents-toggle'), @('rmwhere', 'id', 'kit-agents-panel'), @('unrow', 'kit-tabs-row'), @('swapwhere', 'content.mod', 'kit-pane', 'pane')) + $ops
     }
     Json-Apply $root $ops
     Json-Text $root $text
@@ -2119,7 +2181,12 @@ function Cmd-HerdrPanel($rest) {
         else {
             # the button and panel, and each pane's header with kit's button (the pane header mod "kit-pane")
             $t = $null
-            try { $t = Layout-Edit $lf @(@('addnear', 'content.mod', 'tabs', $AgentsToggle), @('addnear', 'content.mod', 'tabs', $PanelToggle), @('addnear', 'content.tab', 'active', $PanelNode), @('addnear', 'content.tab', 'active', $AgentsNode), @('swapwhere', 'content.mod', 'pane', 'kit-pane')) } catch { if ($env:KIT_DEBUG) { Warn "$($_.Exception.Message) $($_.ScriptStackTrace)" }; $t = $null }
+            # the buttons go in one row with the tab bar: a tab bar in a column (Herdr's own layouts) gets a row around
+            # it first. On Windows the bar draws the window buttons itself, so kit's go before it (close stays in the corner).
+            $tog = if ($OnWindows -or $env:KIT_TEST_BAR_BUTTONS) { 'addbefore' } else { 'addnear' }
+            $have = (Has-Id (Read-Text $lf) 'kit-agents-toggle') -and (Has-Id (Read-Text $lf) 'kit-toggle')
+            $rowOp = if ($have) { $null } else { @('rowaround', 'content.mod', 'tabs', 'kit-tabs-row') }
+            try { $t = Layout-Edit $lf @($rowOp, @($tog, 'content.mod', 'tabs', $AgentsToggle), @($tog, 'content.mod', 'tabs', $PanelToggle), @('addnear', 'content.tab', 'active', $PanelNode), @('addnear', 'content.tab', 'active', $AgentsNode), @('swapwhere', 'content.mod', 'pane', 'kit-pane')) } catch { if ($env:KIT_DEBUG) { Warn "$($_.Exception.Message) $($_.ScriptStackTrace)" }; $t = $null }
             if ($t -and (Has-Id $t 'kit-toggle') -and (Has-Id $t 'kit-panel')) {
                 if ($t -cne (Read-Text $lf)) { $newLayout = $t }     # already like this: no backup, no write
             }

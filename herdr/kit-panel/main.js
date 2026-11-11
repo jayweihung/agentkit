@@ -32,6 +32,7 @@ const PANEL_NODE = { id: PANEL, type: "column", children: [{ id: "kit", type: "b
 const AGENTS_TOGGLE = { id: "kit-agents-toggle", type: "block", content: { mod: "kit-agents", props: { role: "toggle" } }, size: { px: 66 } };
 const AGENTS_NODE = { id: "kit-agents-panel", type: "column", children: [{ id: "kit-agents", type: "block", content: { mod: "kit-agents" } }],
   size: { px: 420 }, min: 320, max: 800, hidden: true };
+const TABS_ROW = "kit-tabs-row";
 const POPUP_H = 560; // the "pane" popup (kit-pane opens it with this height too)
 const LONG = 600000, SHORT = 120000; // how long kit sync / push, and the other actions, may take
 const STALE = 60000, LOAD_TTL = 90000;
@@ -70,13 +71,28 @@ function withKitHeaders(node) {
   return out;
 }
 // The layout with a tab-bar button + the panel beside the work area, kit's pane headers, the stray dock removed.
+// Kit's buttons go in one row with the tab bar. A tab bar in a column (Herdr's own layouts) gets a row around it
+// (kit-tabs-row, its size; the bar fills the rest). Where the bar draws the window buttons itself (Windows, Linux)
+// kit's go before it so the close button stays in the corner; on a Mac after it. The same as kit herdr-panel install.
 function placed(root) {
-  const strip = (n) => ({ ...n, children: n.children?.filter((c) => !["kit", "kit-agents"].includes(c.content?.mod) && c.id !== PANEL && c.id !== AGENTS_NODE.id).map(strip) });
+  const strip = (n) => {
+    const kids = n.children?.filter((c) => !["kit", "kit-agents"].includes(c.content?.mod) && c.id !== PANEL && c.id !== AGENTS_NODE.id).map(strip);
+    return kids ? { ...n, children: kids.map((c) => (c.id === TABS_ROW && c.children?.length === 1 ? unrow(c) : c)) } : { ...n };
+  };
+  const unrow = (r) => { const x = { ...r.children[0] }; if (r.size) x.size = r.size; else delete x.size; return x; };
   const tree = withKitHeaders(strip(JSON.parse(JSON.stringify(root))));
-  const bar = parentOf(tree, (c) => c.content?.mod === "tabs");
+  let bar = parentOf(tree, (c) => c.content?.mod === "tabs");
   const body = parentOf(tree, (c) => c.content?.tab != null);
   if (!bar || !body) return null;
-  bar.children.push(AGENTS_TOGGLE, TOGGLE_NODE);
+  if (bar.type !== "row") {
+    const i = bar.children.findIndex((c) => c.content?.mod === "tabs"), tabs = bar.children[i];
+    const row = { id: TABS_ROW, type: "row", ...(tabs.size ? { size: tabs.size } : {}), children: [{ ...tabs, size: { weight: 1 } }] };
+    bar.children[i] = row;
+    bar = row;
+  }
+  const at = bar.children.findIndex((c) => c.content?.mod === "tabs");
+  if (window()?.buttons) bar.children.splice(at, 0, AGENTS_TOGGLE, TOGGLE_NODE);
+  else bar.children.splice(at + 1, 0, AGENTS_TOGGLE, TOGGLE_NODE);
   body.children.push(PANEL_NODE, AGENTS_NODE);
   return tree;
 }

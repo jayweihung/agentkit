@@ -1864,10 +1864,12 @@ panel_src() { # the panel's files: next to the installed kit, else in the repo k
     done
     return 1
 }
+case $(uname -s 2>/dev/null) in Darwin) TOGGLE_OP=addnear;; *) TOGGLE_OP=addbefore;; esac   # see herdr-panel install
+[ -z "${KIT_TEST_BAR_BUTTONS:-}" ] || TOGGLE_OP=addbefore     # tests: a bar that draws window buttons, on a Mac
 has_id() { grep -Eq "\"id\"[[:space:]]*:[[:space:]]*\"$1\"" "$2"; }   # has_id ID FILE : a layout node with this id
 layout_without_panel() { # layout_without_panel FILE OUT : FILE without the panel's blocks
     # rmholder first: a column holding only kit's block goes too, whatever its id became
-    printf 'rmholder\tcontent.mod\tkit\nrmholder\tcontent.mod\tkit-agents\nrmwhere\tcontent.mod\tkit\nrmwhere\tid\tkit-toggle\nrmwhere\tid\tkit-panel\nrmwhere\tcontent.mod\tkit-agents\nrmwhere\tid\tkit-agents-toggle\nrmwhere\tid\tkit-agents-panel\nswapwhere\tcontent.mod\tkit-pane\tpane\n' > "$2.ops"
+    printf 'rmholder\tcontent.mod\tkit\nrmholder\tcontent.mod\tkit-agents\nrmwhere\tcontent.mod\tkit\nrmwhere\tid\tkit-toggle\nrmwhere\tid\tkit-panel\nrmwhere\tcontent.mod\tkit-agents\nrmwhere\tid\tkit-agents-toggle\nrmwhere\tid\tkit-agents-panel\nunrow\tkit-tabs-row\nswapwhere\tcontent.mod\tkit-pane\tpane\n' > "$2.ops"
     LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$2.ops" "$1" > "$2"; local rc=$?
     rm -f "$2.ops"; return $rc
 }
@@ -1904,8 +1906,12 @@ cmd_herdr_panel() {
                 # only add what is missing. Otherwise start clean (old or half-placed blocks taken out first).
                 if has_id kit-toggle "$lf" && has_id kit-panel "$lf"; then cp "$lf" "$tmp.1"
                 else layout_without_panel "$lf" "$tmp.1"; fi &&
-                    { has_id kit-agents-toggle "$tmp.1" || printf 'addnear\tcontent.mod\ttabs\t%s\n' "$AGENTS_TOGGLE"
-                      has_id kit-toggle "$tmp.1" || printf 'addnear\tcontent.mod\ttabs\t%s\n' "$PANEL_TOGGLE"
+                    { # the buttons go in one row with the tab bar: a tab bar in a column (Herdr's own layouts) gets a row
+                      # around it first. Where the bar draws the window buttons itself (Linux, Windows) they go before it,
+                      # so the close button stays in the corner; on a Mac after it.
+                      { has_id kit-agents-toggle "$tmp.1" && has_id kit-toggle "$tmp.1"; } || printf 'rowaround\tcontent.mod\ttabs\tkit-tabs-row\n'
+                      has_id kit-agents-toggle "$tmp.1" || printf '%s\tcontent.mod\ttabs\t%s\n' "$TOGGLE_OP" "$AGENTS_TOGGLE"
+                      has_id kit-toggle "$tmp.1" || printf '%s\tcontent.mod\ttabs\t%s\n' "$TOGGLE_OP" "$PANEL_TOGGLE"
                       has_id kit-panel "$tmp.1" || printf 'addnear\tcontent.tab\tactive\t%s\n' "$PANEL_NODE"
                       has_id kit-agents-panel "$tmp.1" || printf 'addnear\tcontent.tab\tactive\t%s\n' "$AGENTS_NODE"
                       printf 'swapwhere\tcontent.mod\tpane\tkit-pane\n'; } > "$tmp.ops" &&

@@ -45,8 +45,10 @@ kit 會把來源 clone 到 `%USERPROFILE%\agentkit\<來源名字>`，再把團�
 
 裝好後（每個畫面的用法看 docs/herdr.md）：
 
-- 上排多 `Agents` 和 `Kit` 兩顆按鈕：`Kit` 開關右邊的倉庫，`Agents` 開關右邊的 Agents 面板。
+- 上排多 `Agents` 和 `Kit` 兩顆按鈕（Windows 上在分頁列的左邊）：`Kit` 開關右邊的倉庫，`Agents` 開關右邊的 Agents 面板。
 - 每個 agent 視窗上面多一顆 Kit 按鈕。
+
+**每台要跑 agent 的電腦或主機都要裝 kit**：例如 Herdr 用「+ Add machine」連的公司 Linux，那台也要裝 kit（`sh unix/install.sh`）並 `kit init`，不然那裡的 agent 按 Kit 按鈕會顯示「出錯了」。
 
 **如果 Herdr 用的是內建版面**（剛裝好通常是 `main`）：kit 不能改內建版面，所以裝完只會在右邊看到 Kit 面板，上面有一個「放進上排」按鈕。
 按下去，kit 會複製一份版面，上排才會出現 `Agents`、`Kit`，每個 agent 視窗也才會有 Kit 按鈕。

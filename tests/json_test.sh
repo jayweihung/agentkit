@@ -166,5 +166,19 @@ printf 'rmholder\tcontent.mod\tkit\n' > "$T/ops9"
 v=$(LC_ALL=C $AWK -f "$JA" -v ops="$T/ops9" "$T/h.json" | python3 -c 'import json,sys;print(" ".join(c["id"] for c in json.load(sys.stdin)["children"]))')
 [ "$v" = "y z" ] && ok || bad "rmholder got: $v"
 
+# rowaround: a tab bar in a column goes into a row (its size; the bar fills the rest), not again on a second run;
+# addbefore puts items right before it; unrow puts the file back as it was
+printf '{\n  "id": "work",\n  "type": "column",\n  "children": [\n    {\n      "id": "tabs",\n      "size": {\n        "px": 42\n      },\n      "content": {\n        "mod": "tabs"\n      }\n    },\n    {\n      "id": "status"\n    }\n  ]\n}\n' > "$T/col.json"
+printf 'rowaround\tcontent.mod\ttabs\tkit-tabs-row\naddbefore\tcontent.mod\ttabs\t{"id":"a"}\naddbefore\tcontent.mod\ttabs\t{"id":"b"}\nrowaround\tcontent.mod\ttabs\tkit-tabs-row\n' > "$T/ops10"
+LC_ALL=C $AWK -f "$JA" -v ops="$T/ops10" "$T/col.json" > "$T/col.out"
+v=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));r=d["children"][0];print(r["id"],r["type"],r["size"]["px"]," ".join(c["id"] for c in r["children"]),r["children"][2]["size"]["weight"],d["children"][1]["id"])' "$T/col.out")
+[ "$v" = "kit-tabs-row row 42 a b tabs 1 status" ] && ok || bad "rowaround + addbefore got: $v"
+printf 'rmwhere\tid\ta\nrmwhere\tid\tb\nunrow\tkit-tabs-row\n' > "$T/ops11"
+LC_ALL=C $AWK -f "$JA" -v ops="$T/ops11" "$T/col.out" > "$T/col.back"
+cmp -s "$T/col.back" "$T/col.json" && ok || bad "unrow did not give the file back"
+printf '{"id":"bar","type":"row","children":[{"id":"tabs","content":{"mod":"tabs"}}]}' > "$T/row.json"
+v=$(LC_ALL=C $AWK -f "$JA" -v ops="$T/ops10" "$T/row.json" | python3 -c 'import json,sys;print(" ".join(c["id"] for c in json.load(sys.stdin)["children"]))')
+[ "$v" = "a b tabs" ] && ok || bad "a bar already in a row gets no new row: $v"
+
 echo "json.awk ($AWK): $pass passed, $fail failed"
 [ $fail -eq 0 ]

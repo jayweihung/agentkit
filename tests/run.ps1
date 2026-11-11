@@ -469,7 +469,7 @@ s.serve_forever()
 '@
 W "$P/req.log" ''
 $fake = Start-Process -FilePath $Py -ArgumentList @('-I', "`"$P/fake-gitea`"", "`"$P/port`"", "`"$P/req.log`"") -PassThru -NoNewWindow
-for ($i = 0; $i -lt 20 -and -not ((Test-Path "$P/port") -and (Get-Item "$P/port").Length -gt 0); $i++) { Start-Sleep -Milliseconds 500 }
+for ($i = 0; $i -lt 120 -and -not ((Test-Path "$P/port") -and (Get-Item "$P/port").Length -gt 0); $i++) { Start-Sleep -Milliseconds 500 }
 $env:KIT_GITEA_API = "http://127.0.0.1:$((ReadT "$P/port").Trim())/api/v1"; Remove-Item env:KIT_GITEA_TOKEN -ErrorAction SilentlyContinue
 $WebBase = $env:KIT_GITEA_API -replace '/api/v1$', ''
 function RemoteHeads { (@(& git --git-dir=$ORIGIN for-each-ref '--format=%(refname:short)' refs/heads) | Sort-Object) -join ' ' }
@@ -827,7 +827,7 @@ open(sys.argv[2], "w").write(str(s.server_address[1]))
 s.serve_forever()
 '@
     $httpd = Start-Process -FilePath $Py -ArgumentList @('-I', "`"$PR/serve`"", "`"$PR/srv`"", "`"$PR/port`"") -PassThru -NoNewWindow
-    for ($i = 0; $i -lt 20 -and -not ((Test-Path "$PR/port") -and (Get-Item "$PR/port").Length -gt 0); $i++) { Start-Sleep -Milliseconds 500 }
+    for ($i = 0; $i -lt 120 -and -not ((Test-Path "$PR/port") -and (Get-Item "$PR/port").Length -gt 0); $i++) { Start-Sleep -Milliseconds 500 }
     & git -C $PW remote add origin "http://127.0.0.1:$((ReadT "$PR/port").Trim())/acme/team.git"; & git -C $PW config remote.origin.pushurl $PO
     W "$PW/skills/sp/SKILL.md" "---`nname: sp`ndescription: s`n---`nx`n"; W "$PW/skills/sp/my file.md" "y`n"
     Push-Location $PW

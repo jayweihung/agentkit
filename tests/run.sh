@@ -797,6 +797,31 @@ check "reinstall / self-update refreshes the pane header too" 'cmp -s "$HH/mods/
 out=$(hp uninstall 2>&1); rc=$?
 check "herdr-panel uninstall: mod and layout blocks gone" '[ $rc -eq 0 ] && [ ! -e "$HH/mods/kit" ] && ! grep -q "kit" "$HH/layouts/mine.json" && grep -q "\"tabs\"" "$HH/layouts/mine.json"'
 check "herdr-panel uninstall: Herdr's own pane header is back, Agents window gone" '[ ! -e "$HH/mods/kit-pane" ] && [ ! -e "$HH/mods/kit-agents" ] && grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json"'
+# a tab bar in a column (like Herdr's own main): kit's buttons go in a row with it, not under the status bar
+printf '{"id":"root","type":"row","children":[{"id":"work","type":"column","children":[{"id":"tabs","type":"block","size":{"px":42},"content":{"mod":"tabs"}},{"id":"body","type":"row","children":[{"id":"main","type":"block","content":{"tab":"active"}}]},{"id":"status","type":"block","size":{"px":28},"content":{"mod":"workspace-status"}}]}]}\n' > "$HH/layouts/col.json"
+cp "$HH/layouts/col.json" "$T/col.orig"; printf '{\n  "layout": "col"\n}\n' > "$HH/shared.json"
+out=$(hp install --keep-env 2>&1); rc=$?
+v=$(python3 -c 'import json,sys;w=json.load(open(sys.argv[1]))["children"][0];r=w["children"][0];print(w["children"][-1]["id"],r["id"],r["type"],r["size"]["px"]," ".join(c["id"] for c in r["children"]))' "$HH/layouts/col.json")
+if [ "$(uname -s)" = Darwin ]; then want="tabs kit-agents-toggle kit-toggle"; else want="kit-agents-toggle kit-toggle tabs"; fi
+check "herdr-panel install: a tab bar in a column gets a row with kit's buttons (Mac: after the bar, Linux: before)" '[ $rc -eq 0 ] && [ "$v" = "status kit-tabs-row row 42 $want" ]'
+if command -v pwsh >/dev/null 2>&1; then
+    mkdir -p "$T/hh3/layouts" "$T/hh3/mods"; cp "$T/col.orig" "$T/hh3/layouts/col.json"; cp "$HH/shared.json" "$T/hh3/shared.json"
+    HERDR_APP_HOME="$T/hh3" pwsh -NoProfile -File "$HERE/../windows/kit.ps1" herdr-panel install >/dev/null 2>&1
+    check "herdr-panel install: kit.ps1 builds the same row" 'cmp -s "$T/hh3/layouts/col.json" "$HH/layouts/col.json"'
+fi
+hp uninstall >/dev/null 2>&1
+check "herdr-panel uninstall: the row is gone, the layout as before" 'python3 -c "import json,sys;sys.exit(json.load(open(sys.argv[1]))!=json.load(open(sys.argv[2])))" "$HH/layouts/col.json" "$T/col.orig"'
+cp "$T/col.orig" "$HH/layouts/col.json"
+out=$(KIT_TEST_BAR_BUTTONS=1 hp install --keep-env 2>&1); rc=$?
+v=$(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]))["children"][0]["children"][0];print(" ".join(c["id"] for c in r["children"]))' "$HH/layouts/col.json")
+check "herdr-panel install: where the bar draws the window buttons (Windows), kit's go before it" '[ $rc -eq 0 ] && [ "$v" = "kit-agents-toggle kit-toggle tabs" ]'
+if command -v pwsh >/dev/null 2>&1; then
+    cp "$T/col.orig" "$T/hh3/layouts/col.json"; rm -rf "$T/hh3/mods"/*
+    KIT_TEST_BAR_BUTTONS=1 HERDR_APP_HOME="$T/hh3" pwsh -NoProfile -File "$HERE/../windows/kit.ps1" herdr-panel install >/dev/null 2>&1
+    check "herdr-panel install: kit.ps1 puts them before the bar the same" 'cmp -s "$T/hh3/layouts/col.json" "$HH/layouts/col.json"'
+fi
+hp uninstall >/dev/null 2>&1
+check "herdr-panel uninstall (buttons before the bar): the layout as before" 'python3 -c "import json,sys;sys.exit(json.load(open(sys.argv[1]))!=json.load(open(sys.argv[2])))" "$HH/layouts/col.json" "$T/col.orig"'
 printf '{\n  "layout": "main"\n}\n' > "$HH/shared.json"
 out=$(hp install --keep-env 2>&1); rc=$?
 check "herdr-panel on a Herdr layout: not edited, panel docks on the right" '[ $rc -eq 0 ] && [ "$(cat "$HH/layouts/main.json")" = "{\"main\":1}" ] && grep -q "\"place\": \"right\"" "$HH/mods/kit/mod.json" && echo "$out" | grep -q 放進上排'
