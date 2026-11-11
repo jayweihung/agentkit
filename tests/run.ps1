@@ -692,6 +692,9 @@ W "$NT/kit.yaml" "name: needteam`nrequires:`n  plain: [git]`n"
 W "$NT/skills/packed/SKILL.md" "---`nname: packed`ndescription: has npm packages`n---`nRun ``node scripts/run.mjs``.`n"
 W "$NT/skills/packed/scripts/run.mjs" "x`n"; W "$NT/skills/packed/package.json" "{`"name`": `"packed`", `"dependencies`": {`"left-pad`": `"1.3.0`"}}`n"
 W "$NT/skills/packed/package-lock.json" "{`"lockfileVersion`": 3}`n"; W "$NT/skills/packed/.npmrc" "registry=http://elsewhere.invalid/`n"
+W "$NT/skills/pyskill/SKILL.md" "---`nname: pyskill`ndescription: python packages`n---`nRun ``python3 scripts/go.py``.`n"
+W "$NT/skills/pyskill/requirements.txt" "# what it needs`nrequests==2.32.0`n"
+W "$NT/skills/pybad/SKILL.md" "---`nname: pybad`ndescription: b`n---`nx`n"; W "$NT/skills/pybad/requirements.txt" "requests`n-e git+http://elsewhere.invalid/x`n"
 Kit init $NT
 Kit list --json
 $items = @{}; foreach ($m in [regex]::Matches($out, '"name": "(drawer|plain|told)".*?"needs": (\[[^\]]*\])')) { $items[$m.Groups[1].Value] = $m.Groups[2].Value }
@@ -728,9 +731,9 @@ if ($OnWindows) {
     W "$FB7/npm" "#!/bin/sh`necho `"`$PWD `$*`" >> '$T/npm7.log'`n[ -f .npmrc ] && exit 9`nmkdir -p node_modules/left-pad && echo x > node_modules/left-pad/index.js`n"; & chmod +x "$FB7/npm"
 }
 $savedP = $env:PATH; $env:PATH = "$FB7" + [IO.Path]::PathSeparator + $env:PATH
-function PkOf([string]$n) { $m = [regex]::Match($out, '"name": "' + $n + '"[^\n]*?"packages": (\{[^}]*\})'); if ($m.Success) { $m.Groups[1].Value } else { $null } }
+function PkOf([string]$n, [string]$k = 'npm') { $m = [regex]::Match($out, '"name": "' + $n + '"[^\n]*?"packages": \[[^\n]*?(\{"kind": "' + $k + '"[^}]*\})'); if ($m.Success) { $m.Groups[1].Value } else { $null } }
 Kit list --json
-Check 'packages: a lock -> npm ci, no package scripts' { (PkOf 'packed') -eq '{"kind": "npm", "ok": false, "had": false, "install": "npm ci --ignore-scripts --no-audit --no-fund"}' -and $null -eq (PkOf 'drawer') }
+Check 'packages: a lock -> npm ci, no package scripts' { (PkOf 'packed') -eq '{"kind": "npm", "ok": false, "had": false, "install": "npm ci --ignore-scripts --no-audit --no-fund", "bad": ""}' -and $null -eq (PkOf 'drawer') }
 Kit add skill packed
 $env:KIT_DRY_RUN = '1'; Kit install-deps packed; Remove-Item env:KIT_DRY_RUN
 Check 'install-deps, dry run: only says the command' { $out.Contains('執行 npm ci --ignore-scripts --no-audit --no-fund') -and -not (Test-Path "$T/npm7.log") }
@@ -739,13 +742,30 @@ Kit install-deps packed
 Check 'install-deps: npm ci in kit''s folder, not the source, without the skill''s .npmrc' { $rc -eq 0 -and (ReadT "$T/npm7.log").Trim().Replace('\', '/').EndsWith('.config/agentkit/deps/packed.new ci --ignore-scripts --no-audit --no-fund') -and (Test-Path "$S7/node_modules/left-pad/index.js") -and -not (Test-Path "$NT/skills/packed/node_modules") -and -not (Test-Path "$S7/.npmrc") }
 Check 'install-deps: the copy kit put gets node_modules linked to it' { (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType -and (Test-Path "$C7/node_modules/left-pad/index.js") }
 Kit list --json
-Check 'packages: installed now' { (PkOf 'packed') -eq '{"kind": "npm", "ok": true, "had": true, "install": "npm ci --ignore-scripts --no-audit --no-fund"}' }
+Check 'packages: installed now' { (PkOf 'packed') -eq '{"kind": "npm", "ok": true, "had": true, "install": "npm ci --ignore-scripts --no-audit --no-fund", "bad": ""}' }
 Kit sync
 Check 'sync: the link is not a change to the skill' { $out -notmatch '手動' -and (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType }
+# Python: a venv of the skill's own (fake python here), requirements.txt with names and versions only
+Kit list --json
+Check 'packages (pip): a requirements.txt with options is shown as refused' { (PkOf 'pybad' 'pip') -match '"bad": "2: -e git\+http://elsewhere.invalid/x"' }
+Kit install-deps pybad
+Check 'install-deps (pip): refuses options in requirements.txt' { $rc -ne 0 -and $out.Contains('第 2: -e') -and -not (Test-Path (Join-Path $H '.config/agentkit/pydeps/pybad')) }
+if (-not $OnWindows) {
+    $realPy = (Get-Command python3 -CommandType Application | Select-Object -First 1).Source
+    W "$FB7/python3" "#!/bin/sh`n[ `"`$1 `$2`" = '-m venv' ] || exec '$realPy' `"`$@`"`nmkdir -p `"`$3/bin`" && printf '#!/bin/sh\necho `"`$PWD `$*`" >> $T/pip7.log\n' > `"`$3/bin/python`" && chmod +x `"`$3/bin/python`"`n"; & chmod +x "$FB7/python3"
+    Kit list --json
+    Check 'packages (pip): a venv and pip with wheels only' { (PkOf 'pyskill' 'pip') -eq '{"kind": "pip", "ok": false, "had": false, "install": "python3 -m venv venv; venv/bin/python -m pip install --only-binary=:all: --no-input --disable-pip-version-check -r requirements.txt", "bad": ""}' }
+    Kit add skill pyskill
+    Kit install-deps pyskill pip
+    $S8 = Join-Path $H '.config/agentkit/pydeps/pyskill'; $C8 = Join-Path $H '.claude/skills/pyskill'
+    Check 'install-deps (pip): a venv in kit''s folder, pip run there with wheels only' { $rc -eq 0 -and (ReadT "$T/pip7.log").Trim().EndsWith('pydeps/pyskill -m pip install --only-binary=:all: --no-input --disable-pip-version-check -r requirements.txt') -and (Test-Path "$S8/venv/bin/python") -and -not (Test-Path "$NT/skills/pyskill/.venv") }
+    Check 'install-deps (pip): the copy gets .venv linked, the instructions say to use it' { (Get-Item -LiteralPath "$C8/.venv" -Force).LinkType -and (ReadT (Join-Path $H '.claude/CLAUDE.md')).Contains('.venv/bin/python') }
+    Remove-Item "$FB7/python3"
+}
 Kit rm skill packed
 Check 'rm skill: the copy goes, kit''s packages stay (the link only)' { -not (Test-Path $C7) -and (Test-Path "$S7/node_modules/left-pad/index.js") }
 Kit uninstall
-Check 'uninstall: kit''s packages go too' { -not (Test-Path (Join-Path $H '.config/agentkit/deps')) }
+Check 'uninstall: kit''s packages go too' { -not (Test-Path (Join-Path $H '.config/agentkit/deps')) -and -not (Test-Path (Join-Path $H '.config/agentkit/pydeps')) }
 $env:PATH = $savedP
 
 # ---------- collect / outdated (other people's skills; a local repo plays the author) ----------

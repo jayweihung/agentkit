@@ -547,14 +547,16 @@ export default class KitPanel extends View {
       none: "請自己裝：這台沒有 kit 可以用的安裝方式",
       args: ["install-tool", x.tool, ...(x.min ? ["--min", x.min] : [])],
     }));
-    const pk = i.packages;
-    if (pk && !pk.ok) missing.push({
-      key: `${i.name}-packages`, install: pk.install, label: pk.had ? "更新" : "安裝", title: `${i.name} 的套件`,
-      what: pk.had ? "它的套件要更新（skill 改過了）" : "需要先裝它自己的套件（npm）",
-      note: "裝在 kit 自己的資料夾，不跑套件自己的安裝程式",
-      none: "要先有 Node.js（npm）才能裝",
-      args: ["install-deps", i.name],
-    });
+    for (const pk of (i.packages ?? []).filter((x) => !x.ok)) {
+      const py = pk.kind === "pip", lang = py ? "Python" : "npm";
+      missing.push({
+        key: `${i.name}-${pk.kind}`, install: pk.bad ? "" : pk.install, label: pk.had ? "更新" : "安裝", title: `${i.name} 的 ${lang} 套件`,
+        what: pk.had ? `它的 ${lang} 套件要更新（skill 改過了）` : `需要先裝它自己的 ${lang} 套件`,
+        note: py ? "裝在 kit 自己的 venv，只裝現成的 wheel，不跑套件自己的安裝程式" : "裝在 kit 自己的資料夾，不跑套件自己的安裝程式",
+        none: pk.bad ? `kit 不裝：requirements.txt 第 ${pk.bad}（只能寫套件名和版本）` : py ? "要先有 Python 才能裝" : "要先有 Node.js（npm）才能裝",
+        args: ["install-deps", i.name, pk.kind],
+      });
+    }
     return v_flex().id(`row-${i.kind}-${i.name}`).gap(4).px(8).py(5).rounded(6).hover((s) => s.bg(t.hover))
       .child(row)
       .children(missing.map((x) => this.needLine(t, z, x)));

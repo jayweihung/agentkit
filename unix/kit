@@ -424,7 +424,7 @@ rules_body() { # rules_body import|inline : rule names on stdin -> text for the 
 
 set_rules() { # set_rules FILE import|inline : rule names on stdin
     local f=$1 body
-    body=$(rules_body "$2")
+    body=$(rules_body "$2"; py_hint)
     KIT_BLOCK="$body" replace_block "$f" "$BEGIN_MARK" "$END_MARK"
 }
 
@@ -916,65 +916,139 @@ cmd_install_tool() { # kit install-tool <name> [--min VERSION] : install (or, to
     say "kit：$(tool_title "$n") $h 裝好了"
 }
 
-# ---------- a skill's own packages (npm) ----------
-# Some skills run their own scripts with packages from npm (package.json "dependencies"). kit installs them only when
-# you ask (kit install-deps, the panel's 安裝), into its own folder ($KIT_CONF/deps/<skill>), never in the source,
-# with --ignore-scripts so no package runs its own install program; a skill's .npmrc is not used. Every place kit
-# puts the skill then gets node_modules linked to that folder. The copies of package.json / package-lock.json kept
-# in .kit-src say which version they were installed for: the skill changes them, it needs 更新 again.
+# ---------- a skill's own packages (npm, pip) ----------
+# Some skills run their own scripts with packages: npm (package.json "dependencies") or pip (requirements.txt).
+# kit installs them only when you ask (kit install-deps, the panel's 安裝), into its own folders, never in the source:
+#   npm: $KIT_CONF/deps/<skill>/node_modules, npm ci (with a lock) or npm install, always --ignore-scripts, without
+#        the skill's .npmrc. Each copy of the skill gets node_modules linked there (Node finds it by itself).
+#   pip: $KIT_CONF/pydeps/<skill>/venv, a venv of its own; pip install --only-binary=:all: (wheels only: nothing
+#        is built, so no setup.py runs), and requirements.txt may only name packages and versions (no -r, -e,
+#        --index-url, URLs ...). Each copy gets .venv linked there; the instructions block tells agents to run the
+#        skill's .py with that .venv's python.
+# .kit-src keeps the files they were installed for: when the skill changes them, it needs 更新 again.
 deps_store() { printf '%s\n' "$KIT_CONF/deps/$1"; }
+pydeps_store() { printf '%s\n' "$KIT_CONF/pydeps/$1"; }
 pkgs_need() { # pkgs_need SKILLDIR : it has npm packages to install (and does not bring them itself)
     local v
     [ -f "$1/package.json" ] && [ ! -d "$1/node_modules" ] || return 1
     v=$(json_get "$1/package.json" dependencies | tr -d ' \t\r\n')
     [ -n "$v" ] && [ "$v" != "{}" ]
 }
-deps_fresh() { # deps_fresh SKILLDIR STORE : the store has this skill's packages, for this package.json (and lock)
+pypkgs_need() { # pypkgs_need SKILLDIR : it has a requirements.txt naming something (and no .venv of its own)
+    [ -f "$1/requirements.txt" ] || return 1
+    [ -d "$1/.venv" ] && [ ! -L "$1/.venv" ] && return 1
+    grep -qvE '^[[:space:]]*(#.*)?$' "$1/requirements.txt"
+}
+py_reqs_bad() { # py_reqs_bad FILE -> the first line that is not a plain requirement (name[extras] versions ; markers)
+    LC_ALL=C awk '{ l = $0; sub(/\r$/, "", l); sub(/(^|[ \t])#.*$/, "", l); gsub(/^[ \t]+|[ \t]+$/, "", l)
+        if (l == "") next
+        v = "(===|==|>=|<=|~=|!=|<|>)[ \t]*[A-Za-z0-9.*+!_-]+"
+        if (l !~ ("^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?[ \t]*(\\[[A-Za-z0-9._, -]*\\])?[ \t]*(" v "([ \t]*,[ \t]*" v ")*)?[ \t]*(;[^#]*)?$")) { print NR ": " $0; exit } }' "$1"
+}
+deps_fresh() { # deps_fresh SKILLDIR STORE : the store has this skill's npm packages, for this package.json (and lock)
     [ -d "$2/node_modules" ] && cmp -s "$1/package.json" "$2/.kit-src/package.json" || return 1
     if [ -f "$1/package-lock.json" ]; then cmp -s "$1/package-lock.json" "$2/.kit-src/package-lock.json"; else [ ! -f "$2/.kit-src/package-lock.json" ]; fi
 }
+pydeps_fresh() { [ -x "$2/venv/bin/python" ] && cmp -s "$1/requirements.txt" "$2/.kit-src/requirements.txt"; }
 pkgs_cmd() { # the npm command, one word per line: npm ci with a lock (the exact versions), else npm install
     if [ -f "$1/package-lock.json" ]; then printf '%s\n' npm ci; else printf '%s\n' npm install; fi
     printf '%s\n' --ignore-scripts --no-audit --no-fund
 }
-link_deps() { # link_deps NAME DST : the packages kit installed for skill NAME show in its copy DST as node_modules
-    local s; s=$(deps_store "$1")
-    [ -f "$2/package.json" ] && deps_fresh "$2" "$s" || return 0
-    [ -e "$2/node_modules" ] && [ ! -L "$2/node_modules" ] && return 0     # the skill brings its own
-    ln -sfn "$s/node_modules" "$2/node_modules"
-}
-packages_json() { # packages_json SKILLDIR NAME -> ', "packages": {...}' when the skill has npm packages to install
-    local d=$1 s ok=false had=false c=""
-    pkgs_need "$d" || return 0
-    s=$(deps_store "$2")
-    deps_fresh "$d" "$s" && ok=true
-    [ -d "$s/node_modules" ] && had=true
-    command -v npm >/dev/null 2>&1 && c=$(pkgs_cmd "$d" | tr '\n' ' ' | sed 's/ $//')
-    printf ', "packages": {"kind": "npm", "ok": %s, "had": %s, "install": %s}' "$ok" "$had" "$(json_s "$c")"
-}
-cmd_install_deps() { # kit install-deps <skill> : the skill's own npm packages, in kit's folder, no package scripts
-    [ $# -eq 1 ] && case $1 in -*|"") false;; esac || die "用法：kit install-deps <skill 名字>"
-    local n=$1 p d s
-    p=$(find_item skill "$n") || die "找不到 skill ${n}（打 kit list 看有哪些）"
-    d=$(dirname "$p"); s=$(deps_store "$n")
-    pkgs_need "$d" || { say "kit：$n 不用另外裝套件"; return 0; }
-    if ! deps_fresh "$d" "$s"; then
-        command -v npm >/dev/null 2>&1 || die "要先有 Node.js（npm）：Kit 清單上按 Node.js 的「安裝」，或打 kit install-tool node"
-        set -- $(pkgs_cmd "$d")
-        say "kit：在 $s 執行 $*（不跑套件自己的安裝程式）"
-        [ -n "${KIT_DRY_RUN:-}" ] && return 0
-        rm -rf "$s.new"; mkdir -p "$s.new/.kit-src" || die "沒辦法建立 $s.new"
-        cp "$d/package.json" "$s.new/"
-        [ -f "$d/package-lock.json" ] && cp "$d/package-lock.json" "$s.new/"
-        ( cd "$s.new" && "$@" ) || { rm -rf "$s.new"; die "裝套件失敗（上面是 npm 說的原因）"; }
-        cp "$d/package.json" "$s.new/.kit-src/"
-        [ -f "$d/package-lock.json" ] && cp "$d/package-lock.json" "$s.new/.kit-src/"
-        rm -rf "$s"; mv "$s.new" "$s" || die "沒辦法把套件放到 $s"
-        say "kit：$n 的套件裝好了"
-    else
-        say "kit：$n 的套件已經裝好了"
+PIP_ARGS="-m pip install --only-binary=:all: --no-input --disable-pip-version-check -r requirements.txt"
+link_deps() { # link_deps NAME DST : the packages kit installed for skill NAME show in its copy DST
+    local s
+    s=$(deps_store "$1")
+    if [ -f "$2/package.json" ] && deps_fresh "$2" "$s" && { [ ! -e "$2/node_modules" ] || [ -L "$2/node_modules" ]; }; then
+        ln -sfn "$s/node_modules" "$2/node_modules"
     fi
-    # every copy kit put gets the link (sync does it for each skill it has)
+    s=$(pydeps_store "$1")
+    if [ -f "$2/requirements.txt" ] && pydeps_fresh "$2" "$s" && { [ ! -e "$2/.venv" ] || [ -L "$2/.venv" ]; }; then
+        ln -sfn "$s/venv" "$2/.venv"
+    fi
+    return 0
+}
+py_hint() { # the line for the instructions block, once kit has a venv for some skill
+    local v
+    for v in "$KIT_CONF"/pydeps/*/venv; do
+        [ -d "$v" ] || continue
+        printf '%s\n' '- skill 資料夾裡有 `.venv`（kit 裝的 Python 套件）時，執行那個 skill 的 Python 程式要用它自己的 python：`<skill 資料夾>/.venv/bin/python`（Windows：`<skill 資料夾>\.venv\Scripts\python.exe`），不要另外 pip install。'
+        return 0
+    done
+}
+packages_json() { # packages_json SKILLDIR NAME -> ', "packages": [...]' when the skill has packages to install
+    local d=$1 s ok had c items=""
+    if pkgs_need "$d"; then
+        s=$(deps_store "$2"); ok=false; had=false; c=""
+        deps_fresh "$d" "$s" && ok=true
+        [ -d "$s/node_modules" ] && had=true
+        command -v npm >/dev/null 2>&1 && c=$(pkgs_cmd "$d" | tr '\n' ' ' | sed 's/ $//')
+        items='{"kind": "npm", "ok": '$ok', "had": '$had', "install": '$(json_s "$c")', "bad": ""}'
+    fi
+    if pypkgs_need "$d"; then
+        s=$(pydeps_store "$2"); ok=false; had=false; c=""
+        pydeps_fresh "$d" "$s" && ok=true
+        [ -d "$s/venv" ] && had=true
+        command -v python3 >/dev/null 2>&1 && c="python3 -m venv venv; venv/bin/python $PIP_ARGS"
+        items="${items:+$items, }"'{"kind": "pip", "ok": '$ok', "had": '$had', "install": '$(json_s "$c")', "bad": '$(json_s "$(py_reqs_bad "$d/requirements.txt")")'}'
+    fi
+    [ -z "$items" ] || printf ', "packages": [%s]' "$items"
+}
+install_npm() { # install_npm SKILLDIR STORE
+    local d=$1 s=$2
+    command -v npm >/dev/null 2>&1 || die "要先有 Node.js（npm）：Kit 清單上按 Node.js 的「安裝」，或打 kit install-tool node"
+    set -- $(pkgs_cmd "$d")
+    say "kit：在 $s 執行 $*（不跑套件自己的安裝程式）"
+    [ -n "${KIT_DRY_RUN:-}" ] && return 0
+    rm -rf "$s.new"; mkdir -p "$s.new/.kit-src" || die "沒辦法建立 $s.new"
+    cp "$d/package.json" "$s.new/"
+    [ -f "$d/package-lock.json" ] && cp "$d/package-lock.json" "$s.new/"
+    ( cd "$s.new" && "$@" ) || { rm -rf "$s.new"; die "裝套件失敗（上面是 npm 說的原因）"; }
+    cp "$d/package.json" "$s.new/.kit-src/"
+    [ -f "$d/package-lock.json" ] && cp "$d/package-lock.json" "$s.new/.kit-src/"
+    rm -rf "$s"; mv "$s.new" "$s" || die "沒辦法把套件放到 $s"
+}
+install_pip() { # install_pip SKILLDIR STORE
+    local d=$1 s=$2 bad
+    bad=$(py_reqs_bad "$d/requirements.txt")
+    [ -z "$bad" ] || die "requirements.txt 有 kit 不接受的寫法（只能寫套件名和版本）：第 $bad"
+    command -v python3 >/dev/null 2>&1 || die "要先有 Python：Kit 清單上按 Python 的「安裝」，或打 kit install-tool python"
+    say "kit：在 $s 執行 python3 -m venv venv，再用它的 python ${PIP_ARGS}（只裝現成的 wheel，不跑套件的安裝程式）"
+    [ -n "${KIT_DRY_RUN:-}" ] && return 0
+    # a venv remembers its own path (its scripts start with it): built where it stays, the old one kept until it works
+    rm -rf "$s.old"; [ ! -e "$s" ] || mv "$s" "$s.old" || die "沒辦法搬開舊的 $s"
+    back() { rm -rf "$s"; [ ! -e "$s.old" ] || mv "$s.old" "$s"; }
+    mkdir -p "$s/.kit-src" || { back; die "沒辦法建立 $s"; }
+    cp "$d/requirements.txt" "$s/"
+    ( cd "$s" && python3 -m venv venv ) || { back; die "沒辦法建立 Python 的 venv（上面是原因；Debian/Ubuntu 可能要先裝 python3-venv）"; }
+    ( cd "$s" && venv/bin/python $PIP_ARGS ) || { back; die "裝套件失敗（上面是 pip 說的原因；只能裝有現成 wheel 的套件）"; }
+    cp "$d/requirements.txt" "$s/.kit-src/"
+    rm -rf "$s.old"
+}
+cmd_install_deps() { # kit install-deps <skill> [npm|pip] : the skill's own packages, in kit's folders, no package scripts
+    local n="" only="" p d did=0 a
+    for a in "$@"; do
+        case $a in
+            npm|pip) [ -z "$only" ] && [ -n "$n" ] || die "用法：kit install-deps <skill 名字> [npm|pip]"; only=$a;;
+            -*|"") die "用法：kit install-deps <skill 名字> [npm|pip]";;
+            *) [ -z "$n" ] || die "用法：kit install-deps <skill 名字> [npm|pip]"; n=$a;;
+        esac
+    done
+    [ -n "$n" ] || die "用法：kit install-deps <skill 名字> [npm|pip]"
+    p=$(find_item skill "$n") || die "找不到 skill ${n}（打 kit list 看有哪些）"
+    d=$(dirname "$p")
+    if [ "$only" != pip ] && pkgs_need "$d"; then
+        did=1
+        if deps_fresh "$d" "$(deps_store "$n")"; then say "kit：$n 的 npm 套件已經裝好了"
+        else install_npm "$d" "$(deps_store "$n")"; [ -n "${KIT_DRY_RUN:-}" ] || say "kit：$n 的 npm 套件裝好了"; fi
+    fi
+    if [ "$only" != npm ] && pypkgs_need "$d"; then
+        did=1
+        if pydeps_fresh "$d" "$(pydeps_store "$n")"; then say "kit：$n 的 Python 套件已經裝好了"
+        else install_pip "$d" "$(pydeps_store "$n")"; [ -n "${KIT_DRY_RUN:-}" ] || say "kit：$n 的 Python 套件裝好了"; fi
+    fi
+    [ $did = 1 ] || { say "kit：$n 不用另外裝套件"; return 0; }
+    [ -z "${KIT_DRY_RUN:-}" ] || return 0
+    # every copy kit put gets the links, and the instructions the python line (sync does both)
     [ -f "$MACHINE" ] || return 0
     if take_lock soft; then ( QUIET=1 cmd_sync ) >/dev/null 2>&1; release_lock; fi
     return 0
@@ -1368,6 +1442,7 @@ cmd_run() {
             p=$(find_item rule "$n") || { warn "rule $n not found"; continue; }
             cat "$p"; echo
         done
+        py_hint
         fm_body "$f"
         if [ $tool = codex ] && [ -n "$(ls "$skdir")" ]; then
             # Codex cannot load skills from an extra folder: list them, it reads one when needed
@@ -1460,7 +1535,7 @@ EOF
     [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
     rm -f "$ops"
     [ $left = 0 ] || die "有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall"
-    rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps"
+    rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps"
     say "kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）"
     say "     來源的 clone 還留在 $KIT_SRC"
     if [ $self = 1 ]; then
@@ -2603,7 +2678,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit rm  --dir <資料夾> rule|skill|mcp <名字>
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
-  kit install-deps <skill>          裝 skill 自己的 npm 套件（在 kit 的資料夾，不跑套件的安裝程式）
+  kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
                                     用 kit 的裝法裝，太舊就升級（Herdr 的「安裝」按鈕就是這個）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）

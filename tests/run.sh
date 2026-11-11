@@ -757,6 +757,10 @@ printf 'name: needteam\nrequires:\n  plain: [git]\n' > "$NT/kit.yaml"
 mkdir -p "$NT/skills/packed/scripts"; printf -- '---\nname: packed\ndescription: has npm packages\n---\nRun `node scripts/run.mjs`.\n' > "$NT/skills/packed/SKILL.md"
 echo 'x' > "$NT/skills/packed/scripts/run.mjs"; printf '{"name": "packed", "dependencies": {"left-pad": "1.3.0"}}\n' > "$NT/skills/packed/package.json"
 printf '{"lockfileVersion": 3}\n' > "$NT/skills/packed/package-lock.json"; printf 'registry=http://elsewhere.invalid/\n' > "$NT/skills/packed/.npmrc"
+mkdir -p "$NT/skills/pyskill/scripts" "$NT/skills/pybad"; printf -- '---\nname: pyskill\ndescription: python packages\n---\nRun `python3 scripts/go.py`.\n' > "$NT/skills/pyskill/SKILL.md"
+echo 'print(1)' > "$NT/skills/pyskill/scripts/go.py"; printf '# what it needs\nrequests==2.32.0\nrich[jupyter] >=13, <15 ; python_version >= "3.9"\n' > "$NT/skills/pyskill/requirements.txt"
+printf -- '---\nname: pybad\ndescription: b\n---\nx\n' > "$NT/skills/pybad/SKILL.md"; printf 'requests\n--index-url http://elsewhere.invalid/\n' > "$NT/skills/pybad/requirements.txt"
+REALPY=$(command -v python3)
 (
 export HOME="$H6" PATH="$FB:/usr/bin:/bin"
 kit init "$NT" >/dev/null 2>&1
@@ -787,10 +791,10 @@ printf 'name: node\ntitle: Node\ninstall:\n  mac: [scoop node]\n  linux: [scoop 
 out=$(kit install-tool node 2>&1); rc=$?
 check "install-tool: the source recipe wins; no manager here, says to install it yourself" '[ $rc -ne 0 ] && echo "$out" | grep -qF "請自己裝 Node"'
 # a skill's own npm packages (kit install-deps): only when asked, in kit's folder, no package scripts, linked into each copy
-pk() { kit list --json 2>/dev/null | python3 -c "import json,sys;d={i['name']:i for i in json.load(sys.stdin)['items']};print(json.dumps(d[sys.argv[1]].get('packages'),sort_keys=True))" "$1"; }
-check "packages: no npm here, nothing to run it with" '[ "$(pk packed)" = "{\"had\": false, \"install\": \"\", \"kind\": \"npm\", \"ok\": false}" ] && [ "$(pk drawer)" = null ] && [ "$(pk plain)" = null ]'
+pk() { kit list --json 2>/dev/null | python3 -c "import json,sys;d={i['name']:i for i in json.load(sys.stdin)['items']};p=[x for x in d[sys.argv[1]].get('packages') or [] if x['kind']==sys.argv[2]];print(json.dumps(p[0] if p else None,sort_keys=True))" "$1" "${2:-npm}"; }
+check "packages: no npm here, nothing to run it with" '[ "$(pk packed)" = "{\"bad\": \"\", \"had\": false, \"install\": \"\", \"kind\": \"npm\", \"ok\": false}" ] && [ "$(pk drawer)" = null ] && [ "$(pk plain)" = null ] && [ "$(pk plain pip)" = null ]'
 printf '#!/bin/sh\necho "$PWD $*" >> "%s/npm.log"\n[ -f .npmrc ] && exit 9\nmkdir -p node_modules/left-pad && echo x > node_modules/left-pad/index.js\n' "$T" > "$FB/npm"; chmod +x "$FB/npm"
-check "packages: a lock -> npm ci, no package scripts" '[ "$(pk packed)" = "{\"had\": false, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": false}" ]'
+check "packages: a lock -> npm ci, no package scripts" '[ "$(pk packed)" = "{\"bad\": \"\", \"had\": false, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": false}" ]'
 kit add skill packed >/dev/null 2>&1
 out=$(KIT_DRY_RUN=1 kit install-deps packed 2>&1)
 check "install-deps, dry run: only says the command" 'echo "$out" | grep -qF "執行 npm ci --ignore-scripts --no-audit --no-fund" && [ ! -e "$T/npm.log" ]'
@@ -798,14 +802,14 @@ S6="$H6/.config/agentkit/deps/packed"; C6="$H6/.claude/skills/packed"
 out=$(kit install-deps packed 2>&1); rc=$?
 check "install-deps: npm ci in kit's folder, not the source, without the skill's .npmrc" '[ $rc -eq 0 ] && [ "$(cat "$T/npm.log")" = "$S6.new ci --ignore-scripts --no-audit --no-fund" ] && [ -f "$S6/node_modules/left-pad/index.js" ] && [ ! -e "$NT/skills/packed/node_modules" ] && [ ! -e "$S6/.npmrc" ] && [ ! -e "$S6.new" ]'
 check "install-deps: the copy kit put gets node_modules linked to it" '[ -L "$C6/node_modules" ] && [ -f "$C6/node_modules/left-pad/index.js" ]'
-check "packages: installed now" '[ "$(pk packed)" = "{\"had\": true, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": true}" ]'
+check "packages: installed now" '[ "$(pk packed)" = "{\"bad\": \"\", \"had\": true, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": true}" ]'
 check "packages: kit.ps1 sees the same" '! command -v pwsh >/dev/null || [ "$(pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]'
 out=$(kit install-deps packed 2>&1)
 check "install-deps again: already there, npm not run" 'echo "$out" | grep -qF "已經裝好了" && [ "$(wc -l < "$T/npm.log")" -eq 1 ]'
 out=$(kit sync 2>&1)
 check "sync: the link is not a change to the skill" '! echo "$out" | grep -q "手動" && [ -L "$C6/node_modules" ]'
 echo '{"lockfileVersion": 3, "x": 1}' > "$NT/skills/packed/package-lock.json"; kit sync >/dev/null 2>&1
-check "the skill changed its lock: needs 更新, the new copy has no old packages" '[ "$(pk packed)" = "{\"had\": true, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": false}" ] && [ -f "$C6/SKILL.md" ] && [ ! -e "$C6/node_modules" ]'
+check "the skill changed its lock: needs 更新, the new copy has no old packages" '[ "$(pk packed)" = "{\"bad\": \"\", \"had\": true, \"install\": \"npm ci --ignore-scripts --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": false}" ] && [ -f "$C6/SKILL.md" ] && [ ! -e "$C6/node_modules" ]'
 out=$(kit install-deps packed 2>&1); rc=$?
 check "install-deps after the change: again, and linked" '[ $rc -eq 0 ] && [ "$(wc -l < "$T/npm.log")" -eq 2 ] && [ -L "$C6/node_modules" ]'
 printf '#!/bin/sh\nexit 3\n' > "$FB/npm"; rm -rf "$S6"
@@ -816,8 +820,32 @@ check "install-deps: a skill without packages" '[ $rc -eq 0 ] && echo "$out" | g
 printf '#!/bin/sh\nmkdir -p node_modules/left-pad && echo x > node_modules/left-pad/index.js\n' > "$FB/npm"; kit install-deps packed >/dev/null 2>&1
 kit rm skill packed >/dev/null 2>&1
 check "rm skill: the copy goes, kit's packages stay (the link only)" '[ ! -e "$C6" ] && [ -f "$S6/node_modules/left-pad/index.js" ]'
+# Python: a venv of the skill's own, only wheels, requirements.txt with names and versions only
+printf '#!/bin/sh\n[ "$1 $2" = "-m venv" ] || exec "%s" "$@"\nmkdir -p "$3/bin" && printf "#!/bin/sh\\necho \\"\\$PWD \\$*\\" >> %s/pip.log\\n" > "$3/bin/python" && chmod +x "$3/bin/python"\n' "$REALPY" "$T" > "$FB/python3"; chmod +x "$FB/python3"
+PIPX="-m pip install --only-binary=:all: --no-input --disable-pip-version-check -r requirements.txt"
+check "packages (pip): a requirements.txt -> a venv and pip with wheels only" '[ "$(pk pyskill pip)" = "{\"bad\": \"\", \"had\": false, \"install\": \"python3 -m venv venv; venv/bin/python $PIPX\", \"kind\": \"pip\", \"ok\": false}" ] && [ "$(pk packed pip)" = null ]'
+check "packages (pip): a requirements.txt with options is shown as refused" 'pk pybad pip | grep -qF "\"bad\": \"2: --index-url http://elsewhere.invalid/\""'
+check "packages (pip): kit.ps1 sees the same" '! command -v pwsh >/dev/null || [ "$(pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]'
+out=$(kit install-deps pybad 2>&1); rc=$?
+check "install-deps (pip): refuses options in requirements.txt, nothing made" '[ $rc -ne 0 ] && echo "$out" | grep -qF "第 2: --index-url" && [ ! -e "$H6/.config/agentkit/pydeps/pybad" ] && [ ! -e "$T/pip.log" ]'
+kit add skill pyskill >/dev/null 2>&1
+S7="$H6/.config/agentkit/pydeps/pyskill"; C7="$H6/.claude/skills/pyskill"
+out=$(kit install-deps pyskill 2>&1); rc=$?
+check "install-deps (pip): a venv in kit's folder, pip with wheels only, run there" '[ $rc -eq 0 ] && [ "$(cat "$T/pip.log")" = "$S7 $PIPX" ] && [ -x "$S7/venv/bin/python" ] && [ ! -e "$NT/skills/pyskill/.venv" ] && [ ! -e "$S7.old" ]'
+check "install-deps (pip): the copy gets .venv linked, the instructions say to use it" '[ -L "$C7/.venv" ] && [ -x "$C7/.venv/bin/python" ] && grep -qF ".venv/bin/python" "$H6/.claude/CLAUDE.md"'
+check "packages (pip): installed now; kit.ps1 sees the same" 'pk pyskill pip | grep -qF "\"ok\": true" && { ! command -v pwsh >/dev/null || [ "$(pwsh -NoProfile -File "$HERE/../windows/kit.ps1" list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]; }'
+out=$(kit sync 2>&1)
+check "sync (pip): the link is not a change to the skill" '! echo "$out" | grep -q "手動" && [ -L "$C7/.venv" ]'
+printf 'requests==2.33.0\n' > "$NT/skills/pyskill/requirements.txt"; kit sync >/dev/null 2>&1
+check "pip: requirements changed -> 更新, the new copy has no old venv" 'pk pyskill pip | grep -qF "\"had\": true" && pk pyskill pip | grep -qF "\"ok\": false" && [ ! -e "$C7/.venv" ]'
+printf '#!/bin/sh\n[ "$1 $2" = "-m venv" ] || exec "%s" "$@"\nmkdir -p "$3/bin" && printf "#!/bin/sh\\nexit 4\\n" > "$3/bin/python" && chmod +x "$3/bin/python"\n' "$REALPY" > "$FB/python3"
+out=$(kit install-deps pyskill pip 2>&1); rc=$?
+check "install-deps (pip): pip fails -> the old venv stays" '[ $rc -ne 0 ] && echo "$out" | grep -qF "裝套件失敗" && [ -f "$S7/.kit-src/requirements.txt" ] && grep -q 2.32.0 "$S7/.kit-src/requirements.txt" && [ ! -e "$S7.old" ]'
+out=$(kit install-deps pyskill npm 2>&1)
+check "install-deps <skill> npm: only that kind" 'echo "$out" | grep -qF "不用另外裝套件"'
+rm -f "$FB/python3"
 kit uninstall >/dev/null 2>&1
-check "uninstall: kit's packages go too" '[ ! -e "$H6/.config/agentkit/deps" ]'
+check "uninstall: kit's packages go too" '[ ! -e "$H6/.config/agentkit/deps" ] && [ ! -e "$H6/.config/agentkit/pydeps" ]'
 echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"

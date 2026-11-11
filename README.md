@@ -83,11 +83,11 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 - **在哪裡看到**：Herdr 的 Kit 清單，skill 下面會出現「⚠ 需要 Node.js 18 以上（這台沒有）［安裝］」。按「安裝」先顯示 kit 要執行的指令，按「確定安裝」才執行。
 - 從網路收來的 skill 不會帶 `tools/` 進來：只有你自己倉裡、或團隊審過的 `tools/` 會用到。
 
-### skill 自己的套件（npm install）
+### skill 自己的套件（npm install、pip install）
 
-少數 skill 帶自己的程式，要先 `npm install` 才能跑（`package.json` 有 `dependencies`）。kit 也會看出來，你按了才裝：
+少數 skill 帶自己的程式，要先裝套件才能跑：`package.json` 有 `dependencies`（npm），或有 `requirements.txt`（Python）。kit 也會看出來，你按了才裝：
 
-    kit install-deps <skill>           裝這個 skill 的 npm 套件
+    kit install-deps <skill> [npm|pip]   裝這個 skill 的套件（不寫就兩種都裝）
 
     來源裡的 skill（不動）              kit 自己的資料夾
     skills/foo/package.json  ──複製──▶  ~/.config/agentkit/deps/foo/
@@ -103,6 +103,14 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 - 裝在 kit 自己的資料夾，不寫進來源（不會被 commit 或推上去）。每個放了這個 skill 的地方（帳號、資料夾、`kit run` 的 agent）都連到同一份。
 - skill 更新後 `package.json`／`package-lock.json` 變了，就要再按一次「更新」；舊的套件不會連到新版上。
 - `kit uninstall` 會一起刪掉。要先有 Node.js：沒有的話先裝上面那一行的 Node.js。
+
+Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/agentkit/pydeps/<skill>/venv`），skill 的資料夾裡連一個 `.venv` 過去：
+
+- 指令：`python3 -m venv venv`，再用那個 venv 的 python 跑 `-m pip install --only-binary=:all: --no-input -r requirements.txt`。
+- `--only-binary=:all:`：只裝現成的 wheel，不從原始碼編譯，所以套件的 `setup.py` 不會被執行。沒有 wheel 的套件會裝失敗，要自己處理。
+- `requirements.txt` 只能寫套件名、版本和條件（像 `requests==2.32.0`、`rich[jupyter]>=13 ; python_version >= "3.9"`）。有 `-r`、`-e`、`--index-url`、網址這類寫法，kit 整個不裝，清單上會寫第幾行有問題。
+- 有 venv 之後，kit 在 CLAUDE.md／AGENTS.md 的 kit 區塊多寫一行，請 agent 用 skill 資料夾裡的 `.venv/bin/python`（Windows：`.venv\Scripts\python.exe`）執行那個 skill 的程式，不要自己再 pip install。
+- Debian/Ubuntu 沒有 venv 時，要先裝 `python3-venv`（kit 會說）。
 
 ## Herdr 的 kit 面板
 

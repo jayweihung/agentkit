@@ -727,6 +727,7 @@ function Rules-Body($names, [string]$mode) { # text for the instructions file
         if ($mode -eq 'import') { [void]$sb.Append('@' + $p.Replace('\', '/').Replace(' ', '\ ') + "`n") }
         else { $t = Read-Text $p; [void]$sb.Append("<!-- rule: $n -->`n").Append($t); if (-not $t.EndsWith("`n")) { [void]$sb.Append("`n") } }
     }
+    [void]$sb.Append((Py-Hint))
     $sb.ToString()
 }
 function Set-Rules([string]$f, $names, [string]$mode) { [void](Replace-Block $f $BeginMark $EndMark (Rules-Body $names $mode)) }
@@ -1157,11 +1158,15 @@ function Cmd-InstallTool($rest) { # kit install-tool <name> : install a program 
     Say "kit：$(Tool-Title $n) $h 裝好了"
 }
 
-# ---------- a skill's own packages (npm) ----------
-# The same as unix/kit: installed only when asked (kit install-deps, the panel's 安裝), in kit's own folder
-# ($KitConf/deps/<skill>), with --ignore-scripts, without the skill's .npmrc; each copy of the skill gets node_modules
-# as a link to it (on Windows a junction: no admin needed). .kit-src keeps the package.json / lock it was installed for.
+# ---------- a skill's own packages (npm, pip) ----------
+# The same as unix/kit: installed only when asked (kit install-deps, the panel's 安裝), in kit's own folders, never in
+# the source. npm: $KitConf/deps/<skill>/node_modules, --ignore-scripts, without the skill's .npmrc. pip:
+# $KitConf/pydeps/<skill>/venv, --only-binary=:all: (nothing is built, no setup.py runs), requirements.txt with only
+# package names and versions. Each copy of the skill gets node_modules / .venv as a link (on Windows a junction: no
+# admin needed); the instructions block tells agents to run the skill's .py with that .venv's python.
 function Deps-Store([string]$n) { Join-Path (Join-Path $KitConf 'deps') $n }
+function PyDeps-Store([string]$n) { Join-Path (Join-Path $KitConf 'pydeps') $n }
+$script:PipArgs = @('-m', 'pip', 'install', '--only-binary=:all:', '--no-input', '--disable-pip-version-check', '-r', 'requirements.txt')
 function Pkgs-Need([string]$d) { # it has npm packages to install (and does not bring them itself)
     $pj = Join-Path $d 'package.json'
     if (-not (Test-Path -LiteralPath $pj -PathType Leaf) -or (Test-Path -LiteralPath (Join-Path $d 'node_modules') -PathType Container)) { return $false }
@@ -1170,6 +1175,24 @@ function Pkgs-Need([string]$d) { # it has npm packages to install (and does not 
     $v = $v -replace '\s', ''
     [bool]$v -and $v -ne '{}'
 }
+function PyPkgs-Need([string]$d) { # a requirements.txt naming something (and no .venv of its own)
+    $rq = Join-Path $d 'requirements.txt'
+    if (-not (Test-Path -LiteralPath $rq -PathType Leaf)) { return $false }
+    $i = Get-Item -LiteralPath (Join-Path $d '.venv') -Force -ErrorAction SilentlyContinue
+    if ($i -and -not $i.LinkType) { return $false }
+    @((Read-Text $rq) -split "`n" | Where-Object { $_ -notmatch '^\s*(#.*)?$' }).Count -gt 0
+}
+function Py-ReqsBad([string]$f) { # the first line that is not a plain requirement (name[extras] versions ; markers)
+    $v = '(===|==|>=|<=|~=|!=|<|>)[ \t]*[A-Za-z0-9.*+!_-]+'
+    $re = '^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?[ \t]*(\[[A-Za-z0-9._, -]*\])?[ \t]*(' + $v + '([ \t]*,[ \t]*' + $v + ')*)?[ \t]*(;[^#]*)?$'
+    $ls = (Read-Text $f) -split "`n"; if ($ls.Count -gt 0 -and $ls[-1] -eq '') { $ls = @($ls[0..($ls.Count - 2)]) }
+    for ($i = 0; $i -lt $ls.Count; $i++) {
+        $l = $ls[$i].TrimEnd("`r") -replace '(^|[ \t])#.*$', ''; $l = $l.Trim(" `t")
+        if ($l -eq '') { continue }
+        if ($l -cnotmatch $re) { return "$($i + 1): $($ls[$i].TrimEnd("`r"))" }
+    }
+    ''
+}
 function Same-Bytes([string]$a, [string]$b) {
     if (-not (Test-Path -LiteralPath $a -PathType Leaf) -or -not (Test-Path -LiteralPath $b -PathType Leaf)) { return $false }
     $x = [IO.File]::ReadAllBytes($a); $y = [IO.File]::ReadAllBytes($b)
@@ -1177,13 +1200,17 @@ function Same-Bytes([string]$a, [string]$b) {
     for ($i = 0; $i -lt $x.Length; $i++) { if ($x[$i] -ne $y[$i]) { return $false } }
     $true
 }
-function Deps-Fresh([string]$d, [string]$s) { # the store has this skill's packages, for this package.json (and lock)
+function Deps-Fresh([string]$d, [string]$s) { # the store has this skill's npm packages, for this package.json (and lock)
     $src = Join-Path $s '.kit-src'
     if (-not (Test-Path -LiteralPath (Join-Path $s 'node_modules') -PathType Container)) { return $false }
     if (-not (Same-Bytes (Join-Path $d 'package.json') (Join-Path $src 'package.json'))) { return $false }
     $lock = Join-Path $d 'package-lock.json'
     if (Test-Path -LiteralPath $lock -PathType Leaf) { Same-Bytes $lock (Join-Path $src 'package-lock.json') }
     else { -not (Test-Path -LiteralPath (Join-Path $src 'package-lock.json')) }
+}
+function Venv-Python([string]$venv) { if ($OnWindows) { Join-Path (Join-Path $venv 'Scripts') 'python.exe' } else { Join-Path (Join-Path $venv 'bin') 'python' } }
+function PyDeps-Fresh([string]$d, [string]$s) {
+    (Test-Path -LiteralPath (Venv-Python (Join-Path $s 'venv')) -PathType Leaf) -and (Same-Bytes (Join-Path $d 'requirements.txt') (Join-Path (Join-Path $s '.kit-src') 'requirements.txt'))
 }
 function Pkgs-Cmd([string]$d) { # npm ci with a lock (the exact versions), else npm install
     $sub = if (Test-Path -LiteralPath (Join-Path $d 'package-lock.json') -PathType Leaf) { 'ci' } else { 'install' }
@@ -1193,55 +1220,130 @@ function Npm-Path { # on Windows npm.cmd (npm.ps1 may be blocked by the executio
     $c = if ($OnWindows) { Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue } else { Get-Command 'npm' -CommandType Application -ErrorAction SilentlyContinue }
     if ($c) { @($c)[0].Source } else { $null }
 }
-function Drop-DepsLink([string]$dst) { # take the node_modules link out of a skill copy first: removing the copy never goes into kit's store
-    $l = Join-Path $dst 'node_modules'
-    $i = Get-Item -LiteralPath $l -Force -ErrorAction SilentlyContinue
-    if ($i -and $i.LinkType) { [IO.Directory]::Delete($l) }
+function Py-Path { # python3 (on Windows python.exe, not the Microsoft Store stub)
+    $name = if ($OnWindows) { 'python.exe' } else { 'python3' }
+    foreach ($c in @(Get-Command $name -CommandType Application -All -ErrorAction SilentlyContinue)) { if ($c.Source -notmatch 'WindowsApps') { return $c.Source } }
+    $null
 }
-function Link-Deps([string]$n, [string]$dst) { # the packages kit installed for skill N show in its copy DST as node_modules
-    $s = Deps-Store $n
-    if (-not (Test-Path -LiteralPath (Join-Path $dst 'package.json') -PathType Leaf) -or -not (Deps-Fresh $dst $s)) { return }
-    $l = Join-Path $dst 'node_modules'
+function Drop-DepsLink([string]$dst) { # take the links out of a skill copy first: removing the copy never goes into kit's store
+    foreach ($x in 'node_modules', '.venv') {
+        $l = Join-Path $dst $x
+        $i = Get-Item -LiteralPath $l -Force -ErrorAction SilentlyContinue
+        if ($i -and $i.LinkType) { [IO.Directory]::Delete($l) }
+    }
+}
+function Link-One([string]$l, [string]$target) {
     $i = Get-Item -LiteralPath $l -Force -ErrorAction SilentlyContinue
     if ($i) { if (-not $i.LinkType) { return }; [IO.Directory]::Delete($l) }        # the skill brings its own
     $type = if ($OnWindows) { 'Junction' } else { 'SymbolicLink' }
-    try { New-Item -ItemType $type -Path $l -Target (Join-Path $s 'node_modules') -ErrorAction Stop | Out-Null } catch { Warn "沒辦法在 $dst 連上套件：$($_.Exception.Message)" }
+    try { New-Item -ItemType $type -Path $l -Target $target -ErrorAction Stop | Out-Null } catch { Warn "沒辦法連上套件 ${l}：$($_.Exception.Message)" }
 }
-function Packages-Json([string]$d, [string]$n) { # ', "packages": {...}' when the skill has npm packages to install
-    if (-not (Pkgs-Need $d)) { return '' }
+function Link-Deps([string]$n, [string]$dst) { # the packages kit installed for skill N show in its copy DST
     $s = Deps-Store $n
-    $ok = if (Deps-Fresh $d $s) { 'true' } else { 'false' }
-    $had = if (Test-Path -LiteralPath (Join-Path $s 'node_modules') -PathType Container) { 'true' } else { 'false' }
-    $c = if (Npm-Path) { (Pkgs-Cmd $d) -join ' ' } else { '' }
-    ', "packages": {"kind": "npm", "ok": ' + $ok + ', "had": ' + $had + ', "install": ' + (Json-S $c) + '}'
+    if ((Test-Path -LiteralPath (Join-Path $dst 'package.json') -PathType Leaf) -and (Deps-Fresh $dst $s)) { Link-One (Join-Path $dst 'node_modules') (Join-Path $s 'node_modules') }
+    $s = PyDeps-Store $n
+    if ((Test-Path -LiteralPath (Join-Path $dst 'requirements.txt') -PathType Leaf) -and (PyDeps-Fresh $dst $s)) { Link-One (Join-Path $dst '.venv') (Join-Path $s 'venv') }
 }
-function Cmd-InstallDeps($rest) { # kit install-deps <skill> : the skill's own npm packages, in kit's folder, no package scripts
-    $rest = @($rest)
-    if ($rest.Count -ne 1 -or -not $rest[0] -or ([string]$rest[0]).StartsWith('-')) { Die '用法：kit install-deps <skill 名字>' }
-    $n = [string]$rest[0]
+function Py-Hint { # the line for the instructions block, once kit has a venv for some skill
+    $root = Join-Path $KitConf 'pydeps'
+    if (-not (Test-Path -LiteralPath $root)) { return '' }
+    foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+        if (Test-Path -LiteralPath (Join-Path $d.FullName 'venv') -PathType Container) {
+            return '- skill 資料夾裡有 `.venv`（kit 裝的 Python 套件）時，執行那個 skill 的 Python 程式要用它自己的 python：`<skill 資料夾>/.venv/bin/python`（Windows：`<skill 資料夾>\.venv\Scripts\python.exe`），不要另外 pip install。' + "`n"
+        }
+    }
+    ''
+}
+function Packages-Json([string]$d, [string]$n) { # ', "packages": [...]' when the skill has packages to install
+    $items = @()
+    if (Pkgs-Need $d) {
+        $s = Deps-Store $n
+        $ok = if (Deps-Fresh $d $s) { 'true' } else { 'false' }
+        $had = if (Test-Path -LiteralPath (Join-Path $s 'node_modules') -PathType Container) { 'true' } else { 'false' }
+        $c = if (Npm-Path) { (Pkgs-Cmd $d) -join ' ' } else { '' }
+        $items += '{"kind": "npm", "ok": ' + $ok + ', "had": ' + $had + ', "install": ' + (Json-S $c) + ', "bad": ""}'
+    }
+    if (PyPkgs-Need $d) {
+        $s = PyDeps-Store $n
+        $ok = if (PyDeps-Fresh $d $s) { 'true' } else { 'false' }
+        $had = if (Test-Path -LiteralPath (Join-Path $s 'venv') -PathType Container) { 'true' } else { 'false' }
+        $vp = if ($OnWindows) { 'venv\Scripts\python.exe' } else { 'venv/bin/python' }
+        $pn = if ($OnWindows) { 'python' } else { 'python3' }
+        $c = if (Py-Path) { "$pn -m venv venv; $vp $($PipArgs -join ' ')" } else { '' }
+        $items += '{"kind": "pip", "ok": ' + $ok + ', "had": ' + $had + ', "install": ' + (Json-S $c) + ', "bad": ' + (Json-S (Py-ReqsBad (Join-Path $d 'requirements.txt'))) + '}'
+    }
+    if ($items.Count -eq 0) { return '' }
+    ', "packages": [' + ($items -join ', ') + ']'
+}
+function Swap-Store([string]$new, [string]$s) {
+    if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Recurse -Force }
+    Move-Item -LiteralPath $new -Destination $s
+}
+function Install-Npm([string]$d, [string]$s) {
+    $npm = Npm-Path; if (-not $npm) { Die '要先有 Node.js（npm）：Kit 清單上按 Node.js 的「安裝」，或打 kit install-tool node' }
+    $argv = Pkgs-Cmd $d
+    Say "kit：在 $s 執行 $($argv -join ' ')（不跑套件自己的安裝程式）"
+    if ($env:KIT_DRY_RUN) { return }
+    $new = "$s.new"
+    if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Recurse -Force }
+    Ensure-Dir (Join-Path $new '.kit-src')
+    $files = @('package.json', 'package-lock.json') | Where-Object { Test-Path -LiteralPath (Join-Path $d $_) -PathType Leaf }
+    foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $d $f) -Destination (Join-Path $new $f) }
+    $a = @($argv[1..($argv.Count - 1)])
+    Push-Location -LiteralPath $new
+    try { & $npm @a; $rc = $LASTEXITCODE } finally { Pop-Location }
+    if ($rc -ne 0) { Remove-Item -LiteralPath $new -Recurse -Force -ErrorAction SilentlyContinue; Die '裝套件失敗（上面是 npm 說的原因）' }
+    foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $d $f) -Destination (Join-Path (Join-Path $new '.kit-src') $f) }
+    Swap-Store $new $s
+}
+function Install-Pip([string]$d, [string]$s) {
+    $bad = Py-ReqsBad (Join-Path $d 'requirements.txt')
+    if ($bad) { Die "requirements.txt 有 kit 不接受的寫法（只能寫套件名和版本）：第 $bad" }
+    $py = Py-Path; if (-not $py) { Die '要先有 Python：Kit 清單上按 Python 的「安裝」，或打 kit install-tool python' }
+    Say "kit：在 $s 執行 python -m venv venv，再用它的 python $($PipArgs -join ' ')（只裝現成的 wheel，不跑套件的安裝程式）"
+    if ($env:KIT_DRY_RUN) { return }
+    # a venv remembers its own path (its launchers start with it): built where it stays, the old one kept until it works
+    $old = "$s.old"
+    if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }
+    if (Test-Path -LiteralPath $s) { Move-Item -LiteralPath $s -Destination $old }
+    $back = { if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Recurse -Force -ErrorAction SilentlyContinue }; if (Test-Path -LiteralPath $old) { Move-Item -LiteralPath $old -Destination $s } }
+    Ensure-Dir (Join-Path $s '.kit-src')
+    Copy-Item -LiteralPath (Join-Path $d 'requirements.txt') -Destination (Join-Path $s 'requirements.txt')
+    Push-Location -LiteralPath $s
+    try {
+        & $py -m venv venv; $rc = $LASTEXITCODE
+        if ($rc -eq 0) { $vpy = Venv-Python (Join-Path $s 'venv'); & $vpy @PipArgs; $rc2 = $LASTEXITCODE } else { $rc2 = 1 }
+    } finally { Pop-Location }
+    if ($rc -ne 0) { & $back; Die '沒辦法建立 Python 的 venv（上面是原因）' }
+    if ($rc2 -ne 0) { & $back; Die '裝套件失敗（上面是 pip 說的原因；只能裝有現成 wheel 的套件）' }
+    Copy-Item -LiteralPath (Join-Path $d 'requirements.txt') -Destination (Join-Path (Join-Path $s '.kit-src') 'requirements.txt')
+    if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }
+}
+function Cmd-InstallDeps($rest) { # kit install-deps <skill> [npm|pip] : the skill's own packages, in kit's folders, no package scripts
+    $use = '用法：kit install-deps <skill 名字> [npm|pip]'
+    $n = ''; $only = ''
+    foreach ($a in @($rest)) {
+        $a = [string]$a
+        if ($a -eq 'npm' -or $a -eq 'pip') { if ($only -or -not $n) { Die $use }; $only = $a }
+        elseif (-not $a -or $a.StartsWith('-') -or $n) { Die $use }
+        else { $n = $a }
+    }
+    if (-not $n) { Die $use }
     $p = Find-Item 'skill' $n; if (-not $p) { Die "找不到 skill ${n}（打 kit list 看有哪些）" }
-    $d = Split-Path -Parent $p; $s = Deps-Store $n
-    if (-not (Pkgs-Need $d)) { Say "kit：$n 不用另外裝套件"; return }
-    if (-not (Deps-Fresh $d $s)) {
-        $npm = Npm-Path; if (-not $npm) { Die '要先有 Node.js（npm）：Kit 清單上按 Node.js 的「安裝」，或打 kit install-tool node' }
-        $argv = Pkgs-Cmd $d
-        Say "kit：在 $s 執行 $($argv -join ' ')（不跑套件自己的安裝程式）"
-        if ($env:KIT_DRY_RUN) { return }
-        $new = "$s.new"
-        if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Recurse -Force }
-        Ensure-Dir (Join-Path $new '.kit-src')
-        $files = @('package.json', 'package-lock.json') | Where-Object { Test-Path -LiteralPath (Join-Path $d $_) -PathType Leaf }
-        foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $d $f) -Destination (Join-Path $new $f) }
-        $a = @($argv[1..($argv.Count - 1)])
-        Push-Location -LiteralPath $new
-        try { & $npm @a; $rc = $LASTEXITCODE } finally { Pop-Location }
-        if ($rc -ne 0) { Remove-Item -LiteralPath $new -Recurse -Force -ErrorAction SilentlyContinue; Die '裝套件失敗（上面是 npm 說的原因）' }
-        foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $d $f) -Destination (Join-Path (Join-Path $new '.kit-src') $f) }
-        if (Test-Path -LiteralPath $s) { Remove-Item -LiteralPath $s -Recurse -Force }
-        Move-Item -LiteralPath $new -Destination $s
-        Say "kit：$n 的套件裝好了"
-    } else { Say "kit：$n 的套件已經裝好了" }
-    # every copy kit put gets the link (sync does it for each skill it has)
+    $d = Split-Path -Parent $p; $did = $false
+    if ($only -ne 'pip' -and (Pkgs-Need $d)) {
+        $did = $true
+        if (Deps-Fresh $d (Deps-Store $n)) { Say "kit：$n 的 npm 套件已經裝好了" }
+        else { Install-Npm $d (Deps-Store $n); if (-not $env:KIT_DRY_RUN) { Say "kit：$n 的 npm 套件裝好了" } }
+    }
+    if ($only -ne 'npm' -and (PyPkgs-Need $d)) {
+        $did = $true
+        if (PyDeps-Fresh $d (PyDeps-Store $n)) { Say "kit：$n 的 Python 套件已經裝好了" }
+        else { Install-Pip $d (PyDeps-Store $n); if (-not $env:KIT_DRY_RUN) { Say "kit：$n 的 Python 套件裝好了" } }
+    }
+    if (-not $did) { Say "kit：$n 不用另外裝套件"; return }
+    if ($env:KIT_DRY_RUN) { return }
+    # every copy kit put gets the links, and the instructions the python line (sync does both)
     if (-not (Test-Path -LiteralPath $Machine)) { return }
     if (Take-Lock -Soft) { $script:Quiet = $true; try { Cmd-Sync *> $null } catch { } finally { $script:Quiet = $false; Release-Lock } }
 }
@@ -1635,6 +1737,7 @@ function Cmd-Run($rest) {
         $p = Find-Item 'rule' $n; if (-not $p) { Warn "rule $n not found"; continue }
         [void]$sb.Append((Read-Text $p)).Append("`n")
     }
+    [void]$sb.Append((Py-Hint))
     $c = 0; foreach ($l in (Read-Text $f) -split "`n") { if ($c -ge 2) { [void]$sb.Append($l.TrimEnd("`r")).Append("`n") }; if ($l.TrimEnd("`r") -eq '---') { $c++ } }
     if ($tool -eq 'codex' -and $skills.Count -gt 0) {
         # Codex cannot load skills from an extra folder: list them, it reads one when needed
@@ -1728,7 +1831,7 @@ function Cmd-Uninstall($rest) {
     if ($ops.Count -gt 0) { Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny }
     if ($left) { Die '有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall' }
     foreach ($f in @($State, $Machine)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
-    $deps = Join-Path $KitConf 'deps'; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force }
+    foreach ($x in 'deps', 'pydeps') { $deps = Join-Path $KitConf $x; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force } }
     Say 'kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）'
     Say "     來源的 clone 還留在 $KitSrc"
     if ($self) {
@@ -2915,7 +3018,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit rm  --dir <資料夾> rule|skill|mcp <名字>
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
-  kit install-deps <skill>          裝 skill 自己的 npm 套件（在 kit 的資料夾，不跑套件的安裝程式）
+  kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
                                     用 kit 的裝法裝，太舊就升級（Herdr 的「安裝」按鈕就是這個）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
