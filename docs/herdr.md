@@ -78,7 +78,7 @@ Herdr 內建的版面（main 等）不能改：面板會先出現在右邊，按
 
 - 標 `Kit · 整個帳號` 的是 kit 裝的，可以「從帳號拿掉」；標 `Kit · 團隊必備` 的是團隊規定要有的，拿不掉。
 - 標 `這個資料夾`、`這個帳號（不是 kit 的）` 的是 agent 自己讀到的（`CLAUDE.md`、`.claude/rules`、`.claude/skills`、`.mcp.json`），只顯示，不改。
-- **注意**：「加到整個帳號」「從帳號拿掉」改的是整個帳號，這台電腦上你帳號的每個 agent 都會一起有或一起沒有。
+- **注意**：「加到整個帳號」「從帳號拿掉」改的是整個帳號（就是 `kit add`／`kit rm`）：這台電腦上你帳號的 Claude Code、Codex、omp（有裝的）和每個 agent 都會一起有或一起沒有。就算是在 Claude Code 的視窗按的，Codex 也會一起變。只想給某一個 agent，請點 `kit run` 開的 agent，用它視窗裡的「加上」「拿掉」。
 - 「這次啟動帶的」：用 `kit run`（或 Agents 的「開啟」）開的 agent 才有，只有這個 agent 有，關掉就沒了。要改，到 Agents 改那個 agent。這時下面的標題會變成「另外也讀到的」。
 - `同步` = `kit sync`（拿來源的新版、裝上團隊必備的）；`⟳` 只是重新讀一次畫面，不改任何東西。
 - agent 開在別台主機（Herdr 的遠端 space）時，按鈕會到那台去問 kit。**每台要跑 agent 的主機都要裝好 kit**（`kit init` 過），不然會顯示「出錯了」。

@@ -461,7 +461,7 @@ export default class KitPanel extends View {
       if (!folded) body.child(v_flex().gap(2).children(more.map((i) => this.row(t, z, i))));
     }
     body.child(div().mt(6).p(8).rounded(6).bg(t.raised).text_size(z - 1.5).text_color(t.muted)
-      .child(`「加到整個帳號」「從帳號拿掉」改的是 ${machine} 上你這個帳號的每個 agent，不只這一個；正在跑的 agent 要重開才會讀到。`));
+      .child(`「加到整個帳號」「從帳號拿掉」改的是 ${machine} 上你這個帳號的全部：Claude Code、Codex、omp（有裝的）和每個 agent 都會一起有或一起沒有，不只這一個。只想給某個 agent，請點 kit run 開的 agent，在它的視窗按「加上」。正在跑的要重開才會讀到。`));
     if (!items.length && !here.length && !ag) body.child(div().text_color(t.muted).child("來源裡還沒有東西。"));
     return body;
   }
