@@ -617,38 +617,40 @@ export default class KitPanel extends View {
     box.child(h_flex().gap(6)
       .child(this.btn(t, z, "look", this.busy === "下載" ? "下載中…" : lk ? "重新下載" : "下載看看", { small: true, kind: lk ? undefined : "primary", off: Boolean(this.busy), on: (cx) => this.look(cx) }))
       .child(this.btn(t, z, "make-cancel", "取消", { small: true, on: (cx) => { this.making = null; cx.notify(); } })));
+    if (!lk && this.busy === "下載") return box.child(this.working(t, z, "下載中：大的 repo 可能要一兩分鐘…"));
     if (!lk) return box.child(note("先下載看看：kit 只會列出找到什麼，還不會放進你的倉。", t.dim));
     const sk = lk.skills ?? [], i = Math.min(m.pick ?? 0, Math.max(sk.length - 1, 0)), x = sk[i];
     const card = v_flex().gap(5).p(8).rounded(6).bg(t.background);
     if (sk.length > 1) card.child(note(`這個 repo 有 ${sk.length} 個 skill，選一個：`, t.foreground))
       .child(h_flex().gap(4).flex_wrap().children(sk.map((y, j) => chip(`pick-${j}`, y.name, j === i, (cx) => { m.pick = j; cx.notify(); }))));
     if (!x) return box.child(card.child(note("找不到 skill。", t.ansi1)));
-    const scripts = String(x.scripts ?? "").split(" ").filter(Boolean);
-    let block = null;
-    const head = h_flex().gap(6).items_center()
-      .child(div().font_semibold().child(x.name))
-      .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(x.path === "." ? "（在 repo 最外層）" : `（在 ${x.path}/）`));
-    const desc = String(x.description ?? "");
-    card.child(head)
-      .when(Boolean(desc), (el) => el.child(note(desc.length > 180 ? desc.slice(0, 180).trimEnd() + " …" : desc)))
-      .child(note(x.license ? `授權：${x.license}${x.license === "unknown" ? "（認不出種類，收進來後請自己看 LICENSE）" : x.license === "GPL" ? "（改了再發布要公開原始碼）" : ""}` : "沒有 LICENSE：不知道能不能用，kit 不收。",
-        x.license ? t.foreground : t.ansi1));
+    // every line first, then the head with its button: an element can be added to a parent only once
+    const scripts = String(x.scripts ?? "").split(" ").filter(Boolean), desc = String(x.description ?? "");
+    const lines = [];
+    let block = null, label = "收進來", allow = false;
+    if (desc) lines.push(note(desc.length > 180 ? desc.slice(0, 180).trimEnd() + " …" : desc));
+    lines.push(note(x.license ? `授權：${x.license}${x.license === "unknown" ? "（認不出種類，收進來後請自己看 LICENSE）" : x.license === "GPL" ? "（改了再發布要公開原始碼）" : ""}` : "沒有 LICENSE：不知道能不能用，kit 不收。",
+      x.license ? t.foreground : t.ansi1));
     if (!x.license) block = "沒有 LICENSE";
-    if (scripts.length) card.child(note(`⚠ 有 ${scripts.length} 個會執行的程式（${scripts.slice(0, 3).join("、")}${scripts.length > 3 ? " …" : ""}），送出前請看過。`, t.working));
-    if (x.skipped) card.child(note(`${x.skipped} 個圖片、捷徑之類的非文字檔不會收。`, t.dim));
-    if (!x.valid) { block = "名字不行"; card.child(note(`名字 ${x.name} 不能用（只能小寫英文、數字和 -）：請用指令 kit collect … --name 換名字。`, t.ansi1)); }
-    if (x.exists === "own") { block = "已經有同名的"; card.child(note(`${lk.source} 已經有你自己的 ${x.name}，不會蓋掉它。要收請用指令 kit collect … --name 換名字。`, t.ansi1)); }
-    if (x.exists === "collected") card.child(note(`之前收過 ${x.name}：會整份換成這次下載的版本。`, t.working));
-    card.child(note(`會放到 ${shortDir(slash(x.dest).replace(/\/SKILL\.md$/, "/"))}`, t.foreground));
-    let label = "收進來", allow = false;
+    if (scripts.length) lines.push(note(`⚠ 有 ${scripts.length} 個會執行的程式（${scripts.slice(0, 3).join("、")}${scripts.length > 3 ? " …" : ""}），送出前請看過。`, t.working));
+    if (x.skipped) lines.push(note(`${x.skipped} 個圖片、捷徑之類的非文字檔不會收。`, t.dim));
+    if (!x.valid) { block = "名字不行"; lines.push(note(`名字 ${x.name} 不能用（只能小寫英文、數字和 -）：請用指令 kit collect … --name 換名字。`, t.ansi1)); }
+    if (x.exists === "own") { block = "已經有同名的"; lines.push(note(`${lk.source} 已經有你自己的 ${x.name}，不會蓋掉它。要收請用指令 kit collect … --name 換名字。`, t.ansi1)); }
+    if (x.exists === "collected") lines.push(note(`之前收過 ${x.name}：會整份換成這次下載的版本。`, t.working));
+    lines.push(note(`會放到 ${shortDir(slash(x.dest).replace(/\/SKILL\.md$/, "/"))}`, t.foreground));
     if (!lk.allowed && lk.can_allow) { allow = true; label = "加進清單並收進來";
-      card.child(note(`${lk.id} 還不在 ${lk.source} 的允許清單（kit.yaml 的 collect_sources）。按下去會一起加進清單，之後這個作者的東西就能收。`, t.working)); }
+      lines.push(note(`${lk.id} 還不在 ${lk.source} 的允許清單（kit.yaml 的 collect_sources）。按下去會一起加進清單，之後這個作者的東西就能收。`, t.working)); }
     else if (!lk.allowed) { block = block ?? "不在允許清單";
-      card.child(note(`${lk.id} 不在 ${lk.source} 的允許清單。這是團隊的倉，要請維護者把它加進 kit.yaml 的 collect_sources 才能收。`, t.ansi1)); }
-    card.child(note("收進來後：用 git diff 看收了哪些檔案 → 上排「送出…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。"));
-    if (!block) head.child(this.btn(t, z, "collect", this.busy === "收" ? "收進來中…" : label,
-      { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.collect(x, allow, cx) }));
-    else head.child(div().text_size(z - 2).text_color(t.ansi1).child(`不能收：${block}`));
+      lines.push(note(`${lk.id} 不在 ${lk.source} 的允許清單。這是團隊的倉，要請維護者把它加進 kit.yaml 的 collect_sources 才能收。`, t.ansi1)); }
+    lines.push(note("收進來後：用 git diff 看收了哪些檔案 → 上排「送出…」送上去 → 要用它就到 Agents 視窗按「加到整個帳號」。"));
+    const act = block ? div().flex_none().text_size(z - 2).text_color(t.ansi1).child(`不能收：${block}`)
+      : this.btn(t, z, "collect", this.busy === "收" ? "收進來中…" : label, { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.collect(x, allow, cx) });
+    card.child(h_flex().gap(6).items_center()
+        .child(div().font_semibold().child(x.name))
+        .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(x.path === "." ? "（在 repo 最外層）" : `（在 ${x.path}/）`))
+        .child(act))
+      .children(lines);
+    if (this.busy === "收") card.child(this.working(t, z, "收進來中：下載、複製檔案…"));
     return box.child(card);
   }
 
@@ -838,6 +840,14 @@ export default class KitPanel extends View {
       .child(div().text_size(z - 1).text_color(t.muted).child(notInit
         ? "第一次用要先在終端機打  kit init <團隊來源的網址>，好了再按上面的 ⟳。"
         : "修好後按上面的 ⟳ 重新讀取。"));
+  }
+
+  // working on it: a bar with a piece sliding through it (Herdr animates it; no timer) and what is going on
+  working(t, z, text) {
+    return v_flex().gap(4)
+      .child(div().relative().h(4).w_full().rounded(2).overflow_hidden().bg(t.surface)
+        .child(div().absolute().top(0).h(4).w(90).rounded(2).bg(t.accent).loop("left", { from: -90, to: 460, period: 1400 })))
+      .child(div().text_size(z - 1.5).text_color(t.muted).child(text));
   }
 
   btn(t, z, id, label, { kind, on, off, small } = {}) {
