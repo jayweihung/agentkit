@@ -29,6 +29,10 @@ function Kit {   # run kit in a new process; output (stdout+stderr) in $script:o
     $script:out = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit @args 2>&1 | ForEach-Object { "$_" }) -join "`n"
     $script:rc = $LASTEXITCODE
 }
+function KitJ {   # kit's stdout only (what programs read), in $script:out; exit code in $script:rc
+    $script:out = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit @args 2>$null | ForEach-Object { "$_" }) -join "`n"
+    $script:rc = $LASTEXITCODE
+}
 function JGet([string]$file, [string]$path) {
     $o = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __json-get $file $path 2>$null | ForEach-Object { "$_" }) -join "`n"
     if ($LASTEXITCODE -ne 0) { return $null }; $o
@@ -166,13 +170,13 @@ Kit list --json; $lj = $out; $ljrc = $rc
 W "$T/list.json" "$lj`n"
 $teamJ = (Resolve-Path -LiteralPath $TEAM).ProviderPath.Replace('\', '\\')
 Check 'list --json: exit 0, valid JSON' { $ljrc -eq 0 -and $null -ne (JGet "$T/list.json" 'kit') }
-Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq ('"' + $KitVer + '"') -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`", `"push`": `"pr`"}") }
+Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq ('"' + $KitVer + '"') -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`", `"push`": `"pr`", `"changed`": []}") }
 Check 'list --json: required, used, unused' {
-    $lj.Contains('{"kind": "rule", "name": "security", "status": "required", "new": false, "source": "team", "description": "", "path": ') -and
-    $lj.Contains('{"kind": "skill", "name": "gerrit-review", "status": "used", "new": false, "source": "team", "description": "review a change", "path": ') -and
-    $lj.Contains('{"kind": "skill", "name": "gerrit-workflow", "status": "unused", "new": false, "source": "third-party", "description": "upstream", "path": ') }
-Check 'list --json: agent with its description' { $lj.Contains('{"kind": "agent", "name": "gerrit", "status": "agent", "new": false, "source": "team", "description": "Gerrit helper", "path": ') }
-Check 'list --json: new item, text escaped (UTF-8 kept)' { $lj.Contains('{"kind": "skill", "name": "quote", "status": "unused", "new": true, "source": "team", "description": "中文 \"引號\" \\ 和\ttab", "path": ') }
+    $lj.Contains('{"kind": "rule", "name": "security", "status": "required", "new": false, "changed": false, "source": "team", "description": "", "path": ') -and
+    $lj.Contains('{"kind": "skill", "name": "gerrit-review", "status": "used", "new": false, "changed": false, "source": "team", "description": "review a change", "path": ') -and
+    $lj.Contains('{"kind": "skill", "name": "gerrit-workflow", "status": "unused", "new": false, "changed": false, "source": "third-party", "description": "upstream", "path": ') }
+Check 'list --json: agent with its description' { $lj.Contains('{"kind": "agent", "name": "gerrit", "status": "agent", "new": false, "changed": false, "source": "team", "description": "Gerrit helper", "path": ') }
+Check 'list --json: new item, text escaped (UTF-8 kept)' { $lj.Contains('{"kind": "skill", "name": "quote", "status": "unused", "new": true, "changed": false, "source": "team", "description": "中文 \"引號\" \\ 和\ttab", "path": ') }
 Check 'list --json: tools (Claude only here), no version wanted' { $lj.Contains("`n  `"tools`": [`"claude`"],`n") -and (JGet "$T/list.json" 'kit_version_wanted') -eq '""' }
 Kit list --json
 Check 'list --json does not mark items seen' { ([regex]::Matches($out, '"new": true')).Count -eq 1 }
@@ -221,7 +225,13 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, 1' { $rc -eq 0 -and $out -ceq '1' }
+Check 'api: one line, major.minor (1.0)' { $rc -eq 0 -and $out -ceq '1.0' }
+$env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
+KitJ list --json
+Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
+Remove-Item env:AGENTKIT_CONFIG
+KitJ list --json --bad
+Check 'list --json with a wrong option: error usage' { $rc -ne 0 -and $out.StartsWith('{"error": {"code": "usage", ') }
 Kit help
 Check 'help: kit api is there' { $out -match '(?m)^  kit api  ' }
 Check 'help: --json --dir is under kit list' { $out -match "(?m)^  kit list .*`n     --json --dir" -and $out -notmatch "(?m)^  kit agent .*`n     --json --dir" }
@@ -521,13 +531,20 @@ try {
 Push-Location $W
 Kit push
 Check 'push: nothing to send' { $rc -eq 0 -and $out.Contains('沒有要送的') }
+$WJ = ("$(& $Exe -NoProfile -Command '(Get-Location).ProviderPath')").Replace('\', '\\')   # as a new kit sees this folder
+KitJ push --dry-run --json
+Check 'push --json: nothing to send, in JSON' { $rc -eq 0 -and $out -ceq "{`"source`": `"$(Split-Path -Leaf $W)`", `"dir`": `"$WJ`", `"push`": `"pr`", `"dry_run`": true, `"files`": [], `"skipped`": [], `"commit`": null, `"branch`": null, `"into`": null, `"remotes`": [], `"sent`": false, `"pr_url`": null, `"compare_url`": null}" }
 Kit new skill pfoo
 $head0 = (& git -C $W rev-parse HEAD)
 Kit push --dry-run
 Check 'push --dry-run lists files and branch, sends nothing' { $rc -eq 0 -and $out.Contains('skills/pfoo/SKILL.md') -and $out.Contains("kit/pfoo-$DAY") -and (& git -C $W rev-parse HEAD) -eq $head0 -and (KitBranches) -eq 0 -and (RemoteHeads) -eq 'main' }
+KitJ push --dry-run --json
+Check 'push --dry-run --json: files, commit, branch, where the PR goes; nothing else on stdout' { $rc -eq 0 -and $out -ceq "{`"source`": `"$(Split-Path -Leaf $W)`", `"dir`": `"$WJ`", `"push`": `"pr`", `"dry_run`": true, `"files`": [`"skills/pfoo/SKILL.md`"], `"skipped`": [], `"commit`": `"kit: add skill:pfoo`", `"branch`": `"kit/pfoo-$DAY`", `"into`": `"main`", `"remotes`": [`"origin`"], `"sent`": false, `"pr_url`": null, `"compare_url`": `"$WebBase/acme/team/compare/main...kit/pfoo-$DAY`"}" }
 [IO.File]::AppendAllText("$W/skills/pfoo/SKILL.md", "TopSecretName here`n")
 Kit push
 Check 'push: check problem stops, nothing sent' { $rc -ne 0 -and $out.Contains('什麼都沒送') -and (KitBranches) -eq 0 -and (RemoteHeads) -eq 'main' }
+KitJ push --dry-run --json
+Check 'push --json: a check problem is error check_failed' { $rc -ne 0 -and $out -ceq '{"error": {"code": "check_failed", "message": "kit check 有問題，什麼都沒送（改好再 kit push）"}}' }
 W "$W/skills/pfoo/SKILL.md" "---`nname: pfoo`ndescription: p`n---`nok`n"
 & git -C $W config user.email me@home.example
 Kit push
@@ -1169,14 +1186,14 @@ Remove-Item env:AGENTKIT_HOME
 $Kit = Join-Path $T 'inst/lib/kit.ps1'
 Kit ci-template
 Check 'installed kit has the ci template' { $rc -eq 0 -and $out -ceq $tmpl }
-# an older kit kept a herdr/ folder in its own lib: a new install takes it out; a panel installed in Herdr stays
+# kit 0.2 kept panel files in its own lib: a new install takes them out; a panel installed in a screen program stays
 W (Join-Path $T 'inst/lib/herdr/kit-panel/main.js') 'old'
 $HA = Join-Path $T 'herdr-app'; W "$HA/mods/kit/main.js" 'old'; W "$HA/mods/kit/.kit-panel" ''
 $env:AGENTKIT_HOME = Join-Path $T 'inst'; $env:HERDR_APP_HOME = $HA
 & $Exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'windows/install.ps1') -Quiet
 Remove-Item env:AGENTKIT_HOME, env:HERDR_APP_HOME
-Check "reinstall removes herdr/ an older kit left in its own folder" { -not (Test-Path (Join-Path $T 'inst/lib/herdr')) -and (Test-Path (Join-Path $T 'inst/lib/kit.ps1')) }
-Check 'reinstall leaves the panel installed in Herdr alone' { (ReadT "$HA/mods/kit/main.js") -eq 'old' -and (Test-Path "$HA/mods/kit/.kit-panel") }
+Check "reinstall removes the panel files kit 0.2 left in its own folder" { -not (Test-Path (Join-Path $T 'inst/lib/herdr')) -and (Test-Path (Join-Path $T 'inst/lib/kit.ps1')) }
+Check 'reinstall leaves a panel installed in a screen program alone' { (ReadT "$HA/mods/kit/main.js") -eq 'old' -and (Test-Path "$HA/mods/kit/.kit-panel") }
 $Kit = $realKit
 
 # ---------- sync: why a source could not be updated ----------

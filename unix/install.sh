@@ -25,7 +25,7 @@ cp "$REPO/VERSION" "$DEST/VERSION"
 mkdir -p "$DEST/templates"
 for f in "$REPO"/templates/*; do cp "$f" "$DEST/templates/"; done
 rm -rf "$DEST/tools"; mkdir -p "$DEST/tools"; cp "$REPO"/tools/*.yaml "$DEST/tools/"   # how kit installs node, python, git
-rm -rf "$DEST/herdr"     # what older kits kept here for a Herdr panel (kit's own copy; nothing in Herdr is touched)
+rm -rf "$DEST/herdr"     # panel files kit 0.2 kept in its own folder (nothing outside it is touched); can go after 0.4.0
 printf '%s\n' "$REPO" > "$DEST/.repo"      # where kit self-update pulls from
 chmod 755 "$DEST/kit"
 ln -sf "$DEST/kit" "$BIN/kit"

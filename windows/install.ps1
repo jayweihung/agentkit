@@ -27,7 +27,7 @@ Copy-Item -Path (Join-Path $repo 'templates\*') -Destination (Join-Path $lib 'te
 $tl = Join-Path $lib 'tools'; if (Test-Path -LiteralPath $tl) { Remove-Item -LiteralPath $tl -Recurse -Force }   # how kit installs node, python, git
 New-Item -ItemType Directory -Force -Path $tl | Out-Null
 Copy-Item -Path (Join-Path $repo 'tools\*.yaml') -Destination $tl -Force
-$old = Join-Path $lib 'herdr'   # what older kits kept here for a Herdr panel (kit's own copy; nothing in Herdr is touched)
+$old = Join-Path $lib 'herdr'   # panel files kit 0.2 kept in its own folder (nothing outside it is touched); can go after 0.4.0
 if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }
 Copy-Item -LiteralPath (Join-Path $repo 'windows\kit.cmd') -Destination (Join-Path $dest 'kit.cmd') -Force
 [IO.File]::WriteAllText((Join-Path $lib '.repo'), $repo, (New-Object Text.UTF8Encoding $false))   # where kit self-update pulls from

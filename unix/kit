@@ -9,6 +9,9 @@ set -u
 KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 [ -f "$KIT_LIB/json.awk" ] || KIT_LIB=$(cd "$(dirname "$(readlink "$0" 2>/dev/null || echo "$0")")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
+# what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
+# commands are added. kit.ps1 has the same.
+KIT_API=1.0
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -22,6 +25,7 @@ CODEX_DIR=${CODEX_HOME:-$HOME/.codex}
 OMP_DIR=${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}
 AGENTS_SKILLS=$HOME/.agents/skills          # read by Codex and omp
 TAB=$(printf '\t')
+LF=$'\n'
 BEGIN_MARK='<!-- agentkit:begin (managed by kit, do not edit) -->'
 END_MARK='<!-- agentkit:end -->'
 TOML_BEGIN='# agentkit:begin (managed by kit, do not edit)'
@@ -33,7 +37,16 @@ DIRS_LIST="$KIT_CONF/dirs"                  # the folders that have their own (k
 DIR_FILE=.agentkit                          # in such a folder: what it has; Codex also takes it as the project root
 
 # ---------- small helpers ----------
-die()  { printf 'kit: %s\n' "$*" >&2; exit 1; }
+# With --json (list, agents, push) or collect --look, stdout carries only JSON: kit's words go to stderr, and a stop is
+# also told on stdout as {"error": {"code": CODE, "message": the same words}} (kit.ps1 prints the same).
+JSON_OUT=""; DIE_CODE=""
+json_mode() { JSON_OUT=1; exec 3>&1 1>&2; }      # the JSON goes to fd 3 (stdout); everything else to stderr
+die()  {
+    printf 'kit: %s\n' "$*" >&2
+    [ -z "$JSON_OUT" ] || printf '{"error": {"code": %s, "message": %s}}\n' "$(json_s "${DIE_CODE:-error}")" "$(json_s "$*")" >&3
+    exit 1
+}
+die_c() { DIE_CODE=$1; shift; die "$@"; }       # die_c CODE MESSAGE : the code programs read (README: 給程式讀的介面)
 # on the way out (also after die or Ctrl-C): the temp folder (a token in it, or npm packages half installed), kit run's
 # folder and marker, the venv a stopped pip install had replaced, and the lock if this kit took it
 on_exit() {
@@ -56,7 +69,7 @@ take_lock() { # take_lock [soft] : one kit at a time changes state.tsv and the t
         i=$((i + 1))
         if [ $i -gt "$max" ]; then
             [ "${1:-}" = soft ] && return 1
-            die "另一個 kit 正在跑（${lock}），等它跑完再試一次"
+            die_c busy "另一個 kit 正在跑（${lock}），等它跑完再試一次"
         fi
         [ $i = 3 ] && [ "${1:-}" != soft ] && warn "等另一個 kit 跑完…"
         sleep 1
@@ -200,11 +213,11 @@ check_host() { # refuse URLs whose host is not allowed
     case $url in
         [Ff][Ii][Ll][Ee]:///*) ;;     # file:///path: a folder on this machine, no host to ask
         *) h=$(url_host "$url")
-           printf '%s\n' "$hosts" | grep -qxF "$h" || die "$h 不在允許的主機清單：$(printf '%s' "$hosts" | paste -sd' ' -)";;
+           printf '%s\n' "$hosts" | grep -qxF "$h" || die_c host_not_allowed "$h 不在允許的主機清單：$(printf '%s' "$hosts" | paste -sd' ' -)";;
     esac
     # git config "insteadOf" rules can rewrite a URL; check where git really goes
     local real; real=$(git ls-remote --get-url "$url" 2>/dev/null)
-    [ -z "$real" ] || [ "$real" = "$url" ] || ! is_url "$real" || { h=$(url_host "$real"); printf '%s\n' "$hosts" | grep -qxF "$h" || die "git 設定把網址改到 ${h}，不在允許的主機清單"; }
+    [ -z "$real" ] || [ "$real" = "$url" ] || ! is_url "$real" || { h=$(url_host "$real"); printf '%s\n' "$hosts" | grep -qxF "$h" || die_c host_not_allowed "git 設定把網址改到 ${h}，不在允許的主機清單"; }
     return 0
 }
 push_urls() { # push_urls REMOTE : every URL git may push REMOTE to (pushurl else url, insteadOf applied; pushInsteadOf too)
@@ -2077,7 +2090,7 @@ ctx_detail() { # ctx_detail PID TOOL DIR FRESH : the detail JSON, kept a minute
 }
 
 # ---------- commands ----------
-need_init() { [ -f "$MACHINE" ] || die "還沒設定：先打  kit init <網址或資料夾>"; }
+need_init() { [ -f "$MACHINE" ] || die_c not_init "還沒設定：先打  kit init <網址或資料夾>"; }
 
 cmd_init() {
     local KIT_INIT=1
@@ -2300,7 +2313,7 @@ EOF
     printf '\n  ]}'
 }
 cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a kit panel); kit.ps1 prints the same
-    local want req i k n p d status new first s tools
+    local want req i k n p d status new first s tools sf chg="" changed rel f
     want=$(wanted); req=$(required_items)
     tool_cache                                               # each program looked at once, not once per skill
     printf '{\n  "kit": %s,\n  "sources": [' "$(json_s "$KIT_VERSION")"
@@ -2308,7 +2321,9 @@ cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a k
     while IFS= read -r s; do
         [ -n "$s" ] || continue
         [ $first = 1 ] || printf ','; first=0
-        printf '\n    {"name": %s, "source": %s, "dir": %s, "push": %s}' "$(json_s "$(src_name "$s")")" "$(json_s "$(url_safe "$s")")" "$(json_s "$(src_dir "$s")")" "$(json_s "$(push_mode "$(src_dir "$s")")")"
+        d=$(src_dir "$s"); sf=$(cd "$d" 2>/dev/null && send_files)    # what kit push would send from it
+        [ -z "$sf" ] || while IFS= read -r f; do chg="$chg$TAB$d/$f$LF"; done <<< "$sf"
+        printf '\n    {"name": %s, "source": %s, "dir": %s, "push": %s, "changed": %s}' "$(json_s "$(src_name "$s")")" "$(json_s "$(url_safe "$s")")" "$(json_s "$d")" "$(json_s "$(push_mode "$d")")" "$(printf '%s\n' "$sf" | json_arr)"
     done <<EOF
 $(m_sources)
 EOF
@@ -2323,10 +2338,14 @@ EOF
         printf '%s\n' "$req" | grep -qxF "$i" && status=required
         [ "$k" = agent ] && status=agent
         new=false; [ -n "$(state_get seen "$i")" ] || new=true
-        d=$(item_path "" "$k" "$n"); d=${p%"$d"}               # the source folder that has it
+        rel=$(item_path "" "$k" "$n"); d=${p%"$rel"}            # the source folder that has it
+        # changed: kit push would send it (a skill: any file in its folder)
+        changed=false
+        case $k in skill) case $chg in *"$TAB$d${rel%/*}/"*) changed=true;; esac;;
+                   *) case $chg in *"$TAB$d$rel$LF"*) changed=true;; esac;; esac
         [ $first = 1 ] || printf ','; first=0
-        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "source": %s, "description": %s, "path": %s%s}' \
-            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")" "$(json_s "$p")" \
+        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "changed": %s, "source": %s, "description": %s, "path": %s%s}' \
+            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$changed" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")" "$(json_s "$p")" \
             "$( [ "$k" = skill ] && printf ', "needs": %s%s' "$(needs_json "$(dirname "$p")" "${d%/}")" "$(packages_json "$(dirname "$p")" "$n")")"
     done
     printf '\n  ],\n  "kit_version_wanted": %s' "$(json_s "$(wanted_version)")"
@@ -2340,16 +2359,16 @@ cmd_list() {
             HERE_DIR=""; HERE_PID=""
             while [ $# -gt 0 ]; do
                 case $1 in
-                    --dir) [ $# -ge 2 ] || die "--dir 後面要接資料夾"; HERE_DIR=$2; shift 2
+                    --dir) [ $# -ge 2 ] || die_c usage "--dir 後面要接資料夾"; HERE_DIR=$2; shift 2
                         [ -d "$HERE_DIR" ] && HERE_DIR=$(cd "$HERE_DIR" && pwd -P);;
-                    --pid) [ $# -ge 2 ] || die "--pid 後面要接數字"; HERE_PID=$2; shift 2
-                        case $HERE_PID in ""|*[!0-9]*) die "--pid 後面要接數字";; esac;;
-                    *) die "用法：kit list --json [--dir 資料夾] [--pid 程式編號]";;
+                    --pid) [ $# -ge 2 ] || die_c usage "--pid 後面要接數字"; HERE_PID=$2; shift 2
+                        case $HERE_PID in ""|*[!0-9]*) die_c usage "--pid 後面要接數字";; esac;;
+                    *) die_c usage "用法：kit list --json [--dir 資料夾] [--pid 程式編號]";;
                 esac
             done
-            need_init; cmd_list_json; return;;
+            need_init; cmd_list_json >&3; return;;
         "") ;;
-        *) die "用法：kit list [--json [--dir 資料夾] [--pid 程式編號]]";;
+        *) die_c usage "用法：kit list [--json [--dir 資料夾] [--pid 程式編號]]";;
     esac
     need_init
     local want req i mark
@@ -2603,10 +2622,10 @@ target_dir() { # where new/update write: --to <source name|folder>, else the fol
         while IFS= read -r d; do [ -n "$d" ] && [ "$(basename "$d")" = "$1" ] && { printf '%s\n' "$d"; return 0; }; done <<EOF
 $( [ -f "$MACHINE" ] && src_dirs )
 EOF
-        [ -d "$1" ] || die "找不到 --to $1（要是來源名字或資料夾）"
+        [ -d "$1" ] || die_c no_source "找不到 --to $1（要是來源名字或資料夾）"
         (cd "$1" && pwd); return 0
     fi
-    [ -f ./kit.yaml ] && { pwd; return 0; }
+    [ -f ./kit.yaml ] && { pwd -P; return 0; }        # as kit.ps1 sees it (symlinks resolved)
     need_init
     src_dirs | head -n 1
 }
@@ -3015,6 +3034,17 @@ push_items() { # changed item files (one per line) -> verb<TAB>kind:name, one pe
         else printf 'add\t%s:%s\n' "$k" "$n"; fi
     done | awk -F'\t' '!seen[$2]++'
 }
+ITEM_RE='^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$'   # the files kit push sends
+send_files() { # send_files : (in a source's folder) what kit push would send, one per line: the changed item files, and
+    # kit.yaml when all that changed in it is collect_sources (kit collect --allow added an author); nothing else
+    local all files
+    all=$(changed_files 2>/dev/null)
+    files=$(printf '%s\n' "$all" | grep -E "$ITEM_RE")
+    [ -n "$files" ] || return 0
+    printf '%s\n' "$files"
+    printf '%s\n' "$all" | grep -qx kit.yaml && collect_only_yaml && echo kit.yaml
+    return 0
+}
 changed_files() { # changed files here, one per line, exactly as named (a rename: the new and the old name)
     git status --porcelain -z --untracked-files=all | tr '\0' '\n' |
         awk '{ if (old) { old = 0; print; next } if (substr($0, 1, 1) == "R") old = 1; print substr($0, 4) }'
@@ -3036,10 +3066,10 @@ author_check() { # author_check DIR : with author_domains in kit.yaml, the commi
     doms=$(yget "$1/kit.yaml" author_domains | tr 'A-Z' 'a-z')
     [ -n "$doms" ] || return 0
     e=$( { git var GIT_AUTHOR_IDENT; git var GIT_COMMITTER_IDENT; } 2>/dev/null | sed -n 's/.*<\([^>]*\)>.*/\1/p')
-    [ -n "$e" ] || die "git 還不知道你的名字和信箱，什麼都沒送。請打  git config --global user.name \"你的名字\"  和  git config --global user.email 你的公司信箱"
+    [ -n "$e" ] || die_c no_git_identity "git 還不知道你的名字和信箱，什麼都沒送。請打  git config --global user.name \"你的名字\"  和  git config --global user.email 你的公司信箱"
     for e in $e; do
         printf '%s\n' "$doms" | grep -qxF "$(printf '%s' "${e##*@}" | tr 'A-Z' 'a-z')" ||
-            die "git 的作者信箱 $e 不是公司網域（要是 $(printf '%s' "$doms" | paste -sd' ' -)），什麼都沒送。請打  git config user.email 你的公司信箱（也看看 GIT_AUTHOR_EMAIL、GIT_COMMITTER_EMAIL）"
+            die_c author_not_allowed "git 的作者信箱 $e 不是公司網域（要是 $(printf '%s' "$doms" | paste -sd' ' -)），什麼都沒送。請打  git config user.email 你的公司信箱（也看看 GIT_AUTHOR_EMAIL、GIT_COMMITTER_EMAIL）"
     done
 }
 token_file_ok() { # warn when the token file can be read by others
@@ -3049,79 +3079,98 @@ token_file_ok() { # warn when the token file can be read by others
 push_direct() { # push_direct DIR FILES MSG DRY : kit.yaml says push: direct: commit on this branch, push to every remote
     local dir=$1 files=$2 msg=$3 dry=$4 remotes cur r n list=() f fail=0
     remotes=$(git remote)
-    [ -n "$remotes" ] || die "$(basename "$dir") 沒有 remote，不知道要送到哪"
-    cur=$(git symbolic-ref --short -q HEAD) || die "$(basename "$dir") 現在不在分支上，什麼都沒送"
+    [ -n "$remotes" ] || die_c no_remote "$(basename "$dir") 沒有 remote，不知道要送到哪"
+    cur=$(git symbolic-ref --short -q HEAD) || die_c not_on_branch "$(basename "$dir") 現在不在分支上，什麼都沒送"
     for r in $remotes; do check_push_urls "$r"; done
     # only the new commit may go out: every remote has this branch already, with nothing unpushed here or new there
     for r in $remotes; do
         git_safe fetch -q --no-recurse-submodules "$r" "+refs/heads/$cur:refs/remotes/$r/$cur" 2>/dev/null || warn "沒辦法更新 $r/${cur}（沒網路？），用上次拿到的"
-        git rev-parse -q --verify "refs/remotes/$r/$cur" >/dev/null || die "$r 上沒有 ${cur}，什麼都沒送（第一次請自己  git push $r ${cur}）"
+        git rev-parse -q --verify "refs/remotes/$r/$cur" >/dev/null || die_c out_of_sync "$r 上沒有 ${cur}，什麼都沒送（第一次請自己  git push $r ${cur}）"
         n=$(git rev-list --count "refs/remotes/$r/$cur..HEAD" 2>/dev/null) || n=1
-        [ "$n" = 0 ] || die "${cur} 有 ${n} 個 commit 還沒推到 ${r}，什麼都沒送（先自己  git push $r ${cur}）"
+        [ "$n" = 0 ] || die_c out_of_sync "${cur} 有 ${n} 個 commit 還沒推到 ${r}，什麼都沒送（先自己  git push $r ${cur}）"
         n=$(git rev-list --count "HEAD..refs/remotes/$r/$cur" 2>/dev/null) || n=1
-        [ "$n" = 0 ] || die "$r 的 ${cur} 有 ${n} 個你這裡沒有的 commit，什麼都沒送（先  git pull $r ${cur}）"
+        [ "$n" = 0 ] || die_c out_of_sync "$r 的 ${cur} 有 ${n} 個你這裡沒有的 commit，什麼都沒送（先  git pull $r ${cur}）"
     done
     say "要送的檔案（$(basename "$dir")）："
     printf '%s\n' "$files" | sed 's/^/  /'
     say "kit.yaml 寫 push: direct：直接 commit 到 ${cur}，推到 $(printf '%s' "$remotes" | paste -sd' ' -)，不開 PR"
     say "commit：${msg}"
-    [ -n "$dry" ] && { say "（--dry-run：沒有 commit，沒有送）"; return 0; }
+    PJ_BRANCH=$cur; PJ_REMOTES=$remotes
+    [ -n "$dry" ] && { say "（--dry-run：沒有 commit，沒有送）"; [ -z "$JSON_OUT" ] || push_json false; return 0; }
     while IFS= read -r f; do [ -n "$f" ] && list+=("$f"); done <<< "$files"
-    git_add_commit "$msg" "${list[@]}" || die "commit 失敗，什麼都沒送"
+    git_add_commit "$msg" "${list[@]}" || die_c push_failed "commit 失敗，什麼都沒送"
     local err; err=$(mktemp "${TMPDIR:-/tmp}/kit-git.XXXXXX")
     for r in $remotes; do
         if git_safe push -q --no-recurse-submodules "$r" "HEAD:refs/heads/$cur" 2>"$err"; then say "已推到 ${r}"
         else warn "沒辦法推到 ${r}（落後了要先 git pull？沒網路？），git 說："; git_err "$err"; fail=1; fi
     done
     rm -f "$err"
-    [ $fail = 0 ] || die "commit 已經在本機的 ${cur}，有的 remote 沒推成功（看上面）"
+    [ $fail = 0 ] || die_c push_failed "commit 已經在本機的 ${cur}，有的 remote 沒推成功（看上面）"
+    [ -z "$JSON_OUT" ] || push_json true
     return 0
+}
+json_or_null() { if [ -n "$1" ]; then json_s "$1"; else printf null; fi; }
+push_json() { # push_json SENT : with --json, what kit push sends (or would), from PJ_*, on stdout (kit.ps1 prints the same)
+    printf '{"source": %s, "dir": %s, "push": %s, "dry_run": %s, "files": %s, "skipped": %s, "commit": %s, "branch": %s, "into": %s, "remotes": %s, "sent": %s, "pr_url": %s, "compare_url": %s}\n' \
+        "$(json_s "$(basename "$PJ_DIR")")" "$(json_s "$PJ_DIR")" "$(json_s "$PJ_MODE")" "$PJ_DRY" \
+        "$(printf '%s\n' "$PJ_FILES" | json_arr)" "$(printf '%s\n' "$PJ_SKIPPED" | json_arr)" \
+        "$(json_or_null "$PJ_COMMIT")" "$(json_or_null "$PJ_BRANCH")" "$(json_or_null "$PJ_INTO")" "$(printf '%s\n' "$PJ_REMOTES" | json_arr)" \
+        "$1" "$(json_or_null "$PJ_PR")" "$(json_or_null "$PJ_COMPARE")" >&3
 }
 cmd_push() {
     local to="" dry=""
     while [ $# -gt 0 ]; do
         case $1 in
-            --to) to=${2:-}; shift 2 || die "--to 後面要接來源";;
+            --to) to=${2:-}; shift 2 || die_c usage "--to 後面要接來源";;
             --dry-run) dry=1; shift;;
-            *) die "用法：kit push [--to 來源] [--dry-run]";;
+            --json) shift;;           # (set before: stdout has only the JSON)
+            *) die_c usage "用法：kit push [--to 來源] [--dry-run] [--json]";;
         esac
     done
     local dir; dir=$(target_dir "$to") || exit 1
-    cd "$dir" || die "找不到 $dir"
-    [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || die "$(basename "$dir") 不是 git repo（要先 git clone 團隊來源）"
+    cd "$dir" || die_c no_source "找不到 $dir"
+    [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || die_c not_git "$(basename "$dir") 不是 git repo（要先 git clone 團隊來源）"
     PUSH_DIR=$(pwd -P)
+    # what --json prints (push_json)
+    PJ_DIR=$dir; PJ_MODE=$(push_mode .); PJ_DRY=false; [ -n "$dry" ] && PJ_DRY=true
+    PJ_FILES=""; PJ_SKIPPED=""; PJ_COMMIT=""; PJ_BRANCH=""; PJ_INTO=""; PJ_REMOTES=""; PJ_PR=""; PJ_COMPARE=""
 
     # what changed: only item files are sent
     local all files items other
     all=$(changed_files)
-    files=$(printf '%s\n' "$all" | grep -E '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$')
+    files=$(printf '%s\n' "$all" | grep -E "$ITEM_RE")
     other=$(printf '%s\n' "$all" | grep -vxF -f <(printf '%s\n' "$files"; echo '##none##') | awk 'NF')
-    [ -n "$files" ] || { say "沒有要送的（$(basename "$dir") 裡沒有改過的 rule、skill、mcp、agent）"; return 0; }
+    if [ -z "$files" ]; then
+        say "沒有要送的（$(basename "$dir") 裡沒有改過的 rule、skill、mcp、agent）"
+        PJ_SKIPPED=$other; [ -z "$JSON_OUT" ] || push_json false
+        return 0
+    fi
     items=$(printf '%s\n' "$files" | push_items)
     # kit.yaml goes too when all that changed in it is collect_sources (kit collect --allow added an author)
     if printf '%s\n' "$other" | grep -qx kit.yaml && collect_only_yaml; then
         files=$(printf '%s\nkit.yaml\n' "$files"); other=$(printf '%s\n' "$other" | grep -vx kit.yaml)
     fi
     [ -n "$other" ] && warn "這些不是 rule、skill、mcp、agent，不會送：$(printf '%s' "$other" | paste -sd' ' -)"
+    PJ_FILES=$files; PJ_SKIPPED=$other
 
     # checks: any problem stops everything
-    check_dirs "$PUSH_DIR" || die "kit check 有問題，什麼都沒送（改好再 kit push）"
+    check_dirs "$PUSH_DIR" || die_c check_failed "kit check 有問題，什麼都沒送（改好再 kit push）"
     author_check .
     local msg="" v
     for v in add update remove; do
         local l; l=$(printf '%s\n' "$items" | awk -F'\t' -v v="$v" '$1 == v { print $2 }' | paste -sd, - | sed 's/,/, /g')
         [ -n "$l" ] && msg="${msg:+$msg; }$v $l"
     done
-    msg="kit: $msg"
+    msg="kit: $msg"; PJ_COMMIT=$msg
     # kit.yaml push: pr (the default): a branch on origin + a PR; push: direct (your own source): commit here, push to every remote
     local mode; mode=$(push_mode .)
     case $mode in
         pr) ;;
         direct) push_direct "$dir" "$files" "$msg" "$dry"; return;;
-        *) die "kit.yaml 的 push 只能是 pr 或 direct（現在是 ${mode}）";;
+        *) die_c bad_push_mode "kit.yaml 的 push 只能是 pr 或 direct（現在是 ${mode}）";;
     esac
     local origin; origin=$(git remote get-url origin 2>/dev/null) ||
-        die "$(basename "$dir") 沒有 origin，不知道要開 PR 到哪，什麼都沒送（團隊來源要有 origin；自己的來源想直接推到它的 remote，在 kit.yaml 加一行  push: direct）"
+        die_c no_origin "$(basename "$dir") 沒有 origin，不知道要開 PR 到哪，什麼都沒送（團隊來源要有 origin；自己的來源想直接推到它的 remote，在 kit.yaml 加一行  push: direct）"
     check_host "$origin"; check_push_urls origin
     local api web owner_repo token_to=""
     owner_repo=$(url_path "$origin")
@@ -3145,38 +3194,39 @@ cmd_push() {
     [ -n "$into" ] || into=$(git_safe ls-remote --symref origin HEAD 2>/dev/null | awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
     [ -n "$into" ] || into=main
 
+    local compare=""; [ -n "$web" ] && compare="$web/$owner_repo/compare/$into...$b"
     say "要送的檔案（$(basename "$dir")）："
     printf '%s\n' "$files" | sed 's/^/  /'
     say "分支：${b}（PR 到 ${into}）"
     say "commit：${msg}"
-    [ -n "$dry" ] && { say "（--dry-run：沒有 commit，沒有送）"; return 0; }
+    PJ_BRANCH=$b; PJ_INTO=$into; PJ_REMOTES=origin; PJ_COMPARE=$compare
+    [ -n "$dry" ] && { say "（--dry-run：沒有 commit，沒有送）"; [ -z "$JSON_OUT" ] || push_json false; return 0; }
 
     # commit on the new branch, then go back to where you were
     # the branch starts from origin's base, so unpushed local commits are never sent
     local orig start; orig=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
     git_safe fetch -q --no-recurse-submodules origin "+refs/heads/$into:refs/remotes/origin/$into" 2>/dev/null || warn "沒辦法更新 origin/${into}（沒網路？）"
     git rev-parse -q --verify "refs/remotes/origin/$into" >/dev/null ||
-        die "找不到 origin 的 ${into} 分支（沒網路？還是 origin 的主分支不叫 ${into}？），什麼都沒送"
+        die_c push_failed "找不到 origin 的 ${into} 分支（沒網路？還是 origin 的主分支不叫 ${into}？），什麼都沒送"
     start="refs/remotes/origin/$into"
-    git checkout -q --no-track -b "$b" "$start" || die "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送"
+    git checkout -q --no-track -b "$b" "$start" || die_c push_failed "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送"
     local list=() f
     while IFS= read -r f; do list+=("$f"); done <<EOF
 $files
 EOF
     if ! git_add_commit "$msg" "${list[@]}"; then
         git checkout -q "$orig"; git branch -q -D "$b" 2>/dev/null
-        die "commit 失敗，什麼都沒送"
+        die_c push_failed "commit 失敗，什麼都沒送"
     fi
     git checkout -q "$orig" || warn "沒辦法切回 ${orig}，你現在在 $b"
     local err; err=$(mktemp "${TMPDIR:-/tmp}/kit-git.XXXXXX")
     git_safe push -q --no-recurse-submodules origin "refs/heads/$b:refs/heads/$b" 2>"$err" ||
-        { warn "沒辦法 push 分支 ${b}，git 說："; git_err "$err"; die "commit 留在本機的 ${b}（沒網路？沒權限？）"; }
+        { warn "沒辦法 push 分支 ${b}，git 說："; git_err "$err"; die_c push_failed "commit 留在本機的 ${b}（沒網路？沒權限？）"; }
     rm -f "$err"
     say "已送出分支 ${b}。改的檔案已從這裡移到那個分支，PR 合併後打 git pull 就會回來；想先看可以  git checkout ${b}"
 
     # pull request
-    local tok="" tf="$KIT_CONF/gitea-token" compare=""
-    [ -n "$web" ] && compare="$web/$owner_repo/compare/$into...$b"
+    local tok="" tf="$KIT_CONF/gitea-token"
     if [ -n "${KIT_GITEA_TOKEN:-}" ]; then tok=$KIT_GITEA_TOKEN
     elif [ -f "$tf" ]; then token_file_ok "$tf"; tok=$(tr -d ' \r\n' < "$tf")
     fi
@@ -3194,12 +3244,13 @@ $(printf '%s\n' "$items" | awk -F'\t' '{ print "- " $1 " " $2 }')"
             --data-binary @"$tmp/body" "$api/repos/$owner_repo/pulls" 2>/dev/null)
         pr=$(json_get "$tmp/resp" html_url | sed 's/^"//; s/"$//')
         rm -rf "$tmp"; KIT_TMPDIR=
-        case $code in 2??) [ -n "$pr" ] && { say "已開 PR：$pr"; return 0; };; esac
-        warn "沒辦法自動開 PR（Gitea 回 ${code:-沒回應}）"
+        case $code in 2??) PJ_PR=$pr;; esac
+        if [ -n "$PJ_PR" ]; then say "已開 PR：$PJ_PR"; else warn "沒辦法自動開 PR（Gitea 回 ${code:-沒回應}）"; fi
     elif [ -z "$tok" ]; then
         say "沒有 Gitea token（KIT_GITEA_TOKEN 或 ${tf}），PR 請自己開"
     fi
-    if [ -n "$compare" ]; then say "開 PR：$compare"; else say "請到 Gitea 用分支 $b 開 PR"; fi
+    if [ -z "$PJ_PR" ]; then if [ -n "$compare" ]; then say "開 PR：$compare"; else say "請到 Gitea 用分支 $b 開 PR"; fi; fi
+    [ -z "$JSON_OUT" ] || push_json true
     return 0
 }
 # ---------- collect / outdated: other people's skills, from their own repos ----------
@@ -3225,7 +3276,7 @@ check_maintainer() { # check_maintainer DIR : when kit.yaml lists maintainers, y
     [ -n "$m" ] || return 0
     me=$(git -C "$1" config user.email 2>/dev/null)
     printf '%s\n' "$m" | grep -qxF -e "$me" -e "${me%%@*}" -e "${USER:-}" -e "$(id -un 2>/dev/null)" && return 0
-    die "只有維護者能用 collect／outdated（kit.yaml 的 maintainers）"
+    die_c not_maintainer "只有維護者能用 collect／outdated（kit.yaml 的 maintainers）"
 }
 license_kind() { # license_kind FILE -> short name
     if grep -qiE 'Apache License' "$1"; then echo Apache-2.0
@@ -3312,11 +3363,11 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
             --force) force=1; shift;;
             --allow) allow=1; shift;;
             --look) look=1; shift;;
-            -*) die "不認得 $1";;
-            *) [ -z "$arg" ] || die "多了一個參數：$1"; arg=$1; shift;;
+            -*) die_c usage "不認得 $1";;
+            *) [ -z "$arg" ] || die_c usage "多了一個參數：$1"; arg=$1; shift;;
         esac
     done
-    [ -n "$arg" ] || die "用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag] [--allow]，或 kit collect <名字>（再收一次）"
+    [ -n "$arg" ] || die_c usage "用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag] [--allow]，或 kit collect <名字>（再收一次）"
     local dir url line add=""; dir=$(target_dir "$to") || exit 1
     check_maintainer "$dir"
     if is_url "$arg"; then url=$arg
@@ -3332,7 +3383,7 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
     local ok=1 real; collect_allowed "$url" "$dir" || ok=0
     real=$(git ls-remote --get-url "$url" 2>/dev/null)
     if [ -n "$real" ] && [ "$real" != "$url" ] && ! collect_allowed "$real" "$dir"; then
-        [ -n "$look" ] || die "git 設定把 $url 改到 ${real}，不在 collect_sources"
+        [ -n "$look" ] || die_c not_allowed "git 設定把 $url 改到 ${real}，不在 collect_sources"
         ok=0
     fi
     local own=0; [ "$(push_mode "$dir")" = direct ] && own=1
@@ -3340,8 +3391,8 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
     # every source's), and an author on collect_sources or one your own source can add (--allow)
     PUSH_DIR=$dir check_host "$url"
     if [ $ok = 0 ] && [ -n "$look" ]; then
-        [ -z "$real" ] || [ "$real" = "$url" ] || die "git 設定把 $url 改到 ${real}，不在 collect_sources，不下載"
-        [ $own = 1 ] || die "$(url_id "$url") 不在 collect_sources（$(basename "$dir")/kit.yaml），不下載；這是團隊的來源，要請維護者把它加進 kit.yaml 的 collect_sources"
+        [ -z "$real" ] || [ "$real" = "$url" ] || die_c not_allowed "git 設定把 $url 改到 ${real}，不在 collect_sources，不下載"
+        [ $own = 1 ] || die_c not_allowed "$(url_id "$url") 不在 collect_sources（$(basename "$dir")/kit.yaml），不下載；這是團隊的來源，要請維護者把它加進 kit.yaml 的 collect_sources"
     fi
     if [ $ok = 0 ] && [ -z "$look" ]; then
         if [ -z "$allow" ]; then
@@ -3358,7 +3409,7 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
     local tmp repo src sha lic kind d; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-collect.XXXXXX"); repo="$tmp/repo"
     [ -n "$look" ] || say "從 $(url_id "$url") 下載${ref:+（${ref}）}…"
     if ! git_safe -c protocol.file.allow=always clone -q --depth 1 --no-recurse-submodules ${ref:+--branch "$ref"} "$url" "$repo" 2>"$tmp/err"; then
-        sed 's/^/  /' "$tmp/err" >&2; rm -rf "$tmp"; die "沒辦法下載 $url"
+        sed 's/^/  /' "$tmp/err" >&2; rm -rf "$tmp"; die_c download_failed "沒辦法下載 $url"
     fi
     sha=$(git -C "$repo" rev-parse HEAD)
     repo=$(cd "$repo" && pwd -P)
@@ -3366,30 +3417,30 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
     local found
     if [ -n "$path" ] || [ -f "$repo/SKILL.md" ]; then found=${path:-.}
     else found=$(skill_dirs "$repo"); fi
-    [ -n "$found" ] || { rm -rf "$tmp"; die "$(url_id "$url") 裡找不到 SKILL.md"; }
+    [ -n "$found" ] || { rm -rf "$tmp"; die_c no_skill "$(url_id "$url") 裡找不到 SKILL.md"; }
 
     if [ -n "$look" ]; then # what kit would collect, as JSON (a screen program shows it before you collect)
-        local first=1 n desc fm ex
-        printf '{"source": %s, "dir": %s, "push": %s, "url": %s, "id": %s, "commit": %s, "allowed": %s, "can_allow": %s, "skills": [' \
+        local first=1 n desc fm ex out
+        out=$(printf '{"source": %s, "dir": %s, "push": %s, "url": %s, "id": %s, "commit": %s, "allowed": %s, "can_allow": %s, "skills": [' \
             "$(json_s "$(basename "$dir")")" "$(json_s "$dir")" "$(json_s "$(push_mode "$dir")")" "$(json_s "$url")" "$(json_s "$(url_id "$url")")" "$(json_s "$sha")" \
-            "$( [ $ok = 1 ] && echo true || echo false)" "$( [ $ok = 0 ] && [ $own = 1 ] && [ -z "$real" -o "$real" = "$url" ] && echo true || echo false)"
+            "$( [ $ok = 1 ] && echo true || echo false)" "$( [ $ok = 0 ] && [ $own = 1 ] && [ -z "$real" -o "$real" = "$url" ] && echo true || echo false)")
         while IFS= read -r d; do
             [ -n "$d" ] || continue
             src=$repo; [ "$d" = . ] || src="$repo/$d"
-            [ -f "$src/SKILL.md" ] || { rm -rf "$tmp"; die "$(url_id "$url")/$d 裡沒有 SKILL.md"; }
+            [ -f "$src/SKILL.md" ] || { rm -rf "$tmp"; die_c no_skill "$(url_id "$url")/$d 裡沒有 SKILL.md"; }
             fm=$(fm_of "$src/SKILL.md"); n=$name; [ -n "$n" ] || n=$(fm_val "$fm" name); desc=$(fm_val "$fm" description)
             [ -n "$n" ] || { if [ "$d" = . ]; then n=$(basename "$(url_id "$url")"); else n=$(basename "$d"); fi; }
             lic=$(collect_license "$src" "$repo"); kind=""; [ -z "$lic" ] || kind=$(license_kind "$lic")
             collect_scan "$src"
             ex=""; if [ -e "$dir/skills/$n" ]; then if [ -n "$(lock_get "$dir" "$n")" ]; then ex=collected; else ex=own; fi; fi
-            [ $first = 1 ] || printf ','; first=0
-            printf '\n  {"path": %s, "name": %s, "valid": %s, "description": %s, "license": %s, "scripts": %s, "skipped": %s, "exists": %s, "dest": %s}' \
+            [ $first = 1 ] || out="$out,"; first=0
+            out="$out$(printf '\n  {"path": %s, "name": %s, "valid": %s, "description": %s, "license": %s, "scripts": %s, "skipped": %s, "exists": %s, "dest": %s}' \
                 "$(json_s "$d")" "$(json_s "$n")" "$(valid_name "$n" && echo true || echo false)" "$(json_s "$desc")" "$(json_s "$kind")" \
-                "$(json_s "$COL_SCRIPTS")" "$COL_SKIPPED" "$(json_s "$ex")" "$(json_s "$dir/skills/$n/SKILL.md")"
+                "$(json_s "$COL_SCRIPTS")" "$COL_SKIPPED" "$(json_s "$ex")" "$(json_s "$dir/skills/$n/SKILL.md")")"
         done <<EOT
 $found
 EOT
-        printf '\n]}\n'
+        printf '%s\n]}\n' "$out" >&3
         rm -rf "$tmp"; return 0
     fi
     if [ "$(printf '%s\n' "$found" | wc -l | tr -d ' ')" -gt 1 ]; then
@@ -3510,8 +3561,11 @@ git_state() { # git_state DIR FILE : "new", "changed" or "" (or "no-git")
     esac
 }
 cmd_agents() {
-    [ "${1:-}" = --json ] || die "用法：kit agents --json"
+    [ "${1:-}" = --json ] || die_c usage "用法：kit agents --json"
     need_init
+    agents_json >&3
+}
+agents_json() {
     local i n f d fm first=1 st items
     items=$(available)
     printf '{\n  "kit": %s,\n  "tools": [%s],\n  "available": {"rule": %s, "skill": %s, "mcp": %s},\n  "agents": [' "$(json_s "$KIT_VERSION")" \
@@ -3576,7 +3630,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
   kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
-     --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
+     --json --dir 資料夾 [--pid 程式編號]
+                                    再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（JSON，給畫面程式用）
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
   kit add rule|skill|mcp <名字>     開始用（整個帳號：每個資料夾、每個 agent 都有）
@@ -3603,20 +3658,30 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支] [--allow]   收別人的 skill（保留 LICENSE）
                                     （沒給 --path：repo 裡只有一個 SKILL.md 就用它；--allow：自己的來源一起加進 collect_sources）
   kit collect <名字>                再收一次＝整份換成原作者的新版
+  kit collect <原作者 repo 網址> --look [--path 資料夾] [--ref 分支] [--to 來源]
+                                    只下載來看、什麼都不寫：找到的 skill、授權、會執行的檔案（JSON，給程式讀）
   kit outdated                      看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml
-  kit push [--to 來源] [--dry-run]  檢查後送出改的東西：開 PR（預設），或 kit.yaml 寫 push: direct 就直接推
+  kit push [--to 來源] [--dry-run] [--json]
+                                    檢查後送出改的東西：開 PR（預設），或 kit.yaml 寫 push: direct 就直接推
+                                    （--json：送了／會送什麼、錯誤，都印成 JSON 給程式讀）
 
   kit approve <核准紀錄> <來源 clone>... --key <金鑰>   簽章核准這些版本（給 root 這類只用核准版本的帳號）
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
-  kit api                           給畫面程式（例如 Herdr 的 kit 面板）確認看得懂 kit 的輸出；輸出格式不相容地改變時才加一
+  kit api                           給程式讀的介面版本（major.minor，例如 1.0）：給畫面程式確認看得懂 kit 的輸出。
+                                    不相容的改變 major 加一；新增欄位或指令 minor 加一（清單看 README 的「給程式讀的介面」）
 EOF
 }
 
+# programs read JSON: list/agents/push --json and collect --look print only JSON on stdout (errors too)
+case ${1:-} in
+    list|ls|agents|push) for a in "$@"; do [ "$a" = --json ] && { json_mode; break; }; done;;
+    collect) for a in "$@"; do [ "$a" = --look ] && { json_mode; break; }; done;;
+esac
 # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook takes it itself)
 case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent|install-deps) [ "${2:-}" = --hook ] || take_lock;; esac
 case ${1:-} in
@@ -3647,7 +3712,7 @@ case ${1:-} in
     statusline) shift; cmd_statusline "$@";;
     collect)   shift; cmd_collect "$@";;
     outdated)  shift; cmd_outdated "$@";;
-    api)       echo 1;;     # the output format programs read; +1 only when it changes incompatibly
+    api)       echo "$KIT_API";;   # the version of what programs read (README: 給程式讀的介面)
     --version|version) echo "kit $KIT_VERSION";;
     ""|-h|--help|help) usage;;
     *) die "沒有這個指令：$1（打 kit help）";;

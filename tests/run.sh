@@ -144,12 +144,12 @@ check "list shows agent" 'echo "$out" | grep -q "agent:gerrit"'
 mkdir -p "$TEAM/skills/quote"; printf -- '---\nname: quote\ndescription: 中文 "引號" \\ 和\ttab\n---\nx\n' > "$TEAM/skills/quote/SKILL.md"
 kit list --json > "$T/list.json" 2>&1; rc=$?
 check "list --json: exit 0, valid JSON" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/list.json" > /dev/null'
-check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"$(cat "$HERE/../VERSION")\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\", \"push\": \"pr\"}" "$T/list.json"'
-check "list --json: required, used, unused" 'grep -qF "{\"kind\": \"rule\", \"name\": \"security\", \"status\": \"required\", \"new\": false, \"source\": \"team\", \"description\": \"\", \"path\": " "$T/list.json" &&
-    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"source\": \"team\", \"description\": \"review a change\", \"path\": " "$T/list.json" &&
-    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-workflow\", \"status\": \"unused\", \"new\": false, \"source\": \"third-party\", \"description\": \"upstream\", \"path\": " "$T/list.json"'
-check "list --json: agent with its description" 'grep -qF "{\"kind\": \"agent\", \"name\": \"gerrit\", \"status\": \"agent\", \"new\": false, \"source\": \"team\", \"description\": \"Gerrit helper\", \"path\": " "$T/list.json"'
-check "list --json: new item, text escaped (UTF-8 kept)" 'grep -qF "{\"kind\": \"skill\", \"name\": \"quote\", \"status\": \"unused\", \"new\": true, \"source\": \"team\", \"description\": \"中文 \\\"引號\\\" \\\\ 和\\ttab\", \"path\": " "$T/list.json"'
+check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"$(cat "$HERE/../VERSION")\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\", \"push\": \"pr\", \"changed\": []}" "$T/list.json"'
+check "list --json: required, used, unused" 'grep -qF "{\"kind\": \"rule\", \"name\": \"security\", \"status\": \"required\", \"new\": false, \"changed\": false, \"source\": \"team\", \"description\": \"\", \"path\": " "$T/list.json" &&
+    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"changed\": false, \"source\": \"team\", \"description\": \"review a change\", \"path\": " "$T/list.json" &&
+    grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-workflow\", \"status\": \"unused\", \"new\": false, \"changed\": false, \"source\": \"third-party\", \"description\": \"upstream\", \"path\": " "$T/list.json"'
+check "list --json: agent with its description" 'grep -qF "{\"kind\": \"agent\", \"name\": \"gerrit\", \"status\": \"agent\", \"new\": false, \"changed\": false, \"source\": \"team\", \"description\": \"Gerrit helper\", \"path\": " "$T/list.json"'
+check "list --json: new item, text escaped (UTF-8 kept)" 'grep -qF "{\"kind\": \"skill\", \"name\": \"quote\", \"status\": \"unused\", \"new\": true, \"changed\": false, \"source\": \"team\", \"description\": \"中文 \\\"引號\\\" \\\\ 和\\ttab\", \"path\": " "$T/list.json"'
 printf -- '---\r\nname: crlf\r\ndescription: Written on Windows\r\n---\r\nx\r\n' > "$TEAM/agents/crlf.md"   # CRLF line ends
 check "list --json: an agent written with CRLF has its description too" 'kit list --json 2>/dev/null | grep -q "\"name\": \"crlf\",.*\"description\": \"Written on Windows\"" && { [ -z "$PWSH" ] || kps list --json 2>/dev/null | grep -q "\"name\": \"crlf\",.*\"description\": \"Written on Windows\""; }'
 rm -f "$TEAM/agents/crlf.md"
@@ -160,6 +160,19 @@ if [ -n "$PWSH" ]; then
 fi
 out=$(kit list --bad 2>&1); rc=$?
 check "list with a wrong option: usage" '[ $rc -ne 0 ] && echo "$out" | grep -qF "kit list [--json"'
+# changed: what kit push would send, per source (files) and per item (a skill: any file in its folder)
+git -C "$TEAM" init -q; git -C "$TEAM" add -A; git -C "$TEAM" -c user.name=t -c user.email=t@t commit -qm init
+echo more >> "$TEAM/skills/quote/SKILL.md"; echo x > "$TEAM/skills/gerrit-review/notes.md"; echo y >> "$TEAM/rules/security.md"; echo z > "$TEAM/README.md"
+kit list --json > "$T/list-chg.json" 2>/dev/null
+check "list --json: changed files of a source (only what kit push sends)" 'grep -qF "\"push\": \"pr\", \"changed\": [\"rules/security.md\", \"skills/quote/SKILL.md\", \"skills/gerrit-review/notes.md\"]}" "$T/list-chg.json"'
+check "list --json: changed items (a skill by any file in its folder), the rest not" 'grep -qF "\"name\": \"security\", \"status\": \"required\", \"new\": false, \"changed\": true," "$T/list-chg.json" &&
+    grep -qF "\"name\": \"quote\", \"status\": \"unused\", \"new\": true, \"changed\": true," "$T/list-chg.json" &&
+    grep -qF "\"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"changed\": true," "$T/list-chg.json" &&
+    grep -qF "\"name\": \"gerrit\", \"status\": \"agent\", \"new\": false, \"changed\": false," "$T/list-chg.json"'
+if [ -n "$PWSH" ]; then
+    check "list --json changed: kit.ps1 prints the same" 'kps list --json 2>/dev/null | cmp -s - "$T/list-chg.json"'
+fi
+git -C "$TEAM" checkout -q -- .; rm -f "$TEAM/skills/gerrit-review/notes.md" "$TEAM/README.md"; rm -rf "$TEAM/.git"
 # --dir: what an agent started in a folder reads besides kit's (the panel follows the agent you click)
 mkdir -p "$T/proj/sub/.claude/rules" "$T/proj/sub/.claude/skills/pskill" "$HOME/.claude/skills/mine"
 printf '# Project rules\nx\n' > "$T/proj/CLAUDE.md"; printf '# For codex\n' > "$T/proj/AGENTS.md"
@@ -550,21 +563,39 @@ remote_heads() { git --git-dir="$ORIGIN" for-each-ref --format='%(refname:short)
 cd "$W"
 out=$(kit push 2>&1); rc=$?
 check "push: nothing to send" '[ $rc -eq 0 ] && echo "$out" | grep -q 沒有要送的'
+echo "not an item" > notes.txt
+out=$(kit push --dry-run --json 2>/dev/null); rc=$?
+check "push --json: nothing to send, said in JSON (what is left out too)" '[ $rc -eq 0 ] && [ "$out" = "{\"source\": \"work\", \"dir\": \"$(pwd -P)\", \"push\": \"pr\", \"dry_run\": true, \"files\": [], \"skipped\": [\"notes.txt\"], \"commit\": null, \"branch\": null, \"into\": null, \"remotes\": [], \"sent\": false, \"pr_url\": null, \"compare_url\": null}" ]'
+rm -f notes.txt
 kit new skill pfoo >/dev/null 2>&1
 head0=$(git rev-parse HEAD)
 out=$(kit push --dry-run 2>&1); rc=$?
 check "push --dry-run lists files and branch, sends nothing" '[ $rc -eq 0 ] && echo "$out" | grep -q "skills/pfoo/SKILL.md" && echo "$out" | grep -q "kit/pfoo-$DAY" && [ "$(git rev-parse HEAD)" = "$head0" ] && [ -z "$(git branch --list "kit/*")" ] && [ "$(remote_heads)" = main ]'
+out=$(kit push --dry-run --json 2>/dev/null); rc=$?
+check "push --dry-run --json: only one JSON line on stdout: files, commit, branch, where the PR goes" '[ $rc -eq 0 ] && [ "$out" = "{\"source\": \"work\", \"dir\": \"$(pwd -P)\", \"push\": \"pr\", \"dry_run\": true, \"files\": [\"skills/pfoo/SKILL.md\"], \"skipped\": [], \"commit\": \"kit: add skill:pfoo\", \"branch\": \"kit/pfoo-$DAY\", \"into\": \"main\", \"remotes\": [\"origin\"], \"sent\": false, \"pr_url\": null, \"compare_url\": \"${KIT_GITEA_API%/api/v1}/acme/team/compare/main...kit/pfoo-$DAY\"}" ] && [ "$(git rev-parse HEAD)" = "$head0" ]'
+if [ -n "$PWSH" ]; then
+    check "push --dry-run --json: kit.ps1 prints the same" '[ "$(kps push --dry-run --json 2>/dev/null)" = "$out" ]'
+fi
 echo "TopSecretName here" >> skills/pfoo/SKILL.md
 out=$(kit push 2>&1); rc=$?
 check "push: check problem stops, nothing sent" '[ $rc -ne 0 ] && echo "$out" | grep -q 什麼都沒送 && [ -z "$(git branch --list "kit/*")" ] && [ "$(remote_heads)" = main ]'
+out=$(kit push --dry-run --json 2>/dev/null); rc=$?
+check "push --json: a check problem is error check_failed" '[ $rc -ne 0 ] && [ "$out" = "{\"error\": {\"code\": \"check_failed\", \"message\": \"kit check 有問題，什麼都沒送（改好再 kit push）\"}}" ]'
+if [ -n "$PWSH" ]; then
+    check "push --json error: kit.ps1 prints the same" '[ "$(kps push --dry-run --json 2>/dev/null)" = "$out" ]'
+fi
 printf -- '---\nname: pfoo\ndescription: p\n---\nok\n' > skills/pfoo/SKILL.md
 git config user.email me@home.example
 out=$(kit push 2>&1); rc=$?
 check "push: author domain must be company" '[ $rc -ne 0 ] && echo "$out" | grep -q "不是公司網域" && [ "$(remote_heads)" = main ]'
+out=$(kit push --dry-run --json 2>/dev/null); rc=$?
+check "push --json: error author_not_allowed" '[ $rc -ne 0 ] && echo "$out" | grep -q "^{\"error\": {\"code\": \"author_not_allowed\", \"message\": \"git 的作者信箱 me@home.example 不是公司網域"'
 git config user.email me@corp.example
 git remote set-url origin https://public-git.example/acme/team.git
 out=$(kit push 2>&1); rc=$?
 check "push: origin host not allowed" '[ $rc -ne 0 ] && echo "$out" | grep -q "public-git.example 不在允許的主機清單" && [ "$(remote_heads)" = main ]'
+out=$(kit push --dry-run --json 2>/dev/null); rc=$?
+check "push --json: error host_not_allowed" '[ $rc -ne 0 ] && echo "$out" | grep -q "^{\"error\": {\"code\": \"host_not_allowed\", " && [ "$(echo "$out" | wc -l | tr -d " ")" = 1 ]'
 git remote set-url origin "$ORIGIN"
 echo "local only" > notes.txt; git add notes.txt; git commit -qm "local only"   # an unpushed commit on main
 out=$(kit push 2>&1); rc=$?
@@ -585,6 +616,9 @@ out=$(kit push 2>&1); rc=$?
 check "push: same branch name taken -> -2" '[ $rc -eq 0 ] && remote_heads | grep -qx "kit/pfoo-$DAY-2"'
 check "push: token file used, loose permission warned" 'tail -1 "$P/req.log" | grep -qF "token file-tok-456" && echo "$out" | grep -q "chmod 600" && ! echo "$out" | grep -q file-tok'
 rm -f "$HOME/.config/agentkit/gitea-token"
+echo "Be kindest." > rules/base.md
+out=$(KIT_GITEA_TOKEN=fake-tok-123 kit push --json 2>/dev/null); rc=$?
+check "push --json: sent, the PR's URL; nothing else on stdout" '[ $rc -eq 0 ] && [ "$(echo "$out" | wc -l | tr -d " ")" = 1 ] && echo "$out" | grep -qF "\"dry_run\": false, \"files\": [\"rules/base.md\"], " && echo "$out" | grep -qF "\"branch\": \"kit/base-$DAY\", \"into\": \"main\", \"remotes\": [\"origin\"], \"sent\": true, \"pr_url\": \"http://127.0.0.1/acme/team/pulls/1\", \"compare_url\": " && remote_heads | grep -qx "kit/base-$DAY"'
 kill $FAKE 2>/dev/null; unset KIT_GITEA_API
 cd "$T"
 
@@ -619,6 +653,11 @@ git config "url.evil.example:.pushInsteadOf" "$D/"
 out=$(kit push --dry-run 2>&1); rc=$?
 check "push direct: pushInsteadOf to host:path (no user@) is a host too" '[ $rc -ne 0 ] && echo "$out" | grep -q "evil.example 不在允許的主機清單"'
 git config --remove-section "url.evil.example:"
+out=$(kit push --dry-run --json 2>/dev/null); rc=$?
+check "push direct --dry-run --json: the branch and every remote, no PR" '[ $rc -eq 0 ] && [ "$out" = "{\"source\": \"work\", \"dir\": \"$(pwd -P)\", \"push\": \"direct\", \"dry_run\": true, \"files\": [\"rules/mine.md\"], \"skipped\": [\"notes.txt\"], \"commit\": \"kit: update rule:mine\", \"branch\": \"main\", \"into\": null, \"remotes\": [\"one\", \"two\"], \"sent\": false, \"pr_url\": null, \"compare_url\": null}" ]'
+if [ -n "$PWSH" ]; then
+    check "push direct --dry-run --json: kit.ps1 prints the same" '[ "$(kps push --dry-run --json 2>/dev/null)" = "$out" ]'
+fi
 out=$(kit push --dry-run 2>&1); rc=$?
 check "push direct --dry-run: straight to the remotes, nothing sent" '[ $rc -eq 0 ] && echo "$out" | grep -qF "push: direct" && echo "$out" | grep -q "one two" && echo "$out" | grep -q "rules/mine.md" && [ "$(git rev-parse HEAD)" = "$dh0" ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$dh0" ]'
 out=$(kit push 2>&1); rc=$?
@@ -631,6 +670,8 @@ git reset -q --soft HEAD~1
 git -c init.defaultBranch=main init -q --bare "$D/three.git"; git remote add three "$D/three.git"
 out=$(kit push 2>&1); rc=$?
 check "push direct: a remote without this branch stops it" '[ $rc -ne 0 ] && echo "$out" | grep -q "three 上沒有 main" && [ "$(git rev-parse HEAD)" = "$(git --git-dir="$R1" rev-parse main)" ]'
+out=$(kit push --json 2>/dev/null); rc=$?
+check "push direct --json: error out_of_sync" '[ $rc -ne 0 ] && echo "$out" | grep -q "^{\"error\": {\"code\": \"out_of_sync\", \"message\": \"three 上沒有 main"'
 git remote remove three
 git clone -q "$R1" "$D/other" 2>/dev/null; git -C "$D/other" -c user.name=t -c user.email=t@t commit -q --allow-empty -m theirs; git -C "$D/other" push -q origin HEAD:main 2>/dev/null
 out=$(kit push 2>&1); rc=$?
@@ -682,8 +723,8 @@ echo old > "$HOME/.local/share/agentkit/herdr/kit-panel/main.js"
 echo old > "$HOME/.config/herdr-app/mods/kit/main.js"; : > "$HOME/.config/herdr-app/mods/kit/.kit-panel"
 PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
 check "reinstall does not add PATH twice" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc")" = 1 ]'
-check "reinstall removes herdr/ an older kit left in its own folder" '[ ! -e "$HOME/.local/share/agentkit/herdr" ] && [ -x "$HOME/.local/share/agentkit/kit" ]'
-check "reinstall leaves the panel installed in Herdr alone" '[ "$(cat "$HOME/.config/herdr-app/mods/kit/main.js")" = old ] && [ -f "$HOME/.config/herdr-app/mods/kit/.kit-panel" ]'
+check "reinstall removes the panel files kit 0.2 left in its own folder" '[ ! -e "$HOME/.local/share/agentkit/herdr" ] && [ -x "$HOME/.local/share/agentkit/kit" ]'
+check "reinstall leaves a panel installed in a screen program alone" '[ "$(cat "$HOME/.config/herdr-app/mods/kit/main.js")" = old ] && [ -f "$HOME/.config/herdr-app/mods/kit/.kit-panel" ]'
 rm -rf "$HOME/.config/herdr-app"
 check "installed kit works" '"$HOME/.local/bin/kit" init "$TEAM" >/dev/null 2>&1 && grep -q agentkit:begin "$HOME/.claude/CLAUDE.md"'
 check "installed kit has the ci template" '"$HOME/.local/bin/kit" ci-template | cmp -s - "$R/templates/gitea-kit-check.yaml"'
@@ -1304,6 +1345,8 @@ check "collect --look: every skill, as JSON" '[ $rc -eq 0 ] && [ "$v" = "True Fa
 check "collect --look writes nothing" '[ "$before" = "$(cd "$CO" && find . -type f | sort | xargs cksum)" ]'
 out=$(kit collect "file://$UP" --look 2>&1); rc=$?
 check "collect --look on an author not on the list of a team source (no --allow): says so, downloads nothing" '[ $rc -ne 0 ] && echo "$out" | grep -q "不在 collect_sources" && echo "$out" | grep -q 不下載 && ! echo "$out" | grep -q "\"skills\""'
+out=$(kit collect "file://$UP" --look 2>/dev/null); rc=$?
+check "collect --look: error not_allowed, only JSON on stdout" '[ $rc -ne 0 ] && echo "$out" | grep -q "^{\"error\": {\"code\": \"not_allowed\", \"message\": \".*不下載" && [ "$(echo "$out" | wc -l | tr -d " ")" = 1 ]'
 out=$(kit collect "file://$UP" --path skills/foo --allow 2>&1); rc=$?
 check "collect --allow refused in a team source (no push: direct)" '[ $rc -ne 0 ] && echo "$out" | grep -q "push: direct" && [ ! -e "$CO/skills/foo" ]'
 # your own source: --allow adds the author to collect_sources ([a, b] on one line, or - lines, or no list yet)
@@ -1328,6 +1371,8 @@ check "collect --allow: no list yet gets one" '[ $rc -eq 0 ] && [ "$(tail -n 1 "
 printf 'name: collector\npush: direct\nallowed_hosts: [gitea.example]\ncollect_sources: [https://public-git.example/someone]\n' > "$CO/kit.yaml"
 out=$(kit collect https://public-git.example/someone/skills --look 2>&1); rc=$?
 check "collect --look: a host outside allowed_hosts is refused before anything is downloaded" '[ $rc -ne 0 ] && echo "$out" | grep -q "public-git.example 不在允許的主機清單" && ! echo "$out" | grep -q 沒辦法下載'
+out=$(kit collect https://public-git.example/someone/skills --look 2>/dev/null); rc=$?
+check "collect --look: error host_not_allowed" '[ $rc -ne 0 ] && echo "$out" | grep -q "^{\"error\": {\"code\": \"host_not_allowed\", "'
 out=$(kit collect https://public-git.example/someone/skills 2>&1); rc=$?
 check "collect: a host outside allowed_hosts is refused (the same list)" '[ $rc -ne 0 ] && echo "$out" | grep -q "public-git.example 不在允許的主機清單" && ! echo "$out" | grep -q 沒辦法下載'
 if [ -n "$PWSH" ]; then
@@ -1385,10 +1430,19 @@ check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/age
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, 1" '[ $rc -eq 0 ] && [ "$out" = 1 ]'
+check "api: one line, major.minor (1.0)" '[ $rc -eq 0 ] && [ "$out" = 1.0 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.0 ]'
+fi
+# errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
+out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?
+check "list --json before kit init: error not_init on stdout, the words on stderr" '[ $rc -ne 0 ] && [ "$out" = "{\"error\": {\"code\": \"not_init\", \"message\": \"還沒設定：先打  kit init <網址或資料夾>\"}}" ] && grep -q "還沒設定" "$T/err"'
+out2=$(AGENTKIT_CONFIG="$T/noconf" kit agents --json 2>/dev/null)
+out3=$(kit list --json --bad 2>/dev/null)
+check "agents --json before kit init: not_init; a wrong option: usage" '[ "$out2" = "$out" ] && echo "$out3" | grep -q "^{\"error\": {\"code\": \"usage\", "'
+if [ -n "$PWSH" ]; then
+    check "errors as JSON: kit.ps1 prints the same" '[ "$(AGENTKIT_CONFIG="$T/noconf" kps list --json 2>/dev/null)" = "$out" ] && [ "$(AGENTKIT_CONFIG="$T/noconf" kps agents --json 2>/dev/null)" = "$out" ] && [ "$(kps list --json --bad 2>/dev/null)" = "$out3" ]'
 fi
 
 # ---------- help ----------

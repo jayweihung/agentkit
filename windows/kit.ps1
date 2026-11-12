@@ -19,6 +19,9 @@ $script:KitVersion = 'dev'
 foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $KitLib) 'VERSION'))) {
     if (Test-Path -LiteralPath $v) { $script:KitVersion = ([IO.File]::ReadAllText($v)).Trim(); break }
 }
+# what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
+# commands are added. unix/kit has the same.
+$script:KitApi = '1.0'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -47,14 +50,25 @@ $script:LogPath = $null
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 
 # ---------- small helpers ----------
+# With --json (list, agents, push) or collect --look, stdout carries only JSON: kit's words go to stderr, and a stop is
+# also told on stdout as {"error": {"code": CODE, "message": the same words}} (unix/kit prints the same).
+$script:JsonOut = $false
 function Say([string]$msg) {
     if ($script:Quiet) { return }
-    if ($script:LogPath) { [IO.File]::AppendAllText($script:LogPath, "$msg`n", $Utf8) } else { [Console]::Out.WriteLine($msg) }
+    if ($script:LogPath) { [IO.File]::AppendAllText($script:LogPath, "$msg`n", $Utf8) }
+    elseif ($script:JsonOut) { [Console]::Error.WriteLine($msg) }
+    else { [Console]::Out.WriteLine($msg) }
 }
+function Out-Json([string]$s) { [Console]::Out.WriteLine($s) }   # the JSON programs read, on stdout
 function Warn([string]$msg) {
     if ($script:LogPath) { [IO.File]::AppendAllText($script:LogPath, "kit: $msg`n", $Utf8) } else { [Console]::Error.WriteLine("kit: $msg") }
 }
-function Die([string]$msg) { Warn $msg; exit 1 }
+function Die([string]$msg, [string]$code = 'error') {
+    Warn $msg
+    if ($script:JsonOut) { [Console]::Out.WriteLine('{"error": {"code": ' + (Json-S $code) + ', "message": ' + (Json-S $msg) + '}}') }
+    exit 1
+}
+function Die-C([string]$code, [string]$msg) { Die $msg $code }   # the code programs read (README: 給程式讀的介面)
 # one kit at a time changes state.tsv and the tools' files (the background sync takes the same lock); freed when kit ends
 $script:LockMine = $false; $script:Locked = $false; $script:SshSet = $false
 function Take-Lock([switch]$Soft) { # -Soft: give up quietly after a few seconds ($false) instead of stopping
@@ -65,7 +79,7 @@ function Take-Lock([switch]$Soft) { # -Soft: give up quietly after a few seconds
         try { [void](New-Item -ItemType Directory -Path $lock -ErrorAction Stop); break } catch { }
         # left by a kit that was killed: older than 10 minutes
         if ((Test-Path -LiteralPath $lock) -and (Get-Item -LiteralPath $lock).LastWriteTime -lt (Get-Date).AddMinutes(-10)) { Remove-Item -LiteralPath $lock -Force -Recurse -ErrorAction SilentlyContinue; continue }
-        if ($i -ge $max) { if ($Soft) { return $false }; Die "另一個 kit 正在跑（${lock}），等它跑完再試一次" }
+        if ($i -ge $max) { if ($Soft) { return $false }; Die-C busy "另一個 kit 正在跑（${lock}），等它跑完再試一次" }
         if ($i -eq 2 -and -not $Soft) { Warn '等另一個 kit 跑完…' }
         Start-Sleep -Seconds 1
     }
@@ -454,11 +468,11 @@ function Check-Host([string]$url) { # refuse URLs whose host is not allowed
     if ($hosts.Count -eq 0) { return }
     if (-not $url.StartsWith('file:///', [StringComparison]::OrdinalIgnoreCase)) {   # file:///path: a folder on this machine, no host to ask
         $h = Url-Host $url
-        if ($hosts -notcontains $h) { Die "$h 不在允許的主機清單：$($hosts -join ' ')" }
+        if ($hosts -notcontains $h) { Die-C host_not_allowed "$h 不在允許的主機清單：$($hosts -join ' ')" }
     }
     # git config "insteadOf" rules can rewrite a URL; check where git really goes
     $real = (Git-Safe ls-remote --get-url $url | Select-Object -First 1)
-    if ($real -and $real -ne $url -and (Is-Url $real)) { $h = Url-Host $real; if ($hosts -notcontains $h) { Die "git 設定把網址改到 ${h}，不在允許的主機清單" } }
+    if ($real -and $real -ne $url -and (Is-Url $real)) { $h = Url-Host $real; if ($hosts -notcontains $h) { Die-C host_not_allowed "git 設定把網址改到 ${h}，不在允許的主機清單" } }
 }
 function Push-Urls([string]$dir, [string]$remote) { # every URL git may push REMOTE to (pushurl else url, insteadOf applied; pushInsteadOf too)
     $rules = @(Git-Q -C $dir config --get-regexp '^url\..*\.pushinsteadof$')
@@ -2572,7 +2586,7 @@ function Ctx-Detail([string]$cpid, [string]$tool, [string]$dir, [bool]$fresh) { 
 }
 
 # ---------- commands ----------
-function Need-Init { if (-not (Test-Path -LiteralPath $Machine)) { Die '還沒設定：先打  kit init <網址或資料夾>' } }
+function Need-Init { if (-not (Test-Path -LiteralPath $Machine)) { Die-C not_init '還沒設定：先打  kit init <網址或資料夾>' } }
 function Seen-All { foreach ($i in Available) { if ($null -eq (State-Get 'seen' $i)) { State-Set 'seen' $i 1 } } }
 function Ver-Num([string]$v) { # sortable text for x.y.z ("+build" ignored); $null for a dev build or anything else
     $v = ($v -replace '\+.*$', '').Trim()
@@ -2926,11 +2940,12 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
     $want = Wanted; $req = Kit-Items 'required'
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"sources`": [")
-    $first = $true
+    $first = $true; $chg = @{}
     foreach ($s in @(M-Sources)) {
         if (-not $s) { continue }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
-        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S (Url-Safe $s)), `"dir`": $(Json-S (Src-Dir $s)), `"push`": $(Json-S (Push-Mode (Src-Dir $s)))}")
+        $d = Src-Dir $s; $sf = @(Send-Files $d); $chg[$d] = $sf      # what kit push would send from it
+        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S (Url-Safe $s)), `"dir`": $(Json-S $d), `"push`": $(Json-S (Push-Mode $d)), `"changed`": $(Json-Arr $sf)}")
     }
     $tools = '"claude"'; if (Has-Codex) { $tools += ', "codex"' }; if (Has-Omp) { $tools += ', "omp"' }
     [void]$sb.Append("`n  ],`n  `"tools`": [$tools],`n  `"items`": [")
@@ -2945,14 +2960,18 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
         if ($req -contains $i) { $status = 'required' }
         if ($k -eq 'agent') { $status = 'agent' }
         $new = if ($null -eq (State-Get 'seen' $i)) { 'true' } else { 'false' }
+        # changed: kit push would send it (a skill: any file in its folder)
+        $sf = @($chg[$dir]); $changed = 'false'
+        if ($k -eq 'skill') { if (@($sf | Where-Object { $_.StartsWith("skills/$n/", [StringComparison]::Ordinal) }).Count -gt 0) { $changed = 'true' } }
+        else { $rel = @{ rule = "rules/$n.md"; mcp = "mcp/$n.yaml"; agent = "agents/$n.md" }[$k]; if ($sf -ccontains $rel) { $changed = 'true' } }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
         $nj = if ($k -eq 'skill') { ', "needs": ' + (Needs-Json (Split-Path -Parent $p) $dir) + (Packages-Json (Split-Path -Parent $p) $n) } else { '' }
-        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p)), `"path`": $(Json-S $p)$nj}")
+        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"changed`": $changed, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p)), `"path`": $(Json-S $p)$nj}")
     }
     [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))")
     if ($hereDir) { [void]$sb.Append((Here-Json $hereDir $herePid)) }
     [void]$sb.Append("`n}")
-    Say $sb.ToString()
+    Out-Json $sb.ToString()
 }
 function Cmd-List($rest) {
     $rest = @($rest | Where-Object { $null -ne $_ })
@@ -2960,14 +2979,14 @@ function Cmd-List($rest) {
         $hd = ''; $hp = ''
         for ($i = 1; $i -lt $rest.Count; $i++) {
             switch -CaseSensitive ($rest[$i]) {
-                '--dir' { if ($i + 1 -ge $rest.Count) { Die '--dir 後面要接資料夾' }; $i++; $hd = $rest[$i]; if (Test-Path -LiteralPath $hd -PathType Container) { $hd = Real-Dir $hd } }
-                '--pid' { if ($i + 1 -ge $rest.Count -or $rest[$i + 1] -notmatch '^[0-9]+$') { Die '--pid 後面要接數字' }; $i++; $hp = $rest[$i] }
-                default { Die '用法：kit list --json [--dir 資料夾] [--pid 程式編號]' }
+                '--dir' { if ($i + 1 -ge $rest.Count) { Die-C usage '--dir 後面要接資料夾' }; $i++; $hd = $rest[$i]; if (Test-Path -LiteralPath $hd -PathType Container) { $hd = Real-Dir $hd } }
+                '--pid' { if ($i + 1 -ge $rest.Count -or $rest[$i + 1] -notmatch '^[0-9]+$') { Die-C usage '--pid 後面要接數字' }; $i++; $hp = $rest[$i] }
+                default { Die-C usage '用法：kit list --json [--dir 資料夾] [--pid 程式編號]' }
             }
         }
         Need-Init; Cmd-ListJson $hd $hp; return
     }
-    if ($rest.Count -gt 0) { Die '用法：kit list [--json [--dir 資料夾] [--pid 程式編號]]' }
+    if ($rest.Count -gt 0) { Die-C usage '用法：kit list [--json [--dir 資料夾] [--pid 程式編號]]' }
     Need-Init
     $want = Wanted; $req = Kit-Items 'required'
     foreach ($i in Available) {
@@ -3216,7 +3235,7 @@ function Item-Hash([string]$kind, [string]$file) { if ($kind -eq 'skill') { Dir-
 function Target-Dir([string]$to) { # --to <source name|folder>, else the folder you are in if it has kit.yaml, else the first source
     if ($to) {
         if (Test-Path -LiteralPath $Machine) { foreach ($d in Src-Dirs) { if ((Split-Path -Leaf $d) -eq $to) { return $d } } }
-        if (-not (Test-Path -LiteralPath $to -PathType Container)) { Die "找不到 --to ${to}（要是來源名字或資料夾）" }
+        if (-not (Test-Path -LiteralPath $to -PathType Container)) { Die-C no_source "找不到 --to ${to}（要是來源名字或資料夾）" }
         return (Full-Path $to)
     }
     if (Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) { return (Get-Location).ProviderPath }
@@ -3657,6 +3676,15 @@ function Push-Items([string]$dir, $files) { # changed item files -> @(verb, kind
         , @($v, "${k}:$n")
     }
 }
+$script:ItemRe = '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$'   # the files kit push sends
+function Send-Files([string]$dir) { # what kit push would send from DIR: the changed item files, and kit.yaml when all that
+    # changed in it is collect_sources (kit collect --allow added an author); nothing else
+    $all = @(Changed-Files $dir)
+    $files = @($all | Where-Object { $_ -cmatch $ItemRe })
+    if ($files.Count -eq 0) { return }
+    $files
+    if (($all -ccontains 'kit.yaml') -and (Collect-OnlyYaml $dir)) { 'kit.yaml' }
+}
 function Changed-Files([string]$dir) { # changed files in DIR, exactly as named (a rename: the new and the old name)
     $raw = "$(@(Git-Q -C $dir status --porcelain -z --untracked-files=all) -join "`n")"
     $old = $false
@@ -3702,77 +3730,95 @@ function Author-Check([string]$dir) { # with author_domains in kit.yaml, the com
     if ($doms.Count -eq 0) { return }
     $ids = @(Git-Q -C $dir var GIT_AUTHOR_IDENT) + @(Git-Q -C $dir var GIT_COMMITTER_IDENT)
     $emails = @(foreach ($i in $ids) { if ("$i" -match '<([^>]*)>') { $Matches[1] } })
-    if ($emails.Count -eq 0) { Die 'git 還不知道你的名字和信箱，什麼都沒送。請打  git config --global user.name "你的名字"  和  git config --global user.email 你的公司信箱' }
+    if ($emails.Count -eq 0) { Die-C no_git_identity 'git 還不知道你的名字和信箱，什麼都沒送。請打  git config --global user.name "你的名字"  和  git config --global user.email 你的公司信箱' }
     foreach ($e in $emails) {
-        if ($doms -notcontains $e.Substring($e.LastIndexOf('@') + 1).ToLowerInvariant()) { Die "git 的作者信箱 $e 不是公司網域（要是 $($doms -join ' ')），什麼都沒送。請打  git config user.email 你的公司信箱（也看看 GIT_AUTHOR_EMAIL、GIT_COMMITTER_EMAIL）" }
+        if ($doms -notcontains $e.Substring($e.LastIndexOf('@') + 1).ToLowerInvariant()) { Die-C author_not_allowed "git 的作者信箱 $e 不是公司網域（要是 $($doms -join ' ')），什麼都沒送。請打  git config user.email 你的公司信箱（也看看 GIT_AUTHOR_EMAIL、GIT_COMMITTER_EMAIL）" }
     }
 }
 function Rev-Count([string]$dir, [string]$range) { $n = "$(@(Git-Q -C $dir rev-list --count $range) -join '')"; if ($LASTEXITCODE -ne 0 -or $n -notmatch '^[0-9]+$') { return '1' }; $n }
 function Push-Direct($dir, $leaf, $files, $msg, $dry) { # kit.yaml says push: direct: commit on this branch, push to every remote
     $remotes = @(Git-Q -C $dir remote | Where-Object { $_ })
-    if ($remotes.Count -eq 0) { Die "$leaf 沒有 remote，不知道要送到哪" }
+    if ($remotes.Count -eq 0) { Die-C no_remote "$leaf 沒有 remote，不知道要送到哪" }
     $cur = "$(@(Git-Q -C $dir symbolic-ref --short -q HEAD) -join '')"
-    if (-not $cur) { Die "$leaf 現在不在分支上，什麼都沒送" }
+    if (-not $cur) { Die-C not_on_branch "$leaf 現在不在分支上，什麼都沒送" }
     foreach ($r in $remotes) { Check-PushUrls $dir $r }
     # only the new commit may go out: every remote has this branch already, with nothing unpushed here or new there
     foreach ($r in $remotes) {
         [void](Git-Safe -C $dir fetch -q --no-recurse-submodules $r "+refs/heads/${cur}:refs/remotes/$r/$cur")
         if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 $r/${cur}（沒網路？），用上次拿到的" }
         [void](Git-Q -C $dir rev-parse -q --verify "refs/remotes/$r/$cur")
-        if ($LASTEXITCODE -ne 0) { Die "$r 上沒有 ${cur}，什麼都沒送（第一次請自己  git push $r ${cur}）" }
+        if ($LASTEXITCODE -ne 0) { Die-C out_of_sync "$r 上沒有 ${cur}，什麼都沒送（第一次請自己  git push $r ${cur}）" }
         $n = Rev-Count $dir "refs/remotes/$r/${cur}..HEAD"
-        if ($n -ne '0') { Die "${cur} 有 ${n} 個 commit 還沒推到 ${r}，什麼都沒送（先自己  git push $r ${cur}）" }
+        if ($n -ne '0') { Die-C out_of_sync "${cur} 有 ${n} 個 commit 還沒推到 ${r}，什麼都沒送（先自己  git push $r ${cur}）" }
         $n = Rev-Count $dir "HEAD..refs/remotes/$r/$cur"
-        if ($n -ne '0') { Die "$r 的 ${cur} 有 ${n} 個你這裡沒有的 commit，什麼都沒送（先  git pull $r ${cur}）" }
+        if ($n -ne '0') { Die-C out_of_sync "$r 的 ${cur} 有 ${n} 個你這裡沒有的 commit，什麼都沒送（先  git pull $r ${cur}）" }
     }
     Say "要送的檔案（$leaf）："
     foreach ($f in $files) { Say "  $f" }
     Say "kit.yaml 寫 push: direct：直接 commit 到 ${cur}，推到 $($remotes -join ' ')，不開 PR"
     Say "commit：$msg"
-    if ($dry) { Say '（--dry-run：沒有 commit，沒有送）'; return }
-    if (-not (Git-AddCommit $dir $msg $files)) { Die 'commit 失敗，什麼都沒送' }
+    $PJ.branch = $cur; $PJ.remotes = $remotes
+    if ($dry) { Say '（--dry-run：沒有 commit，沒有送）'; if ($JsonOut) { Push-Json $false }; return }
+    if (-not (Git-AddCommit $dir $msg $files)) { Die-C push_failed 'commit 失敗，什麼都沒送' }
     $fail = $false
     foreach ($r in $remotes) {
         $o = @(Git-Safe -C $dir push -q --no-recurse-submodules $r "HEAD:refs/heads/$cur")
         if ($LASTEXITCODE -eq 0) { Say "已推到 $r" } else { Warn "沒辦法推到 ${r}（落後了要先 git pull？沒網路？），git 說："; Git-Err $o; $fail = $true }
     }
-    if ($fail) { Die "commit 已經在本機的 ${cur}，有的 remote 沒推成功（看上面）" }
+    if ($fail) { Die-C push_failed "commit 已經在本機的 ${cur}，有的 remote 沒推成功（看上面）" }
+    if ($JsonOut) { Push-Json $true }
+}
+function Json-OrNull([string]$s) { if ($s) { Json-S $s } else { 'null' } }
+function Push-Json([bool]$sent) { # with --json, what kit push sends (or would), from $PJ, on stdout (unix/kit prints the same)
+    $b = { param($v) if ($v) { 'true' } else { 'false' } }
+    Out-Json ('{"source": ' + (Json-S (Split-Path -Leaf $PJ.dir)) + ', "dir": ' + (Json-S $PJ.dir) + ', "push": ' + (Json-S $PJ.mode) + ', "dry_run": ' + (& $b $PJ.dry) +
+        ', "files": ' + (Json-Arr $PJ.files) + ', "skipped": ' + (Json-Arr $PJ.skipped) + ', "commit": ' + (Json-OrNull $PJ.commit) + ', "branch": ' + (Json-OrNull $PJ.branch) +
+        ', "into": ' + (Json-OrNull $PJ.into) + ', "remotes": ' + (Json-Arr $PJ.remotes) + ', "sent": ' + (& $b $sent) + ', "pr_url": ' + (Json-OrNull $PJ.pr) +
+        ', "compare_url": ' + (Json-OrNull $PJ.compare) + '}')
 }
 function Cmd-Push($rest) {
     $to = ''; $dry = $false; $r = @($rest | Where-Object { $_ })
     for ($i = 0; $i -lt $r.Count; $i++) {
-        if ($r[$i] -eq '--to') { if ($i + 1 -ge $r.Count) { Die '--to 後面要接來源' }; $i++; $to = $r[$i] }
-        elseif ($r[$i] -eq '--dry-run') { $dry = $true }
-        else { Die '用法：kit push [--to 來源] [--dry-run]' }
+        if ($r[$i] -ceq '--to') { if ($i + 1 -ge $r.Count) { Die-C usage '--to 後面要接來源' }; $i++; $to = $r[$i] }
+        elseif ($r[$i] -ceq '--dry-run') { $dry = $true }
+        elseif ($r[$i] -ceq '--json') { }          # (set before: stdout has only the JSON)
+        else { Die-C usage '用法：kit push [--to 來源] [--dry-run] [--json]' }
     }
     $dir = Target-Dir $to
     $leaf = Split-Path -Leaf $dir
     $top = @(Git-Q -C $dir rev-parse --show-toplevel)
     $prefix = @(Git-Q -C $dir rev-parse --show-prefix | Where-Object { $_ })
-    if ($top.Count -eq 0 -or $prefix.Count -gt 0) { Die "$leaf 不是 git repo（要先 git clone 團隊來源）" }
+    if ($top.Count -eq 0 -or $prefix.Count -gt 0) { Die-C not_git "$leaf 不是 git repo（要先 git clone 團隊來源）" }
     $script:PushDir = $dir
+    # what --json prints (Push-Json)
+    $script:PJ = @{ dir = $dir; mode = (Push-Mode $dir); dry = $dry; files = @(); skipped = @(); commit = ''; branch = ''; into = ''; remotes = @(); pr = ''; compare = '' }
 
     # what changed: only item files are sent
     $all = @(Changed-Files $dir)
-    $files = @($all | Where-Object { $_ -match '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$' })
-    $other = @($all | Where-Object { $files -notcontains $_ })
-    if ($files.Count -eq 0) { Say "沒有要送的（$leaf 裡沒有改過的 rule、skill、mcp、agent）"; return }
+    $files = @($all | Where-Object { $_ -cmatch $ItemRe })
+    $other = @($all | Where-Object { $files -cnotcontains $_ })
+    if ($files.Count -eq 0) {
+        Say "沒有要送的（$leaf 裡沒有改過的 rule、skill、mcp、agent）"
+        $PJ.skipped = $other; if ($JsonOut) { Push-Json $false }
+        return
+    }
     $items = @(Push-Items $dir $files)
     # kit.yaml goes too when all that changed in it is collect_sources (kit collect --allow added an author)
     if (($other -contains 'kit.yaml') -and (Collect-OnlyYaml $dir)) { $files += 'kit.yaml'; $other = @($other | Where-Object { $_ -ne 'kit.yaml' }) }
     if ($other.Count -gt 0) { Warn "這些不是 rule、skill、mcp、agent，不會送：$($other -join ' ')" }
+    $PJ.files = $files; $PJ.skipped = $other
 
     # checks: any problem stops everything
-    if (-not (Check-Dirs @($dir))) { Die 'kit check 有問題，什麼都沒送（改好再 kit push）' }
+    if (-not (Check-Dirs @($dir))) { Die-C check_failed 'kit check 有問題，什麼都沒送（改好再 kit push）' }
     Author-Check $dir
     $parts = @(foreach ($v in 'add', 'update', 'remove') { $l = @($items | Where-Object { $_[0] -eq $v } | ForEach-Object { $_[1] }); if ($l.Count -gt 0) { "$v $($l -join ', ')" } })
-    $msg = "kit: $($parts -join '; ')"
+    $msg = "kit: $($parts -join '; ')"; $PJ.commit = $msg
     # kit.yaml push: pr (the default): a branch on origin + a PR; push: direct (your own source): commit here, push to every remote
     $mode = Push-Mode $dir
     if ($mode -ceq 'direct') { Push-Direct $dir $leaf $files $msg $dry; return }
-    if ($mode -cne 'pr') { Die "kit.yaml 的 push 只能是 pr 或 direct（現在是 ${mode}）" }
+    if ($mode -cne 'pr') { Die-C bad_push_mode "kit.yaml 的 push 只能是 pr 或 direct（現在是 ${mode}）" }
     $origin = "$(@(Git-Q -C $dir remote get-url origin) -join '')"
-    if ($LASTEXITCODE -ne 0 -or -not $origin) { Die "$leaf 沒有 origin，不知道要開 PR 到哪，什麼都沒送（團隊來源要有 origin；自己的來源想直接推到它的 remote，在 kit.yaml 加一行  push: direct）" }
+    if ($LASTEXITCODE -ne 0 -or -not $origin) { Die-C no_origin "$leaf 沒有 origin，不知道要開 PR 到哪，什麼都沒送（團隊來源要有 origin；自己的來源想直接推到它的 remote，在 kit.yaml 加一行  push: direct）" }
     Check-Host $origin; Check-PushUrls $dir 'origin'
     $ownerRepo = Url-Path $origin
     # the Gitea token goes only to the Gitea you named (KIT_GITEA_API), or to origin's host when this source's own
@@ -3800,11 +3846,13 @@ function Cmd-Push($rest) {
     if (-not $into) { foreach ($l in @(Git-Safe -C $dir ls-remote --symref origin HEAD)) { if ("$l" -match '^ref:\s+refs/heads/(\S+)\s+HEAD$') { $into = $Matches[1]; break } } }
     if (-not $into) { $into = 'main' }
 
+    $compare = if ($web) { "$web/$ownerRepo/compare/$into...$b" } else { '' }
     Say "要送的檔案（$leaf）："
     foreach ($f in $files) { Say "  $f" }
     Say "分支：${b}（PR 到 ${into}）"
     Say "commit：$msg"
-    if ($dry) { Say '（--dry-run：沒有 commit，沒有送）'; return }
+    $PJ.branch = $b; $PJ.into = $into; $PJ.remotes = @('origin'); $PJ.compare = $compare
+    if ($dry) { Say '（--dry-run：沒有 commit，沒有送）'; if ($JsonOut) { Push-Json $false }; return }
 
     # the branch starts from origin's base, so unpushed local commits are never sent
     $orig = "$(@(Git-Q -C $dir symbolic-ref --short -q HEAD) -join '')"
@@ -3812,21 +3860,20 @@ function Cmd-Push($rest) {
     [void](Git-Safe -C $dir fetch -q --no-recurse-submodules origin "+refs/heads/${into}:refs/remotes/origin/$into")
     if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 origin/${into}（沒網路？）" }
     [void](Git-Q -C $dir rev-parse -q --verify "refs/remotes/origin/$into")
-    if ($LASTEXITCODE -ne 0) { Die "找不到 origin 的 ${into} 分支（沒網路？還是 origin 的主分支不叫 ${into}？），什麼都沒送" }
+    if ($LASTEXITCODE -ne 0) { Die-C push_failed "找不到 origin 的 ${into} 分支（沒網路？還是 origin 的主分支不叫 ${into}？），什麼都沒送" }
     $start = "refs/remotes/origin/$into"
     [void](Git-Q -C $dir checkout -q --no-track -b $b $start)
-    if ($LASTEXITCODE -ne 0) { Die "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送" }
+    if ($LASTEXITCODE -ne 0) { Die-C push_failed "沒辦法開分支 ${b}（你改的檔案跟 origin/$into 有衝突？），什麼都沒送" }
     $ok = Git-AddCommit $dir $msg $files
-    if (-not $ok) { [void](Git-Q -C $dir checkout -q $orig); [void](Git-Q -C $dir branch -q -D $b); Die 'commit 失敗，什麼都沒送' }
+    if (-not $ok) { [void](Git-Q -C $dir checkout -q $orig); [void](Git-Q -C $dir branch -q -D $b); Die-C push_failed 'commit 失敗，什麼都沒送' }
     [void](Git-Q -C $dir checkout -q $orig)
     if ($LASTEXITCODE -ne 0) { Warn "沒辦法切回 ${orig}，你現在在 $b" }
     $o = @(Git-Safe -C $dir push -q --no-recurse-submodules origin "refs/heads/${b}:refs/heads/$b")
-    if ($LASTEXITCODE -ne 0) { Warn "沒辦法 push 分支 ${b}，git 說："; Git-Err $o; Die "commit 留在本機的 ${b}（沒網路？沒權限？）" }
+    if ($LASTEXITCODE -ne 0) { Warn "沒辦法 push 分支 ${b}，git 說："; Git-Err $o; Die-C push_failed "commit 留在本機的 ${b}（沒網路？沒權限？）" }
     Say "已送出分支 ${b}。改的檔案已從這裡移到那個分支，PR 合併後打 git pull 就會回來；想先看可以  git checkout $b"
 
     # pull request
     $tok = ''; $tf = Join-Path $KitConf 'gitea-token'
-    $compare = if ($web) { "$web/$ownerRepo/compare/$into...$b" } else { '' }
     if ($env:KIT_GITEA_TOKEN) { $tok = $env:KIT_GITEA_TOKEN }
     elseif (Test-Path -LiteralPath $tf -PathType Leaf) {
         if (-not $script:OnWindows) { $m = "$(& ls -l $tf)"; if ($m.Length -lt 10 -or $m.Substring(4, 6) -ne '------') { Warn "$tf 的權限太開放了，請打  chmod 600 $tf" } }
@@ -3843,13 +3890,14 @@ function Cmd-Push($rest) {
             $resp = Invoke-RestMethod -Method Post -Uri "$api/repos/$ownerRepo/pulls" -Headers @{ Authorization = "token $tok" } `
                 -ContentType 'application/json; charset=utf-8' -Body ($Utf8.GetBytes($json)) -TimeoutSec 30 -UseBasicParsing
             $pr = ''; if ($resp -and ($resp.PSObject.Properties.Name -contains 'html_url')) { $pr = [string]$resp.html_url }
-            if ($pr) { Say "已開 PR：$pr"; return }
+            $PJ.pr = $pr
         } catch { try { $code = [string][int]$_.Exception.Response.StatusCode } catch { } }
-        Warn "沒辦法自動開 PR（Gitea 回 $(if ($code) { $code } else { '沒回應' })）"
+        if ($PJ.pr) { Say "已開 PR：$($PJ.pr)" } else { Warn "沒辦法自動開 PR（Gitea 回 $(if ($code) { $code } else { '沒回應' })）" }
     } elseif (-not $tok) {
         Say "沒有 Gitea token（KIT_GITEA_TOKEN 或 ${tf}），PR 請自己開"
     }
-    if ($compare) { Say "開 PR：$compare" } else { Say "請到 Gitea 用分支 $b 開 PR" }
+    if (-not $PJ.pr) { if ($compare) { Say "開 PR：$compare" } else { Say "請到 Gitea 用分支 $b 開 PR" } }
+    if ($JsonOut) { Push-Json $true }
 }
 
 # ---------- collect / outdated: other people's skills, from their own repos ----------
@@ -3876,7 +3924,7 @@ function Check-Maintainer([string]$dir) {
     $me = "$(& git -C $dir config user.email 2>$null)"
     $who = @($me, ($me -replace '@.*$', ''), $env:USERNAME, $env:USER) | Where-Object { $_ }
     foreach ($w in $who) { if ($m -contains $w) { return } }
-    Die '只有維護者能用 collect／outdated（kit.yaml 的 maintainers）'
+    Die-C not_maintainer '只有維護者能用 collect／outdated（kit.yaml 的 maintainers）'
 }
 function License-Kind([string]$f) {
     $t = Read-Text $f
@@ -3972,10 +4020,10 @@ function Cmd-Collect($rest) {
             '--force' { $force = $true }
             '--allow' { $allow = $true }
             '--look' { $look = $true }
-            default { if ($r[$i].StartsWith('-')) { Die "不認得 $($r[$i])" }; if ($arg) { Die "多了一個參數：$($r[$i])" }; $arg = $r[$i] }
+            default { if ($r[$i].StartsWith('-')) { Die-C usage "不認得 $($r[$i])" }; if ($arg) { Die-C usage "多了一個參數：$($r[$i])" }; $arg = $r[$i] }
         }
     }
-    if (-not $arg) { Die '用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag] [--allow]，或 kit collect <名字>（再收一次）' }
+    if (-not $arg) { Die-C usage '用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag] [--allow]，或 kit collect <名字>（再收一次）' }
     $dir = Target-Dir $to
     Check-Maintainer $dir
     if (Is-Url $arg) { $url = $arg }
@@ -3992,7 +4040,7 @@ function Cmd-Collect($rest) {
     $real = "$(& git ls-remote --get-url $url 2>$null)".Trim()
     $moved = $real -and $real -ne $url
     if ($moved -and -not (Collect-Allowed $real $dir)) {
-        if (-not $look) { Die "git 設定把 $url 改到 ${real}，不在 collect_sources" }
+        if (-not $look) { Die-C not_allowed "git 設定把 $url 改到 ${real}，不在 collect_sources" }
         $ok = $false
     }
     $own = (Push-Mode $dir) -eq 'direct'
@@ -4000,8 +4048,8 @@ function Cmd-Collect($rest) {
     # every source's), and an author on collect_sources or one your own source can add (--allow)
     $savePush = $script:PushDir; $script:PushDir = $dir; Check-Host $url; $script:PushDir = $savePush
     if (-not $ok -and $look) {
-        if ($moved) { Die "git 設定把 $url 改到 ${real}，不在 collect_sources，不下載" }
-        if (-not $own) { Die "$(Url-Id $url) 不在 collect_sources（$(Split-Path -Leaf $dir)/kit.yaml），不下載；這是團隊的來源，要請維護者把它加進 kit.yaml 的 collect_sources" }
+        if ($moved) { Die-C not_allowed "git 設定把 $url 改到 ${real}，不在 collect_sources，不下載" }
+        if (-not $own) { Die-C not_allowed "$(Url-Id $url) 不在 collect_sources（$(Split-Path -Leaf $dir)/kit.yaml），不下載；這是團隊的來源，要請維護者把它加進 kit.yaml 的 collect_sources" }
     }
     $add = $false
     if (-not $ok -and -not $look) {
@@ -4022,17 +4070,17 @@ function Cmd-Collect($rest) {
         if (-not $look) { Say "從 $(Url-Id $url) 下載$(if ($ref) { "（$ref）" })…" }
         $ga = @('clone', '-q', '--depth', '1', '--no-recurse-submodules'); if ($ref) { $ga += @('--branch', $ref) }
         $out = Git-Safe @($ga + @($url, $repo))
-        if ($LASTEXITCODE -ne 0) { foreach ($l in @($out)) { Warn "  $l" }; Die "沒辦法下載 $url" }
+        if ($LASTEXITCODE -ne 0) { foreach ($l in @($out)) { Warn "  $l" }; Die-C download_failed "沒辦法下載 $url" }
         $sha = "$(& git -C $repo rev-parse HEAD)".Trim()
         $repo = Full-Path $repo
         # which folder: --path, else the top if it has a SKILL.md, else the only folder in the repo that has one
         $found = @(if ($path) { $path } elseif (Test-Path -LiteralPath (Join-Path $repo 'SKILL.md') -PathType Leaf) { '.' } else { Skill-Dirs $repo })
-        if ($found.Count -eq 0) { Die "$(Url-Id $url) 裡找不到 SKILL.md" }
+        if ($found.Count -eq 0) { Die-C no_skill "$(Url-Id $url) 裡找不到 SKILL.md" }
         if ($look) { # what kit would collect, as JSON (a screen program shows it before you collect)
             $sk = @()
             foreach ($d in $found) {
                 $src = if ($d -eq '.') { $repo } else { Join-Path $repo $d }
-                if (-not (Test-Path -LiteralPath (Join-Path $src 'SKILL.md') -PathType Leaf)) { Die "$(Url-Id $url)/$d 裡沒有 SKILL.md" }
+                if (-not (Test-Path -LiteralPath (Join-Path $src 'SKILL.md') -PathType Leaf)) { Die-C no_skill "$(Url-Id $url)/$d 裡沒有 SKILL.md" }
                 $fm = $null; try { $fm = Yaml-Lines (Join-Path $src 'SKILL.md') -Frontmatter } catch { $fm = @() }
                 $n = $name; if (-not $n) { $n = "$(@(YGet-From $fm 'name')[0])" }
                 if (-not $n) { $n = if ($d -eq '.') { Split-Path -Leaf (Url-Id $url) } else { Split-Path -Leaf $d } }
@@ -4130,7 +4178,7 @@ function Agent-Body([string]$f) { # the lines after the frontmatter
 }
 function Cmd-Agents($rest) {
     $rest = @($rest | Where-Object { $null -ne $_ })
-    if ($rest.Count -ne 1 -or $rest[0] -ne '--json') { Die '用法：kit agents --json' }
+    if ($rest.Count -ne 1 -or $rest[0] -ne '--json') { Die-C usage '用法：kit agents --json' }
     Need-Init
     $items = @(Available)
     $pick = { param($k) @($items | Where-Object { $_.StartsWith("${k}:") } | ForEach-Object { $_.Substring($k.Length + 1) }) }
@@ -4149,7 +4197,7 @@ function Cmd-Agents($rest) {
         [void]$sb.Append("`n     `"prompt`": $(Json-S (Agent-Body $f))}")
     }
     [void]$sb.Append("`n  ]`n}")
-    Say $sb.ToString()
+    Out-Json $sb.ToString()
 }
 function Fm-SetList([string]$f, [string]$key, [string]$val) { # KEY: [val] in the frontmatter (block lists replaced, added if missing)
     # a block list: the indented lines after KEY go, up to the next key or ---; blank and comment lines
@@ -4209,7 +4257,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
   kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
-     --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
+     --json --dir 資料夾 [--pid 程式編號]
+                                    再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（JSON，給畫面程式用）
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
   kit add rule|skill|mcp <名字>     開始用（整個帳號：每個資料夾、每個 agent 都有）
@@ -4236,22 +4285,29 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支] [--allow]   收別人的 skill（保留 LICENSE）
                                     （沒給 --path：repo 裡只有一個 SKILL.md 就用它；--allow：自己的來源一起加進 collect_sources）
   kit collect <名字>                再收一次＝整份換成原作者的新版
+  kit collect <原作者 repo 網址> --look [--path 資料夾] [--ref 分支] [--to 來源]
+                                    只下載來看、什麼都不寫：找到的 skill、授權、會執行的檔案（JSON，給程式讀）
   kit outdated                      看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml
-  kit push [--to 來源] [--dry-run]  檢查後送出改的東西：開 PR（預設），或 kit.yaml 寫 push: direct 就直接推
+  kit push [--to 來源] [--dry-run] [--json]
+                                    檢查後送出改的東西：開 PR（預設），或 kit.yaml 寫 push: direct 就直接推
+                                    （--json：送了／會送什麼、錯誤，都印成 JSON 給程式讀）
 
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
-  kit api                           給畫面程式（例如 Herdr 的 kit 面板）確認看得懂 kit 的輸出；輸出格式不相容地改變時才加一
+  kit api                           給程式讀的介面版本（major.minor，例如 1.0）：給畫面程式確認看得懂 kit 的輸出。
+                                    不相容的改變 major 加一；新增欄位或指令 minor 加一（清單看 README 的「給程式讀的介面」）
 '@
 }
 
 # ---------- main ----------
 $cmd = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
 $rest = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
+# programs read JSON: list/agents/push --json and collect --look print only JSON on stdout (errors too)
+if ((@('list', 'ls', 'agents', 'push') -ccontains $cmd -and @($rest) -ccontains '--json') -or ($cmd -ceq 'collect' -and @($rest) -ccontains '--look')) { $script:JsonOut = $true }
 try {
     # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook / --bg take it themselves)
     if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent', 'install-deps') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
@@ -4285,7 +4341,7 @@ try {
         'push' { Cmd-Push $rest }
         'uninstall' { Cmd-Uninstall $rest }
         'self-update' { Cmd-SelfUpdate }
-        'api' { Say '1' }     # the output format programs read; +1 only when it changes incompatibly (unix/kit the same)
+        'api' { Say $KitApi }     # the version of what programs read (README: 給程式讀的介面)
         { $_ -in '--version', 'version' } { Say "kit $KitVersion" }
         { $_ -in '', '-h', '--help', 'help' } { Usage }
         '__json-get' { $v = Json-Get $rest[0] $rest[1]; if ($null -eq $v) { exit 1 }; Say $v }   # for tests
