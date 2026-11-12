@@ -27,21 +27,6 @@ Copy-Item -Path (Join-Path $repo 'templates\*') -Destination (Join-Path $lib 'te
 $tl = Join-Path $lib 'tools'; if (Test-Path -LiteralPath $tl) { Remove-Item -LiteralPath $tl -Recurse -Force }   # how kit installs node, python, git
 New-Item -ItemType Directory -Force -Path $tl | Out-Null
 Copy-Item -Path (Join-Path $repo 'tools\*.yaml') -Destination $tl -Force
-$hp = Join-Path $lib 'herdr'   # kit herdr-panel install copies the panel from here
-if (Test-Path -LiteralPath $hp) { Remove-Item -LiteralPath $hp -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $hp | Out-Null
-Copy-Item -LiteralPath (Join-Path $repo 'herdr\kit-panel') -Destination $hp -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $repo 'herdr\kit-pane') -Destination $hp -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $repo 'herdr\kit-agents') -Destination $hp -Recurse -Force
-# the Herdr panel, if kit herdr-panel install put it there: new files, same settings (mod.json, config.json)
-$uh = if ($onWindows -and $env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
-$hh = if ($env:HERDR_APP_HOME) { $env:HERDR_APP_HOME } elseif ($env:XDG_CONFIG_HOME) { Join-Path $env:XDG_CONFIG_HOME 'herdr-app' } else { Join-Path $uh '.config/herdr-app' }
-$hm = Join-Path $hh 'mods/kit'
-if (Test-Path -LiteralPath (Join-Path $hm '.kit-panel')) { Copy-Item -Path (Join-Path $repo 'herdr\kit-panel\*') -Destination $hm -Recurse -Force }
-$hm = Join-Path $hh 'mods/kit-pane'
-if (Test-Path -LiteralPath (Join-Path $hm '.kit-panel')) { Copy-Item -Path (Join-Path $repo 'herdr\kit-pane\*') -Destination $hm -Recurse -Force }
-$hm = Join-Path $hh 'mods/kit-agents'
-if (Test-Path -LiteralPath (Join-Path $hm '.kit-panel')) { Copy-Item -Path (Join-Path $repo 'herdr\kit-agents\*') -Destination $hm -Recurse -Force }
 Copy-Item -LiteralPath (Join-Path $repo 'windows\kit.cmd') -Destination (Join-Path $dest 'kit.cmd') -Force
 [IO.File]::WriteAllText((Join-Path $lib '.repo'), $repo, (New-Object Text.UTF8Encoding $false))   # where kit self-update pulls from
 

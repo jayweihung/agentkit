@@ -114,7 +114,7 @@ printf 'rmjson\thooks.SessionStart\t%s\n' "$H" > "$T/ops5"
 LC_ALL=C $AWK -f "$JA" -v ops="$T/ops5" "$T/h2" > "$T/h3"
 cmp -s "$T/h.json" "$T/h3" && ok || bad "rmjson did not restore"; 
 
-# rmwhere / addnear: find array items by a key anywhere in the tree (Herdr layouts)
+# rmwhere / addnear: find array items by a key anywhere in the tree (layout files of screen programs)
 cat > "$T/l.json" <<'J'
 {"id":"root","type":"row","children":[
   {"id":"bar","type":"row","children":[{"id":"tabs","content":{"mod":"tabs"}},{"id":"x","content":{"mod":"kit"}}]},

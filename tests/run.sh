@@ -140,7 +140,7 @@ check "list marks in use" 'echo "$out" | grep -q "^\*  skill:gerrit-review"'
 check "list shows unused" 'echo "$out" | grep -q "^   skill:gerrit-workflow"'
 check "list shows agent" 'echo "$out" | grep -q "agent:gerrit"'
 
-# ---------- list --json (for the Herdr panel) ----------
+# ---------- list --json (for programs) ----------
 mkdir -p "$TEAM/skills/quote"; printf -- '---\nname: quote\ndescription: 中文 "引號" \\ 和\ttab\n---\nx\n' > "$TEAM/skills/quote/SKILL.md"
 kit list --json > "$T/list.json" 2>&1; rc=$?
 check "list --json: exit 0, valid JSON" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/list.json" > /dev/null'
@@ -204,7 +204,7 @@ FAKE_KIT=$KIT FAKE_OUT="$T/fake.json" PATH="$T/fakebin:$PATH" kit run gerrit >/d
 check "kit run: the agent in the pane is known while it runs, the marker goes after" '[ $rc -eq 0 ] && grep -qF "\"agent\": {\"name\": \"gerrit\", \"source\": \"team\"," "$T/fake.json" && [ -z "$(ls "$RUND")" ]'
 cp "$T/cj.bak" "$HOME/.claude.json"; rm -rf "$T/proj" "$HOME/.claude/skills/mine"
 
-# ---------- agents --json / agent add|rm (the Herdr agent panel) ----------
+# ---------- agents --json / agent add|rm (for programs that show agents) ----------
 cp "$TEAM/agents/gerrit.md" "$T/gerrit.bak"
 kit agents --json > "$T/agents.json" 2>&1; rc=$?
 check "agents --json: valid JSON, what is available" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/agents.json" > /dev/null && grep -qF "\"rule\": [\"coding-style\", \"gerrit-flow\", \"security\"]" "$T/agents.json" && grep -q "\"skill\": \[.*\"gerrit-workflow\"\]" "$T/agents.json"'
@@ -493,6 +493,7 @@ check "export-self keeps tests, .gitattributes, .gitignore, kit" '[ -f "$EX/test
 if git -C "$HERE/.." rev-parse --git-dir >/dev/null 2>&1; then
     mkdir -p "$T/exhome"; out=$(HOME="$T/exhome" "$KIT" export-self "$T/exself" 2>&1); rc=$?
     check "export-self: kit's own repo exports (nothing in it names GitHub)" '[ $rc -eq 0 ] && [ -f "$T/exself/VERSION" ] || { echo "$out" | grep "export-self:" | head -n 5; false; }'
+    check "export-self: kit's own repo exports only kit (no screen program's add-ons)" '[ "$(cd "$T/exself" && ls -A | LC_ALL=C sort | tr "\n" " ")" = ".gitattributes .gitignore INSTALL.md README.md VERSION docs templates tests tools unix windows " ]'
 fi
 check "export-self leaves out untracked files" '[ ! -e "$EX/untracked.md" ]'
 check "export-self writes VERSION" '[ "$(cat "$EX/VERSION")" = 0.4.0+gitea.12 ]'
@@ -669,7 +670,7 @@ check "claude.json byte-identical after everything" 'cmp -s "$HOME/.claude.json"
 check "uninstall removes mcp" '! jget "$HOME/.claude.json" mcpServers.gerrit >/dev/null'
 
 # ---------- install / self-update / uninstall --self ----------
-R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../templates" "$HERE/../herdr" "$HERE/../tools" "$HERE/../VERSION" "$R/"
+R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../templates" "$HERE/../tools" "$HERE/../VERSION" "$R/"
 ( cd "$R" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm v1 )
 U="$T/clone2"; git clone -q "$R" "$U"
 touch "$HOME/.bashrc"
@@ -1177,51 +1178,6 @@ if [ -n "$PWSH" ]; then
     check "context, statusline (kit.ps1): the window set in settings.json (autoCompactWindow) too" '[ "$out" = "{\"tool\": \"claude\", \"used\": 130000, \"window\": 400000, \"pct\": 33, \"source\": \"statusline\", \"model\": \"claude-opus-5-5\"}" ] && [ "$out2" = "Opus 5.5 · context 35%（139k / 400k）" ]'
     rm -f "$H7/.config/agentkit/ctx/claude-$$.json"
 fi
-# the context window's buttons (herdr/kit-pane, its part without Herdr): what each tool gets typed in, and when
-if command -v node >/dev/null 2>&1; then
-    sed -n '/^\/\/ ---- what the context window runs, sends and says/,/^\/\/ ---- end ----/p' "$HERE/../herdr/kit-pane/main.js" > "$T/pane.js"
-    cat >> "$T/pane.js" <<'EOF'
-const json = (k) => JSON.parse(process.env[k]);
-const C = json("DJ_CLAUDE").commands, X = json("DJ_CODEX").commands, O = json("DJ_OMP").commands;
-const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const say = (name, ok) => console.log(`${ok ? "ok" : "BAD"} ${name}`);
-say("send", eq([sendText(C, "compact", "  keep the\n plan "), sendText(C, "compact", ""), sendText(C, "clear")], ["/compact keep the plan", "/compact", "/clear"])
-  && eq([sendText(X, "compact", "keep it"), sendText(X, "clear")], ["/compact", "/new"])
-  && eq([sendText(O, "compact", "keep it"), sendText(O, "clear")], ["/compact keep it", "/new"])
-  && sendText(C, "other") === null && sendText({}, "clear") === null && sendText(null, "compact") === null);
-say("waiting", eq(sendArgs("t7", "idle", "/clear"), ["send", "--if", "idle", "t7", "/clear"]) && eq(sendArgs("m1/t7", "done", "/compact x"), ["send", "m1/t7", "/compact x"])
-  && [sendArgs("t7", "working", "/clear"), sendArgs("t7", "blocked", "/clear"), sendArgs("t7", null, "/clear"), sendArgs("", "idle", "/clear"), sendArgs("t7", "idle", null)].every((x) => x === null));
-say("args", eq(ctxArgs(42, "claude", "/x y", true, true), ["context", "--pid", "42", "--tool", "claude", "--dir", "/x y", "--detail", "--fresh"])
-  && eq(ctxArgs(42, null, "", false, true), ["context", "--pid", "42"])
-  && toolOf("pi", "x") === "omp" && toolOf(null, "claude") === "claude" && toolOf("claude-code") === "claude" && toolOf("Codex") === "codex" && toolOf("bash", "shell") === null);
-const items = [{ kind: "skill", name: "a", status: "used" }, { kind: "rule", name: "sec", status: "required", path: "C:\\s\\rules\\sec.md" },
-  { kind: "rule", name: "style", status: "used", path: "/s/rules/style.md" }, { kind: "mcp", name: "gerrit", status: "used" }, { kind: "skill", name: "b", status: "unused" }];
-const home = { items, here: { folder: { dir: "/h", why: "家目錄就是整個帳號", items: [] } } };
-const inDir = { items, here: { folder: { dir: "/p", why: "", items: ["skill:a", "skill:b"] } } };
-say("remove", eq(removal(home, "skills", "a").args, ["rm", "skill", "a"]) && eq(removal(home, "mcp", "mcp__gerrit").args, ["rm", "mcp", "gerrit"])
-  && eq(removal(home, "memory", "~/s/rules/style.md", "/s/rules/style.md").args, ["rm", "rule", "style"])
-  && removal(home, "memory", "x", "C:/s/rules/sec.md").required === true && removal(home, "skills", "b") === null && removal(home, "msgs", "a") === null
-  && eq(removal(inDir, "skills", "a").args, ["rm", "--dir", "/p", "skill", "a"]) && eq(removal(inDir, "skills", "b").args, ["rm", "--dir", "/p", "skill", "b"])
-  && removal(inDir, "mcp", "gerrit") === null && removal({ ...home, here: { user: "root" } }, "skills", "a") === null && removal({ error: "x" }, "skills", "a") === null);
-const full = { tool: "claude", used: 330000, window: 400000, compact_at: 367000, commands: C, categories: [{ id: "mcp_tools", tokens: 30000 }, { id: "skills", tokens: 800 }],
-  groups: [{ id: "tool_results", items: [{ name: "Read", tokens: 90000 }, { name: "Bash", tokens: 1000 }] }, { id: "mcp", items: [{ name: "gerrit", tokens: 25000 }, { name: "other", tokens: 5000 }] },
-    { id: "memory", items: [{ name: "~/.claude/CLAUDE.md", tokens: 2500 }] }] };
-const tips = ctxTips(full, (g, n) => g === "mcp" && n === "gerrit");
-say("tips", tips.length === 4 && tips[0].startsWith("快滿了（到 367k 會自動壓縮）") && tips[1].includes("「Read」的呼叫和結果約 90.0k（27%）") && tips[2].includes("用不到的（gerrit）可以在下面「MCP」拿掉")
-  && tips[3].startsWith("~/.claude/CLAUDE.md 有 2.5k") && ctxTips({ ...full, used: 20000, compact_at: 0, categories: [], groups: [] }).length === 0 && ctxTips(null).length === 0);
-const sum = summaryText(json("DJ_CLAUDE"), "Claude Code", "這台電腦 · ~/x").split("\n");
-say("summary", sum[0] === "Claude Code 的 context · 這台電腦 · ~/x" && sum[1] === "已使用 33% · 130,000 / 400,000 tokens · claude-opus-5-5"
-  && sum.includes("  系統工具（延後載入）：用到才載入（13,000）") && sum.includes("  其他／自上次更新以來：15,000（3.8%）") && sum.includes("  gerrit：2,500（2 個工具）")
-  && sum[sum.length - 1] === "距自動壓縮還有 237,000");
-EOF
-    out=$(DJ_CLAUDE=$dj_claude DJ_CODEX=$dj_codex DJ_OMP=$dj_omp node "$T/pane.js" 2>&1)
-    check "context window (Herdr): what is typed in for each tool (Claude /compact <what to keep>, /clear; Codex /compact alone, /new; omp /compact <what to keep>, /new)" 'echo "$out" | grep -qx "ok send"'
-    check "context window (Herdr): sent only while the agent waits (idle: --if idle; done), never while it works or needs you" 'echo "$out" | grep -qx "ok waiting"'
-    check "context window (Herdr): kit context's arguments, the tool from what the agent reports" 'echo "$out" | grep -qx "ok args"'
-    check "context window (Herdr): 拿掉 only what kit manages, the Kit popup's rule (folder: kit rm --dir; home: the account; required never)" 'echo "$out" | grep -qx "ok remove"'
-    check "context window (Herdr): 怎麼省 only from the numbers; the 複製 summary" 'echo "$out" | grep -qx "ok tips" && echo "$out" | grep -qx "ok summary"'
-    [ "$(echo "$out" | grep -c '^ok ')" = 6 ] || echo "$out" | grep -v '^ok ' | head -n 5
-fi
 big=$(printf '%0400d' 0)
 printf '{"type":"user","message":{"content":"%s"}}\n' "$big" >> "$CT"
 printf '{"type":"event_msg","payload":{"type":"agent_message","message":"%s"}}\n' "$big" >> "$RO"
@@ -1421,95 +1377,17 @@ check "local edits in the clone are reset to the approved commit" '! grep -q "lo
 out=$(HOME="$RH" AGENTKIT_CONFIG="$RH/.config/agentkit" AGENTKIT_SOURCES="$RH/agentkit2" "$KIT" init "file://$SA/srcA.git" --approvals "$SA/nowhere" --signers "$SA/allowed_signers" 2>&1); rc=$?
 check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/agentkit2/srcA/rules" ]'
 
-# ---------- herdr-panel: the kit panel as a Herdr mod ----------
-HH="$T/herdr-app"; mkdir -p "$HH/mods" "$HH/layouts"
-printf '{"id":"root","type":"row","children":[{"id":"bar","type":"row","children":[{"id":"tabs","type":"block","content":{"mod":"tabs"}}]},{"id":"body","type":"row","children":[{"id":"main","type":"block","content":{"tab":"active","pane":{"header":{"content":{"mod":"pane"},"reveal":"always"}}}}]}]}\n' > "$HH/layouts/mine.json"
-cp "$HH/layouts/mine.json" "$T/mine.orig"
-printf '{"main":1}\n' > "$HH/layouts/main.json"
-printf '{\n  "layout": "mine"\n}\n' > "$HH/shared.json"
-hp() { HERDR_APP_HOME="$HH" kit herdr-panel "$@"; }
-out=$(hp install 2>&1); rc=$?
-check "herdr-panel install: mod files, config with the kit command" '[ $rc -eq 0 ] && [ -f "$HH/mods/kit/main.js" ] && [ -f "$HH/mods/kit/.kit-panel" ] && grep -qF "\"kit\": [\"$(cd "$HERE/../unix" && pwd)/kit\"]" "$HH/mods/kit/config.json" && grep -qF "\"env\": {}" "$HH/mods/kit/config.json"'
-check "herdr-panel install: button in the tab bar, panel beside the work area" '[ "$(jget "$HH/layouts/mine.json" children | grep -c "\"kit-toggle\"")" = 1 ] && grep -q "\"kit-panel\"" "$HH/layouts/mine.json" && grep -q "\"place\": \"none\"" "$HH/mods/kit/mod.json"'
-check "herdr-panel install: an Agents button before Kit's, its panel hidden beside Kit's" 'tr -d " \n" < "$HH/layouts/mine.json" | grep -q "\"kit-agents-toggle\".*\"kit-toggle\"" && tr -d " \n" < "$HH/layouts/mine.json" | grep -q "\"kit-panel\".*\"kit-agents-panel\".*\"hidden\":true"'
-check "herdr-panel install: the Agents window (mods/kit-agents)" '[ -f "$HH/mods/kit-agents/main.js" ] && [ -f "$HH/mods/kit-agents/.kit-panel" ] && grep -q "\"kind\": \"window\"" "$HH/mods/kit-agents/mod.json"'
-check "herdr-panel install: each pane's header is kit's (mods/kit-pane)" 'grep -q "\"mod\": \"kit-pane\"" "$HH/layouts/mine.json" && ! grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json" && [ -f "$HH/mods/kit-pane/main.js" ] && [ -f "$HH/mods/kit-pane/.kit-panel" ] && grep -q "\"place\": \"none\"" "$HH/mods/kit-pane/mod.json"'
+# ---------- api: the output format programs read ----------
+out=$(kit api 2>&1); rc=$?
+check "api: one line, 1" '[ $rc -eq 0 ] && [ "$out" = 1 ]'
 if [ -n "$PWSH" ]; then
-    mkdir -p "$T/hh2/mods" "$T/hh2/layouts"; cp "$T/mine.orig" "$T/hh2/layouts/mine.json"; cp "$HH/shared.json" "$T/hh2/"
-    HERDR_APP_HOME="$T/hh2" kps herdr-panel install >/dev/null 2>&1
-    check "herdr-panel install: kit.ps1 edits the layout the same" 'cmp -s "$T/hh2/layouts/mine.json" "$HH/layouts/mine.json" && [ -f "$T/hh2/mods/kit-pane/.kit-panel" ]'
+    out=$(kps api 2>&1); rc=$?
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1 ]'
 fi
-check "herdr-panel install: layout backed up first" 'cmp -s "$(ls "$HH"/layouts/mine.json.kit-backup-* | head -n 1)" "$T/mine.orig"'
-out=$(hp install --keep-env 2>&1); rc=$?
-check "herdr-panel install again: layout not changed twice" '[ $rc -eq 0 ] && [ "$(grep -c "\"kit-toggle\"" "$HH/layouts/mine.json")" = 1 ] && [ "$(ls "$HH"/layouts/ | grep -c kit-backup)" = 1 ]'
-sed 's/"px": 56/"px": 42/' "$HH/layouts/mine.json" > "$T/mine.moved" && cp "$T/mine.moved" "$HH/layouts/mine.json"
-out=$(hp install --keep-env 2>&1); rc=$?
-check "herdr-panel install again: a hand-arranged layout is kept" '[ $rc -eq 0 ] && grep -q "\"px\": 42" "$HH/layouts/mine.json" && cmp -s "$T/mine.moved" "$HH/layouts/mine.json"'
-check "herdr-panel --keep-env: the panel runs kit with this HOME" 'grep -qF "\"HOME\": \"$HOME\"" "$HH/mods/kit/config.json"'
-echo old > "$HH/mods/kit/main.js"; echo old > "$HH/mods/kit-pane/main.js"; cp "$HH/mods/kit/config.json" "$T/panel-cfg"
-HERDR_APP_HOME="$HH" AGENTKIT_HOME="$T/inst-p" sh "$HERE/../unix/install.sh" --quiet >/dev/null 2>&1
-check "reinstall / self-update refreshes an installed panel, keeps its settings" 'cmp -s "$HH/mods/kit/main.js" "$HERE/../herdr/kit-panel/main.js" && cmp -s "$HH/mods/kit/config.json" "$T/panel-cfg"'
-check "reinstall / self-update refreshes the pane header too" 'cmp -s "$HH/mods/kit-pane/main.js" "$HERE/../herdr/kit-pane/main.js"'
-out=$(hp uninstall 2>&1); rc=$?
-check "herdr-panel uninstall: mod and layout blocks gone" '[ $rc -eq 0 ] && [ ! -e "$HH/mods/kit" ] && ! grep -q "kit" "$HH/layouts/mine.json" && grep -q "\"tabs\"" "$HH/layouts/mine.json"'
-check "herdr-panel uninstall: Herdr's own pane header is back, Agents window gone" '[ ! -e "$HH/mods/kit-pane" ] && [ ! -e "$HH/mods/kit-agents" ] && grep -q "\"mod\": \"pane\"" "$HH/layouts/mine.json"'
-# a tab bar in a column (like Herdr's own main): kit's buttons go in a row with it, not under the status bar
-printf '{"id":"root","type":"row","children":[{"id":"work","type":"column","children":[{"id":"tabs","type":"block","size":{"px":42},"content":{"mod":"tabs"}},{"id":"body","type":"row","children":[{"id":"main","type":"block","content":{"tab":"active"}}]},{"id":"status","type":"block","size":{"px":28},"content":{"mod":"workspace-status"}}]}]}\n' > "$HH/layouts/col.json"
-cp "$HH/layouts/col.json" "$T/col.orig"; printf '{\n  "layout": "col"\n}\n' > "$HH/shared.json"
-out=$(hp install --keep-env 2>&1); rc=$?
-v=$(python3 -c 'import json,sys;w=json.load(open(sys.argv[1]))["children"][0];r=w["children"][0];print(w["children"][-1]["id"],r["id"],r["type"],r["size"]["px"]," ".join(c["id"] for c in r["children"]))' "$HH/layouts/col.json")
-if [ "$(uname -s)" = Darwin ]; then want="tabs kit-agents-toggle kit-toggle"; else want="kit-agents-toggle kit-toggle tabs"; fi
-check "herdr-panel install: a tab bar in a column gets a row with kit's buttons (Mac: after the bar, Linux: before)" '[ $rc -eq 0 ] && [ "$v" = "status kit-tabs-row row 42 $want" ]'
-if [ -n "$PWSH" ]; then
-    mkdir -p "$T/hh3/layouts" "$T/hh3/mods"; cp "$T/col.orig" "$T/hh3/layouts/col.json"; cp "$HH/shared.json" "$T/hh3/shared.json"
-    HERDR_APP_HOME="$T/hh3" kps herdr-panel install >/dev/null 2>&1
-    check "herdr-panel install: kit.ps1 builds the same row" 'cmp -s "$T/hh3/layouts/col.json" "$HH/layouts/col.json"'
-fi
-hp uninstall >/dev/null 2>&1
-check "herdr-panel uninstall: the row is gone, the layout as before" 'python3 -c "import json,sys;sys.exit(json.load(open(sys.argv[1]))!=json.load(open(sys.argv[2])))" "$HH/layouts/col.json" "$T/col.orig"'
-cp "$T/col.orig" "$HH/layouts/col.json"
-out=$(KIT_TEST_BAR_BUTTONS=1 hp install --keep-env 2>&1); rc=$?
-v=$(python3 -c 'import json,sys;r=json.load(open(sys.argv[1]))["children"][0]["children"][0];print(" ".join(c["id"] for c in r["children"]))' "$HH/layouts/col.json")
-check "herdr-panel install: where the bar draws the window buttons (Windows), kit's go before it" '[ $rc -eq 0 ] && [ "$v" = "kit-agents-toggle kit-toggle tabs" ]'
-if [ -n "$PWSH" ]; then
-    cp "$T/col.orig" "$T/hh3/layouts/col.json"; rm -rf "$T/hh3/mods"/*
-    KIT_TEST_BAR_BUTTONS=1 HERDR_APP_HOME="$T/hh3" kps herdr-panel install >/dev/null 2>&1
-    check "herdr-panel install: kit.ps1 puts them before the bar the same" 'cmp -s "$T/hh3/layouts/col.json" "$HH/layouts/col.json"'
-fi
-hp uninstall >/dev/null 2>&1
-check "herdr-panel uninstall (buttons before the bar): the layout as before" 'python3 -c "import json,sys;sys.exit(json.load(open(sys.argv[1]))!=json.load(open(sys.argv[2])))" "$HH/layouts/col.json" "$T/col.orig"'
-printf '{\n  "layout": "main"\n}\n' > "$HH/shared.json"
-out=$(hp install --keep-env 2>&1); rc=$?
-check "herdr-panel on a Herdr layout: not edited, panel docks on the right" '[ $rc -eq 0 ] && [ "$(cat "$HH/layouts/main.json")" = "{\"main\":1}" ] && grep -q "\"place\": \"right\"" "$HH/mods/kit/mod.json" && echo "$out" | grep -q 放進上排'
-hp uninstall >/dev/null 2>&1
-mkdir -p "$HH/mods/kit"; echo mine > "$HH/mods/kit/main.js"
-out=$(hp install 2>&1); rc=$?
-check "herdr-panel: someone else's mods/kit is left alone" '[ $rc -ne 0 ] && echo "$out" | grep -q "不是 kit 放的" && [ "$(cat "$HH/mods/kit/main.js")" = mine ]'
-HERDR_APP_HOME="$HH" AGENTKIT_HOME="$T/inst-p" sh "$HERE/../unix/install.sh" --quiet >/dev/null 2>&1
-check "reinstall leaves someone else's mods/kit alone" '[ "$(cat "$HH/mods/kit/main.js")" = mine ]'
-out=$(hp uninstall 2>&1); rc=$?
-check "herdr-panel uninstall: someone else's mods/kit is left alone" '[ $rc -ne 0 ] && [ -f "$HH/mods/kit/main.js" ]'
-rm -rf "$HH/mods/kit"; mkdir -p "$HH/mods/kit-agents"; echo theirs > "$HH/mods/kit-agents/main.js"
-printf '{\n  "layout": "mine"\n}\n' > "$HH/shared.json"; cp "$HH/layouts/mine.json" "$T/mine.before"
-out=$(hp install 2>&1); rc=$?
-check "herdr-panel: someone else's mods/kit-agents stops it before anything is written" '[ $rc -ne 0 ] && echo "$out" | grep -q "kit-agents 已經有東西" && [ ! -e "$HH/mods/kit" ] && [ ! -e "$HH/mods/kit-pane" ] && cmp -s "$HH/layouts/mine.json" "$T/mine.before" && ! ls "$HH/layouts" | grep -q "\.kit\." && [ "$(cat "$HH/mods/kit-agents/main.js")" = theirs ]'
-rm -rf "$HH/mods/kit-agents"
-printf '{"id":"root","children":[{"id":"main","content":{"tab":"active","pane":{"header":{"content":{"mod":"kit-pane"}}}}}]}\n' > "$HH/layouts/compact.json"
-printf '{"id":"root","children":[{"id":"tabs","content":{"mod":"tabs"}}]}\n' > "$HH/layouts/plain.json"; cp "$HH/layouts/plain.json" "$T/plain.orig"
-out=$(hp uninstall 2>&1); rc=$?
-check "herdr-panel uninstall: kit's parts go however the layout is written" '[ $rc -eq 0 ] && ! grep -q kit-pane "$HH/layouts/compact.json" && grep -q "\"mod\": \"pane\"" "$HH/layouts/compact.json"'
-check "herdr-panel uninstall: a layout without kit's parts is not touched" 'cmp -s "$HH/layouts/plain.json" "$T/plain.orig" && ! ls "$HH/layouts" | grep -q "plain.json.kit-backup"'
-if [ -n "$PWSH" ]; then
-    printf '{"id":"root","children":[{"id":"main","content":{"tab":"active","pane":{"header":{"content":{"mod":"kit-pane"}}}}}]}\n' > "$HH/layouts/compact.json"
-    cp "$HH/layouts/compact.json" "$T/compact.orig"; hp uninstall >/dev/null 2>&1; cp "$HH/layouts/compact.json" "$T/compact.bash"; cp "$T/compact.orig" "$HH/layouts/compact.json"
-    HERDR_APP_HOME="$HH" kps herdr-panel uninstall >/dev/null 2>&1
-    check "herdr-panel uninstall: kit.ps1 the same (and a plain layout untouched)" 'cmp -s "$HH/layouts/compact.json" "$T/compact.bash" && cmp -s "$HH/layouts/plain.json" "$T/plain.orig" && ! ls "$HH/layouts" | grep -q "plain.json.kit-backup"'
-fi
-out=$(HERDR_APP_HOME="$T/no-herdr" kit herdr-panel install 2>&1); rc=$?
-check "herdr-panel without Herdr: says so" '[ $rc -ne 0 ] && echo "$out" | grep -q "找不到 Herdr"'
 
 # ---------- help ----------
 out=$(kit help 2>&1)
+check "help: kit api is there" 'echo "$out" | grep -q "^  kit api  "'
 check "help: --json --dir is under kit list" 'echo "$out" | grep -A1 "^  kit list" | grep -q -- "--json --dir" && ! echo "$out" | grep -A1 "^  kit agent " | grep -q -- "--json --dir"'
 
 # ---------- sync: why a source could not be updated ----------
@@ -1602,14 +1480,6 @@ check "push: a file name with a space is sent" 'git --git-dir="$PO" ls-tree -r -
 check "push: no token to a host this source does not list in allowed_hosts" 'echo "$out" | grep -q "不把 Gitea token 送過去" && echo "$out" | grep -qF "開 PR：https://127.0.0.1/acme/team/compare/master...kit/sp-$DAY" && ! echo "$out" | grep -q tok-777'
 check "push: the kit branch does not track origin" '[ -z "$(git -C "$PR/w" config "branch.kit/sp-$DAY.remote")" ]'
 kill $HTTPD 2>/dev/null
-# herdr-panel: decided on node ids; a renamed column that held only kit's block goes on uninstall
-RH="$RF/herdr"; mkdir -p "$RH/layouts" "$RH/mods"; printf '{\n  "layout": "x"\n}\n' > "$RH/shared.json"
-printf '{"id":"root","type":"row","title":"kit-toggle","note":"kit-panel","children":[{"id":"bar","type":"row","children":[{"id":"tabs","type":"block","content":{"mod":"tabs"}}]},{"id":"body","type":"row","children":[{"id":"main","type":"block","content":{"tab":"active"}}]}]}\n' > "$RH/layouts/x.json"
-HERDR_APP_HOME="$RH" rf herdr-panel install >/dev/null 2>&1
-check "herdr-panel: the words in a title are not kit's nodes (they get added)" 'grep -q "\"id\": \"kit-toggle\"" "$RH/layouts/x.json" && grep -q "\"id\": \"kit-panel\"" "$RH/layouts/x.json"'
-sed 's/"id": "kit-panel"/"id": "my-col"/' "$RH/layouts/x.json" > "$RH/x.tmp" && mv "$RH/x.tmp" "$RH/layouts/x.json"
-HERDR_APP_HOME="$RH" rf herdr-panel uninstall >/dev/null 2>&1
-check "herdr-panel uninstall: a renamed column with only kit's block is gone too" '! grep -q "my-col" "$RH/layouts/x.json" && ! grep -q "\"mod\": \"kit" "$RH/layouts/x.json"'
 if [ "$(uname)" = Darwin ]; then
     IH="$RF/ih"; mkdir -p "$IH"; echo "# mine" > "$IH/.profile"
     HOME="$IH" SHELL=/bin/bash PATH=/usr/bin:/bin AGENTKIT_HOME="$IH/share" sh "$HERE/../unix/install.sh" --quiet >/dev/null 2>&1

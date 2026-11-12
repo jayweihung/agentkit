@@ -860,12 +860,12 @@ function Apply-All {
     $scur = if (Test-Path -LiteralPath $sf) { Flat-Json (Json-Get $sf 'statusLine') } else { '' }
     if (-not $scur -and $sold -and -not $script:Force) {
         State-Del 'statusline' 'claude'; State-Set 'told' 'statusline-removed' 1
-        Warn '你拿掉了 kit 放的 statusLine：kit 不會再加回來，Herdr 上 Claude 的 context 用量改從對話紀錄估（要加回來：kit sync --force）'
+        Warn '你拿掉了 kit 放的 statusLine：kit 不會再加回來，畫面程式看 Claude 的 context 用量改從對話紀錄估（要加回來：kit sync --force）'
     } elseif (-not $scur -and $null -ne (State-Get 'told' 'statusline-removed') -and -not $script:Force) {
     } elseif (-not $scur -or ($sold -and $scur -eq (Flat-Json $sold))) {
         if (-not $scur -or $sj -ne $sold) { $ops.Add(@('set', 'statusLine', $sj)); $snew = $true }
     } elseif ($null -eq (State-Get 'told' 'statusline')) {
-        Warn 'Claude 已經有自己的 statusLine：kit 不動它，Herdr 上 Claude 的 context 用量改從對話紀錄估（只提醒這一次）'; State-Set 'told' 'statusline' 1
+        Warn 'Claude 已經有自己的 statusLine：kit 不動它，畫面程式看 Claude 的 context 用量改從對話紀錄估（只提醒這一次）'; State-Set 'told' 'statusline' 1
     }
     if ($ops.Count -gt 0) {
         Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny
@@ -951,7 +951,7 @@ function Dir-Write([string]$d, $items) { # the folder's .agentkit (gone when not
     $f = Join-Path $d $DirFile; $items = @($items | Where-Object { $_ })
     if ($items.Count -eq 0) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }; return }
     $t = "# kit：這個資料夾自己的規則、skill、MCP。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。`n"
-    $t += "# 用  kit add --dir <資料夾> 種類 名字  /  kit rm --dir …  改（或在 Herdr 的 Kit 清單按「加到這個資料夾」）。`n"
+    $t += "# 用  kit add --dir <資料夾> 種類 名字  /  kit rm --dir …  改。`n"
     Write-Text $f ($t + (($items | ForEach-Object { "$_`n" }) -join ''))
 }
 function Drop-Made([string]$f) { # a JSON file kit made that is empty again goes away
@@ -3029,7 +3029,7 @@ function Here-Json([string]$dir, [string]$hpid) { # the "here" part of kit list 
     $out + "`n  ]}"
 }
 function Push-Mode([string]$dir) { $m = @(YGet (Join-Path $dir 'kit.yaml') 'push'); if ($m.Count -gt 0 -and $m[0]) { [string]$m[0] } else { 'pr' } }   # pr (the default) or direct
-function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit list shows, as JSON for programs (the Herdr panel); unix/kit prints the same
+function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit list shows, as JSON for programs (a screen like a kit panel); unix/kit prints the same
     $want = Wanted; $req = Kit-Items 'required'
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"sources`": [")
@@ -3221,7 +3221,7 @@ function Cmd-Run($rest) {
         if ($dry) { Say $tool; foreach ($x in $a) { Say $x }; Say "tmp=$tmp"; return }
         # the same quoting rules on PowerShell 5.1 and 7 (Arg-TomlStr is written for them)
         $PSNativeCommandArgumentPassing = 'Legacy'
-        # a marker (this process -> agent name), so the Herdr pane can tell which agent runs in it
+        # a marker (this process -> agent name), so a program showing the pane can tell which agent runs in it
         try { Ensure-Dir (Join-Path $KitConf 'run'); Write-Text $mark "$name`n" } catch { }
         & $tool @($a.ToArray())
         $rc = $LASTEXITCODE
@@ -3657,12 +3657,6 @@ function Install-Md { # INSTALL.md of the export (no URLs; the same text as unix
     kit help
 
 每個指令的用法看 README.md，各版改了什麼看 docs/changes.md。
-
-## Herdr
-
-    kit herdr-panel install
-
-用法看 docs/herdr.md。
 '@
     ($t -replace "`r`n", "`n") + "`n"
 }
@@ -4141,7 +4135,7 @@ function Cmd-Collect($rest) {
         # which folder: --path, else the top if it has a SKILL.md, else the only folder in the repo that has one
         $found = @(if ($path) { $path } elseif (Test-Path -LiteralPath (Join-Path $repo 'SKILL.md') -PathType Leaf) { '.' } else { Skill-Dirs $repo })
         if ($found.Count -eq 0) { Die "$(Url-Id $url) 裡找不到 SKILL.md" }
-        if ($look) { # what kit would collect, as JSON (the Herdr panel shows it before you collect)
+        if ($look) { # what kit would collect, as JSON (a screen program shows it before you collect)
             $sk = @()
             foreach ($d in $found) {
                 $src = if ($d -eq '.') { $repo } else { Join-Path $repo $d }
@@ -4227,135 +4221,7 @@ function Cmd-Outdated($rest) {
     if ($new -gt 0) { Say "kit：$new 個有新版本" }
 }
 
-# ---------- the Herdr panel (a Herdr mod that runs kit list --json / add / rm / sync / run) ----------
-$script:ShippedLayouts = @('main', 'terminals', 'win98')     # Herdr's own layouts: Herdr puts them back when edited
-$script:PanelToggle = '{"id":"kit-toggle","type":"block","content":{"mod":"kit","props":{"role":"toggle"}},"size":{"px":56}}'
-$script:PanelNode = '{"id":"kit-panel","type":"column","children":[{"id":"kit","type":"block","content":{"mod":"kit"}}],"size":{"px":420},"min":320,"max":800}'
-# Agents stand beside Kit: their own tab-bar button (before Kit's) and their own panel (hidden until clicked)
-$script:AgentsToggle = '{"id":"kit-agents-toggle","type":"block","content":{"mod":"kit-agents","props":{"role":"toggle"}},"size":{"px":66}}'
-$script:AgentsNode = '{"id":"kit-agents-panel","type":"column","children":[{"id":"kit-agents","type":"block","content":{"mod":"kit-agents"}}],"size":{"px":420},"min":320,"max":800,"hidden":true}'
-function Herdr-Home { # the same rule as Herdr: $HERDR_APP_HOME, else $XDG_CONFIG_HOME/herdr-app, else ~/.config/herdr-app (also on Windows)
-    if ($env:HERDR_APP_HOME) { return $env:HERDR_APP_HOME }
-    if ($env:XDG_CONFIG_HOME) { return (Join-Path $env:XDG_CONFIG_HOME 'herdr-app') }
-    Join-Path $UserHome '.config/herdr-app'
-}
-function Panel-Src { # the panel's files: next to the installed kit, else in the repo kit runs from
-    $cands = @((Join-Path $KitLib 'herdr/kit-panel'))
-    $r = Kit-Repo; if ($r) { $cands += (Join-Path $r 'herdr/kit-panel') }
-    foreach ($d in $cands) { if (Test-Path -LiteralPath (Join-Path $d 'main.js') -PathType Leaf) { return $d } }
-    $null
-}
-function Has-Id([string]$text, [string]$id) { $text -match ('"id"\s*:\s*"' + [regex]::Escape($id) + '"') }   # a layout node with this id
-function Layout-Edit([string]$f, $ops, [switch]$Clean) { # the layout text with OPS applied (-Clean: kit's blocks all taken out first)
-    $text = Read-Text $f
-    $root = Json-Parse $text
-    $ops = @($ops | Where-Object { $_ })
-    if (-not $Clean -and (Has-Id $text 'kit-toggle') -and (Has-Id $text 'kit-panel')) {
-        # Kit's button and panel already there (maybe moved or resized by hand): keep them, only add what is missing
-        $ops = @($ops | Where-Object { -not (($_[0] -eq 'addnear' -or $_[0] -eq 'addbefore') -and $_[3] -match '^\{"id":"([^"]+)"' -and (Has-Id $text $Matches[1])) })
-    }
-    else { # start clean: old or half-placed blocks taken out first (a column holding only kit's block too, whatever its id became)
-        $ops = @(@('rmholder', 'content.mod', 'kit'), @('rmholder', 'content.mod', 'kit-agents'), @('rmwhere', 'content.mod', 'kit'), @('rmwhere', 'id', 'kit-toggle'), @('rmwhere', 'id', 'kit-panel'), @('rmwhere', 'content.mod', 'kit-agents'), @('rmwhere', 'id', 'kit-agents-toggle'), @('rmwhere', 'id', 'kit-agents-panel'), @('unrow', 'kit-tabs-row'), @('swapwhere', 'content.mod', 'kit-pane', 'pane')) + $ops
-    }
-    Json-Apply $root $ops
-    Json-Text $root $text
-}
-function Swap-Layout([string]$f, [string]$text) { # FILE (backed up first) gets TEXT
-    $b = "$f.kit-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-    Copy-Item -LiteralPath $f -Destination $b -Force
-    Write-Text $f $text
-    Say "kit：改了版面 $(Split-Path -Leaf $f)（原本的備份在 $(Split-Path -Leaf $b)）"
-}
-function Cmd-HerdrPanel($rest) {
-    $rest = @($rest | Where-Object { $null -ne $_ })
-    $hh = Herdr-Home; $mods = Join-Path $hh 'mods'; $dest = Join-Path $mods 'kit'
-    $mine = Test-Path -LiteralPath (Join-Path $dest '.kit-panel')
-    $verb = if ($rest.Count -gt 0) { $rest[0] } else { '' }
-    if ($verb -eq 'install') {
-        $keep = $rest -contains '--keep-env'
-        if ($keep -and $OnWindows) { Die '--keep-env 只能在 Mac／Linux 用（測試用）' }
-        $src = Panel-Src; if (-not $src) { Die '找不到 panel 的檔案（herdr/kit-panel）；請重裝 kit' }
-        if (-not (Test-Path -LiteralPath $mods -PathType Container)) { Die "找不到 Herdr 的 mods 資料夾：${mods}（Herdr 有裝、開過一次嗎？）" }
-        if ((Test-Path -LiteralPath $dest) -and -not $mine) { Die "$dest 已經有東西，不是 kit 放的，不動它" }
-        foreach ($xm in 'kit-pane', 'kit-agents') {      # every conflict before anything is written
-            $xDest = Join-Path $mods $xm
-            if ((Test-Path -LiteralPath $xDest) -and -not (Test-Path -LiteralPath (Join-Path $xDest '.kit-panel'))) { Die "$xDest 已經有東西，不是 kit 放的，不動它" }
-        }
-        # where the panel goes: a button in the tab bar of the shown layout + the panel beside the work area
-        $name = ''
-        try { $v = Json-Get (Join-Path $hh 'shared.json') 'layout'; if ($v -and $v.StartsWith('"')) { $name = $v.Trim('"') } } catch { }
-        if (-not $name) { $name = 'main' }
-        $lf = Join-Path $hh "layouts/$name.json"; $newLayout = $null; $place = 'none'
-        if ($ShippedLayouts -contains $name) {
-            $place = 'right'
-            Say "kit：現在的版面（${name}）是 Herdr 內建的，不能直接改：panel 會先出現在右邊，按 panel 上的「放進上排」會複製一份版面再放進去"
-        } elseif (-not (Test-Path -LiteralPath $lf -PathType Leaf)) { $place = 'right' }
-        else {
-            # the button and panel, and each pane's header with kit's button (the pane header mod "kit-pane")
-            $t = $null
-            # the buttons go in one row with the tab bar: a tab bar in a column (Herdr's own layouts) gets a row around
-            # it first. On Windows the bar draws the window buttons itself, so kit's go before it (close stays in the corner).
-            $tog = if ($OnWindows -or $env:KIT_TEST_BAR_BUTTONS) { 'addbefore' } else { 'addnear' }
-            $have = (Has-Id (Read-Text $lf) 'kit-agents-toggle') -and (Has-Id (Read-Text $lf) 'kit-toggle')
-            $rowOp = if ($have) { $null } else { @('rowaround', 'content.mod', 'tabs', 'kit-tabs-row') }
-            try { $t = Layout-Edit $lf @($rowOp, @($tog, 'content.mod', 'tabs', $AgentsToggle), @($tog, 'content.mod', 'tabs', $PanelToggle), @('addnear', 'content.tab', 'active', $PanelNode), @('addnear', 'content.tab', 'active', $AgentsNode), @('swapwhere', 'content.mod', 'pane', 'kit-pane')) } catch { if ($env:KIT_DEBUG) { Warn "$($_.Exception.Message) $($_.ScriptStackTrace)" }; $t = $null }
-            if ($t -and (Has-Id $t 'kit-toggle') -and (Has-Id $t 'kit-panel')) {
-                if ($t -cne (Read-Text $lf)) { $newLayout = $t }     # already like this: no backup, no write
-            }
-            else { $place = 'right'; Say "kit：版面 $name 找不到分頁列（tabs）或工作區，沒改它：panel 會先出現在右邊" }
-        }
-        # the files (main.js etc.), then mod.json and the panel's config (how to run kit here)
-        Ensure-Dir $dest
-        Copy-Item -Path (Join-Path $src '*') -Destination $dest -Recurse -Force
-        # the other mods next to it: each pane's header (kit-pane) and the Agents window (kit-agents)
-        $extra = @{ 'kit-pane' = '{ "place": "none", "title": "Pane header (kit)" }'; 'kit-agents' = '{ "place": "none", "title": "kit Agents", "overlay": { "kind": "window", "width": 520, "height": 640 } }' }
-        foreach ($xm in 'kit-pane', 'kit-agents') {
-            $xSrc = Join-Path (Split-Path -Parent $src) $xm; $xDest = Join-Path $mods $xm
-            if (-not (Test-Path -LiteralPath (Join-Path $xSrc 'main.js') -PathType Leaf)) { continue }
-            Ensure-Dir $xDest
-            Copy-Item -Path (Join-Path $xSrc '*') -Destination $xDest -Recurse -Force
-            Write-Text (Join-Path $xDest 'mod.json') "$($extra[$xm])`n"
-            Write-Text (Join-Path $xDest '.kit-panel') ''
-        }
-        Write-Text (Join-Path $dest 'mod.json') "{ `"place`": `"$place`", `"size`": 420, `"title`": `"kit`" }`n"
-        if ($OnWindows) {
-            $cmdPath = Join-Path (Split-Path -Parent $KitLib) 'kit.cmd'
-            $kit = if ((Split-Path -Leaf $KitLib) -eq 'lib' -and (Test-Path -LiteralPath $cmdPath)) { @($cmdPath) } else { @('kit.cmd') }
-        } else { $kit = @((Get-Process -Id $PID).Path, '-NoProfile', '-File', $PSCommandPath) }
-        $envs = @()
-        if ($keep) {
-            foreach ($k in 'HOME', 'AGENTKIT_CONFIG', 'AGENTKIT_SOURCES', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR') {
-                $v = [Environment]::GetEnvironmentVariable($k); if ($v) { $envs += "$(Json-S $k): $(Json-S $v)" }
-            }
-        }
-        Write-Text (Join-Path $dest 'config.json') "{`n  `"kit`": [$((@($kit | ForEach-Object { Json-S $_ })) -join ', ')],`n  `"env`": {$($envs -join ', ')}`n}`n"
-        Write-Text (Join-Path $dest '.kit-panel') ''
-        if ($newLayout) { Swap-Layout $lf $newLayout }
-        Say "kit：Herdr 的 kit panel 裝好了（${dest}）"
-    } elseif ($verb -eq 'uninstall') {
-        if (Test-Path -LiteralPath $dest) {
-            if (-not $mine) { Die "$dest 不是 kit 放的，不動它" }
-            Remove-Item -LiteralPath $dest -Recurse -Force
-        }
-        foreach ($xm in 'kit-pane', 'kit-agents') {
-            $xDest = Join-Path $mods $xm
-            if (Test-Path -LiteralPath (Join-Path $xDest '.kit-panel')) { Remove-Item -LiteralPath $xDest -Recurse -Force }
-        }
-        $ld = Join-Path $hh 'layouts'
-        if (Test-Path -LiteralPath $ld) {
-            foreach ($f in @(Get-ChildItem -LiteralPath $ld -File -Filter '*.json' | Where-Object { $_.Extension -eq '.json' })) {
-                if ($ShippedLayouts -contains [IO.Path]::GetFileNameWithoutExtension($f.Name)) { continue }
-                $text = Read-Text $f.FullName
-                try { $t = Layout-Edit $f.FullName @() -Clean; $same = Json-Text (Json-Parse $text) $text } catch { Warn "沒辦法讀 $($f.FullName)，沒改它"; continue }
-                if ($t -ceq $same) { continue }      # nothing of kit's in it (the same as the file only re-read)
-                Swap-Layout $f.FullName $t
-            }
-        }
-        Say 'kit：Herdr 的 kit panel 拿掉了'
-    } else { Die '用法：kit herdr-panel install|uninstall' }
-}
-
-# ---------- agents: the definitions (agents/<name>.md), for the Herdr agent panel ----------
+# ---------- agents: the definitions (agents/<name>.md), for programs that show agents ----------
 function Json-Arr($vals) { '[' + ((@($vals | Where-Object { $_ }) | ForEach-Object { Json-S $_ }) -join ', ') + ']' }
 function Git-State([string]$dir, [string]$file) { # "new", "changed" or "" (or "no-git")
     & git -C $dir rev-parse --git-dir *> $null; if ($LASTEXITCODE -ne 0) { return 'no-git' }
@@ -4451,7 +4317,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit init <網址|資料夾> [更多...]   第一次：設定來源，加上預設的東西
   kit list [--json]                 有哪些、你在用哪些、哪些是新的（--json 給程式讀）
      --json --dir 資料夾              再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
-  kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（給 Herdr 的 Agent 面板）
+  kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（JSON，給畫面程式用）
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
   kit add rule|skill|mcp <名字>     開始用（整個帳號：每個資料夾、每個 agent 都有）
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
@@ -4460,10 +4326,10 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit rm  --dir <資料夾> rule|skill|mcp <名字>
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
+                                    用 kit 的裝法裝，太舊就升級（畫面程式的「安裝」按鈕也是用這個）
   kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
   kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]
                                   那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
-                                    用 kit 的裝法裝，太舊就升級（Herdr 的「安裝」按鈕就是這個）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
 
@@ -4483,10 +4349,10 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                       kit ci-template .gitea/workflows/kit-check.yaml
   kit push [--to 來源] [--dry-run]  檢查後送出改的東西：開 PR（預設），或 kit.yaml 寫 push: direct 就直接推
 
-  kit herdr-panel install|uninstall 在 Herdr 加上（或拿掉）kit 的面板
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
+  kit api                           給畫面程式（例如 Herdr 的 kit 面板）確認看得懂 kit 的輸出；輸出格式不相容地改變時才加一
 '@
 }
 
@@ -4526,7 +4392,7 @@ try {
         'push' { Cmd-Push $rest }
         'uninstall' { Cmd-Uninstall $rest }
         'self-update' { Cmd-SelfUpdate }
-        'herdr-panel' { Cmd-HerdrPanel $rest }
+        'api' { Say '1' }     # the output format programs read; +1 only when it changes incompatibly (unix/kit the same)
         { $_ -in '--version', 'version' } { Say "kit $KitVersion" }
         { $_ -in '', '-h', '--help', 'help' } { Usage }
         '__json-get' { $v = Json-Get $rest[0] $rest[1]; if ($null -eq $v) { exit 1 }; Say $v }   # for tests

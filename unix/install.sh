@@ -25,12 +25,6 @@ cp "$REPO/VERSION" "$DEST/VERSION"
 mkdir -p "$DEST/templates"
 for f in "$REPO"/templates/*; do cp "$f" "$DEST/templates/"; done
 rm -rf "$DEST/tools"; mkdir -p "$DEST/tools"; cp "$REPO"/tools/*.yaml "$DEST/tools/"   # how kit installs node, python, git
-rm -rf "$DEST/herdr"; mkdir -p "$DEST/herdr"; cp -R "$REPO/herdr/kit-panel" "$REPO/herdr/kit-pane" "$REPO/herdr/kit-agents" "$DEST/herdr/"   # kit herdr-panel install
-# the Herdr panel, if kit herdr-panel install put it there: new files, same settings (mod.json, config.json)
-if [ -n "${HERDR_APP_HOME:-}" ]; then hp=$HERDR_APP_HOME; elif [ -n "${XDG_CONFIG_HOME:-}" ]; then hp=$XDG_CONFIG_HOME/herdr-app; else hp=$HOME/.config/herdr-app; fi
-[ -f "$hp/mods/kit/.kit-panel" ] && cp -R "$REPO/herdr/kit-panel"/. "$hp/mods/kit"/
-[ -f "$hp/mods/kit-pane/.kit-panel" ] && cp -R "$REPO/herdr/kit-pane"/. "$hp/mods/kit-pane"/
-[ -f "$hp/mods/kit-agents/.kit-panel" ] && cp -R "$REPO/herdr/kit-agents"/. "$hp/mods/kit-agents"/
 printf '%s\n' "$REPO" > "$DEST/.repo"      # where kit self-update pulls from
 chmod 755 "$DEST/kit"
 ln -sf "$DEST/kit" "$BIN/kit"
