@@ -23,7 +23,7 @@
 **其他**
 - `json.awk`（和 `kit.ps1` 裡對應的部分）拿掉只給 Herdr 版面用的操作（`rmwhere`、`addnear`、`addbefore`、`swapwhere`、`rmholder`、`rowaround`、`unrow`）。
 - Windows：`kit push` 判斷哪些檔案要送時分大小寫，跟 Mac／Linux 一樣（`Rules/x.md` 不算 rule）。
-- 在來源資料夾裡跑 `kit push`、`kit new` 這類指令時，kit 用解開捷徑後的資料夾路徑（Mac／Linux 跟 Windows 一樣）。
+- 來源資料夾一律用解開捷徑後的路徑（symlink；Windows 也解開 junction 和 subst 的磁碟機）：`kit init` 存的，和 `kit push`、`kit check`、`kit new`、`kit update` 拿來比的，都是同一個。修好：在 Mac 上用經過捷徑的路徑（例如 `/tmp/...`，其實是 `/private/tmp/...`）`kit init` 的來源，`kit push`、`kit check` 會把它算成兩個、說名字重複。以前這樣 init 的不用重來，升級後就好；CLAUDE.md 裡引用規則的路徑也跟著改成解開後的（`kit sync` 自己會改）。
 
 ## 0.2.0（2026-11-12）
 

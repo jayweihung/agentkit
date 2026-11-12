@@ -13,6 +13,8 @@ $KitVer = ([IO.File]::ReadAllText((Join-Path $Repo 'VERSION'))).Trim()
 $Exe = (Get-Process -Id $PID).Path
 $U8 = New-Object System.Text.UTF8Encoding $false
 $T = Join-Path ([IO.Path]::GetTempPath()) ('kit-test.' + [IO.Path]::GetRandomFileName())
+[void](New-Item -ItemType Directory -Force -Path $T)
+if (-not $OnWindows) { $T = "$(& /bin/sh -c 'cd "$1" && pwd -P' sh $T)".Trim() }   # links resolved, as kit names source folders (macOS: /var is /private/var)
 $script:pass = 0; $script:fail = 0
 
 function W([string]$path, [string]$text) { [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path)); [IO.File]::WriteAllText($path, $text, $U8) }
@@ -645,6 +647,43 @@ W "$DW/rules/mine.md" "Mine, blocked.`n"; $headBefore = "$(& git -C $DW rev-pars
 Kit push
 Check "push direct: a commit hook refusing: its words shown, nothing committed or left staged" { $rc -ne 0 -and $out -match 'hook: no thanks' -and "$(& git -C $DW rev-parse HEAD)".Trim() -eq $headBefore -and -not "$(& git -C $DW diff --cached --name-only)" -and "$(& git -C $DW status --porcelain rules)" -eq ' M rules/mine.md' }
 Remove-Item -Force "$DW/.git/hooks/pre-commit"
+
+# ---------- a source set up through a link (on macOS /tmp is really /private/tmp; on Windows a junction): still one source ----------
+$hSave = $H; Set-Home (Join-Path $T 'home-linked')
+$LK = Join-Path $T 'pd-link'; [void](New-Item -ItemType $(if ($OnWindows) { 'Junction' } else { 'SymbolicLink' }) -Path $LK -Target $D)
+$LW = Join-Path $LK 'work'
+$DWP = if ($OnWindows) { (Get-Item -LiteralPath $DW -Force).FullName.TrimEnd('\', '/') } else { "$(& /bin/sh -c 'cd "$1" && pwd -P' sh $DW)".Trim() }
+$DWJ = $DWP.Replace('\', '\\')
+$LM = Join-Path $H '.config/agentkit/machine.yaml'; $LS = Join-Path $H '.config/agentkit/state.tsv'
+Kit init $LW
+Check 'init through a link: the source is kept with links resolved' { $rc -eq 0 -and (ReadT $LM).Contains("  - $DWP`n") }
+Push-Location $LW
+KitJ push --dry-run --json
+Check 'init through a link, push in the link: one source, not two' { $rc -eq 0 -and $out.StartsWith("{`"source`": `"work`", `"dir`": `"$DWJ`", `"push`": `"direct`", `"dry_run`": true, `"files`": [`"rules/mine.md`"], ") }
+Kit check
+Check 'check in a source opened through a link: no name twice' { $rc -eq 0 -and $out.Contains('沒問題（1 個來源）') }
+Pop-Location
+Push-Location $T
+KitJ push --to $LW --dry-run --json
+Check 'push --to a folder through a link: the same one source' { $rc -eq 0 -and $out.Contains("`"dir`": `"$DWJ`", ") }
+Pop-Location
+# upgrading: kit before 0.3.0 kept the folder as typed (the link)
+W $LM ((ReadT $LM).Replace("  - $DWP`n", "  - $LW`n"))
+KitJ push --dry-run --json
+Check 'upgrade: a source kept as a link still counts once' { (ReadT $LM).Contains("  - $LW`n") -and $rc -eq 0 -and $out.Contains("`"dir`": `"$DWJ`", ") }
+Push-Location $LW
+Kit check
+Check 'upgrade: check with a source kept as a link: no name twice' { $rc -eq 0 -and $out.Contains('沒問題（1 個來源）') }
+Pop-Location
+W "$T/linked.md" "Linked.`n"
+Kit new rule linked --from "$T/linked.md" --to $LW
+Check 'kit new --from through a link: remembered under the folder with links resolved' { (ReadT $LS).Contains("from`trule:linked@$DWP`t") }
+W $LS ((ReadT $LS).Replace("from`trule:linked@$DWP`t", "from`trule:linked@$LW`t"))
+W "$T/linked.md" "Linked, newer.`n"
+Kit update rule linked --from "$T/linked.md" --to $LW
+Check 'upgrade: kit update finds what kit new remembered under the link' { (ReadT $LS).Contains("from`trule:linked@$LW`t") -and $rc -eq 0 -and (ReadT "$DW/rules/linked.md").Contains('Linked, newer') }
+Remove-Item -Force "$DW/rules/linked.md"
+Set-Home $hSave
 Pop-Location
 
 # ---------- uninstall ----------

@@ -409,6 +409,13 @@ function State-Set([string]$k, [string]$n, $v) {
     Write-Text $t (($rows | ForEach-Object { "$_`n" }) -join '')
     Move-Item -LiteralPath $t -Destination $State -Force
 }
+function State-From-Old([string]$item, [string]$dir) { # a "from" entry written before 0.3.0 with the folder as typed (links in it)
+    foreach ($r in State-Rows) {
+        $f = $r.Split("`t")
+        if ($f[0] -eq 'from' -and $f[1].StartsWith("$item@") -and (Canon-Dir $f[1].Substring($item.Length + 1)) -eq $dir) { if ($f.Count -gt 2) { return $f[2] } }
+    }
+    $null
+}
 function State-Del([string]$k, [string]$n) { if (Test-Path -LiteralPath $State) { State-Set $k $n $null } }
 
 # ---------- machine.yaml ----------
@@ -435,10 +442,46 @@ function Url-Host([string]$u) { ((($u -replace '^[A-Za-z][A-Za-z0-9+.-]*://', ''
 function Url-Safe([string]$u) { $u -replace '^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@', '$1' }   # a URL without user:password@ (never printed or kept)
 function Has-Creds([string]$u) { $u -match '^[Hh][Tt][Tt][Pp][Ss]?://[^/]*@' }   # an http(s) URL with user[:password]@ in it
 function Src-Name([string]$s) { [IO.Path]::GetFileName($s.TrimEnd('/', '\')) -replace '\.git$', '' }
-function Src-Dir([string]$s) {
-    if (Is-Url $s) { return Join-Path $KitSrc (Src-Name $s) }
-    if (Test-Path -LiteralPath $s) { return (Resolve-Path -LiteralPath $s).ProviderPath }
-    $s
+function Src-Dir([string]$s) { # local checkout of a source, links resolved: the same folder always has the same name
+    if (Is-Url $s) { return Canon-Dir (Join-Path $KitSrc (Src-Name $s)) }
+    Canon-Dir $s
+}
+$script:CanonDirs = @{}
+function Canon-Dir([string]$d) { # one name per folder, links resolved (unix/kit: real_dir = pwd -P; on Windows also junctions, folder symlinks, subst drives)
+    if (-not $d -or -not (Test-Path -LiteralPath $d)) { return $d }
+    $f = Full-Path $d
+    if (-not (Test-Path -LiteralPath $f -PathType Container)) { return $f }
+    if (-not $script:CanonDirs.ContainsKey($f)) {
+        $script:CanonDirs[$f] = if ($OnWindows) { try { Win-Real-Dir $f } catch { $f } } else { Real-Dir $f }
+    }
+    $script:CanonDirs[$f]
+}
+$script:SubstDrives = $null
+function Subst-Drives { # subst drive letter -> the folder it stands for (X -> C:\work)
+    if ($null -eq $script:SubstDrives) {
+        $script:SubstDrives = @{}
+        foreach ($l in @(& subst.exe 2>$null)) { if ("$l" -match '^([A-Za-z]):\\: => (.+)$') { $script:SubstDrives[$Matches[1].ToUpper()] = $Matches[2].Trim() } }
+    }
+    $script:SubstDrives
+}
+function Win-Real-Dir([string]$p) { # Windows: follow subst drives, junctions and symlinks anywhere along the path
+    for ($hop = 0; $hop -lt 40; $hop++) {
+        $sd = Subst-Drives
+        if ($p -match '^([A-Za-z]):' -and $sd.ContainsKey($Matches[1].ToUpper())) { $p = $sd[$Matches[1].ToUpper()].TrimEnd('\') + $p.Substring(2); continue }
+        $root = [IO.Path]::GetPathRoot($p); $cur = $root.TrimEnd('\'); $next = $null
+        $parts = @($p.Substring($root.Length).Split('\') | Where-Object { $_ })
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            $cur = "$cur\$($parts[$i])"
+            $it = Get-Item -LiteralPath $cur -Force
+            if ($it.LinkType -ne 'Junction' -and $it.LinkType -ne 'SymbolicLink') { continue }
+            $t = "$(@($it.Target)[0])" -replace '^\\\?\?\\', '' -replace '^UNC\\', '\\'
+            if (-not [IO.Path]::IsPathRooted($t)) { $t = Join-Path (Split-Path -Parent $cur) $t }
+            $next = [IO.Path]::GetFullPath(((@($t) + @($parts | Select-Object -Skip ($i + 1))) -join '\')); break
+        }
+        if ($null -eq $next) { return $p.TrimEnd('\') }
+        $p = $next
+    }
+    $p
 }
 function Src-Dirs { @(foreach ($s in M-Sources) { Src-Dir $s }) }
 $script:PushDir = $null
@@ -2619,7 +2662,7 @@ function Cmd-Init($srcs) {
     $list = @(foreach ($s in $srcs) {
         if (Has-Creds $s) { Die "網址裡有帳號或 token（$(Url-Safe $s)）：不要把密碼放進網址，先用 git clone 登入一次（Git 的認證管理會記住），再用不含帳號的網址" }
         if (Is-Url $s) { $s }
-        elseif (Test-Path -LiteralPath $s -PathType Container) { (Resolve-Path -LiteralPath $s).ProviderPath }
+        elseif (Test-Path -LiteralPath $s -PathType Container) { Canon-Dir $s }
         else { Die "找不到資料夾：$s" }
     })
     Write-Machine $list @() @()
@@ -2637,7 +2680,7 @@ function Includes { # include: entries of every source; a local path is relative
             if (-not $i) { continue }
             if (Is-Url $i) { $i; continue }
             $p = if ([IO.Path]::IsPathRooted($i)) { $i } else { Join-Path $d $i }
-            if (Test-Path -LiteralPath $p -PathType Container) { (Resolve-Path -LiteralPath $p).ProviderPath } else { $p }
+            if (Test-Path -LiteralPath $p -PathType Container) { Canon-Dir $p } else { $p }
         }
     })
 }
@@ -3236,9 +3279,9 @@ function Target-Dir([string]$to) { # --to <source name|folder>, else the folder 
     if ($to) {
         if (Test-Path -LiteralPath $Machine) { foreach ($d in Src-Dirs) { if ((Split-Path -Leaf $d) -eq $to) { return $d } } }
         if (-not (Test-Path -LiteralPath $to -PathType Container)) { Die-C no_source "找不到 --to ${to}（要是來源名字或資料夾）" }
-        return (Full-Path $to)
+        return (Canon-Dir $to)
     }
-    if (Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) { return (Get-Location).ProviderPath }
+    if (Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) { return (Canon-Dir (Get-Location).ProviderPath) }
     Need-Init
     @(Src-Dirs)[0]
 }
@@ -3354,7 +3397,7 @@ function Cmd-DiffUpdate([string]$mode, $rest) {
             if ($same) { Say '一樣，沒有要更新的' } else { & git --no-pager diff --no-index --no-color -- $a $b | ForEach-Object { Say "$_" } }
             return
         }
-        $old = State-Get 'from' "${kind}:$($o.Name)@$dir"; $now = Item-Hash $kind $dst
+        $old = State-Get 'from' "${kind}:$($o.Name)@$dir"; if (-not $old) { $old = State-From-Old "${kind}:$($o.Name)" $dir }; $now = Item-Hash $kind $dst
         if (-not $o.Force -and $old -ne $now) {
             if (-not $old) { Die "${kind}:$($o.Name) 不是這台用 kit new --from 帶進來的，不知道有沒有人改過。先 kit diff 看清楚，確定要蓋掉再加 --force" }
             Die "${kind}:$($o.Name) 在 $(Split-Path -Leaf $dir) 被改過（跟上次帶進來的不一樣）。先 kit diff 看差在哪；要保留別人的修改就手動合併，確定要蓋掉再加 --force"
@@ -3496,10 +3539,10 @@ function Cmd-Check($rest) {
     foreach ($a in @($rest | Where-Object { $_ })) {
         if ($a -eq '--ci') { $script:CheckCi = $true }
         elseif ("$a".StartsWith('-')) { Die "不認得 $a" }
-        else { $dirs += $(if (Test-Path -LiteralPath $a) { Full-Path $a } else { $a }) }
+        else { $dirs += (Canon-Dir $a) }
     }
     if ($dirs.Count -eq 0) {
-        if ((Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) -or $script:CheckCi) { $dirs = @((Get-Location).ProviderPath) }
+        if ((Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) -or $script:CheckCi) { $dirs = @(Canon-Dir (Get-Location).ProviderPath) }
         else { Need-Init; $dirs = @(Src-Dirs) }
     }
     if (Check-Dirs $dirs) { Say "kit check：沒問題（$($dirs.Count) 個來源）" }
@@ -4247,7 +4290,7 @@ function Cmd-Agent($rest) { # kit agent <name> add|rm rule|skill|mcp <item>
     $d = Split-Path -Parent (Split-Path -Parent $f)
     Say "agent ${n}：$(if ($verb -eq 'add') { '加上' } else { '拿掉' }) ${k}:${item}（改了 ${f}，還沒送出：打  kit push --to $(Split-Path -Leaf $d)）"
     $sep = [IO.Path]::DirectorySeparatorChar
-    if (($d + $sep).StartsWith($KitSrc.TrimEnd('/', '\') + $sep)) { Warn "這個檔案在 kit 自己同步用的資料夾（${KitSrc}）裡：沒送出前，kit sync 可能沒辦法更新它；最好在你自己 clone 的來源改" }
+    if (($d + $sep).StartsWith($KitSrc.TrimEnd('/', '\') + $sep) -or ($d + $sep).StartsWith((Canon-Dir $KitSrc).TrimEnd('/', '\') + $sep)) { Warn "這個檔案在 kit 自己同步用的資料夾（${KitSrc}）裡：沒送出前，kit sync 可能沒辦法更新它；最好在你自己 clone 的來源改" }
     if (@(YGet $Machine 'approvals' | Where-Object { $_ }).Count -gt 0) { Warn '這台只用簽過的版本（approvals）：改的要送出、合併、再簽過，這台才會用到' }
 }
 

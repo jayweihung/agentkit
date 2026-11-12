@@ -217,6 +217,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
   之後可能加新的 code（minor 加一）：不認得的 code 當作 `error`。
 - 字串照 JSON 規則跳脫；路徑是這台電腦的寫法。欄位順序固定，但程式應該照名字讀。
+- 來源資料夾（`dir`）是解開捷徑後的實際路徑（Mac 的 `/tmp/x` 會是 `/private/tmp/x`；Windows 也解開 junction 和 subst 的磁碟機）。程式拿自己的路徑來比時，先一樣解開。
 
 ### `kit list --json [--dir 資料夾] [--pid 程式編號]`
 

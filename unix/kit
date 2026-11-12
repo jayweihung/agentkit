@@ -145,6 +145,11 @@ state_set() {
     [ $# -ge 3 ] && printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$t"
     mv -f "$t" "$STATE"
 }
+state_from_old() { # state_from_old KIND:NAME DIR : a "from" entry written before 0.3.0 with the folder as typed (links in it)
+    [ -f "$STATE" ] || return 0
+    awk -F'\t' -v p="$1@" '$1 == "from" && index($2, p) == 1 { print substr($2, length(p) + 1) "\t" $3 }' "$STATE" |
+        while IFS="$TAB" read -r d h; do [ "$(real_dir "$d")" = "$2" ] && { printf '%s\n' "$h"; break; }; done
+}
 state_del() {
     local t
     [ -f "$STATE" ] || return 0
@@ -192,8 +197,10 @@ has_creds() { # an http(s) URL with user[:password]@ in it (a token in the URL)
     return 1
 }
 src_name() { basename "$1" .git; }
-src_dir() { # local checkout of a source
-    if is_url "$1"; then printf '%s/%s\n' "$KIT_SRC" "$(src_name "$1")"; else (cd "$1" 2>/dev/null && pwd) || printf '%s\n' "$1"; fi
+real_dir() { (CDPATH= cd "$1" 2>/dev/null && pwd -P); }   # real_dir DIR : DIR with links resolved; fails when it is not there
+src_dir() { # local checkout of a source, links resolved: the same folder always has the same name (kit.ps1: Canon-Dir)
+    local d; if is_url "$1"; then d="$KIT_SRC/$(src_name "$1")"; else d=$1; fi
+    real_dir "$d" || printf '%s\n' "$d"
 }
 src_dirs() { m_sources | while IFS= read -r s; do src_dir "$s"; done; }
 
@@ -2112,7 +2119,7 @@ cmd_init() {
     set -- "${args[@]}"
     for s in "$@"; do
         has_creds "$s" && die "網址裡有帳號或 token（$(url_safe "$s")）：不要把密碼放進網址，先用 git clone 登入一次（Git 的認證管理會記住），再用不含帳號的網址"
-        is_url "$s" || s=$(cd "$s" 2>/dev/null && pwd) || die "找不到資料夾：$s"
+        is_url "$s" || s=$(real_dir "$s") || die "找不到資料夾：$s"
         srcs="$srcs$s
 "
     done
@@ -2158,7 +2165,7 @@ includes() { # include: entries of every source; a local path is relative to the
             [ -n "$i" ] || continue
             if is_url "$i"; then printf '%s\n' "$i"; continue; fi
             case $i in /*) ;; *) i="$d/$i";; esac
-            (cd "$i" 2>/dev/null && pwd) || printf '%s\n' "$i"
+            real_dir "$i" || printf '%s\n' "$i"
         done
     done | awk 'NF && !seen[$0]++'
 }
@@ -2623,9 +2630,9 @@ target_dir() { # where new/update write: --to <source name|folder>, else the fol
 $( [ -f "$MACHINE" ] && src_dirs )
 EOF
         [ -d "$1" ] || die_c no_source "找不到 --to $1（要是來源名字或資料夾）"
-        (cd "$1" && pwd); return 0
+        real_dir "$1"; return 0
     fi
-    [ -f ./kit.yaml ] && { pwd -P; return 0; }        # as kit.ps1 sees it (symlinks resolved)
+    [ -f ./kit.yaml ] && { pwd -P; return 0; }        # links resolved, as src_dir names it
     need_init
     src_dirs | head -n 1
 }
@@ -2738,7 +2745,7 @@ cmd_diff_update() { # cmd_diff_update diff|update ARGS...
         [ $? = 0 ] && say "一樣，沒有要更新的"
         rm -rf "$tmp"; return 0
     fi
-    old=$(state_get from "$KIND:$NAME@$dir"); now=$(item_hash "$KIND" "$dst")
+    old=$(state_get from "$KIND:$NAME@$dir"); [ -n "$old" ] || old=$(state_from_old "$KIND:$NAME" "$dir"); now=$(item_hash "$KIND" "$dst")
     if [ -z "$FORCE_IT" ] && [ "$old" != "$now" ]; then
         rm -rf "$tmp"
         if [ -z "$old" ]; then die "$KIND:$NAME 不是這台用 kit new --from 帶進來的，不知道有沒有人改過。先 kit diff 看清楚，確定要蓋掉再加 --force"; fi
@@ -2867,10 +2874,10 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
 cmd_check() {
     local dirs=() a
     for a in "$@"; do
-        case $a in --ci) CHECK_CI=1;; -*) die "不認得 $a";; *) dirs+=("$(cd "$a" 2>/dev/null && pwd || echo "$a")");; esac
+        case $a in --ci) CHECK_CI=1;; -*) die "不認得 $a";; *) dirs+=("$(real_dir "$a" || echo "$a")");; esac
     done
     if [ ${#dirs[@]} = 0 ]; then
-        if [ -f ./kit.yaml ] || [ -n "${CHECK_CI:-}" ]; then dirs=("$(pwd)")
+        if [ -f ./kit.yaml ] || [ -n "${CHECK_CI:-}" ]; then dirs=("$(pwd -P)")
         else need_init; while IFS= read -r a; do dirs+=("$a"); done <<EOF
 $(src_dirs)
 EOF
@@ -3620,7 +3627,7 @@ cmd_agent() { # kit agent <name> add|rm rule|skill|mcp <item>
     fm_set_list "$f" "$key" "$new"
     d=${f%/agents/*}
     say "agent ${n}：$( [ "$verb" = add ] && echo 加上 || echo 拿掉) ${k}:${item}（改了 ${f}，還沒送出：打  kit push --to $(basename "$d")）"
-    case $d/ in "$KIT_SRC"/*) warn "這個檔案在 kit 自己同步用的資料夾（${KIT_SRC}）裡：沒送出前，kit sync 可能沒辦法更新它；最好在你自己 clone 的來源改";; esac
+    case $d/ in "$KIT_SRC"/*|"$(real_dir "$KIT_SRC" || printf '%s' "$KIT_SRC")"/*) warn "這個檔案在 kit 自己同步用的資料夾（${KIT_SRC}）裡：沒送出前，kit sync 可能沒辦法更新它；最好在你自己 clone 的來源改";; esac
     [ -z "$M_APPROVALS" ] || warn "這台只用簽過的版本（approvals）：改的要送出、合併、再簽過，這台才會用到"
 }
 

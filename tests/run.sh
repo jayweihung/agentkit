@@ -12,6 +12,7 @@ fi
 HERE=$(cd "$(dirname "$0")" && pwd)
 KIT="$HERE/../unix/kit"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(cd "$T" && pwd -P)   # links resolved, as kit names source folders (macOS: /var is /private/var)
 export HOME="$T/home"; mkdir -p "$HOME"
 unset CLAUDE_CONFIG_DIR AGENTKIT_CONFIG AGENTKIT_SOURCES
 export KIT_TRANSCRIPT_CHECK=0   # (kit sync --hook does not look at the Claude these tests may run in)
@@ -691,6 +692,39 @@ echo "Mine, blocked." > rules/mine.md; h=$(git rev-parse HEAD)
 out=$(kit push 2>&1); rc=$?
 check "push direct: a commit hook refusing: its words shown, nothing committed or left staged" '[ $rc -ne 0 ] && echo "$out" | grep -q "hook: no thanks" && [ "$(git rev-parse HEAD)" = "$h" ] && [ -z "$(git diff --cached --name-only)" ] && [ "$(git status --porcelain rules)" = " M rules/mine.md" ]'
 rm -f .git/hooks/pre-commit
+
+# ---------- a source set up through a link (on macOS /tmp is really /private/tmp): still one source ----------
+LH="$T/home-linked"; mkdir -p "$LH"; ln -s "$D" "$T/pd-link"; LW="$T/pd-link/work"; DWP=$(cd "$DW" && pwd -P)
+LM="$LH/.config/agentkit/machine.yaml"; LS="$LH/.config/agentkit/state.tsv"
+out=$(HOME="$LH" kit init "$LW" 2>&1); rc=$?
+check "init through a link: the source is kept with links resolved" '[ $rc -eq 0 ] && grep -qxF "  - $DWP" "$LM"'
+out=$(cd "$LW" && HOME="$LH" kit push --dry-run --json 2>/dev/null); rc=$?
+check "init through a link, push in the link: one source, not two" '[ $rc -eq 0 ] && echo "$out" | grep -qF "{\"source\": \"work\", \"dir\": \"$DWP\", \"push\": \"direct\", \"dry_run\": true, \"files\": [\"rules/mine.md\"], "'
+if [ -n "$PWSH" ]; then
+    check "init through a link, push: kit.ps1 prints the same" '[ "$(cd "$LW" && HOME="$LH" kps push --dry-run --json 2>/dev/null)" = "$out" ]'
+fi
+out=$(cd "$T" && HOME="$LH" kit push --to "$LW" --dry-run --json 2>/dev/null); rc=$?
+check "push --to a folder through a link: the same one source" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"dir\": \"$DWP\", "'
+out=$(cd "$LW" && HOME="$LH" kit check 2>&1); rc=$?
+check "check in a source opened through a link: no name twice" '[ $rc -eq 0 ] && echo "$out" | grep -qF "沒問題（1 個來源）"'
+# upgrading: kit before 0.3.0 kept the folder as typed (the link)
+awk -v p="  - $DWP" -v l="  - $LW" '{ print ($0 == p ? l : $0) }' "$LM" > "$LM.t" && mv "$LM.t" "$LM"
+out=$(cd "$DW" && HOME="$LH" kit push --dry-run --json 2>/dev/null); rc=$?
+check "upgrade: a source kept as a link still counts once" 'grep -qxF "  - $LW" "$LM" && [ $rc -eq 0 ] && echo "$out" | grep -qF "\"dir\": \"$DWP\", "'
+out=$(cd "$LW" && HOME="$LH" kit check 2>&1); rc=$?
+check "upgrade: check with a source kept as a link: no name twice" '[ $rc -eq 0 ] && echo "$out" | grep -qF "沒問題（1 個來源）"'
+if [ -n "$PWSH" ]; then
+    out=$(cd "$DW" && HOME="$LH" kps push --dry-run --json 2>/dev/null); rc=$?
+    check "upgrade: kit.ps1 also counts a source kept as a link once" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"dir\": \"$DWP\", "'
+fi
+printf 'Linked.\n' > "$T/linked.md"
+HOME="$LH" kit new rule linked --from "$T/linked.md" --to "$LW" >/dev/null 2>&1
+check "kit new --from through a link: remembered under the folder with links resolved" 'grep -q "^from	rule:linked@$DWP	" "$LS"'
+awk -F'\t' -v OFS='\t' -v p="rule:linked@$DWP" -v l="rule:linked@$LW" '$1 == "from" && $2 == p { $2 = l } 1' "$LS" > "$LS.t" && mv "$LS.t" "$LS"
+printf 'Linked, newer.\n' > "$T/linked.md"
+out=$(HOME="$LH" kit update rule linked --from "$T/linked.md" --to "$LW" 2>&1); rc=$?
+check "upgrade: kit update finds what kit new remembered under the link" 'grep -q "^from	rule:linked@$LW	" "$LS" && [ $rc -eq 0 ] && grep -q "Linked, newer" "$DW/rules/linked.md"'
+rm -f "$DW/rules/linked.md"
 cd "$T"
 
 # ---------- uninstall ----------
