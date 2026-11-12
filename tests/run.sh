@@ -150,6 +150,9 @@ check "list --json: required, used, unused" 'grep -qF "{\"kind\": \"rule\", \"na
     grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-workflow\", \"status\": \"unused\", \"new\": false, \"source\": \"third-party\", \"description\": \"upstream\", \"path\": " "$T/list.json"'
 check "list --json: agent with its description" 'grep -qF "{\"kind\": \"agent\", \"name\": \"gerrit\", \"status\": \"agent\", \"new\": false, \"source\": \"team\", \"description\": \"Gerrit helper\", \"path\": " "$T/list.json"'
 check "list --json: new item, text escaped (UTF-8 kept)" 'grep -qF "{\"kind\": \"skill\", \"name\": \"quote\", \"status\": \"unused\", \"new\": true, \"source\": \"team\", \"description\": \"中文 \\\"引號\\\" \\\\ 和\\ttab\", \"path\": " "$T/list.json"'
+printf -- '---\r\nname: crlf\r\ndescription: Written on Windows\r\n---\r\nx\r\n' > "$TEAM/agents/crlf.md"   # CRLF line ends
+check "list --json: an agent written with CRLF has its description too" 'kit list --json 2>/dev/null | grep -q "\"name\": \"crlf\",.*\"description\": \"Written on Windows\"" && { [ -z "$PWSH" ] || kps list --json 2>/dev/null | grep -q "\"name\": \"crlf\",.*\"description\": \"Written on Windows\""; }'
+rm -f "$TEAM/agents/crlf.md"
 check "list --json: tools and no version wanted" 'grep -q "^  \"tools\": \[\"claude\"" "$T/list.json" && [ "$(jget "$T/list.json" kit_version_wanted)" = "\"\"" ]'
 check "list --json does not mark items seen" '[ "$(kit list --json | grep -c "\"new\": true")" = 1 ]'
 if [ -n "$PWSH" ]; then

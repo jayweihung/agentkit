@@ -2188,7 +2188,7 @@ json_s() { # a JSON string: \ " TAB LF CR escaped, other control characters drop
 }
 item_desc() { # item_desc KIND FILE : the description of a skill or agent (frontmatter) or of an MCP yaml
     case $1 in
-        skill|agent) head -n 1 "$2" | grep -qx -- '---' && fm_val "$(fm_of "$2")" description | head -n 1;;
+        skill|agent) fm_starts "$2" && fm_val "$(fm_of "$2")" description | head -n 1;;
         mcp) yget "$2" description 2>/dev/null | head -n 1;;
     esac
 }
