@@ -137,7 +137,7 @@ check "list shows agent" 'echo "$out" | grep -q "agent:gerrit"'
 mkdir -p "$TEAM/skills/quote"; printf -- '---\nname: quote\ndescription: 中文 "引號" \\ 和\ttab\n---\nx\n' > "$TEAM/skills/quote/SKILL.md"
 kit list --json > "$T/list.json" 2>&1; rc=$?
 check "list --json: exit 0, valid JSON" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/list.json" > /dev/null'
-check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"0.1.0\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\", \"push\": \"pr\"}" "$T/list.json"'
+check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"$(cat "$HERE/../VERSION")\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\", \"push\": \"pr\"}" "$T/list.json"'
 check "list --json: required, used, unused" 'grep -qF "{\"kind\": \"rule\", \"name\": \"security\", \"status\": \"required\", \"new\": false, \"source\": \"team\", \"description\": \"\", \"path\": " "$T/list.json" &&
     grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"source\": \"team\", \"description\": \"review a change\", \"path\": " "$T/list.json" &&
     grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-workflow\", \"status\": \"unused\", \"new\": false, \"source\": \"third-party\", \"description\": \"upstream\", \"path\": " "$T/list.json"'
@@ -264,7 +264,7 @@ rm -rf "$TEAM/skills/quote"
 cp "$TEAM/kit.yaml" "$T/kit.yaml.orig"
 echo "kit_version: 0.4.0" >> "$TEAM/kit.yaml"
 out=$(kit sync 2>&1)
-check "old kit: sync tells the user" 'echo "$out" | grep -qF "團隊要 kit 0.4.0 以上，你的是 0.1.0。請打  kit self-update"'
+check "old kit: sync tells the user" 'echo "$out" | grep -qF "團隊要 kit 0.4.0 以上，你的是 $(cat "$HERE/../VERSION")。請打  kit self-update"'
 out=$(kit sync 2>&1; kit list 2>&1)
 check "old kit: told only once" '! echo "$out" | grep -q 團隊要'
 cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 0.10.0" >> "$TEAM/kit.yaml"
@@ -479,6 +479,11 @@ out=$("$FK/unix/kit" export-self "$EX" --version 0.4.0+gitea.12 2>&1); rc=$?
 check "export-self succeeds, says the commit message" '[ $rc -eq 0 ] && echo "$out" | grep -q "kit 0.4.0+gitea.12"'
 check "export-self drops README, CHANGELOG, LICENSE, .github, private-words.txt" '[ ! -e "$EX/README.md" ] && [ ! -e "$EX/LICENSE" ] && [ ! -e "$EX/CHANGELOG.md" ] && [ ! -e "$EX/.github" ] && [ ! -e "$EX/private-words.txt" ]'
 check "export-self keeps tests, .gitattributes, .gitignore, kit" '[ -f "$EX/tests/t.sh" ] && [ -f "$EX/.gitattributes" ] && [ -f "$EX/.gitignore" ] && [ -x "$EX/unix/kit" ] && [ -f "$EX/windows/kit.ps1" ]'
+# kit's own repo must export too (a GitHub host in a test or an example once stopped every company update)
+if git -C "$HERE/.." rev-parse --git-dir >/dev/null 2>&1; then
+    mkdir -p "$T/exhome"; out=$(HOME="$T/exhome" "$KIT" export-self "$T/exself" 2>&1); rc=$?
+    check "export-self: kit's own repo exports (nothing in it names GitHub)" '[ $rc -eq 0 ] && [ -f "$T/exself/VERSION" ] || { echo "$out" | grep "export-self:" | head -n 5; false; }'
+fi
 check "export-self leaves out untracked files" '[ ! -e "$EX/untracked.md" ]'
 check "export-self writes VERSION" '[ "$(cat "$EX/VERSION")" = 0.4.0+gitea.12 ]'
 check "export-self INSTALL.md, no URL" 'grep -q "sh unix/install.sh" "$EX/INSTALL.md" && grep -qF "windows\\install.ps1" "$EX/INSTALL.md" && ! grep -qE "://|@[A-Za-z0-9.-]+:" "$EX/INSTALL.md"'
@@ -653,7 +658,7 @@ R="$T/clone"; mkdir -p "$R"; cp -R "$HERE/../unix" "$HERE/../templates" "$HERE/.
 U="$T/clone2"; git clone -q "$R" "$U"
 touch "$HOME/.bashrc"
 out=$(PATH=/usr/bin:/bin sh "$U/unix/install.sh" 2>&1)
-check "install puts kit in ~/.local/bin" '[ -x "$HOME/.local/bin/kit" ] && "$HOME/.local/bin/kit" --version | grep -q "kit 0.1.0"'
+check "install puts kit in ~/.local/bin" '[ -x "$HOME/.local/bin/kit" ] && "$HOME/.local/bin/kit" --version | grep -qF "kit $(cat "$HERE/../VERSION")"'
 check "install adds PATH once" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc")" = 1 ]'
 PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
 check "reinstall does not add PATH twice" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc")" = 1 ]'
@@ -791,7 +796,7 @@ printf 'registry=http://elsewhere.invalid/\n' > "$NT/skills/packed/.npmrc"
 for n in npmgit npmlock npmreg; do mkdir -p "$NT/skills/$n"; printf -- '---\nname: %s\ndescription: x\n---\nx\n' "$n" > "$NT/skills/$n/SKILL.md"; done
 printf '{"name": "npmgit", "dependencies": {"left-pad": "1.3.0"}, "optionalDependencies": {"tool": "github:someone/tool"}}\n' > "$NT/skills/npmgit/package.json"
 printf '{"name": "npmlock", "dependencies": {"tool": "^1.0.0"}}\n' > "$NT/skills/npmlock/package.json"
-printf '{"lockfileVersion": 3, "packages": {"": {}, "node_modules/tool": {"version": "1.0.0", "resolved": "git+ssh://git@github.com/someone/tool.git#abc", "integrity": "sha512-x"}}}\n' > "$NT/skills/npmlock/package-lock.json"
+printf '{"lockfileVersion": 3, "packages": {"": {}, "node_modules/tool": {"version": "1.0.0", "resolved": "git+ssh://git@git.example.org/someone/tool.git#abc", "integrity": "sha512-x"}}}\n' > "$NT/skills/npmlock/package-lock.json"
 printf '{"name": "npmreg", "dependencies": {"tool": "^1.0.0"}}\n' > "$NT/skills/npmreg/package.json"
 printf '{"lockfileVersion": 3, "packages": {"": {}, "node_modules/tool": {"version": "1.0.0", "resolved": "https://npm.example.com/r/tool/-/tool-1.0.0.tgz", "integrity": "sha512-x"}}}\n' > "$NT/skills/npmreg/package-lock.json"
 # a program a skill asks for that kit has no recipe for: never run
@@ -919,7 +924,7 @@ if [ -n "$PWSH" ]; then
 fi
 # what kit does not install: git, a URL, another registry without your ~/.npmrc
 check "packages: a git dependency is shown as refused" '[ "$(pk npmgit)" = "{\"bad\": \"package.json: optionalDependencies.tool = github:someone/tool\", \"had\": false, \"install\": \"npm install --ignore-scripts --omit=dev --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": false}" ]'
-check "packages: a lock with a package from git, or from another registry, is refused" 'pk npmlock | grep -qF "\"bad\": \"package-lock.json: node_modules/tool: resolved git+ssh://git@github.com/someone/tool.git#abc\"" && pk npmreg | grep -qF "\"bad\": \"package-lock.json: node_modules/tool: resolved https://npm.example.com/r/tool/-/tool-1.0.0.tgz\""'
+check "packages: a lock with a package from git, or from another registry, is refused" 'pk npmlock | grep -qF "\"bad\": \"package-lock.json: node_modules/tool: resolved git+ssh://git@git.example.org/someone/tool.git#abc\"" && pk npmreg | grep -qF "\"bad\": \"package-lock.json: node_modules/tool: resolved https://npm.example.com/r/tool/-/tool-1.0.0.tgz\""'
 check "packages (refused): kit.ps1 says the same" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]'
 rm -f "$T/npm.log"
 out=$(kit install-deps npmgit 2>&1); rc=$?

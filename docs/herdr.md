@@ -222,7 +222,7 @@ Kit 按鈕右邊的 `[context 35% 139k/400k]` 是這個 agent 的 context 用了
 ┌ 新增 skill ──────────────────────────────────┐
 │ [自己從頭寫] [從網址收別人的]                │
 │ 網址（GitHub 之類的 repo）                   │
-│ [https://github.com/作者/repo         ]      │
+│ [https://git.example.org/作者/repo         ]      │
 │ 放在哪個倉                                   │
 │ [agentkit-home（自己的 · 直接推）]           │
 │ [agentkit-library（自己的 · 直接推）]        │

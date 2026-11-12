@@ -22,6 +22,8 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
 裝到 `%LOCALAPPDATA%\Programs\agentkit`，並加進你的 PATH（開新的終端機後生效）。
 在 cmd 和 PowerShell 都是打 `kit`。
 
+各版改了什麼：[docs/changes.md](docs/changes.md)。
+
 ## 使用
 
     kit init <團隊來源的網址>     第一次

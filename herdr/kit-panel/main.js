@@ -254,7 +254,7 @@ export default class KitPanel extends View {
     this.newName = InputState.new({ placeholder: "名字：小寫英文、數字和 -" });
     this.newName.on("submit", (_e, cx) => this.make(cx));
     this.newName.on("change", (_e, cx) => cx.notify());   // the path it will make follows the name
-    this.newUrl = InputState.new({ placeholder: "網址，例如 https://github.com/作者/repo" });
+    this.newUrl = InputState.new({ placeholder: "網址，例如 https://git.example.org/作者/repo" });
     this.newUrl.on("submit", (_e, cx) => this.look(cx));
     this.newUrl.on("change", (_e, cx) => { if (this.making?.look || this.making?.urlErr) { this.making.look = null; this.making.urlErr = null; cx.notify(); } });
     // load when there is nothing, it is a minute old, or someone marked it out of date (at: 0)

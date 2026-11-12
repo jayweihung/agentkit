@@ -108,6 +108,13 @@ kit 會把來源 clone 到 `%USERPROFILE%\agentkit\<來源名字>`，再把團�
 - `author_domains`：送出的人的 git 信箱必須是這些網域。
 - `kit_version`：kit 比這個舊的人會被提醒 `kit self-update`。
 
+## 更新
+
+    kit self-update
+    kit sync
+
+每一版改了什麼、更新後要做什麼，看 [changes.md](changes.md)。用 Herdr 的話，更新後把 Herdr 整個關掉重開。每台跑 agent 的電腦或主機（例如 Herdr 連的公司 Linux）都要更新。
+
 ## 常見問題
 
 - **「沒辦法 clone」**：先自己 git clone 一次，確定登得進 Gitea。

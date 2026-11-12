@@ -9,6 +9,7 @@ $OnWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or ((Test-Path variable:
 $Here = Split-Path -Parent $PSCommandPath
 $Repo = Split-Path -Parent $Here
 $Kit = Join-Path $Repo 'windows/kit.ps1'
+$KitVer = ([IO.File]::ReadAllText((Join-Path $Repo 'VERSION'))).Trim()
 $Exe = (Get-Process -Id $PID).Path
 $U8 = New-Object System.Text.UTF8Encoding $false
 $T = Join-Path ([IO.Path]::GetTempPath()) ('kit-test.' + [IO.Path]::GetRandomFileName())
@@ -165,7 +166,7 @@ Kit list --json; $lj = $out; $ljrc = $rc
 W "$T/list.json" "$lj`n"
 $teamJ = (Resolve-Path -LiteralPath $TEAM).ProviderPath.Replace('\', '\\')
 Check 'list --json: exit 0, valid JSON' { $ljrc -eq 0 -and $null -ne (JGet "$T/list.json" 'kit') }
-Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq '"0.1.0"' -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`", `"push`": `"pr`"}") }
+Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq ('"' + $KitVer + '"') -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`", `"push`": `"pr`"}") }
 Check 'list --json: required, used, unused' {
     $lj.Contains('{"kind": "rule", "name": "security", "status": "required", "new": false, "source": "team", "description": "", "path": ') -and
     $lj.Contains('{"kind": "skill", "name": "gerrit-review", "status": "used", "new": false, "source": "team", "description": "review a change", "path": ') -and
@@ -228,7 +229,7 @@ function Team-Version([string]$v) { W "$TEAM/kit.yaml" ($teamYaml.TrimEnd("`n") 
 function State-Nag { @((ReadT "$H/.config/agentkit/state.tsv") -split "`n" | Where-Object { $_.StartsWith("nag`t") }).Count }
 Team-Version '0.4.0'
 Kit sync
-Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 0.4.0 以上，你的是 0.1.0。請打  kit self-update') }
+Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 0.4.0 以上，你的是 ' + $KitVer + '。請打  kit self-update') }
 Kit sync; $o1 = $out; Kit list
 Check 'old kit: told only once' { -not ($o1 + $out).Contains('團隊要') }
 Team-Version '0.10.0'
@@ -734,7 +735,7 @@ W "$NT/skills/packed/.npmrc" "registry=http://elsewhere.invalid/`n"
 foreach ($n in 'npmgit', 'npmlock', 'npmreg') { W "$NT/skills/$n/SKILL.md" "---`nname: $n`ndescription: x`n---`nx`n" }
 W "$NT/skills/npmgit/package.json" "{`"name`": `"npmgit`", `"dependencies`": {`"left-pad`": `"1.3.0`"}, `"optionalDependencies`": {`"tool`": `"github:someone/tool`"}}`n"
 W "$NT/skills/npmlock/package.json" "{`"name`": `"npmlock`", `"dependencies`": {`"tool`": `"^1.0.0`"}}`n"
-W "$NT/skills/npmlock/package-lock.json" "{`"lockfileVersion`": 1, `"dependencies`": {`"tool`": {`"version`": `"1.0.0`", `"resolved`": `"https://registry.npmjs.org/tool/-/tool-1.0.0.tgz`", `"integrity`": `"sha512-x`", `"dependencies`": {`"sub`": {`"version`": `"git+ssh://git@github.com/someone/sub.git#abc`", `"resolved`": `"git+ssh://git@github.com/someone/sub.git#abc`"}}}}}`n"
+W "$NT/skills/npmlock/package-lock.json" "{`"lockfileVersion`": 1, `"dependencies`": {`"tool`": {`"version`": `"1.0.0`", `"resolved`": `"https://registry.npmjs.org/tool/-/tool-1.0.0.tgz`", `"integrity`": `"sha512-x`", `"dependencies`": {`"sub`": {`"version`": `"git+ssh://git@git.example.org/someone/sub.git#abc`", `"resolved`": `"git+ssh://git@git.example.org/someone/sub.git#abc`"}}}}}`n"
 W "$NT/skills/npmreg/package.json" "{`"name`": `"npmreg`", `"dependencies`": {`"tool`": `"^1.0.0`"}}`n"
 W "$NT/skills/npmreg/package-lock.json" "{`"lockfileVersion`": 3, `"packages`": {`"`": {}, `"node_modules/tool`": {`"version`": `"1.0.0`", `"resolved`": `"https://npm.example.com/r/tool/-/tool-1.0.0.tgz`", `"integrity`": `"sha512-x`"}}}`n"
 W "$NT/skills/asks/SKILL.md" "---`nname: asks`ndescription: x`nrequires: [noprobe]`n---`nx`n"
@@ -835,7 +836,7 @@ foreach ($f in "$FB7/claude", "$FB7/claude.cmd", "$NT/agents/packer.md") { Remov
 # what kit does not install: git, a URL, another registry without your ~/.npmrc
 Kit list --json
 Check 'packages: a git dependency is shown as refused' { (PkOf 'npmgit') -eq '{"kind": "npm", "ok": false, "had": false, "install": "npm install --ignore-scripts --omit=dev --no-audit --no-fund", "bad": "package.json: optionalDependencies.tool = github:someone/tool"}' }
-Check 'packages: a lock (v1) with a package from git, or one from another registry, is refused' { (PkOf 'npmlock') -match '"bad": "package-lock.json: node_modules/tool/node_modules/sub: resolved git\+ssh://git@github.com/someone/sub.git#abc"' -and (PkOf 'npmreg') -match '"bad": "package-lock.json: node_modules/tool: resolved https://npm.example.com/r/tool/-/tool-1.0.0.tgz"' }
+Check 'packages: a lock (v1) with a package from git, or one from another registry, is refused' { (PkOf 'npmlock') -match '"bad": "package-lock.json: node_modules/tool/node_modules/sub: resolved git\+ssh://git@git.example.org/someone/sub.git#abc"' -and (PkOf 'npmreg') -match '"bad": "package-lock.json: node_modules/tool: resolved https://npm.example.com/r/tool/-/tool-1.0.0.tgz"' }
 if (Test-Path "$T/npm7.log") { Remove-Item "$T/npm7.log" }
 Kit install-deps npmgit
 Check 'install-deps: refuses a git dependency, npm not run' { $rc -ne 0 -and $out.Contains('kit 不裝這些 npm 套件') -and $out.Contains('github:someone/tool') -and -not (Test-Path "$T/npm7.log") -and -not (Test-Path (Join-Path $H '.config/agentkit/deps/npmgit')) }
