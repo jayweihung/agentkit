@@ -1,0 +1,6 @@
+# Line endings in every checkout (Windows too): LF, so unix/kit, install.sh and the awk files run on Mac and Linux.
+* text=auto eol=lf
+# PowerShell files: CRLF in the working folder (stored with LF, as they always were); the UTF-8 BOM is kept.
+*.ps1 text eol=crlf
+# kit.cmd is stored with CRLF and must stay byte for byte as it is (cmd.exe misreads labels with LF)
+*.cmd -text
