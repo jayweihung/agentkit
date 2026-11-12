@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.1'
+$script:KitApi = '1.2'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -2642,8 +2642,90 @@ function Ctx-Detail([string]$cpid, [string]$tool, [string]$dir, [bool]$fresh) { 
 
 # ---------- kit files: the files an agent read or changed ----------
 # The same JSON line as unix/kit (its comments there say what is taken from each tool's log). Only paths are taken from
-# a log, never what was said. Each log: its last KIT_CTX_TAIL bytes (8 MB).
+# a log, and of what was said only the start of the person's messages (turns' "text", 30 characters at most). Each
+# log: its last KIT_CTX_TAIL bytes (8 MB).
 $script:FilesMax = 200
+$script:TurnsMax = 30
+$script:TurnFiles = 50
+$script:FilesNoTurn = [string][char]1
+$script:FilesTsNormRx = [regex]'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?\z'
+$script:FilesLeadRx = [regex]'^(?:[ \t]|\\[nrtf])+'
+$script:FilesSkipRx = [regex]'^(?:<command-name>|<command-message>|<local-command-stdout>|<local-command-caveat>|Caveat:|\[Request interrupted|<task-notification>|<bash-input>|<bash-stdout>|<bash-stderr>|<environment_context>|<user_instructions>)'
+$script:FilesStrRx = [regex]'^"((?:[^"\\]|\\.)*)"'
+function Files-Div([long]$a, [long]$b) { [long][Math]::Truncate($a / $b) }   # (as awk's int(a / b))
+function Files-TsNorm([string]$x) { # a timestamp as YYYY-MM-DDTHH:MM:SSZ (UTC), else ''
+    $m = $FilesTsNormRx.Match($x); if (-not $m.Success) { return '' }
+    $z = $m.Groups[2].Value
+    if (-not $z -or $z -ceq 'Z') { return $x.Substring(0, 19) + 'Z' }
+    [long]$o = ([int]$z.Substring(1, 2) * 60 + [int]$z.Substring($z.Length - 2, 2)) * $(if ($z[0] -ceq [char]'-') { -1 } else { 1 })
+    [long]$y = [int]$x.Substring(0, 4); [long]$mo = [int]$x.Substring(5, 2); [long]$d = [int]$x.Substring(8, 2)
+    if ($mo -le 2) { $y-- }; $era = Files-Div $y 400; $yoe = $y - $era * 400   # (days from 1970-01-01: H. Hinnant)
+    $doe = $yoe * 365 + (Files-Div $yoe 4) - (Files-Div $yoe 100) + (Files-Div (153 * $(if ($mo -gt 2) { $mo - 3 } else { $mo + 9 }) + 2) 5) + $d - 1
+    $mi = ($era * 146097 + $doe - 719468) * 1440 + [int]$x.Substring(11, 2) * 60 + [int]$x.Substring(14, 2) - $o
+    $dd = Files-Div $mi 1440; if ($dd * 1440 -gt $mi) { $dd-- }; $mi -= $dd * 1440
+    $dd += 719468; $era = Files-Div $dd 146097; $doe = $dd - $era * 146097
+    $yoe = Files-Div ($doe - (Files-Div $doe 1460) + (Files-Div $doe 36524) - (Files-Div $doe 146096)) 365
+    $y = $yoe + $era * 400; $doe -= 365 * $yoe + (Files-Div $yoe 4) - (Files-Div $yoe 100); $mp = Files-Div (5 * $doe + 2) 153
+    $d = $doe - (Files-Div (153 * $mp + 2) 5) + 1; $mo = if ($mp -lt 10) { $mp + 3 } else { $mp - 9 }; if ($mo -le 2) { $y++ }
+    $y.ToString($Inv) + '-' + $mo.ToString('00', $Inv) + '-' + $d.ToString('00', $Inv) + 'T' + (Files-Div $mi 60).ToString('00', $Inv) + ':' + ($mi % 60).ToString('00', $Inv) + ':' + $x.Substring(17, 2) + 'Z'
+}
+function Files-Text([string]$s) { # the start of a message (S: JSON-escaped) for a turn, still escaped (as ttext in unix/kit);
+    # FilesNoTurn: not a message the person sent
+    while ($true) {
+        $s = $FilesLeadRx.Replace($s, '', 1)
+        if (-not $s.StartsWith('<system-reminder>', $Ord)) { break }
+        $i = $s.IndexOf('</system-reminder>', $Ord); if ($i -lt 0) { return '' }
+        $s = $s.Substring($i + 18)
+    }
+    if ($FilesSkipRx.IsMatch($s)) { return $FilesNoTurn }
+    if ($s.StartsWith('<hc from=\"', $Ord) -and ($i = $s.IndexOf('\">', 11, $Ord)) -ge 0) {
+        $s = 'hc ' + $s.Substring(11, $i - 11) + '：' + $s.Substring($i + 3).Replace('</hc>', '')
+    }
+    $o = New-Object Text.StringBuilder; $n = 0; $sp = $false; $cut = $false; $L = $s.Length; $i = 0
+    while ($i -lt $L) {
+        $c = [string]$s[$i]; $w = $false; $st = $true
+        if ($c -ceq '\') {
+            $e = if ($i + 1 -lt $L) { [string]$s[$i + 1] } else { '' }
+            if ($e -ceq 'u') {
+                $h = $s.Substring($i + 2, [Math]::Min(4, $L - $i - 2)).ToLowerInvariant()
+                if ($h -cnotmatch '^[0-9a-f]{4}\z') { $i += 2; continue }
+                $i += 6
+                if ($h -cmatch '^00[01]' -or $h -ceq '007f') { if ([string]::CompareOrdinal($h, '0009') -ge 0 -and [string]::CompareOrdinal($h, '000d') -le 0) { $w = $true } else { continue } }
+                else { $c = '\u' + $h; if ($h -cmatch '^d[c-f]') { $st = $false } }   # (a low surrogate: the same character)
+            } elseif ($e -ceq 'n' -or $e -ceq 'r' -or $e -ceq 't' -or $e -ceq 'f') { $w = $true; $i += 2 }
+            elseif ($e -ceq 'b') { $i += 2; continue }
+            elseif ($e -ceq '"' -or $e -ceq '\') { $c = '\' + $e; $i += 2 }
+            else { $c = $e; $i += 2 }
+        } else {
+            $i++; $v = [int][char]$c
+            if ($v -eq 32 -or ($v -ge 9 -and $v -le 13)) { $w = $true }
+            elseif ($v -lt 32 -or $v -eq 127) { continue }
+            elseif ($v -ge 0xDC00 -and $v -le 0xDFFF) { $st = $false }               # (a low surrogate: the same character)
+        }
+        if ($w) { $sp = $true; continue }
+        if ($st) {
+            if ($sp -and $n -gt 0) { if ($n -eq 30) { $cut = $true; break }; [void]$o.Append(' '); $n++ }
+            $sp = $false
+            if ($n -eq 30) { $cut = $true; break }
+            $n++
+        }
+        [void]$o.Append($c)
+    }
+    $r = $o.ToString()
+    if ($cut) { if ($r.EndsWith(' ', $Ord)) { $r = $r.Substring(0, $r.Length - 1) }; $r += '…' }
+    $r
+}
+function Files-FirstText([string]$s) { # the first text item in S (an array of content items) that has words, JSON-escaped
+    while (($i = $s.IndexOf('{"type":"text","text":"', $Ord)) -ge 0) {
+        $s = $s.Substring($i + 15); $x = Ctx-Strv $s 'text'; if ((Files-Text $x) -cne '') { return $x }
+    }
+    ''
+}
+function Files-FirstTs([string]$l) { $m = $FilesTsRx.Match($l); if ($m.Success) { $m.Value.Substring(13, $m.Length - 14) } else { '' } }
+function Files-MsgText([string]$s) { # the message (S: from its content on): a string, or the first text in an array of items
+    if ($s.StartsWith('"', $Ord)) { $m = $FilesStrRx.Match($s); if ($m.Success) { return $m.Groups[1].Value }; return '' }
+    Files-FirstText $s
+}
 $script:FilesZero = '00000000000000000'
 $script:FilesTsRx = [regex]'"timestamp":"[^"]*"'
 $script:FilesChangeRx = [regex]'"(?:[^"\\]|\\.)*":\{(?:"type":)?"(add|update|delete)"'
@@ -2667,14 +2749,26 @@ function Files-Ptxt([string]$s, [int]$lv) { # the path after "*** Add File: " up
     }
     $o.ToString().TrimEnd([char]' ', [char]"`t")
 }
-function Files-Scan([string]$tool, [string]$f, [int]$fi, $Keys, $Vals) { # the rows of one log: a sort key (time, file, n) in KEYS, @(tag, path) in VALS
+function Files-Scan([string]$tool, [string]$f, [int]$fi, [bool]$main, $Keys, $Vals) { # the rows of one log: a sort key (time, file, n) in
+    # KEYS, in VALS @(tag, path, turn) (turn: the main log's turn number, - for a sub-agent's) or a turn's start @('turn', '', n, at, text)
     $o = Ctx-Open $f $CtxTail; if (-not $o) { return }
-    $t = ''; $r = 0
+    $t = ''; $r = 0; $tn = 0; $last = ''; $touched = $false
     try {
         while ($null -ne ($l = $o[0].ReadLine())) {
-            $add = New-Object 'System.Collections.Generic.List[object]'
+            $add = New-Object 'System.Collections.Generic.List[object]'; $traw = $null; $tat = ''
             if ($tool -ceq 'claude') {
-                if ($l.StartsWith('{"type":"api-request', $Ord) -or -not $l.Contains('"type":"assistant"') -or -not $l.Contains('"type":"tool_use"')) { continue }
+                if ($l.StartsWith('{"type":"api-request', $Ord)) { continue }
+                $k = -1; if ($main -and $l.Contains('"type":"user"')) { $k = $l.IndexOf('"message":{"role":"user","content":', $Ord) }
+                if ($k -ge 0 -and -not $l.Contains('"isMeta":true') -and -not $l.Contains('"isCompactSummary":true')) {
+                    $ms = $FilesTsRx.Matches($l)
+                    $x = ''; if ($ms.Count -gt 0) { $x = $ms[$ms.Count - 1].Value; $x = $x.Substring(13, $x.Length - 14) }
+                    if ($x) { $t = (($x -creplace '[^0-9]', '') + $FilesZero).Substring(0, 17) } elseif (-not $t) { $t = $FilesZero }
+                    $s = $l.Substring($k + 35)
+                    if ($s.StartsWith('[', $Ord) -and $s.Contains('"type":"tool_result"')) { continue }
+                    $traw = Files-MsgText $s; $tat = $x
+                } elseif (-not $l.Contains('"type":"assistant"') -or -not $l.Contains('"type":"tool_use"')) { continue }
+            }
+            if ($tool -ceq 'claude' -and $null -eq $traw) {
                 $ms = $FilesTsRx.Matches($l)
                 $x = ''; if ($ms.Count -gt 0) { $x = $ms[$ms.Count - 1].Value; $x = $x.Substring(13, $x.Length - 14) }
                 if ($x) { $t = (($x -creplace '[^0-9]', '') + $FilesZero).Substring(0, 17) } elseif (-not $t) { $t = $FilesZero }
@@ -2690,8 +2784,16 @@ function Files-Scan([string]$tool, [string]$f, [int]$fi, $Keys, $Vals) { # the r
                 }
             } elseif ($tool -ceq 'codex') {
                 $t = $FilesZero
-                $i = $l.IndexOf('"changes":', $Ord)
-                if (($l.Contains('"type":"FileChange"') -or $l.Contains('"type":"patch_apply_')) -and $i -ge 0) {
+                $i = $l.IndexOf('"changes":', $Ord); $u = -1; $j = -1
+                if ($l.Contains('"type":"event_msg"')) { $u = $l.IndexOf('"payload":{"type":"user_message"', $Ord) }
+                if ($u -lt 0 -and $l.Contains('"type":"item_completed"')) { $j = $l.IndexOf('"item":{"type":"UserMessage"', $Ord) }
+                if ($u -ge 0) {
+                    $s = $l.Substring($u + 10); $k = Ctx-Strv $s 'kind'; if ($k -and $k -cne 'plain') { continue }
+                    $traw = Ctx-Strv $s 'message'; $tat = Files-FirstTs $l
+                } elseif ($j -ge 0) {
+                    $s = $l.Substring($j); $k = $s.IndexOf('"content":[', $Ord); if ($k -lt 0) { continue }
+                    $traw = Files-FirstText $s.Substring($k + 11); $tat = Files-FirstTs $l
+                } elseif (($l.Contains('"type":"FileChange"') -or $l.Contains('"type":"patch_apply_')) -and $i -ge 0) {
                     $s = $l.Substring($i + 10)
                     foreach ($m in $FilesChangeRx.Matches($s)) {
                         $v = $m.Value; $add.Add(@($(if ($m.Groups[1].Value -ceq 'add') { 'write' } else { 'edit' }), (Ctx-Unesc $v.Substring(1, $v.IndexOf('":{', $Ord) - 1))))
@@ -2706,9 +2808,11 @@ function Files-Scan([string]$tool, [string]$f, [int]$fi, $Keys, $Vals) { # the r
                         $add.Add(@($(if ($m.Groups[1].Value -ceq 'Add File') { 'write' } else { 'edit' }), (Files-Ptxt $l.Substring($pos) $lv)))
                     }
                 }
-            } else {
-                $t = $FilesZero
-                if (-not $l.Contains('"role":"assistant"') -or -not $l.Contains('{"type":"toolCall"')) { continue }
+            } elseif ($tool -ceq 'omp') {
+                $t = $FilesZero; $k = -1
+                if ($l.Contains('"type":"message"')) { $k = $l.IndexOf('"message":{"role":"user","content":', $Ord) }
+                if ($k -ge 0) { $traw = Files-MsgText $l.Substring($k + 35); $tat = Files-FirstTs $l }
+                elseif (-not $l.Contains('"role":"assistant"') -or -not $l.Contains('{"type":"toolCall"')) { continue }
                 $s = $l; $i = $s.IndexOf('{"type":"toolCall"', $Ord)
                 while ($i -ge 0) {
                     $s = $s.Substring($i + 18); $i = $s.IndexOf('{"type":"toolCall"', $Ord)
@@ -2723,23 +2827,31 @@ function Files-Scan([string]$tool, [string]$f, [int]$fi, $Keys, $Vals) { # the r
                     while (($m = $FilesHashRx.Match($x, $q)).Success) { $add.Add(@('edit', (Ctx-Unesc $m.Groups[1].Value))); $q = $m.Index + $m.Length - 2 }
                 }
             }
+            if ($null -ne $traw) {   # a turn starts (Codex: a version that writes both a user_message event and a UserMessage item: one turn)
+                if ($tool -ceq 'codex' -and $traw -ceq $last -and -not $touched) { continue }
+                $x = Files-Text $traw; if ($x -ceq '' -or $x -ceq $FilesNoTurn) { continue }
+                $r++; $tn++; $Keys.Add($t + '000000' + $r.ToString('D10', $Inv)); $Vals.Add(@('turn', '', [string]$tn, (Files-TsNorm $tat), $x))
+                $last = $traw; $touched = $false; continue
+            }
+            $tu = if ($main) { [string]$tn } else { '-' }
             foreach ($e in $add) {
                 if (-not $e[1] -or ($tool -ceq 'omp' -and $FilesUriRx.IsMatch($e[1]))) { continue }
-                $r++; $Keys.Add($t + $fi.ToString('D6', $Inv) + $r.ToString('D10', $Inv)); $Vals.Add($e)
+                $r++; $Keys.Add($t + $fi.ToString('D6', $Inv) + $r.ToString('D10', $Inv)); $Vals.Add(@($e[0], $e[1], $tu)); $touched = $true
             }
         }
     } finally { $o[0].Dispose() }
 }
-function Files-Rows([string]$tool, [string]$log) { # @(tag, path) of every file the log (and, Claude, its sub-agents) shows, oldest first
+function Files-Rows([string]$tool, [string]$log) { # @(tag, path, turn) of every file the log (and, Claude, its sub-agents) shows, and the turns' starts, oldest first
     if (@('claude', 'codex', 'omp') -cnotcontains $tool -or -not $log -or -not (Test-Path -LiteralPath $log -PathType Leaf)) { return , @() }
-    $fs = @($log)
+    $fs = @($log); $mf = $log
     if ($tool -ceq 'claude') {   # the oldest file first (as ls -tr)
         $sd = Join-Path $log.Substring(0, $log.Length - 6) 'subagents'
+        $mf = (Get-Item -LiteralPath $log).FullName
         $all = @(Get-Item -LiteralPath $log) + @(Get-ChildItem -LiteralPath $sd -Filter '*.jsonl' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name.EndsWith('.jsonl', $Ord) })
         $fs = @($all | Sort-Object @{ Expression = { $_.LastWriteTimeUtc }; Ascending = $true }, @{ Expression = { $_.FullName }; Descending = $true } | ForEach-Object { $_.FullName })
     }
     $K = New-List; $V = New-Object 'System.Collections.Generic.List[object]'; $fi = 0
-    foreach ($f in $fs) { if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }; $fi++; Files-Scan $tool $f $fi $K $V }
+    foreach ($f in $fs) { if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }; $fi++; Files-Scan $tool $f $fi ($f -ceq $mf) $K $V }
     $ka = $K.ToArray(); $ix = New-Object 'int[]' $ka.Length; for ($i = 0; $i -lt $ix.Length; $i++) { $ix[$i] = $i }
     [Array]::Sort($ka, $ix, [StringComparer]::Ordinal)   # (an index: PowerShell may hand Sort a copy of an object[])
     $out = New-Object 'System.Collections.Generic.List[object]'; foreach ($i in $ix) { $out.Add($V[$i]) }
@@ -2780,12 +2892,37 @@ function Files-Pick($rows, $gits, [string]$dir) { # newest first, one per path (
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $out = New-Object 'System.Collections.Generic.List[object]'
     $all = New-Object 'System.Collections.Generic.List[object]'
-    for ($i = $rows.Count - 1; $i -ge 0; $i--) { $all.Add($rows[$i]) }
+    for ($i = $rows.Count - 1; $i -ge 0; $i--) { if ($rows[$i][0] -cne 'turn') { $all.Add($rows[$i]) } }
     foreach ($p in $gits) { $all.Add(@('git', $p)) }
     foreach ($e in $all) {
         $p = Files-Abs $e[1] $dir; if (-not $p) { continue }
         $k = if ($p -cmatch '^[A-Za-z]:/' -or $p.StartsWith('//', $Ord)) { $p.ToLowerInvariant() } else { $p }
         if ($seen.Add($k)) { $out.Add(@($e[0], $p)) }
+    }
+    , $out
+}
+function Files-Turns($rows, [string]$dir) { # the turns, newest first (n 0, the files before the first one seen, last): @(n, at, text, files
+    # @(tag, path) newest first, one per path); a sub-agent's touch: in the turn that started last before it (the rows are in time order)
+    $cur = 0; $top = 0; $at = @{}; $tx = @{}; $tu = New-Object 'int[]' $rows.Count
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $e = $rows[$i]
+        if ($e[0] -ceq 'turn') { $cur = [int]$e[2]; if ($cur -gt $top) { $top = $cur }; $at[$cur] = $e[3]; $tx[$cur] = $e[4]; continue }
+        $tu[$i] = if ($e[2] -ceq '-') { $cur } else { [int]$e[2] }
+    }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal); $lists = @{}
+    for ($i = $rows.Count - 1; $i -ge 0; $i--) {
+        $e = $rows[$i]; if ($e[0] -ceq 'turn') { continue }
+        $p = Files-Abs $e[1] $dir; if (-not $p) { continue }
+        $k = if ($p -cmatch '^[A-Za-z]:/' -or $p.StartsWith('//', $Ord)) { $p.ToLowerInvariant() } else { $p }
+        if (-not $seen.Add([string]$tu[$i] + "`t" + $k)) { continue }
+        if (-not $lists.ContainsKey($tu[$i])) { $lists[$tu[$i]] = New-Object 'System.Collections.Generic.List[object]' }
+        $lists[$tu[$i]].Add(@($e[0], $p))
+    }
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    for ($u = $top; $u -ge 0; $u--) {
+        if (-not $lists.ContainsKey($u)) { continue }
+        $a = ''; $x = ''; if ($u -gt 0) { $a = $at[$u]; $x = $tx[$u] }
+        $out.Add(@($u, $a, $x, $lists[$u]))
     }
     , $out
 }
@@ -2810,16 +2947,28 @@ function Cmd-Files($rest) { # kit files --pid PID [--tool claude|codex|omp] [--d
     elseif (-not $tool) { $note = '看不出是哪種 agent（用 --tool claude|codex|omp 指定）' }
     else { $note = "不認得這種 agent：${tool}（只認得 claude、codex、omp）" }
     $gits = if ($git) { Files-Git $dir } else { @() }
-    $items = New-List; $human = New-List; $n = 0
-    foreach ($e in (Files-Pick (Files-Rows $tool $log) $gits $dir)) {
+    $items = New-List; $human = New-List; $n = 0; $rows = Files-Rows $tool $log
+    foreach ($e in (Files-Pick $rows $gits $dir)) {
         $tag = $e[0]; $p = $e[1]
         if ([IO.File]::Exists($p)) { $ex = 'true' } elseif ($tag -ceq 'read' -or $tag -ceq 'git') { continue } else { $ex = 'false' }
         $n++; if ($n -gt $FilesMax) { break }
         $items.Add('{"path": ' + (Json-S $p) + ', "tag": "' + $tag + '", "exists": ' + $ex + '}')
         $human.Add("$p  $tag" + $(if ($ex -ceq 'false') { '（已經不在）' } else { '' }))
     }
+    $turns = New-List
+    foreach ($u in (Files-Turns $rows $dir)) {
+        if ($turns.Count -ge $TurnsMax) { break }
+        $fl = New-List
+        foreach ($e in $u[3]) {
+            if ($fl.Count -ge $TurnFiles) { break }
+            $tag = $e[0]; $p = $e[1]
+            if ([IO.File]::Exists($p)) { $ex = 'true' } elseif ($tag -ceq 'read') { continue } else { $ex = 'false' }
+            $fl.Add('{"path": ' + (Json-S $p) + ', "tag": "' + $tag + '", "exists": ' + $ex + '}')
+        }
+        if ($fl.Count -gt 0) { $turns.Add('{"n": ' + $u[0] + ', "at": "' + $u[1] + '", "text": "' + $u[2] + '", "files": [' + ($fl -join ', ') + ']}') }
+    }
     if ($json) {
-        $j = '{"tool": ' + (Json-S $tool) + ', "log": ' + (Json-S $log) + ', "dir": ' + (Json-S $dir) + ', "files": [' + ($items -join ', ') + ']'
+        $j = '{"tool": ' + (Json-S $tool) + ', "log": ' + (Json-S $log) + ', "dir": ' + (Json-S $dir) + ', "files": [' + ($items -join ', ') + '], "turns": [' + ($turns -join ', ') + ']'
         if ($note) { $j += ', "note": ' + (Json-S $note) }
         Out-Json ($j + '}')
     } else {
@@ -4543,7 +4692,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
-  kit api                           給程式讀的介面版本（major.minor，例如 1.1）：給畫面程式確認看得懂 kit 的輸出。
+  kit api                           給程式讀的介面版本（major.minor，例如 1.2）：給畫面程式確認看得懂 kit 的輸出。
                                     不相容的改變 major 加一；新增欄位或指令 minor 加一（清單看 README 的「給程式讀的介面」）
 '@
 }

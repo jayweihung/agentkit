@@ -1335,21 +1335,22 @@ printf '{"pid":%s,"sessionId":"%s","cwd":"%s"}\n' "$$" "$SID8" "$PF" > "$H8/.cla
 # a sub-agent read b.txt at 02:00: after the edit at 01:00, before the writes at 03:00
 printf '{"parentUuid":null,"isSidechain":true,"agentId":"x","message":{"content":[{"type":"tool_use","id":"s1","name":"Read","input":{"file_path":"%s/b.txt"}}]},"type":"assistant","uuid":"s1","timestamp":"2026-11-13T02:00:00.000Z"}\n' "$PF" > "$PD8/$SID8/subagents/agent-x.jsonl"
 FL="{\"path\": \"$PF/made.txt\", \"tag\": \"write\", \"exists\": false}, {\"path\": \"$PF/sub/c.txt\", \"tag\": \"write\", \"exists\": true}, {\"path\": \"$PF/b.txt\", \"tag\": \"read\", \"exists\": true}, {\"path\": \"$PF/nb.ipynb\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/a.txt\", \"tag\": \"read\", \"exists\": true}"
+T0="\"turns\": [{\"n\": 0, \"at\": \"\", \"text\": \"\", \"files\": [$FL]}]"
 out=$(KF --pid $$ --tool claude --dir "$PF" --json); rc=$?
-check "files (claude): newest first, one per path, its sub-agent's merged by time; a relative path under the folder; Read/Edit/NotebookEdit/Write" '[ $rc -eq 0 ] && [ "$out" = "{\"tool\": \"claude\", \"log\": \"$TS8\", \"dir\": \"$PF\", \"files\": [$FL]}" ]'
+check "files (claude): newest first, one per path, its sub-agent's merged by time; a relative path under the folder; Read/Edit/NotebookEdit/Write" '[ $rc -eq 0 ] && [ "$out" = "{\"tool\": \"claude\", \"log\": \"$TS8\", \"dir\": \"$PF\", \"files\": [$FL], $T0}" ]'
 check "files (claude): api-request records skipped, a read that is gone dropped, a write that is gone kept, no content shown" '! echo "$out" | grep -q -e api.txt -e gone.txt -e SECRET -e evil'
 out=$(kit files --pid $$ --tool claude --dir "$PF" 2>&1)
 check "files: without --json a plain list (path, tag)" '[ "$(echo "$out" | head -n 1)" = "$PF/made.txt  write（已經不在）" ] && [ "$(echo "$out" | sed -n 5p)" = "$PF/a.txt  read" ]'
 # --git: what git status shows too (after the log's, not already listed, only files that are there; a rename: its new name)
 ( cd "$PF" && git init -q && git add -A && git -c user.name=a -c user.email=a@a commit -qm x && git mv r1.txt r2.txt && rm d.txt && echo y >> b.txt && echo n > g.txt )
 out=$(KF --pid 1 --tool codex --dir "$PF/sub" --git --json)
-check "files --git: git status's files (paths from the repo's top, not the folder), a rename's new name, nothing gone; no log: a note" '[ "$out" = "{\"tool\": \"codex\", \"log\": \"\", \"dir\": \"$PF/sub\", \"files\": [{\"path\": \"$PF/b.txt\", \"tag\": \"git\", \"exists\": true}, {\"path\": \"$PF/r2.txt\", \"tag\": \"git\", \"exists\": true}, {\"path\": \"$PF/g.txt\", \"tag\": \"git\", \"exists\": true}], \"note\": \"找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）\"}" ]'
+check "files --git: git status's files (paths from the repo's top, not the folder), a rename's new name, nothing gone; no log: a note" '[ "$out" = "{\"tool\": \"codex\", \"log\": \"\", \"dir\": \"$PF/sub\", \"files\": [{\"path\": \"$PF/b.txt\", \"tag\": \"git\", \"exists\": true}, {\"path\": \"$PF/r2.txt\", \"tag\": \"git\", \"exists\": true}, {\"path\": \"$PF/g.txt\", \"tag\": \"git\", \"exists\": true}], \"turns\": [], \"note\": \"找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）\"}" ]'
 out=$(KF --pid $$ --tool claude --dir "$PF" --git --json)
-check "files --git: listed by the log first" '[ "$out" = "{\"tool\": \"claude\", \"log\": \"$TS8\", \"dir\": \"$PF\", \"files\": [$FL, {\"path\": \"$PF/r2.txt\", \"tag\": \"git\", \"exists\": true}, {\"path\": \"$PF/g.txt\", \"tag\": \"git\", \"exists\": true}]}" ]'
+check "files --git: listed by the log first" '[ "$out" = "{\"tool\": \"claude\", \"log\": \"$TS8\", \"dir\": \"$PF\", \"files\": [$FL, {\"path\": \"$PF/r2.txt\", \"tag\": \"git\", \"exists\": true}, {\"path\": \"$PF/g.txt\", \"tag\": \"git\", \"exists\": true}], $T0}" ]'
 out=$(KF --pid 1 --tool claude --dir "$T" --git --json)
-check "files --git: not a git repo -> nothing added; no log -> [] and a note (not an error)" '[ "$out" = "{\"tool\": \"claude\", \"log\": \"\", \"dir\": \"$T\", \"files\": [], \"note\": \"找不到這個 Claude 的對話紀錄（~/.claude/projects）\"}" ]'
+check "files --git: not a git repo -> nothing added; no log -> [] and a note (not an error)" '[ "$out" = "{\"tool\": \"claude\", \"log\": \"\", \"dir\": \"$T\", \"files\": [], \"turns\": [], \"note\": \"找不到這個 Claude 的對話紀錄（~/.claude/projects）\"}" ]'
 out=$(KF --pid 1 --tool vim --dir "$PF" --json); out2=$(KF --pid 1 --dir "$PF" --json)
-check "files: an agent kit does not know -> a note" '[ "$out" = "{\"tool\": \"vim\", \"log\": \"\", \"dir\": \"$PF\", \"files\": [], \"note\": \"不認得這種 agent：vim（只認得 claude、codex、omp）\"}" ] && echo "$out2" | grep -qF "\"files\": [], \"note\": \"看不出是哪種 agent"'
+check "files: an agent kit does not know -> a note" '[ "$out" = "{\"tool\": \"vim\", \"log\": \"\", \"dir\": \"$PF\", \"files\": [], \"turns\": [], \"note\": \"不認得這種 agent：vim（只認得 claude、codex、omp）\"}" ] && echo "$out2" | grep -qF "\"files\": [], \"turns\": [], \"note\": \"看不出是哪種 agent"'
 out=$(kit files --json 2>"$T/err8"); rc=$?; out2=$(kit files --pid 2>/dev/null); rc2=$?; out3=$(kit files --pid 1 --what --json 2>/dev/null); rc3=$?
 check "files: wrong arguments -> exit 1, error usage on stdout with --json, the words on stderr" '[ $rc -eq 1 ] && [ "$out" = "{\"error\": {\"code\": \"usage\", \"message\": \"用法：kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]\"}}" ] && grep -qF "用法：kit files" "$T/err8" && [ $rc2 -eq 1 ] && [ -z "$out2" ] && [ $rc3 -eq 1 ] && echo "$out3" | grep -qF "\"code\": \"usage\""'
 # Codex: what its patches changed (FileChange items, patch_apply events, apply_patch text in its tool calls)
@@ -1363,10 +1364,10 @@ mkdir -p "$H8/.codex/sessions/2026/11/13"; RO8="$H8/.codex/sessions/2026/11/13/r
     printf '{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"c4","changes":{"%s/d.txt":{"delete":{"content":"SECRET"}}}}}\n' "$PF"
 } > "$RO8"
 out=$(KF --pid 1 --tool codex --dir "$PF" --json)
-check "files (codex): what its patches changed (added: write), relative paths under the folder, renamed, deleted; no reads, no content" '[ "$out" = "{\"tool\": \"codex\", \"log\": \"$RO8\", \"dir\": \"$PF\", \"files\": [{\"path\": \"$PF/d.txt\", \"tag\": \"edit\", \"exists\": false}, {\"path\": \"$PF/g.txt\", \"tag\": \"write\", \"exists\": true}, {\"path\": \"$PF/nb.ipynb\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/sub/c2.txt\", \"tag\": \"edit\", \"exists\": false}, {\"path\": \"$PF/sub/c.txt\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/new.txt\", \"tag\": \"write\", \"exists\": false}, {\"path\": \"$PF/a.txt\", \"tag\": \"edit\", \"exists\": true}]}" ]'
+check "files (codex): what its patches changed (added: write), relative paths under the folder, renamed, deleted; no reads, no content" '[ "$out" = "{\"tool\": \"codex\", \"log\": \"$RO8\", \"dir\": \"$PF\", \"files\": [{\"path\": \"$PF/d.txt\", \"tag\": \"edit\", \"exists\": false}, {\"path\": \"$PF/g.txt\", \"tag\": \"write\", \"exists\": true}, {\"path\": \"$PF/nb.ipynb\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/sub/c2.txt\", \"tag\": \"edit\", \"exists\": false}, {\"path\": \"$PF/sub/c.txt\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/new.txt\", \"tag\": \"write\", \"exists\": false}, {\"path\": \"$PF/a.txt\", \"tag\": \"edit\", \"exists\": true}], \"turns\": [{\"n\": 0, \"at\": \"\", \"text\": \"\", \"files\": [{\"path\": \"$PF/d.txt\", \"tag\": \"edit\", \"exists\": false}, {\"path\": \"$PF/g.txt\", \"tag\": \"write\", \"exists\": true}, {\"path\": \"$PF/nb.ipynb\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/sub/c2.txt\", \"tag\": \"edit\", \"exists\": false}, {\"path\": \"$PF/sub/c.txt\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/new.txt\", \"tag\": \"write\", \"exists\": false}, {\"path\": \"$PF/a.txt\", \"tag\": \"edit\", \"exists\": true}]}]}" ]'
 n=$(tail -n 1 "$RO8" | wc -c | tr -d " ")
 out=$(KIT_CTX_TAIL=$((n + 5)) KF --pid 1 --tool codex --dir "$PF" --json)
-check "files: only the end of a long log (KIT_CTX_TAIL), its first cut line skipped" '[ "$out" = "{\"tool\": \"codex\", \"log\": \"$RO8\", \"dir\": \"$PF\", \"files\": [{\"path\": \"$PF/d.txt\", \"tag\": \"edit\", \"exists\": false}]}" ]'
+check "files: only the end of a long log (KIT_CTX_TAIL), its first cut line skipped" '[ "$out" = "{\"tool\": \"codex\", \"log\": \"$RO8\", \"dir\": \"$PF\", \"files\": [{\"path\": \"$PF/d.txt\", \"tag\": \"edit\", \"exists\": false}], \"turns\": [{\"n\": 0, \"at\": \"\", \"text\": \"\", \"files\": [{\"path\": \"$PF/d.txt\", \"tag\": \"edit\", \"exists\": false}]}]}" ]'
 # omp: its read / edit / write calls (a read's :LINES off; skill:// is not a file; hashline edits name the file in the input)
 mkdir -p "$H8/.omp/agent/sessions/z"; OS8="$H8/.omp/agent/sessions/z/s8.jsonl"
 {
@@ -1377,23 +1378,105 @@ mkdir -p "$H8/.omp/agent/sessions/z"; OS8="$H8/.omp/agent/sessions/z/s8.jsonl"
     printf '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"7","name":"write","arguments":{"path":"C:\\\\Work\\\\X.txt","content":"x"}},{"type":"toolCall","id":"8","name":"edit","arguments":{"path":"c:/work/x.txt"}}]}}\n'
 } > "$OS8"
 out=$(KF --pid 1 --tool pi --dir "$PF" --json)
-check "files (omp): its read/edit/write calls; a drive-letter path with / and compared ignoring case" '[ "$out" = "{\"tool\": \"omp\", \"log\": \"$OS8\", \"dir\": \"$PF\", \"files\": [{\"path\": \"c:/work/x.txt\", \"tag\": \"edit\", \"exists\": false}, {\"path\": \"$PF/sub/c.txt\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/b.txt\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/sub/w.txt\", \"tag\": \"write\", \"exists\": false}, {\"path\": \"$PF/a.txt\", \"tag\": \"read\", \"exists\": true}]}" ]'
+check "files (omp): its read/edit/write calls; a drive-letter path with / and compared ignoring case" '[ "$out" = "{\"tool\": \"omp\", \"log\": \"$OS8\", \"dir\": \"$PF\", \"files\": [{\"path\": \"c:/work/x.txt\", \"tag\": \"edit\", \"exists\": false}, {\"path\": \"$PF/sub/c.txt\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/b.txt\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/sub/w.txt\", \"tag\": \"write\", \"exists\": false}, {\"path\": \"$PF/a.txt\", \"tag\": \"read\", \"exists\": true}], \"turns\": [{\"n\": 0, \"at\": \"\", \"text\": \"\", \"files\": [{\"path\": \"c:/work/x.txt\", \"tag\": \"edit\", \"exists\": false}, {\"path\": \"$PF/sub/c.txt\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/b.txt\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/sub/w.txt\", \"tag\": \"write\", \"exists\": false}, {\"path\": \"$PF/a.txt\", \"tag\": \"read\", \"exists\": true}]}]}" ]'
 mkdir -p "$PF/many"; { printf '{"type":"session","version":3,"id":"s9","cwd":"%s/many"}\n' "$PF"; i=0; while [ $i -lt 250 ]; do i=$((i + 1)); printf '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"%s","name":"write","arguments":{"path":"f%s.txt"}}]}}\n' $i $i; done; } > "$H8/.omp/agent/sessions/z/s9.jsonl"
 out=$(KF --pid 1 --tool omp --dir "$PF/many" --json)
-check "files: at most 200, the newest" '[ "$(echo "$out" | grep -o "\"tag\"" | wc -l | tr -d " ")" = 200 ] && echo "$out" | grep -qF "\"files\": [{\"path\": \"$PF/many/f250.txt\"" && echo "$out" | grep -qF "f51.txt" && ! echo "$out" | grep -qF "/f50.txt"'
+check "files: at most 200, the newest" '[ "$(echo "${out%%, \"turns\"*}" | grep -o "\"tag\"" | wc -l | tr -d " ")" = 200 ] && echo "$out" | grep -qF "\"files\": [{\"path\": \"$PF/many/f250.txt\"" && echo "$out" | grep -qF "f51.txt" && ! echo "$out" | grep -qF "/f50.txt"'
 mkdir -p "$PF/odd"; printf 'x' > "$PF/odd/q\"u\\o é.txt"
 printf '{"type":"session","version":3,"id":"s10","cwd":"%s/odd"}\n{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"1","name":"edit","arguments":{"path":"q\\"u\\\\o é.txt"}}]}}\n' "$PF" > "$H8/.omp/agent/sessions/z/s10.jsonl"
 out=$(KF --pid 1 --tool omp --dir "$PF/odd" --json)
 check "files: a path with a quote, a backslash, not ASCII: valid JSON, the path as it is" '[ "$(printf "%s" "$out" | python3 -Ic "import json, sys; print(json.load(sys.stdin)[\"files\"][0][\"path\"])")" = "$PF/odd/q\"u\\o é.txt" ]'
+# turns: what was touched after each message the person sent (Claude: the main transcript's; its sub-agents' by time)
+PT="$PF/turns"; mkdir -p "$PT"; for f in a b c d e f g old; do echo x > "$PT/$f.txt"; done
+SID9=0a1b2c3d-9999-4444-3333-444455556666; PD9="$H8/.claude/projects/$(printf '%s' "$PT" | sed 's|[^A-Za-z0-9]|-|g')"; TS9="$PD9/$SID9.jsonl"
+mkdir -p "$PD9/$SID9/subagents"; printf '{"pid":4242,"sessionId":"%s","cwd":"%s"}\n' "$SID9" "$PT" > "$H8/.claude/sessions/4242.json"
+cu() { printf '{"parentUuid":"p","isSidechain":false,"promptId":"i","type":"user","message":{"role":"user","content":%s},"uuid":"u","timestamp":"2026-11-13T%s"%s}\n' "$1" "$2" "${3:-}"; }
+ca() { printf '{"parentUuid":"p","isSidechain":false,"message":{"content":[%s]},"type":"assistant","uuid":"u","timestamp":"2026-11-13T%s"}\n' "$1" "$2"; }
+tu() { printf '{"type":"tool_use","id":"x","name":"%s","input":{"file_path":"%s/%s"}}' "$1" "$PT" "$2"; }
+{
+    ca "$(tu Read old.txt)" 00:30:00.000Z
+    cu '"<system-reminder>\nSECRET\n</system-reminder>\n  第一個  問題\n\n請看 \"q\" 和 \\ 這個"' 01:00:00.500Z
+    ca "$(tu Read a.txt),$(tu Edit b.txt)" 01:00:05.000Z
+    cu '[{"tool_use_id":"x","type":"tool_result","content":[{"type":"text","text":"SECRET"}]}]' 01:00:06.000Z
+    cu '"SECRET meta"' 01:20:00.000Z ',"isMeta":true'
+    cu '"<command-name>/model</command-name>\n<command-message>model</command-message>"' 01:25:00.000Z
+    cu '[{"type":"text","text":"[Request interrupted by user]"}]' 01:26:00.000Z
+    cu '"<local-command-stdout>SECRET</local-command-stdout>"' 01:27:00.000Z
+    ca "$(tu Write c.txt)" 01:30:00.000Z
+    cu '[{"type":"image","source":{"type":"base64","data":"AAAA"}},{"type":"text","text":"<hc from=\"home/t1p\">一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十</hc>"}]' 02:00:00.000+08:00
+    ca "$(tu Edit a.txt),$(tu Write gone.txt),$(tu Read gone2.txt)" 02:00:10.000Z
+    cu '"x"' 03:00:00.000Z
+    cu '[{"type":"image","source":{"type":"base64","data":"AAAA"}}]' 03:30:00.000Z
+    cu '"SECRET summary"' 03:40:00.000Z ',"isCompactSummary":true'
+    cu '"<task-notification>\n<task-id>1</task-id>SECRET</task-notification>"' 03:50:00.000Z
+    cu '"line1\u0007\n\n\tline2\b   end 第一第二第三第四第五第六第七第八第九第十"' 04:00:00.000Z
+    ca "$(tu Read d.txt)" 04:00:30.000Z
+} > "$TS9"
+{   # a sub-agent: its own prompt is not a turn; its reads go to the main turn that started last at or before them
+    printf '{"isSidechain":true,"agentId":"y","type":"user","message":{"role":"user","content":"sub prompt"},"timestamp":"2026-11-13T01:10:00.000Z"}\n'
+    printf '{"isSidechain":true,"agentId":"y","message":{"content":[%s]},"type":"assistant","timestamp":"2026-11-13T01:10:00.000Z"}\n' "$(tu Read e.txt)"
+    printf '{"isSidechain":true,"agentId":"y","message":{"content":[%s]},"type":"assistant","timestamp":"2026-11-13T02:30:00.000Z"}\n' "$(tu Read g.txt)"
+    printf '{"isSidechain":true,"agentId":"y","message":{"content":[%s]},"type":"assistant","timestamp":"2026-11-13T04:00:00.000Z"}\n' "$(tu Read f.txt)"
+} > "$PD9/$SID9/subagents/agent-y.jsonl"
+fe() { printf '{"path": "%s/%s", "tag": "%s", "exists": %s}' "$PT" "$1" "$2" "${3:-true}"; }
+TT4="{\"n\": 4, \"at\": \"2026-11-13T04:00:00Z\", \"text\": \"line1 line2 end 第一第二第三第四第五第六第七…\", \"files\": [$(fe d.txt read), $(fe f.txt read)]}"
+TT2="{\"n\": 2, \"at\": \"2026-11-12T18:00:00Z\", \"text\": \"hc home/t1p：一二三四五六七八九十一二三四五六七八…\", \"files\": [$(fe g.txt read), $(fe gone.txt write false), $(fe a.txt edit)]}"
+TT1="{\"n\": 1, \"at\": \"2026-11-13T01:00:00Z\", \"text\": \"第一個 問題 請看 \\\"q\\\" 和 \\\\ 這個\", \"files\": [$(fe c.txt write), $(fe e.txt read), $(fe b.txt edit), $(fe a.txt read)]}"
+TT0="{\"n\": 0, \"at\": \"\", \"text\": \"\", \"files\": [$(fe old.txt read)]}"
+out=$(KF --pid 4242 --tool claude --dir "$PT" --json)
+check "files turns (claude): newest first, n 0 (before the first message read) last; a file in two turns in both; a turn without files left out" '[ "${out#*\"turns\": }" = "[$TT4, $TT2, $TT1, $TT0]}" ]'
+check "files turns (claude): tool results, isMeta, isCompactSummary, commands, interrupts, task notifications, images alone, a sub-agent's prompt: not turns" '! echo "$out" | grep -q -e SECRET -e "\"n\": 5" -e "sub prompt" -e "model" -e "Request"'
+check "files turns: text: system-reminder skipped, white space one space, control characters out, <hc from> -> hc X：, 30 characters (+ …), valid JSON" '[ "$(printf "%s" "$out" | python3 -Ic "import json, sys; print(\"|\".join(t[\"text\"] for t in json.load(sys.stdin)[\"turns\"]))")" = "line1 line2 end 第一第二第三第四第五第六第七…|hc home/t1p：一二三四五六七八九十一二三四五六七八…|第一個 問題 請看 \"q\" 和 \\ 這個|" ]'
+n9=$(tail -n 7 "$TS9" | wc -c | tr -d " ")
+out=$(KIT_CTX_TAIL=$((n9 + 5)) KF --pid 4242 --tool claude --dir "$PT" --json)
+check "files turns: only the end of the log read: n counted from the first message read, what came before it n 0" '[ "${out#*\"turns\": }" = "[${TT4/\"n\": 4/\"n\": 2}, {\"n\": 0, \"at\": \"\", \"text\": \"\", \"files\": [$(fe g.txt read), $(fe gone.txt write false), $(fe a.txt edit), $(fe e.txt read)]}]}" ]'
+# Codex: user_message events and UserMessage items (one turn when a version writes both); omp: its user messages
+mkdir -p "$PF/cx"; RO9="$H8/.codex/sessions/2026/11/13/rollout-2026-11-13T05-00-00-c9.jsonl"
+{
+    printf '{"timestamp":"2026-11-13T05:00:00.000Z","type":"session_meta","payload":{"id":"c9","cwd":"%s/cx"}}\n' "$PF"
+    printf '{"timestamp":"2026-11-13T05:00:00.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md SECRET"}]}}\n'
+    printf '{"timestamp":"2026-11-13T05:00:00.200Z","type":"event_msg","payload":{"type":"user_message","message":"<environment_context>SECRET</environment_context>","kind":"environment_context"}}\n'
+    printf '{"timestamp":"2026-11-13T05:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"fix it","images":[]}}\n'
+    printf '{"timestamp":"2026-11-13T05:00:01.001Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"t","turn_id":"u","item":{"type":"UserMessage","id":"m","content":[{"type":"text","text":"fix it","text_elements":[]}]}}}\n'
+    printf '{"timestamp":"2026-11-13T05:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\\n*** Update File: a.txt\\n+x\\n*** End Patch\\n","call_id":"c1"}}\n'
+    printf '{"timestamp":"2026-11-13T05:10:00.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"t","turn_id":"v","item":{"type":"UserMessage","id":"n","content":[{"type":"text","text":"再來\\n一個","text_elements":[]}]}}}\n'
+    printf '{"timestamp":"2026-11-13T05:10:01.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","id":"e","changes":{"%s/cx/g.txt":{"type":"add","content":"SECRET"}},"status":"completed"}}}\n' "$PF"
+} > "$RO9"
+out=$(KF --pid 1 --tool codex --dir "$PF/cx" --json)
+check "files turns (codex): user_message events and UserMessage items, the same message written both ways one turn; not its instructions or environment" '[ "${out#*\"turns\": }" = "[{\"n\": 2, \"at\": \"2026-11-13T05:10:00Z\", \"text\": \"再來 一個\", \"files\": [{\"path\": \"$PF/cx/g.txt\", \"tag\": \"write\", \"exists\": false}]}, {\"n\": 1, \"at\": \"2026-11-13T05:00:01Z\", \"text\": \"fix it\", \"files\": [{\"path\": \"$PF/cx/a.txt\", \"tag\": \"edit\", \"exists\": false}]}]}" ]'
+mkdir -p "$PF/om"; OS9="$H8/.omp/agent/sessions/z/s11.jsonl"
+{
+    printf '{"type":"session","version":3,"id":"s11","timestamp":"2026-11-13T06:00:00.000Z","cwd":"%s/om"}\n' "$PF"
+    printf '{"type":"message","id":"1","parentId":null,"timestamp":"2026-11-13T06:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"看 a"}],"attribution":"user","timestamp":1}}\n'
+    printf '{"type":"message","id":"2","parentId":"1","timestamp":"2026-11-13T06:00:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"1","name":"read","arguments":{"path":"a.txt"}},{"type":"toolCall","id":"2","name":"write","arguments":{"path":"w.txt"}}]}}\n'
+    printf '{"type":"message","id":"3","parentId":"2","timestamp":"2026-11-13T06:00:03.000Z","message":{"role":"toolResult","toolName":"read","content":[{"type":"text","text":"SECRET"}]}}\n'
+    printf '{"type":"message","id":"4","parentId":"3","timestamp":"2026-11-13T06:05:00.000Z","message":{"role":"user","content":"<hc from=\\"pc\\">ok</hc>","attribution":"user","timestamp":2}}\n'
+    printf '{"type":"message","id":"5","parentId":"4","timestamp":"2026-11-13T06:05:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"3","name":"edit","arguments":{"path":"w.txt"}}]}}\n'
+} > "$OS9"
+out=$(KF --pid 1 --tool omp --dir "$PF/om" --json)
+check "files turns (omp): its user messages (text items or a string)" '[ "${out#*\"turns\": }" = "[{\"n\": 2, \"at\": \"2026-11-13T06:05:00Z\", \"text\": \"hc pc：ok\", \"files\": [{\"path\": \"$PF/om/w.txt\", \"tag\": \"edit\", \"exists\": false}]}, {\"n\": 1, \"at\": \"2026-11-13T06:00:01Z\", \"text\": \"看 a\", \"files\": [{\"path\": \"$PF/om/w.txt\", \"tag\": \"write\", \"exists\": false}]}]}" ]'
+mkdir -p "$PF/mt"; OS10="$H8/.omp/agent/sessions/z/s12.jsonl"
+{
+    printf '{"type":"session","version":3,"id":"s12","cwd":"%s/mt"}\n' "$PF"
+    i=0; while [ $i -lt 36 ]; do i=$((i + 1))
+        printf '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"m%s"}]}}\n{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"1","name":"write","arguments":{"path":"f%s.txt"}}]}}\n' $i $i
+    done
+    i=0; while [ $i -lt 55 ]; do i=$((i + 1)); printf '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"1","name":"edit","arguments":{"path":"w%s.txt"}}]}}\n' $i; done
+} > "$OS10"
+out=$(KF --pid 1 --tool omp --dir "$PF/mt" --json)
+check "files turns: at most 30 turns (the newest), 50 files each (the newest); no time in the log: at \"\"" '[ "$(printf "%s" "$out" | python3 -Ic "import json, sys; t = json.load(sys.stdin)[\"turns\"]; print(len(t), t[0][\"n\"], t[-1][\"n\"], len(t[0][\"files\"]), t[0][\"files\"][0][\"path\"].rsplit(\"/\", 1)[1], t[0][\"files\"][-1][\"path\"].rsplit(\"/\", 1)[1], t[0][\"at\"] == \"\", t[1][\"text\"])")" = "30 36 7 50 w55.txt w6.txt True m35" ]'
 if [ -n "$PWSH" ]; then
     same=1
-    for a in "--pid $$ --tool claude --dir $PF --json" "--pid $$ --tool claude --dir $PF --git --json" "--pid $$ --tool claude --dir $PF" "--pid 1 --tool codex --dir $PF --json" "--pid 1 --tool omp --dir $PF --json" "--pid 1 --tool omp --dir $PF/many --json" "--pid 1 --tool vim --dir $PF --json" "--pid 1 --dir $T --git --json" "--pid 1 --tool codex --dir $PF/sub --git --json" "--pid 1 --tool omp --dir $PF/odd --json" "--json"; do
+    for a in "--pid $$ --tool claude --dir $PF --json" "--pid $$ --tool claude --dir $PF --git --json" "--pid $$ --tool claude --dir $PF" "--pid 1 --tool codex --dir $PF --json" "--pid 1 --tool omp --dir $PF --json" "--pid 1 --tool omp --dir $PF/many --json" "--pid 1 --tool vim --dir $PF --json" "--pid 1 --dir $T --git --json" "--pid 1 --tool codex --dir $PF/sub --git --json" "--pid 1 --tool omp --dir $PF/odd --json" "--json" \
+        "--pid 4242 --tool claude --dir $PT --json" "--pid 1 --tool codex --dir $PF/cx --json" "--pid 1 --tool omp --dir $PF/om --json" "--pid 1 --tool omp --dir $PF/mt --json"; do
         x=$(kit files $a 2>&1; echo "rc=$?"); y=$(kps files $a 2>&1; echo "rc=$?")
         [ "$x" = "$y" ] || { same=0; echo "  differs: $a"; printf '%s\n' "$x" | tr ',' '\n' > "$T/dx"; printf '%s\n' "$y" | tr ',' '\n' > "$T/dy"; diff "$T/dx" "$T/dy" | head -n 6; }
     done
     x=$(KIT_CTX_TAIL=$((n + 5)) kit files --pid 1 --tool codex --dir "$PF" --json 2>&1); y=$(KIT_CTX_TAIL=$((n + 5)) kps files --pid 1 --tool codex --dir "$PF" --json 2>&1)
     [ "$x" = "$y" ] || { same=0; echo "  differs: KIT_CTX_TAIL"; }
-    check "files: kit.ps1 says the same (Claude, --git, Codex, omp, the end of a log, unknown, no log, usage)" '[ $same = 1 ]'
+    x=$(KIT_CTX_TAIL=$((n9 + 5)) kit files --pid 4242 --tool claude --dir "$PT" --json 2>&1); y=$(KIT_CTX_TAIL=$((n9 + 5)) kps files --pid 4242 --tool claude --dir "$PT" --json 2>&1)
+    [ "$x" = "$y" ] || { same=0; echo "  differs: KIT_CTX_TAIL (turns)"; }
+    check "files: kit.ps1 says the same (Claude, --git, Codex, omp, the end of a log, unknown, no log, usage, turns)" '[ $same = 1 ]'
 fi
 echo "$pass $fail" > "$T/sub"
 )
@@ -1546,10 +1629,10 @@ check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/age
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.1)" '[ $rc -eq 0 ] && [ "$out" = 1.1 ]'
+check "api: one line, major.minor (1.2)" '[ $rc -eq 0 ] && [ "$out" = 1.2 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.1 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.2 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?

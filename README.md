@@ -179,7 +179,8 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 給畫面程式做「這個 agent 碰過哪些檔案」的清單、點一下用編輯器打開（`--json`）；沒有 `--json` 時印給人看的清單。
 `--pid`、`--tool`、`--dir` 跟 `kit context` 一樣（沒給 `--tool` 就從程式看出來，沒給 `--dir` 就用它現在的資料夾）。
 
-- 從 agent 自己的紀錄檔讀，只拿路徑，不印也不存對話內容或檔案內容。紀錄檔只讀最後 8 MB（`KIT_CTX_TAIL`）。
+- 從 agent 自己的紀錄檔讀，只拿路徑（`--json` 的 `turns` 另外拿你每則訊息開頭最多 30 個字），不印也不存其他對話內容或檔案內容。紀錄檔只讀最後 8 MB（`KIT_CTX_TAIL`）。
+- `--json` 另外照你送出的每一則訊息分組（`turns`：那則訊息之後 agent 碰過的檔案，像 Claude Code 的 `/rewind`），見「給程式讀的介面」。
 - Claude：它的對話紀錄，加上它的 sub-agent 的（`<session>/subagents/*.jsonl`），照紀錄裡的時間排在一起。`Read`、`Edit`／`MultiEdit`／`NotebookEdit`、`Write`。
 - Codex：它的 patch 改了哪些檔案（新增的算 `write`，改、刪、搬的算 `edit`）。Codex 是用 shell 讀檔案的，看不出讀了什麼，所以沒有 `read`。
 - omp：它的 `read`、`edit`、`write` 工具（`read` 的 `:行號` 拿掉；`skill://` 這類不是檔案的不算）。
@@ -193,10 +194,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.1
+    kit api        →  1.2
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.1（1.0 加上 `kit files`：要用它的程式先確認 minor 至少是 1）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.2（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2）。
 
 ### 共同規則
 
@@ -286,19 +287,29 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 一行 JSON，欄位見上面「agent 的 context 用了多少」和「context 細項」。找不到資料不算失敗：`used`、`window`、`pct` 是 `null`（`--detail` 時另外有字串 `error` 寫原因）。參數不對時印給人看的字、exit 不是 0（不是上面的錯誤 JSON）。
 
-### `kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] --json`（1.1 起）
+### `kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] --json`（1.1 起；`turns` 1.2 起）
 
 一行：
 
     {"tool": "claude", "log": "<紀錄檔>", "dir": "<agent 的資料夾>",
      "files": [{"path": "/work/app/src/main.py", "tag": "edit", "exists": true},
-               {"path": "/work/app/README.md", "tag": "read", "exists": true}]}
+               {"path": "/work/app/README.md", "tag": "read", "exists": true}],
+     "turns": [{"n": 12, "at": "2026-11-13T03:41:07Z", "text": "登入頁的錯誤訊息改成中文",
+                "files": [{"path": "/work/app/src/main.py", "tag": "edit", "exists": true}]},
+               {"n": 11, "at": "2026-11-13T03:20:45Z", "text": "先看一下 README",
+                "files": [{"path": "/work/app/README.md", "tag": "read", "exists": true}]}]}
 
 - `tool`：`claude`、`codex`、`omp`（看不出來是 `""`，不認得的照 `--tool` 寫的）。`log`：讀的紀錄檔（Claude：主對話的那個；找不到是 `""`）。`dir`：agent 的資料夾（`--dir`，或它現在的資料夾）。
 - `files`：最新的在前面，同一個路徑只有一個（看最後一次碰它），最多 200 個（含 `--git` 加的）。`path` 是絕對路徑；有磁碟機代號的（Windows）寫成 `C:/x/y`（`/`，代號照紀錄裡的寫法），比對時不分大小寫。
 - `tag`：`read`（讀過）、`edit`（改過；Codex 刪掉、搬走的也算）、`write`（整個寫、新增）、`git`（`--git` 加的，`git status` 有變動）。之後可能加新的 tag（minor 加一）：不認得的當作 `edit`。
 - `exists`：現在是不是一個檔案。不在的只會是 `edit` 或 `write`（讀過但不在的、`git` 的不列）。
-- 找不到紀錄檔（或不認得那種 agent）不算失敗：`files` 是 `[]`（`--git` 的照樣有）、`log` 是 `""`，最後另外有 `"note"`（給人看的原因）。
+- `turns`（1.2 起，在 `files` 後面、`note` 前面）：照人送出的每一則訊息分組（像 Claude Code 的 `/rewind`）：那則訊息之後、下一則之前 agent 碰過的檔案。最新的一則在前面；只列有檔案的，最多 30 則，每則最多 50 個檔案（新的在前，同一個路徑一個，看那一則裡最後一次碰它；`exists` 跟 `files` 一樣，讀過但不在的不列）。`--git` 加的不在這裡（只在 `files`）。
+  - `n`：第幾則，從 kit 讀到的那段紀錄裡最早的一則算 1。紀錄檔只讀了後面（`KIT_CTX_TAIL`）時，讀到的第一則訊息之前碰的檔案自成一組：`n` 是 `0`、`at` 和 `text` 是 `""`，排在最後。
+  - `at`：那則訊息在紀錄裡的時間，換成 UTC 的 `YYYY-MM-DDTHH:MM:SSZ`（沒有小數）；紀錄裡沒有就是 `""`。
+  - `text`：那則訊息的開頭：連在一起的空白（含換行、tab）變成一個空格，控制字元拿掉，頭尾空白去掉，最多 30 個字（字，不是 byte），截掉的話後面加 `…`。開頭的 `<system-reminder>…</system-reminder>` 跳過。`<hc from="X">…</hc>`（用 hc 從別的終端機傳來的）寫成 `hc X：` 再接內容的開頭（`</hc>` 拿掉），整個一樣最多 30 個字。照 JSON 規則跳脫。
+  - 哪些算「人送出的訊息」：Claude：主對話紀錄裡有文字的使用者訊息；工具結果、`isMeta`、`isCompactSummary`（壓縮後的摘要）、斜線指令和它們的輸出（`<command-name>`、`<command-message>`、`<local-command-stdout>`、`<local-command-caveat>`、`Caveat:`）、`[Request interrupted…`、背景工作的通知（`<task-notification>`）、`!` 指令（`<bash-input>` 等）、只有圖片的都不算。sub-agent 自己收到的指示不算；sub-agent 碰的檔案算在「那個時間點（含同一刻）之前最後一則」主對話訊息那組。Codex：`user_message` 事件和 `UserMessage` 項目（同一則兩種都寫的版本算一則；它自己的指示、環境資訊不算）。omp：它的使用者訊息。
+  - `text` 是 kit 第一個從紀錄裡拿出「說了什麼」的欄位：只有每則訊息開頭這最多 30 個字，其他的對話內容還是不拿、不印、不存。
+- 找不到紀錄檔（或不認得那種 agent）不算失敗：`files` 是 `[]`（`--git` 的照樣有）、`turns` 是 `[]`、`log` 是 `""`，最後另外有 `"note"`（給人看的原因）。
 - 參數不對：exit 1，`{"error": {"code": "usage", ...}}`。
 
 ### 動作類指令

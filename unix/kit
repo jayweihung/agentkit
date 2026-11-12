@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.1
+KIT_API=1.2
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -2106,24 +2106,123 @@ ctx_detail() { # ctx_detail PID TOOL DIR FRESH : the detail JSON, kept a minute
 }
 
 # ---------- kit files: the files an agent read or changed ----------
-# One JSON line (kit.ps1 prints the same), from the agent's own log; only paths are taken from it, never what was said:
-#   {"tool", "log", "dir", "files": [{"path", "tag": read|edit|write|git, "exists"}][, "note"]}
+# One JSON line (kit.ps1 prints the same), from the agent's own log; only paths are taken from it, and of what was said
+# only the start of the person's messages (turns' "text", 30 characters at most):
+#   {"tool", "log", "dir", "files": [{"path", "tag": read|edit|write|git, "exists"}],
+#    "turns": [{"n", "at", "text", "files": [{"path", "tag", "exists"}]}][, "note"]}
 # Newest first, one entry per path (its newest touch), at most FILES_MAX; a path that is gone only when it was written
 # or edited. Each log: its last KIT_CTX_TAIL bytes (8 MB).
+# turns: what was touched after each message the person sent, until the next one (the files before the first one seen
+# in what was read: n 0); newest first, only those with files (no git ones), at most TURNS_MAX, TURN_FILES each.
 # Claude: its transcript and its sub-agents' (<session>/subagents/*.jsonl), merged by the records' timestamps (then by
 #   the files' age, oldest first, and line order); Read / Edit, MultiEdit, NotebookEdit / Write. api-request records
-#   repeat old calls: skipped.
+#   repeat old calls: skipped. Turns: the main transcript's user records with a text (not tool results, not isMeta or
+#   isCompactSummary, not commands or what Claude Code wrote itself); a sub-agent's touch goes to the main turn that
+#   started last at or before it.
 # Codex: what its patches changed (FileChange items, patch_apply events, *** Add/Update/Delete File: in its tool calls);
-#   Codex reads files through the shell, so reads are not seen.
-# omp: its read / edit / write tool calls (a read's :LINES taken off; xd://, skill:// ... are not files).
-# The producers print "time TAB file TAB n TAB tag TAB path" (time: 17 digits, path as in the log, escapes undone).
+#   Codex reads files through the shell, so reads are not seen. Turns: user_message events, UserMessage items.
+# omp: its read / edit / write tool calls (a read's :LINES taken off; xd://, skill:// ... are not files). Turns: its
+#   user messages.
+# The producers print "time TAB file TAB n TAB turn TAB tag TAB path" (time: 17 digits, path as in the log, escapes
+# undone; turn: the main log's turn number, - for a sub-agent's) and for a turn's start "time TAB 0 TAB n TAB turn TAB
+# turn TAB at TAB text" (text: JSON-escaped).
 FILES_MAX=200
+TURNS_MAX=30
+TURN_FILES=50
+FILES_AWK='
+function lastts(s,   x) { x = ""; while (match(s, /"timestamp":"[^"]*"/)) { x = substr(s, RSTART + 13, RLENGTH - 14); s = substr(s, RSTART + RLENGTH) }; return x }
+function firstts(s) { return match(s, /"timestamp":"[^"]*"/) ? substr(s, RSTART + 13, RLENGTH - 14) : "" }
+function sortt(x) { gsub(/[^0-9]/, "", x); return substr(x "00000000000000000", 1, 17) }
+function p2(n) { return (n < 10 ? "0" : "") n }
+function tsnorm(x,   z, o, y, m, d, era, yoe, doe, mi, dd, mp) { # a timestamp as YYYY-MM-DDTHH:MM:SSZ (UTC), else ""
+    if (x !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9](\.[0-9]+)?(Z|[+-][0-9][0-9]:?[0-9][0-9])?$/) return ""
+    z = x; sub(/^[^T]*T[0-9:]*(\.[0-9]+)?/, "", z)
+    if (z == "" || z == "Z") return substr(x, 1, 19) "Z"
+    o = (substr(z, 2, 2) * 60 + substr(z, length(z) - 1, 2)) * (substr(z, 1, 1) == "-" ? -1 : 1)
+    y = substr(x, 1, 4) + 0; m = substr(x, 6, 2) + 0; d = substr(x, 9, 2) + 0
+    y -= (m <= 2); era = int(y / 400); yoe = y - era * 400                    # (days from 1970-01-01: H. Hinnant)
+    doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
+    mi = (era * 146097 + doe - 719468) * 1440 + substr(x, 12, 2) * 60 + substr(x, 15, 2) - o
+    dd = int(mi / 1440); if (dd * 1440 > mi) dd--; mi -= dd * 1440
+    dd += 719468; era = int(dd / 146097); doe = dd - era * 146097
+    yoe = int((doe - int(doe / 1460) + int(doe / 36524) - int(doe / 146096)) / 365)
+    y = yoe + era * 400; doe -= 365 * yoe + int(yoe / 4) - int(yoe / 100); mp = int((5 * doe + 2) / 153)
+    d = doe - int((153 * mp + 2) / 5) + 1; m = mp < 10 ? mp + 3 : mp - 9; y += (m <= 2)
+    return y "-" p2(m) "-" p2(d) "T" p2(int(mi / 60)) ":" p2(mi % 60) ":" substr(x, 18, 2) "Z"
+}
+function ttext(s,   o, n, c, e, h, w, st, sp, i, L, x, cut) { # the start of a message (S: JSON-escaped) for a turn, still
+    # escaped: leading <system-reminder> blocks skipped, <hc from="X"> -> "hc X：", white space runs one space, control
+    # characters out, 30 characters at most (+ "…"); "\001": not a message the person sent
+    while (1) {
+        sub(/^([ \t]|\\[nrtf])+/, "", s)
+        if (substr(s, 1, 17) != "<system-reminder>") break
+        i = index(s, "</system-reminder>"); if (!i) return ""
+        s = substr(s, i + 18)
+    }
+    if (s ~ /^(<command-name>|<command-message>|<local-command-stdout>|<local-command-caveat>|Caveat:|\[Request interrupted|<task-notification>|<bash-input>|<bash-stdout>|<bash-stderr>|<environment_context>|<user_instructions>)/) return "\001"
+    if (substr(s, 1, 11) == "<hc from=\\\"" && (i = index(substr(s, 12), "\\\">"))) {
+        x = substr(s, 12, i - 1); s = substr(s, i + 14); gsub(/<\/hc>/, "", s); s = "hc " x "：" s
+    }
+    o = ""; n = 0; sp = 0; cut = 0; L = length(s); i = 1
+    while (i <= L) {
+        c = substr(s, i, 1); w = 0; st = 1
+        if (c == "\\") {
+            e = substr(s, i + 1, 1)
+            if (e == "u") {
+                h = tolower(substr(s, i + 2, 4))
+                if (h !~ /^[0-9a-f][0-9a-f][0-9a-f][0-9a-f]$/) { i += 2; continue }
+                i += 6
+                if (h ~ /^00[01]/ || h == "007f") { if (h >= "0009" && h <= "000d") w = 1; else continue }
+                else { c = "\\u" h; if (h ~ /^d[c-f]/) st = 0 }                 # (a low surrogate: the same character)
+            } else if (e == "n" || e == "r" || e == "t" || e == "f") { w = 1; i += 2 }
+            else if (e == "b") { i += 2; continue }
+            else if (e == "\"" || e == "\\") { c = "\\" e; i += 2 }
+            else { c = e; i += 2 }
+        } else {
+            i++
+            if (c == " " || (c >= "\011" && c <= "\015")) w = 1
+            else if (c < " " || c == "\177") continue
+            else if (c >= "\200" && c < "\300") st = 0                          # (a UTF-8 continuation byte)
+        }
+        if (w) { sp = 1; continue }
+        if (st) {
+            if (sp && n) { if (n == 30) { cut = 1; break }; o = o " "; n++ }
+            sp = 0
+            if (n == 30) { cut = 1; break }
+            n++
+        }
+        o = o c
+    }
+    if (cut) { sub(/ $/, "", o); o = o "…" }
+    return o
+}
+function turn(t, at, raw,   x) { # a turn starts (RAW: the message, JSON-escaped); 0: it is not one
+    x = ttext(raw); if (x == "\001" || x == "") return 0
+    print t "\t0\t" (++r) "\t" (++tn) "\tturn\t" tsnorm(at) "\t" x; return 1
+}
+function firsttext(s,   i, x) { # the first text item in S (an array of content items) that has words, JSON-escaped
+    while ((i = index(s, "{\"type\":\"text\",\"text\":\"")) > 0) {
+        s = substr(s, i + 15); x = strv(s, "text"); if (ttext(x) != "") return x
+    }
+    return ""
+}
+function msgtext(s) { # the message (S: from its content on): a string, or the first text in an array of items
+    if (substr(s, 1, 1) == "\"") return match(s, /^"([^"\\]|\\.)*"/) ? substr(s, 2, RLENGTH - 2) : ""
+    return firsttext(s)
+}
+function tno() { return main ? tn + 0 : "-" }
+'
 FILES_CLAUDE='
 cut && NR == 1 { next }
 /^\{"type":"api-request/ { next }
+main && index($0, "\"type\":\"user\"") && (k = index($0, "\"message\":{\"role\":\"user\",\"content\":")) && !index($0, "\"isMeta\":true") && !index($0, "\"isCompactSummary\":true") {
+    x = lastts($0); if (x != "") t = sortt(x); else if (t == "") t = "00000000000000000"
+    s = substr($0, k + 35)
+    if (substr(s, 1, 1) == "[" && index(s, "\"type\":\"tool_result\"")) next
+    turn(t, x, msgtext(s)); next
+}
 index($0, "\"type\":\"assistant\"") && index($0, "\"type\":\"tool_use\"") {
-    s = $0; x = ""; while (match(s, /"timestamp":"[^"]*"/)) { x = substr(s, RSTART + 13, RLENGTH - 14); s = substr(s, RSTART + RLENGTH) }
-    if (x != "") { gsub(/[^0-9]/, "", x); t = substr(x "00000000000000000", 1, 17) } else if (t == "") t = "00000000000000000"
+    x = lastts($0); if (x != "") t = sortt(x); else if (t == "") t = "00000000000000000"
     s = $0
     while ((i = index(s, "\"type\":\"tool_use\"")) > 0) {
         s = substr(s, i + 17); seg = s; j = index(seg, "\"type\":\"tool_use\""); if (j) seg = substr(seg, 1, j - 1)
@@ -2131,7 +2230,7 @@ index($0, "\"type\":\"assistant\"") && index($0, "\"type\":\"tool_use\"") {
         if (n == "Read") g = "read"; else if (n == "Write") g = "write"; else if (n == "Edit" || n == "MultiEdit" || n == "NotebookEdit") g = "edit"
         if (g == "") continue
         p = strv(seg, "file_path"); if (p == "") p = strv(seg, "notebook_path")
-        if (p != "") print t "\t" fi "\t" (++r) "\t" g "\t" unesc(p)
+        if (p != "") print t "\t" fi "\t" (++r) "\t" tno() "\t" g "\t" unesc(p)
     }
 }'
 FILES_CODEX='
@@ -2150,8 +2249,18 @@ function ptxt(s, lv,   o, c) { # the path after "*** Add File: " up to the end o
     }
     sub(/[ \t]+$/, "", o); return o
 }
-function out(g, p) { if (p != "") print "00000000000000000\t" fi "\t" (++r) "\t" g "\t" p }
+function out(g, p) { if (p != "") { print "00000000000000000\t" fi "\t" (++r) "\t" tno() "\t" g "\t" p; touched = 1 } }
+function cturn(raw) { # (a version that writes both a user_message event and a UserMessage item: one turn)
+    if (raw == last && !touched) return
+    if (turn("00000000000000000", firstts($0), raw)) { last = raw; touched = 0 }
+}
 cut && NR == 1 { next }
+index($0, "\"type\":\"event_msg\"") && (i = index($0, "\"payload\":{\"type\":\"user_message\"")) {
+    s = substr($0, i + 10); k = strv(s, "kind"); if (k == "" || k == "plain") cturn(strv(s, "message")); next
+}
+index($0, "\"type\":\"item_completed\"") && (i = index($0, "\"item\":{\"type\":\"UserMessage\"")) {
+    s = substr($0, i); if ((i = index(s, "\"content\":["))) cturn(firsttext(substr(s, i + 11))); next
+}
 (index($0, "\"type\":\"FileChange\"") || index($0, "\"type\":\"patch_apply_")) && (i = index($0, "\"changes\":")) {
     s = substr($0, i + 10)
     while (match(s, /"([^"\\]|\\.)*":\{("type":)?"(add|update|delete)"/)) {
@@ -2175,8 +2284,11 @@ index($0, "\"type\":\"custom_tool_call\"") || index($0, "\"type\":\"function_cal
     }
 }'
 FILES_OMP='
-function out(g, p) { if (p != "" && p !~ /^[A-Za-z][A-Za-z0-9+.-]+:\/\//) print "00000000000000000\t" fi "\t" (++r) "\t" g "\t" p }
+function out(g, p) { if (p != "" && p !~ /^[A-Za-z][A-Za-z0-9+.-]+:\/\//) print "00000000000000000\t" fi "\t" (++r) "\t" tno() "\t" g "\t" p }
 cut && NR == 1 { next }
+index($0, "\"type\":\"message\"") && (k = index($0, "\"message\":{\"role\":\"user\",\"content\":")) {
+    turn("00000000000000000", firstts($0), msgtext(substr($0, k + 35))); next
+}
 index($0, "\"role\":\"assistant\"") && index($0, "{\"type\":\"toolCall\"") {
     s = $0
     while ((i = index(s, "{\"type\":\"toolCall\"")) > 0) {
@@ -2210,20 +2322,34 @@ function abs(p,   d, i) {
     return p
 }
 function key(p) { return (p ~ /^[A-Za-z]:\// || p ~ /^\/\//) ? tolower(p) : p }
-function pick(g, p,   k) { p = abs(p); if (p == "") return; k = key(p); if (k in seen) return; seen[k] = 1; print g "\t" p }
+function pick(g, p,   k) { p = abs(p); if (p == "") return; k = key(p); if (k in seen) return; seen[k] = 1; print "F\t" g "\t" p }
+# the rows: "time TAB turn TAB tag TAB path", a turn start "time TAB n TAB turn TAB at TAB text"; then "F TAB tag TAB
+# path" for files, and the turns newest first (n 0 last), "T TAB n TAB at TAB text" and its files "P TAB tag TAB path"
+# (newest first, one per path; a sub-agent touch: in the turn that started last before it, the rows are in time order)
 $0 == "--git--" { git = 1; next }
-{ g = $1; p = substr($0, length(g) + 2) }
-!git { n++; tg[n] = g; pa[n] = p; next }
-{ m++; gp[m] = p }
-END { for (i = n; i >= 1; i--) pick(tg[i], pa[i]); for (i = 1; i <= m; i++) pick("git", gp[i]) }'
+git { m++; gp[m] = substr($0, 5); next }
+$3 == "turn" { cur = $2; if ($2 > top) top = $2; at[$2] = $4; tx[$2] = $5; next }
+{ n++; tg[n] = $3; pa[n] = substr($0, length($1) + length($2) + length($3) + 4); tu[n] = $2 == "-" ? cur + 0 : $2 + 0 }
+END {
+    for (i = n; i >= 1; i--) pick(tg[i], pa[i])
+    for (i = 1; i <= m; i++) pick("git", gp[i])
+    for (i = n; i >= 1; i--) {
+        p = abs(pa[i]); if (p == "") continue
+        k = tu[i] SUBSEP key(p); if (k in ts) continue; ts[k] = 1; tl[tu[i], ++tc[tu[i]]] = tg[i] "\t" p
+    }
+    for (u = top + 0; u >= 0; u--) {
+        if (!tc[u]) continue
+        print "T\t" u "\t" at[u] "\t" tx[u]; for (i = 1; i <= tc[u]; i++) print "P\t" tl[u, i]
+    }
+}'
 files_rows() { # files_rows TOOL LOG : the rows of every file the log (and, Claude, its sub-agents) shows, oldest first
-    local f i=0 prog
+    local f i=0 m prog
     case $1 in claude) prog=$FILES_CLAUDE;; codex) prog=$FILES_CODEX;; omp) prog=$FILES_OMP;; *) return 0;; esac
     [ -n "$2" ] && [ -f "$2" ] || return 0
     { if [ "$1" = claude ]; then ls -tr "$2" "${2%.jsonl}/subagents/"*.jsonl 2>/dev/null; else printf '%s\n' "$2"; fi; } |
     while IFS= read -r f; do
-        [ -f "$f" ] || continue; i=$((i + 1))
-        ctx_scan "$f" "BEGIN { fi = $i }$CTX_AWK$prog"
+        [ -f "$f" ] || continue; i=$((i + 1)); m=0; [ "$f" = "$2" ] && m=1
+        ctx_scan "$f" "BEGIN { fi = $i; main = $m }$CTX_AWK$FILES_AWK$prog"
     done | LC_ALL=C sort -t "$TAB" -k1,1 -k2,2n -k3,3n
 }
 files_git() { # files_git DIR : "git TAB path" for what git status shows in the repo DIR is in (a rename: its new name)
@@ -2235,7 +2361,8 @@ files_git() { # files_git DIR : "git TAB path" for what git status shows in the 
             length($0) > 3 { if (substr($0, 1, 2) ~ /[RC]/) skip = 1; print "git\t" top "/" substr($0, 4) }'
 }
 cmd_files() { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git] [--json] : the files that agent read or changed
-    local pid="" tool="" dir="" git="" json="" log="" note="" s picked tag p e n=0 out="" human=""
+    local pid="" tool="" dir="" git="" json="" log="" note="" s picked tag p e n=0 out="" human="" k th tf=0 tl="" tn=0 turns=""
+    turn_end() { [ -z "$tl" ] || { turns="$turns${turns:+, }$th$tl]}"; tn=$((tn + 1)); }; tl=""; }
     local use="用法：kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]"
     while [ $# -gt 0 ]; do
         case $1 in
@@ -2256,20 +2383,31 @@ cmd_files() { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git
         "") note="看不出是哪種 agent（用 --tool claude|codex|omp 指定）";;
         *) note="不認得這種 agent：${tool}（只認得 claude、codex、omp）";;
     esac
-    picked=$( { files_rows "$tool" "$log" | cut -f 4-; [ -z "$git" ] || { echo --git--; files_git "$dir"; }; } |
+    picked=$( { files_rows "$tool" "$log" | cut -f 1,4-; [ -z "$git" ] || { echo --git--; files_git "$dir"; }; } |
         FILES_DIR=$dir LC_ALL=C awk -F '\t' "$FILES_PICK")
     while IFS= read -r p; do
+        k=${p%%"$TAB"*}; p=${p#*"$TAB"}
+        case $k in
+            F) [ $n -lt $FILES_MAX ] || continue;;
+            T) turn_end; [ $tn -lt $TURNS_MAX ] || break
+               th=${p%%"$TAB"*}; p=${p#*"$TAB"}; th="{\"n\": $th, \"at\": \"${p%%"$TAB"*}\", \"text\": \"${p#*"$TAB"}\", \"files\": ["
+               tf=0; tl=""; continue;;
+            P) [ $tf -lt $TURN_FILES ] || continue;;
+            *) continue;;
+        esac
         tag=${p%%"$TAB"*}; p=${p#*"$TAB"}
         [ -n "$p" ] || continue
         if [ -f "$p" ]; then e=true; else case $tag in read|git) continue;; esac; e=false; fi
-        n=$((n + 1)); [ $n -le $FILES_MAX ] || break
+        if [ "$k" = P ]; then tf=$((tf + 1)); tl="$tl${tl:+, }{\"path\": $(json_s "$p"), \"tag\": \"$tag\", \"exists\": $e}"; continue; fi
+        n=$((n + 1))
         out="$out${out:+, }{\"path\": $(json_s "$p"), \"tag\": \"$tag\", \"exists\": $e}"
         human="$human$p  $tag$( [ $e = true ] || printf '（已經不在）')$LF"
     done <<EOF
 $picked
 EOF
+    turn_end
     if [ -n "$json" ]; then
-        printf '{"tool": %s, "log": %s, "dir": %s, "files": [%s]%s}\n' "$(json_s "$tool")" "$(json_s "$log")" "$(json_s "$dir")" "$out" \
+        printf '{"tool": %s, "log": %s, "dir": %s, "files": [%s], "turns": [%s]%s}\n' "$(json_s "$tool")" "$(json_s "$log")" "$(json_s "$dir")" "$out" "$turns" \
             "$( [ -z "$note" ] || printf ', "note": %s' "$(json_s "$note")")" >&3
     else
         [ -z "$note" ] || warn "$note"
@@ -3862,7 +4000,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
-  kit api                           給程式讀的介面版本（major.minor，例如 1.1）：給畫面程式確認看得懂 kit 的輸出。
+  kit api                           給程式讀的介面版本（major.minor，例如 1.2）：給畫面程式確認看得懂 kit 的輸出。
                                     不相容的改變 major 加一；新增欄位或指令 minor 加一（清單看 README 的「給程式讀的介面」）
 EOF
 }
