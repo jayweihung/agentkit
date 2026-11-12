@@ -14,6 +14,8 @@
       git config --global user.email 你的公司信箱
 
   團隊的 kit.yaml 有寫 `author_domains` 的話，信箱不是公司網域就送不出去。
+- **先給 IT 看一下**：kit 在 Windows 上，每次 Claude 開啟時會讀 `claude.exe` 的環境變數（讀它的記憶體）。防毒或監控軟體可能會注意到。
+  做什麼、怎麼關，寫在最後的「給 IT 的說明」。
 
 ## 1. 裝 kit
 
@@ -114,6 +116,39 @@ kit 會把來源 clone 到 `%USERPROFILE%\agentkit\<來源名字>`，再把團�
     kit sync
 
 每一版改了什麼、更新後要做什麼，看 [changes.md](changes.md)。用 Herdr 的話，更新後把 Herdr 整個關掉重開。每台跑 agent 的電腦或主機（例如 Herdr 連的公司 Linux）都要更新。
+
+## 給 IT 的說明：Claude 開啟時 kit 讀 claude.exe 的記憶體
+
+`kit sync` 會在 Claude Code 的設定（`%USERPROFILE%\.claude\settings.json`）加一個 SessionStart hook：每次 Claude 開啟時跑 `kit sync --hook`。
+它做兩件事：在背景同步來源（最多每 10 分鐘一次），和檢查這個 Claude 有沒有在存對話紀錄。
+
+檢查對話紀錄在 Windows 上是這樣做的：
+
+1. 從 hook 的行程往上找父行程（最多 6 層），找到名字是 `claude` 的那個（`claude.exe`）。每一層的父行程是用下面的 `OpenProcess` 和 `NtQueryInformationProcess` 問的（只問父行程是誰，不讀記憶體）。
+2. 用 `kernel32.dll` 的 `OpenProcess` 打開它，權限只有 `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`（0x1010）。
+3. 用 `ntdll.dll` 的 `NtQueryInformationProcess` 找到它的 PEB，再用 `kernel32.dll` 的 `ReadProcessMemory` 讀出它的環境變數區塊（最多 4 MB），用完 `CloseHandle`。
+4. 只看裡面有沒有 `CLAUDE_CODE_CHILD_SESSION=1`、`CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`。有前者沒後者，就在 Claude 畫面上警告「這個 session 沒有在存對話紀錄」。
+
+- 這幾個 Windows API 是 PowerShell 執行時用 `System.Reflection.Emit`（`DefinePInvokeMethod`）宣告的：不用 `Add-Type`、不編譯、不寫任何檔案、不用管理員。
+- 只讀這個使用者自己開的 `claude.exe`，不寫任何行程的記憶體；讀到的環境變數不存檔、不送到網路上。
+- 讀不到時（32 位元的 PowerShell、權限不夠、用 npm 裝的 Claude 行程名字是 `node`）什麼都不做，也不警告。
+- 防毒或 EDR 如果有「腳本動態宣告 P/Invoke」或「讀別的行程記憶體」的規則，可能會標記 `powershell.exe` 做這件事。
+
+**關掉這個檢查**（關掉後 kit 不打開任何行程，也不宣告這些 API；背景同步照常）：
+
+- 只給 Claude 用：在 `%USERPROFILE%\.claude\settings.json` 的 `env` 加一行：
+
+      "env": { "KIT_TRANSCRIPT_CHECK": "0" }
+
+  （已經有 `env` 的話，把 `"KIT_TRANSCRIPT_CHECK": "0"` 加進去。）
+- 或設成使用者的環境變數，在 PowerShell 打：
+
+      [Environment]::SetEnvironmentVariable('KIT_TRANSCRIPT_CHECK', '0', 'User')
+
+  設完開新的終端機（Herdr 要整個關掉重開），之後開的 Claude 才會帶到這個設定。
+- `settings.json` 裡已經有叫 `transcript-check` 的 hook（自己做同一件事的）時，kit 也不做這個檢查。
+
+Mac、Linux 不讀記憶體：Mac 用 `ps -E`，Linux 讀 `/proc/<pid>/environ`，一樣用 `KIT_TRANSCRIPT_CHECK=0` 關掉。
 
 ## 常見問題
 
