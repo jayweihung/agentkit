@@ -2,6 +2,13 @@
 # End-to-end tests for the bash kit. Everything runs in a throwaway HOME,
 # so your real ~/.claude is never touched.
 set -u
+# Started with Ctrl-C ignored (a background job of a script, `bash tests/run.sh &`, some runners): bash cannot undo
+# that for itself or anything it starts, so the Ctrl-C tests below would fail without testing kit. Start again with
+# Ctrl-C back to normal.
+if [ -z "${KIT_TEST_SIGINT:-}" ] && [ "$(python3 -Ic 'import signal; print(signal.getsignal(signal.SIGINT) == signal.SIG_IGN)' 2>/dev/null)" = True ]; then
+    export KIT_TEST_SIGINT=1
+    exec python3 -Ic 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' bash "$0" "$@"
+fi
 HERE=$(cd "$(dirname "$0")" && pwd)
 KIT="$HERE/../unix/kit"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
