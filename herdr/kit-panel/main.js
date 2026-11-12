@@ -17,8 +17,8 @@
 //   kit.msg.<where>  kit's words after an action, per place (panel, pane:<key>, editor:<path>)
 //   kit.editors   path -> { dirty } the files open in big windows
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Editor, EditorState } from "gpui-base";
-import { theme, settings, exec, home, run, layout, shared, setShared, window, appHome, readTextFile, writeTextFile, closeOverlay, openOverlay, props as blockProps } from "herdr";
+import { v_flex, h_flex, InputState, Input, Editor, EditorState, TextView } from "gpui-base";
+import { theme, settings, exec, home, run, layout, shared, setShared, window, appHome, readTextFile, writeTextFile, closeOverlay, openOverlay, notify, props as blockProps } from "herdr";
 
 const TOGGLE = "kit-toggle", PANEL = "kit-panel";
 const SHIPPED = ["main", "terminals", "win98"]; // Herdr's own layouts: read-only, so "放進上排" clones one first
@@ -64,6 +64,26 @@ const squeeze = (text) => {
 };
 // kit's own messages, without the "kit: " / "kit：" in front of each line
 const clean = (s) => String(s).split("\n").map((l) => l.replace(/^kit[:：]\s?/, "")).join("\n").trim();
+// Copying (the same in every kit mod, and the same as the gerrit mod's): blocks of text (kit's messages, errors,
+// descriptions, prompts) are selectable — drag over them, then Cmd/Ctrl+C; a right-click on a single value (a name,
+// a path, a command) copies it and says 已複製. Left clicks are untouched.
+// Leading spaces and tabs kept visible (text wraps, so they'd collapse).
+const keepIndent = (l) => String(l ?? "").replace(/^[ \t]+/, (m) => m.replace(/\t/g, "    ").replace(/ /g, "\u00a0"));
+// Plain text as a selectable TextView: every line kept (a Markdown hard break: an HTML <br> inside a <p> is lost),
+// nothing in it read as markup (every ASCII punctuation mark escaped). Its press is stopped, so selecting text in a
+// window never drags the window.
+const mdLines = (text) => String(text ?? "").replace(/\r/g, "").split("\n")
+  .map((l) => keepIndent(l.replace(/[\\`*_{}[\]<>()#+\-.!|~$&:"'@^=?%,;\/]/g, "\\$&")) || "\u00a0").join("\\\n");
+const textBlock = (id, text) => div().on_mouse_down("left", stop).child(TextView.markdown(id, mdLines(text)).selectable(true));
+// on_mouse_down("right", copyOn(value))
+const copyOn = (value) => (_e, cx) => {
+  const text = String(value ?? "");
+  if (!text) return;
+  cx.stop_propagation();
+  cx.write_to_clipboard(text);
+  notify({ title: "已複製", body: text.length > 120 ? `${text.slice(0, 120)}…` : text, level: "success", timeout: 1500 });
+};
+const copyOnRight = (el, value) => el.on_mouse_down("right", copyOn(value));
 function find(node, id) {
   if (node?.id === id) return node;
   for (const c of node?.children ?? []) { const f = find(c, id); if (f) return f; }
@@ -396,7 +416,8 @@ export default class KitPanel extends View {
       .when(this.role === "pane", (el) => el.h(POPUP_H).rounded(8));
     if (this.role === "editor") {
       if (msg) root.child(this.message(t, z, msg));
-      return root.child(this.edit ? this.editor(t, z) : div().p(14).child(waiting(t, z, "讀取中…")));
+      return root.child(this.edit ? this.editor(t, z) : this.openErr ? div().p(14).text_color(t.muted).child("打不開這個檔案（看上面的原因）。關掉這個視窗，再試一次。")
+        : div().p(14).child(waiting(t, z, "讀取中…")));
     }
     root.child(this.role === "pane" ? this.paneHeader(t, z) : this.repoHeader(t, z));
     if (this.role === "panel" && !find(layout(), TOGGLE)) root.child(this.moveBanner(t, z));
@@ -412,7 +433,7 @@ export default class KitPanel extends View {
         ? "root 只用簽過的版本（kit approve），這裡看不到也不能改。要換版本：簽一個新的 kit approve，再請它 kit sync。"
         : "這裡只看得到你自己帳號的 kit，看不到也不能改它的。")));
     if (d.kit_version_wanted) root.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked)
-      .child(`團隊要 kit ${d.kit_version_wanted} 以上，你的是 ${d.kit}。請在終端機打  kit self-update`));
+      .child(textBlock(`want-${this.where}`, `團隊要 kit ${d.kit_version_wanted} 以上，你的是 ${d.kit}。請在終端機打  kit self-update`)));
     if (this.role === "pane") return root.child(this.agentList(t, z, d));
     if (this.plan) root.child(this.planCard(t, z));
     return root.child(this.edit ? this.editor(t, z) : this.repo(t, z, d));
@@ -426,9 +447,10 @@ export default class KitPanel extends View {
     return h_flex().flex_none().px(10).py(8).gap(6).items_center().border_b(1).border_color(t.border)
       .child(div().size(32).flex_none().rounded(16).bg(t.raised).flex().items_center().justify_center().child(pic ?? div().text_color(t.muted).child("•")))
       .child(v_flex().flex_1().min_w(0)
-        .child(div().truncate().font_semibold().child(tg.title || "agent"))
+        .child(copyOnRight(div().truncate().font_semibold().child(tg.title || "agent"), tg.title || "agent"))
         .child(h_flex().gap(5).items_center().min_w(0).when(this.loading, (el) => el.child(spin(z - 3, t.muted)))
-          .child(div().truncate().text_size(z - 1.5).text_color(t.muted).child(this.loading ? `${where} · 讀取中…` : where))))
+          .child(copyOnRight(div().truncate().text_size(z - 1.5).text_color(t.muted).child(this.loading ? `${where} · 讀取中…` : where),
+            d?.here?.dir ?? tg.cwd ?? where))))
       .when(Boolean(canSync), (el) => el.child(this.btn(t, z, "sync", busy === "同步" ? "同步中…" : "同步", { small: true, off: Boolean(busy), on: (cx) => this.act("同步", ["sync"], cx, LONG) })))
       .child(this.btn(t, z, "reload", this.loading ? spin(z - 2, t.dim) : "⟳", { small: true, off: this.loading, on: () => this.want() }))
       .child(this.btn(t, z, "close", "✕", { small: true, on: () => closeOverlay(blockProps()?.overlay) }));
@@ -451,7 +473,7 @@ export default class KitPanel extends View {
         const names = ag[key] ?? [];
         if (names.length) body.child(h_flex().gap(6).flex_wrap().pl(8).text_size(z - 1)
           .child(div().text_color(t.dim).child(`${kindName[kind]}：`))
-          .children(names.map((n) => div().px(6).rounded(4).bg(t.raised).child(n))));
+          .children(names.map((n) => copyOnRight(div().px(6).rounded(4).bg(t.raised).child(n), n))));
       }
       body.child(div().mt(4).border_t(1).border_color(t.border));
     }
@@ -467,7 +489,7 @@ export default class KitPanel extends View {
       if (!n) { body.child(div().pl(18).text_size(z - 1.5).text_color(t.dim).child("沒有")); continue; }
       body.child(v_flex().gap(2).children([...kitRows.map((i) => this.row(t, z, i)), ...ownRows.map((i) => this.hereRow(t, z, i))]));
     }
-    if (d.here?.error) body.child(div().text_size(z - 1.5).text_color(t.muted).child(`${shortDir(d.here.dir)}：${d.here.error}`));
+    if (d.here?.error) body.child(div().text_size(z - 1.5).text_color(t.muted).child(textBlock(`here-error-${this.where}`, `${shortDir(d.here.dir)}：${d.here.error}`)));
     // 3. what kit has that the account does not use yet
     const more = items.filter((i) => i.kind !== "agent" && i.status === "unused" && !mine(i));
     const news = more.filter((i) => i.new).length;
@@ -501,13 +523,13 @@ export default class KitPanel extends View {
   hereRow(t, z, i) {
     const badge = (text) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(t.muted).child(text);
     const head = h_flex().gap(5).items_center().min_w(0)
-      .child(div().min_w(0).truncate().font_semibold().child(shortDir(i.name)))
+      .child(copyOnRight(div().min_w(0).truncate().font_semibold().child(shortDir(i.name)), i.name))
       .child(badge(i.scope === "user" ? "這個帳號（不是 kit 的）" : "這個資料夾"));
     if (i.tools && i.tools !== "claude") head.child(badge(i.tools === "codex omp" ? "Codex／omp" : i.tools));
     const sub = i.description || shortDir(i.path);
     return v_flex().id(`here-${i.scope}-${i.kind}-${i.path}-${i.name}`).px(8).py(4).gap(1).rounded(6).hover((s) => s.bg(t.hover))
       .child(head)
-      .when(Boolean(sub), (el) => el.child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child(sub)));
+      .when(Boolean(sub), (el) => el.child(copyOnRight(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child(sub), i.description || i.path)));
   }
 
   // one of kit's things: for this folder (加到這個資料夾 / 從資料夾拿掉) and for the account (加到整個帳號 / 從帳號拿掉;
@@ -517,7 +539,7 @@ export default class KitPanel extends View {
     const canDir = Boolean(f && !f.why);
     const badge = (text, color) => div().flex_none().px(5).rounded(4).text_size(z - 2.5).text_color(t.background).bg(color).child(text);
     const head = h_flex().gap(5).items_center().min_w(0)
-      .child(div().min_w(0).truncate().font_semibold().text_color(i.status === "unused" && !inDir ? t.muted : t.foreground).child(i.name));
+      .child(copyOnRight(div().min_w(0).truncate().font_semibold().text_color(i.status === "unused" && !inDir ? t.muted : t.foreground).child(i.name), i.name));
     if (i.status === "required") head.child(badge("Kit · 團隊必備", t.accent));
     if (i.status === "used") head.child(badge("Kit · 整個帳號", t.working));
     if (inDir) head.child(badge("Kit · 這個資料夾", t.done));
@@ -538,7 +560,7 @@ export default class KitPanel extends View {
     const row = h_flex().gap(8).items_center()
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(head)
-        .when(Boolean(sub), (el) => el.child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child(sub))))
+        .when(Boolean(sub), (el) => el.child(copyOnRight(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child(sub), i.description || i.source || sub))))
       .child(action);
     // what is missing for it to run: programs (node, python ...), then its own npm packages
     const missing = (i.needs ?? []).filter((x) => !x.ok).map((x) => ({
@@ -576,7 +598,7 @@ export default class KitPanel extends View {
       .child(div().text_color(t.working).child(`⚠ ${x.what}`))
       .child(h_flex().gap(6).items_center().flex_wrap()
         .child(div().text_color(t.muted).child("會執行："))
-        .child(div().px(5).rounded(4).bg(t.raised).font_family(mono()).child(x.install)))
+        .child(copyOnRight(div().px(5).rounded(4).bg(t.raised).font_family(mono()).child(x.install), x.install)))
       .when(Boolean(x.note), (el) => el.child(div().text_color(t.muted).child(x.note)))
       .child(h_flex().gap(6)
         .child(this.btn(t, z, `need-go-${x.key}`, "確定安裝", { small: true, kind: "primary", off: busy, on: (cx) => { this.asking = null; this.act(`安裝 ${x.title}`, x.args, cx, LONG); } }))
@@ -603,7 +625,7 @@ export default class KitPanel extends View {
     const srcs = d?.sources ?? [];
     if (srcs.length) v.child(h_flex().px(10).pb(8).gap(4).flex_wrap().items_center().text_size(z - 2)
       .children(srcs.map((s) => h_flex().gap(4).px(6).py(1).rounded(5).bg(t.raised).items_center()
-        .child(div().text_color(t.foreground).child(s.name))
+        .child(copyOnRight(div().text_color(t.foreground).child(s.name), s.name))
         .when(Boolean(PUSH_KIND[s.push]), (el) => el.child(div().text_color(s.push === "pr" ? t.accent : t.dim).child(PUSH_KIND[s.push]))))));
     return v;
   }
@@ -616,10 +638,10 @@ export default class KitPanel extends View {
         .child(this.btn(t, z, "plan-cancel", "取消", { small: true, on: (cx) => { this.plan = null; cx.notify(); } })));
     for (const p of this.plan) card.child(v_flex().gap(4)
       .child(h_flex().gap(6).items_center()
-        .child(div().flex_1().font_semibold().child(p.name))
+        .child(copyOnRight(div().flex_1().font_semibold().child(p.name), p.name))
         .when(Boolean(PUSH_KIND[p.push]), (el) => el.child(div().text_size(z - 2).text_color(t.muted).child(PUSH_KIND[p.push])))
         .when(p.ok, (el) => el.child(this.btn(t, z, `push-${p.name}`, this.busy === "送出" ? "送出中…" : "確定送出", { small: true, kind: "primary", off: busy, on: (cx) => this.push(p, cx) }))))
-      .child(div().p(6).rounded(6).bg(t.background).font_family(mono()).text_size(z - 2).text_color(p.ok ? t.foreground : t.ansi1).child(squeeze(p.text) || "（kit 沒說什麼）")));
+      .child(div().p(6).rounded(6).bg(t.background).font_family(mono()).text_size(z - 2).text_color(p.ok ? t.foreground : t.ansi1).child(textBlock(`plan-${p.name}`, squeeze(p.text) || "（kit 沒說什麼）"))));
     return card;
   }
 
@@ -662,7 +684,7 @@ export default class KitPanel extends View {
     const lines = (d.dirty ?? []).map((x) => {
       const names = items.filter((i) => i.changed && i.src === x.name).map((i) => i.name);
       const what = [names.length ? names.slice(0, 3).join("、") + (names.length > 3 ? ` 等 ${names.length} 樣` : "") : "", x.agents ? `agent ${x.agents} 個` : ""].filter(Boolean).join("、");
-      return div().text_size(z - 1).text_color(t.foreground).child(`${x.name}：${what || "改過的檔案"}（${x.items + x.agents} 個檔案）`);
+      return div().text_size(z - 1).text_color(t.foreground).child(textBlock(`unsent-${x.name}`, `${x.name}：${what || "改過的檔案"}（${x.items + x.agents} 個檔案）`));
     });
     return v_flex().flex_none().mb(8).p(10).gap(6).rounded(8).bg(t.raised).border_1().border_color(t.working)
       .child(h_flex().gap(8).items_center()
@@ -726,7 +748,7 @@ export default class KitPanel extends View {
     const scripts = String(x.scripts ?? "").split(" ").filter(Boolean), desc = String(x.description ?? "");
     const lines = [];
     let block = null, label = "收進來", allow = false;
-    if (desc) lines.push(note(desc.length > 180 ? desc.slice(0, 180).trimEnd() + " …" : desc));
+    if (desc) lines.push(div().text_size(z - 1.5).text_color(t.muted).child(textBlock(`look-desc-${x.name}`, desc.length > 180 ? desc.slice(0, 180).trimEnd() + " …" : desc)));
     lines.push(note(x.license ? `授權：${x.license}${x.license === "unknown" ? "（認不出種類，收進來後請自己看 LICENSE）" : x.license === "GPL" ? "（改了再發布要公開原始碼）" : ""}` : "沒有 LICENSE：不知道能不能用，kit 不收。",
       x.license ? t.foreground : t.ansi1));
     if (!x.license) block = "沒有 LICENSE";
@@ -735,7 +757,7 @@ export default class KitPanel extends View {
     if (!x.valid) { block = "名字不行"; lines.push(note(`名字 ${x.name} 不能用（只能小寫英文、數字和 -）：請用指令 kit collect … --name 換名字。`, t.ansi1)); }
     if (x.exists === "own") { block = "已經有同名的"; lines.push(note(`${lk.source} 已經有你自己的 ${x.name}，不會蓋掉它。要收請用指令 kit collect … --name 換名字。`, t.ansi1)); }
     if (x.exists === "collected") lines.push(note(`之前收過 ${x.name}：會整份換成這次下載的版本。`, t.working));
-    lines.push(note(`會放到 ${shortDir(slash(x.dest).replace(/\/SKILL\.md$/, "/"))}`, t.foreground));
+    lines.push(copyOnRight(note(`會放到 ${shortDir(slash(x.dest).replace(/\/SKILL\.md$/, "/"))}`, t.foreground), slash(x.dest).replace(/\/SKILL\.md$/, "")));
     if (!lk.allowed && lk.can_allow) { allow = true; label = "加進清單並收進來";
       lines.push(note(`${lk.id} 還不在 ${lk.source} 的允許清單（kit.yaml 的 collect_sources）。按下去會一起加進清單，之後這個作者的東西就能收。`, t.working)); }
     else if (!lk.allowed) { block = block ?? "不在允許清單";
@@ -744,8 +766,8 @@ export default class KitPanel extends View {
     const act = block ? div().flex_none().text_size(z - 2).text_color(t.ansi1).child(`不能收：${block}`)
       : this.btn(t, z, "collect", this.busy === "收" ? "收進來中…" : label, { small: true, kind: "primary", off: Boolean(this.busy), on: (cx) => this.collect(x, allow, cx) });
     card.child(h_flex().gap(6).items_center()
-        .child(div().font_semibold().child(x.name))
-        .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(x.path === "." ? "（在 repo 最外層）" : `（在 ${x.path}/）`))
+        .child(copyOnRight(div().font_semibold().child(x.name), x.name))
+        .child(copyOnRight(div().flex_1().text_size(z - 2).text_color(t.dim).child(x.path === "." ? "（在 repo 最外層）" : `（在 ${x.path}/）`), x.path))
         .child(act))
       .children(lines);
     if (this.busy === "收") card.child(this.working(t, z, "收進來中：下載、複製檔案…"));
@@ -824,18 +846,20 @@ export default class KitPanel extends View {
       .on_click((_e, cx) => cx.spawn(async (cx) => { await this.openItem(i, cx); cx.notify(); }))
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().gap(5).items_center().min_w(0)
-          .child(div().min_w(0).truncate().font_semibold().child(i.name))
+          .child(copyOnRight(div().min_w(0).truncate().font_semibold().child(i.name), i.name))
           .when(Boolean(i.changed), (el) => el.child(badge("改過", t.working)))
           .when(Boolean(i.new), (el) => el.child(badge("新", t.done)))
           .when(i.status === "required", (el) => el.child(badge("團隊必備", t.accent))))
-        .child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child([i.description, i.src].filter(Boolean).join(" · ") || "（還沒寫說明）")))
+        .child(copyOnRight(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child([i.description, i.src].filter(Boolean).join(" · ") || "（還沒寫說明）"),
+          i.description || i.path)))
       .child(div().flex_none().text_color(t.dim).child("›"));
   }
 
   // ---------- one file in the editor (in the panel, or its own window) ----------
   async openItem(i, cx, value, orig) {
     const text = orig ?? await readTextFile(i.path).catch(() => null);
-    if (text === null) { this.setMsg({ ok: false, label: "打開", text: `讀不到 ${shortDir(i.path)}`, at: Date.now() }); return; }
+    if (text === null) { this.openErr = true; this.setMsg({ ok: false, label: "打開", text: `讀不到 ${shortDir(i.path)}`, at: Date.now() }); return; }
+    this.openErr = false;
     this.code?.release();
     const th = theme();
     this.code = EditorState.new({ language: i.kind === "mcp" ? "yaml" : "md", value: value ?? text, soft_wrap: true,
@@ -884,7 +908,7 @@ export default class KitPanel extends View {
         await writeTextFile(e.item.path, text, e.orig);
         e.orig = text; e.dirty = false; e.err = null; e.saved = true;
         this.mark();
-        this.changed(null);
+        if (!e.item.plain) this.changed(null);   // a file of a source: the repository's list (改過 / 送出) is out of date
       } catch {
         e.err = "這個檔案在別的地方被改過了。先複製你改的，按「重新讀取」，再貼回去。";
       }
@@ -899,18 +923,21 @@ export default class KitPanel extends View {
       ? this.btn(t, z, "back", e.dirty ? "✕ 不存，關掉" : "✕ 關掉", { small: true, on: () => closeOverlay(blockProps()?.overlay) })
       : this.btn(t, z, "back", e.dirty ? "← 不存，回去" : "← 回去", { small: true, on: (cx) => this.closeItem(cx) });
     const unsent = e.saved || i.changed;
+    // a plain file (an agent's memory / instruction file, opened from its context popup): nothing to send
+    const saidAfter = i.plain ? (e.saved ? "存好了。正在跑的 agent 要開新的對話（/clear）或重開才會讀到。" : "")
+      : unsent ? "存好了，還沒送出（倉庫清單上面黃色那條）" : "";
     return v_flex().flex_1().min_h(0)
       .child(h_flex().flex_none().px(10).py(8).gap(6).items_center().border_b(1).border_color(t.border)
         .child(leave)
         .child(v_flex().flex_1().min_w(0)
-          .child(div().truncate().font_semibold().child(i.name))
-          .child(div().truncate().text_size(z - 2).text_color(t.muted).child(`${i.src ?? i.source} · ${i.rel || shortDir(i.path)}`)))
+          .child(copyOnRight(div().truncate().font_semibold().child(i.name), i.name))
+          .child(copyOnRight(div().truncate().text_size(z - 2).text_color(t.muted).child(`${i.src ?? i.source} · ${i.rel || shortDir(i.path)}`), i.path)))
         .when(!big, (el) => el.child(this.btn(t, z, "bigger", "⤢ 放大", { small: true, on: (cx) => this.enlarge(cx) })))
         .child(this.btn(t, z, "save", e.dirty ? "存檔" : "已存", { small: true, kind: "primary", off: !e.dirty, on: (cx) => this.saveItem(cx) })))
-      .when(Boolean(e.err), (el) => el.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked).child(e.err)))
+      .when(Boolean(e.err), (el) => el.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked).child(textBlock(`edit-err-${i.path}`, e.err))))
       .child(Editor.new(this.code).flex_1().min_h(0))
       .child(h_flex().flex_none().px(10).py(6).gap(6).items_center().border_t(1).border_color(t.border)
-        .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(e.dirty ? "還沒存檔" : unsent ? "存好了，還沒送出（倉庫清單上面黃色那條）" : ""))
+        .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(e.dirty ? "還沒存檔" : saidAfter))
         .child(this.btn(t, z, "reload-file", "重新讀取", { small: true, on: (cx) => cx.spawn(async (cx) => { await this.openItem(i, cx); cx.notify(); }) }))
         .child(this.btn(t, z, "outside", "用編輯器開", { small: true, on: () => { openOutside(i.path).catch(() => {}); } })));
   }
@@ -926,9 +953,9 @@ export default class KitPanel extends View {
     return h_flex().flex_none().mx(10).mt(8).p(8).gap(8).items_start().rounded(6).bg(t.raised)
       .border_1().border_color(msg.ok ? t.border : t.ansi1)
       .child(msg.plain
-        ? div().flex_1().min_w(0).text_size(z - 1).text_color(t.foreground).child(msg.text)
+        ? div().flex_1().min_w(0).text_size(z - 1).text_color(t.foreground).child(textBlock(`msg-text-${this.where}`, msg.text))
         : div().flex_1().min_w(0).text_size(z - 1).font_family(mono()).text_color(msg.ok ? t.foreground : t.ansi1)
-          .child(`${msg.label}：${msg.ok ? "" : "失敗\n"}${squeeze(msg.text)}`))
+          .child(textBlock(`msg-text-${this.where}`, `${msg.label}：${msg.ok ? "" : "失敗\n"}${squeeze(msg.text)}`)))
       .child(div().id("msg-close").flex_none().px(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
         .on_mouse_down("left", stop).on_click((_e, cx) => { this.setMsg(null); cx.notify(); }).child("✕"));
   }
@@ -937,7 +964,7 @@ export default class KitPanel extends View {
     const notInit = /kit init/.test(text);
     return v_flex().p(14).gap(8)
       .child(div().font_semibold().text_color(t.ansi1).child("kit 出錯了"))
-      .child(div().font_family(mono()).text_size(z - 1).child(text))
+      .child(div().font_family(mono()).text_size(z - 1).child(textBlock(`problem-${this.where}`, text)))
       .child(div().text_size(z - 1).text_color(t.muted).child(notInit
         ? "第一次用要先在終端機打  kit init <團隊來源的網址>，好了再按上面的 ⟳。"
         : "修好後按上面的 ⟳ 重新讀取。"));

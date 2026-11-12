@@ -10,8 +10,8 @@
 //   kit agent <name> add|rm rule|skill|mcp <item>  change an agent (its file in the source)
 //   kit run <name> --tool claude|codex|omp         open it (in a new tab)
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { theme, settings, exec, home, run, shared, setShared, window, appHome, readTextFile, writeTextFile, closeOverlay, props, spaces, focused, layout } from "herdr";
+import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
+import { theme, settings, exec, home, run, shared, setShared, window, appHome, readTextFile, writeTextFile, closeOverlay, notify, props, spaces, focused, layout } from "herdr";
 
 // Roles (props.role): the panel (default; "kit-agents-panel" beside the work area, or a window) and "toggle",
 // the tab-bar button next to Kit's that shows or hides it. Agents stand beside Kit, not inside it.
@@ -33,6 +33,26 @@ const stop = (_e, cx) => cx.stop_propagation();
 const isWindows = () => window()?.platform === "windows";
 const shortDir = (d) => { const h = String(home() ?? "").replace(/\\/g, "/"); const p = String(d ?? "").replace(/\\/g, "/"); return p && h && (p + "/").startsWith(h + "/") ? "~" + p.slice(h.length) : p; };
 const clean = (s) => String(s).split("\n").map((l) => l.replace(/^kit[:：]\s?/, "")).join("\n").trim();
+// Copying (the same in every kit mod, and the same as the gerrit mod's): blocks of text (kit's messages, errors,
+// descriptions, prompts) are selectable — drag over them, then Cmd/Ctrl+C; a right-click on a single value (a name,
+// a path, a command) copies it and says 已複製. Left clicks are untouched.
+// Leading spaces and tabs kept visible (text wraps, so they'd collapse).
+const keepIndent = (l) => String(l ?? "").replace(/^[ \t]+/, (m) => m.replace(/\t/g, "    ").replace(/ /g, "\u00a0"));
+// Plain text as a selectable TextView: every line kept (a Markdown hard break: an HTML <br> inside a <p> is lost),
+// nothing in it read as markup (every ASCII punctuation mark escaped). Its press is stopped, so selecting text in a
+// window never drags the window.
+const mdLines = (text) => String(text ?? "").replace(/\r/g, "").split("\n")
+  .map((l) => keepIndent(l.replace(/[\\`*_{}[\]<>()#+\-.!|~$&:"'@^=?%,;\/]/g, "\\$&")) || "\u00a0").join("\\\n");
+const textBlock = (id, text) => div().on_mouse_down("left", stop).child(TextView.markdown(id, mdLines(text)).selectable(true));
+// on_mouse_down("right", copyOn(value))
+const copyOn = (value) => (_e, cx) => {
+  const text = String(value ?? "");
+  if (!text) return;
+  cx.stop_propagation();
+  cx.write_to_clipboard(text);
+  notify({ title: "已複製", body: text.length > 120 ? `${text.slice(0, 120)}…` : text, level: "success", timeout: 1500 });
+};
+const copyOnRight = (el, value) => el.on_mouse_down("right", copyOn(value));
 
 // How to run kit here: the kit mod's config.json (written by kit herdr-panel install), else kit / kit.cmd on PATH.
 async function kitArgv() {
@@ -217,7 +237,7 @@ export default class KitAgents extends View {
     if (!d) return root.child(div().p(14).child(waiting(t, z, "讀取中…")));
     if (d.error) return root.child(v_flex().p(14).gap(8)
       .child(div().font_semibold().text_color(t.ansi1).child("kit 出錯了"))
-      .child(div().font_family(mono()).text_size(z - 1).child(d.error))
+      .child(div().font_family(mono()).text_size(z - 1).child(textBlock("kitag-error", d.error)))
       .child(div().text_size(z - 1).text_color(t.muted).child("修好後按上面的 ⟳ 重新讀取。")));
     if (this.edit) return root.child(this.editor(t, z));
     if (a) return root.child(this.detail(t, z, d, a));
@@ -232,8 +252,8 @@ export default class KitAgents extends View {
       .when(Boolean(a) && !this.edit, (el) => el.child(this.btn(t, z, "back", "← 回去", { small: true, on: (cx) => { this.open = null; this.adding = {}; cx.notify(); } })))
       .when(!a, (el) => el.child(div().size(32).flex_none().rounded(8).bg(t.raised).flex().items_center().justify_center().font_semibold().text_size(z - 4).child("agent")))
       .child(v_flex().flex_1().min_w(0)
-        .child(div().truncate().font_semibold().child(a ? a.name : "Agents"))
-        .child(div().truncate().text_size(z - 1.5).text_color(t.muted).child(sub)))
+        .child(a ? copyOnRight(div().truncate().font_semibold().child(a.name), a.name) : div().truncate().font_semibold().child("Agents"))
+        .child(a ? copyOnRight(div().truncate().text_size(z - 1.5).text_color(t.muted).child(sub), a.path) : div().truncate().text_size(z - 1.5).text_color(t.muted).child(sub)))
       .when(Boolean(busy), (el) => el.child(h_flex().flex_none().gap(5).items_center().text_size(z - 1.5).text_color(t.muted).child(spin(z - 2, t.muted)).child(`${busy}…`)))
       .child(this.btn(t, z, "reload", this.loading ? spin(z - 2, t.dim) : "⟳", { small: true, off: Boolean(this.loading), on: (cx) => this.refresh(cx) }))
       .when(Boolean(overlay), (el) => el.child(this.btn(t, z, "close", "✕", { small: true, on: () => closeOverlay(overlay) })))
@@ -244,7 +264,7 @@ export default class KitAgents extends View {
     return h_flex().flex_none().mx(10).mt(8).p(8).gap(8).items_start().rounded(6).bg(t.raised)
       .border_1().border_color(msg.ok ? t.border : t.ansi1)
       .child(div().flex_1().min_w(0).text_size(z - 1).font_family(mono()).text_color(msg.ok ? t.foreground : t.ansi1)
-        .child(`${msg.label}：${msg.ok ? "" : "失敗\n"}${msg.text}`))
+        .child(textBlock("kitag-msg-text", `${msg.label}：${msg.ok ? "" : "失敗\n"}${msg.text}`)))
       .child(div().id("msg-close").flex_none().px(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
         .on_mouse_down("left", stop).on_click((_e, cx) => { setShared(MSG, null); cx.notify(); }).child("✕"));
   }
@@ -265,9 +285,10 @@ export default class KitAgents extends View {
         .on_click((_e, cx) => { this.open = a.name; this.adding = {}; setShared(MSG, null); cx.notify(); })
         .child(v_flex().flex_1().min_w(0).gap(1)
           .child(h_flex().gap(5).items_center().min_w(0)
-            .child(div().min_w(0).truncate().font_semibold().child(a.name))
+            .child(copyOnRight(div().min_w(0).truncate().font_semibold().child(a.name), a.name))
             .when(Boolean(GIT[a.git]), (el) => el.child(this.badge(t, z, GIT[a.git], a.git === "new" ? t.done : t.working))))
-          .child(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child([a.description, a.source].filter(Boolean).join(" · ") || "（還沒寫說明）"))
+          .child(copyOnRight(div().min_w(0).truncate().text_size(z - 1.5).text_color(t.muted).child([a.description, a.source].filter(Boolean).join(" · ") || "（還沒寫說明）"),
+            a.description || a.path))
           .child(div().text_size(z - 2).text_color(t.dim).child(counts)))
         .child(div().flex_none().text_color(t.dim).child("›")));
     }
@@ -279,7 +300,7 @@ export default class KitAgents extends View {
     const busy = Boolean(this.busy), avail = d.available ?? {};
     const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().px(10).py(8).gap(8);
     body.child(v_flex().gap(2)
-      .child(div().child(a.description || "（還沒寫說明）"))
+      .child(a.description ? textBlock(`kitag-desc-${a.name}`, a.description) : div().child("（還沒寫說明）"))
       .when(Boolean(GIT[a.git]), (el) => el.child(div().text_size(z - 1.5).text_color(a.git === "new" ? t.done : t.working)
         .child(`${GIT[a.git]}：改好按倉庫的「送出」，或在終端機打  kit push`))));
     // open: pick the tool, then kit run in a new tab
@@ -297,15 +318,15 @@ export default class KitAgents extends View {
     const only = a.tools_only ?? [], deny = a.tools_deny ?? [];
     body.child(v_flex().gap(2).p(8).rounded(6).bg(t.raised).text_size(z - 1.5)
       .child(div().font_semibold().text_size(z - 1).child("可以用的工具"))
-      .child(div().text_color(t.muted).child(only.length ? `只能用：${only.join("、")}` : "不限（照工具本身的設定）"))
-      .when(deny.length > 0, (el) => el.child(div().text_color(t.muted).child(`不准用：${deny.join("、")}`))));
+      .child(div().text_color(t.muted).child(only.length ? textBlock(`kitag-only-${a.name}`, `只能用：${only.join("、")}`) : "不限（照工具本身的設定）"))
+      .when(deny.length > 0, (el) => el.child(div().text_color(t.muted).child(textBlock(`kitag-deny-${a.name}`, `不准用：${deny.join("、")}`)))));
     // what it uses, per kind
     for (const [kind, key, title] of KINDS) {
       const used = a[key] ?? [], more = (avail[kind] ?? []).filter((x) => !used.includes(x)).sort();
       body.child(div().mt(4).font_semibold().child(`${title}（${used.length}）`));
       if (!used.length) body.child(div().pl(8).text_size(z - 1.5).text_color(t.dim).child("沒有"));
       for (const name of used) body.child(h_flex().id(`use-${kind}-${name}`).gap(8).items_center().px(8).py(4).rounded(6).hover((s) => s.bg(t.hover))
-        .child(div().flex_1().min_w(0).truncate().child(name))
+        .child(copyOnRight(div().flex_1().min_w(0).truncate().child(name), name))
         .child(this.btn(t, z, `rm-${kind}-${name}`, "拿掉", { small: true, off: busy, on: (cx) => this.act(`拿掉 ${name}`, ["agent", a.name, "rm", kind, name], cx) })));
       if (!more.length) continue;
       const open = Boolean(this.adding[kind]);
@@ -314,12 +335,12 @@ export default class KitAgents extends View {
         .on_click((_e, cx) => { this.adding[kind] = !open; cx.notify(); })
         .child(div().w(12).child(open ? "▾" : "▸")).child(`加上…（${more.length}）`));
       if (open) for (const name of more) body.child(h_flex().id(`add-${kind}-${name}`).gap(8).items_center().px(8).py(4).rounded(6).hover((s) => s.bg(t.hover))
-        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(name))
+        .child(copyOnRight(div().flex_1().min_w(0).truncate().text_color(t.muted).child(name), name))
         .child(this.btn(t, z, `add-${kind}-${name}-b`, "加上", { small: true, kind: "primary", off: busy, on: (cx) => this.act(`加上 ${name}`, ["agent", a.name, "add", kind, name], cx) })));
     }
     if (a.prompt) body.child(v_flex().mt(4).gap(4)
       .child(div().font_semibold().child("Prompt"))
-      .child(div().p(8).rounded(6).bg(t.raised).text_size(z - 1.5).text_color(t.muted).child(a.prompt)));
+      .child(div().p(8).rounded(6).bg(t.raised).text_size(z - 1.5).text_color(t.muted).child(textBlock(`kitag-prompt-${a.name}`, a.prompt))));
     return body;
   }
 
@@ -328,9 +349,9 @@ export default class KitAgents extends View {
     return v_flex().flex_1().min_h(0)
       .child(h_flex().flex_none().px(10).py(8).gap(6).items_center().border_b(1).border_color(t.border)
         .child(this.btn(t, z, "file-back", e.dirty ? "← 不存，回去" : "← 回去", { small: true, on: (cx) => this.closeFile(cx) }))
-        .child(div().flex_1().min_w(0).truncate().font_semibold().child(`${e.name}.md`))
+        .child(copyOnRight(div().flex_1().min_w(0).truncate().font_semibold().child(`${e.name}.md`), e.path))
         .child(this.btn(t, z, "file-save", e.dirty ? "存檔" : "已存", { small: true, kind: "primary", off: !e.dirty, on: (cx) => this.saveFile(cx) })))
-      .when(Boolean(e.err), (el) => el.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked).child(e.err)))
+      .when(Boolean(e.err), (el) => el.child(div().flex_none().mx(10).mt(8).p(8).rounded(6).bg(t.raised).text_size(z - 1).text_color(t.blocked).child(textBlock("kitag-edit-err", e.err))))
       .child(Editor.new(this.code).flex_1().min_h(0))
       .child(h_flex().flex_none().px(10).py(6).gap(6).items_center().border_t(1).border_color(t.border)
         .child(div().flex_1().text_size(z - 2).text_color(t.dim).child(e.dirty ? "還沒存檔" : "上面 --- 之間是設定（rules、skills、mcp、tools），下面是 prompt"))
