@@ -1169,6 +1169,14 @@ Remove-Item env:AGENTKIT_HOME
 $Kit = Join-Path $T 'inst/lib/kit.ps1'
 Kit ci-template
 Check 'installed kit has the ci template' { $rc -eq 0 -and $out -ceq $tmpl }
+# an older kit kept a herdr/ folder in its own lib: a new install takes it out; a panel installed in Herdr stays
+W (Join-Path $T 'inst/lib/herdr/kit-panel/main.js') 'old'
+$HA = Join-Path $T 'herdr-app'; W "$HA/mods/kit/main.js" 'old'; W "$HA/mods/kit/.kit-panel" ''
+$env:AGENTKIT_HOME = Join-Path $T 'inst'; $env:HERDR_APP_HOME = $HA
+& $Exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'windows/install.ps1') -Quiet
+Remove-Item env:AGENTKIT_HOME, env:HERDR_APP_HOME
+Check "reinstall removes herdr/ an older kit left in its own folder" { -not (Test-Path (Join-Path $T 'inst/lib/herdr')) -and (Test-Path (Join-Path $T 'inst/lib/kit.ps1')) }
+Check 'reinstall leaves the panel installed in Herdr alone' { (ReadT "$HA/mods/kit/main.js") -eq 'old' -and (Test-Path "$HA/mods/kit/.kit-panel") }
 $Kit = $realKit
 
 # ---------- sync: why a source could not be updated ----------

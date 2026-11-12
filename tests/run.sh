@@ -677,8 +677,14 @@ touch "$HOME/.bashrc"
 out=$(PATH=/usr/bin:/bin sh "$U/unix/install.sh" 2>&1)
 check "install puts kit in ~/.local/bin" '[ -x "$HOME/.local/bin/kit" ] && "$HOME/.local/bin/kit" --version | grep -qF "kit $(cat "$HERE/../VERSION")"'
 check "install adds PATH once" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc")" = 1 ]'
+mkdir -p "$HOME/.local/share/agentkit/herdr/kit-panel" "$HOME/.config/herdr-app/mods/kit"
+echo old > "$HOME/.local/share/agentkit/herdr/kit-panel/main.js"
+echo old > "$HOME/.config/herdr-app/mods/kit/main.js"; : > "$HOME/.config/herdr-app/mods/kit/.kit-panel"
 PATH=/usr/bin:/bin sh "$U/unix/install.sh" >/dev/null 2>&1
 check "reinstall does not add PATH twice" '[ "$(grep -c "added by agentkit" "$HOME/.bashrc")" = 1 ]'
+check "reinstall removes herdr/ an older kit left in its own folder" '[ ! -e "$HOME/.local/share/agentkit/herdr" ] && [ -x "$HOME/.local/share/agentkit/kit" ]'
+check "reinstall leaves the panel installed in Herdr alone" '[ "$(cat "$HOME/.config/herdr-app/mods/kit/main.js")" = old ] && [ -f "$HOME/.config/herdr-app/mods/kit/.kit-panel" ]'
+rm -rf "$HOME/.config/herdr-app"
 check "installed kit works" '"$HOME/.local/bin/kit" init "$TEAM" >/dev/null 2>&1 && grep -q agentkit:begin "$HOME/.claude/CLAUDE.md"'
 check "installed kit has the ci template" '"$HOME/.local/bin/kit" ci-template | cmp -s - "$R/templates/gitea-kit-check.yaml"'
 ( cd "$R" && echo 0.1.1 > VERSION && git -c user.name=t -c user.email=t@t commit -qam v2 )
