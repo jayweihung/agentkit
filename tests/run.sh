@@ -1337,13 +1337,13 @@ out=$(kit collect "file://$U2" --look 2>/dev/null); rc=$?
 v=$(printf '%s' "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["allowed"],d["can_allow"],";".join(s["path"]+","+s["name"]+","+s["description"]+","+s["license"]+","+s["scripts"]+","+s["exists"] for s in d["skills"]))' 2>&1)
 check "collect --look: every skill, as JSON" '[ $rc -eq 0 ] && [ "$v" = "True False a,a,say \"a\" now,MIT,run.sh,;b,b,say \"b\" now,MIT,," ]'
 check "collect --look writes nothing" '[ "$before" = "$(cd "$CO" && find . -type f | sort | xargs cksum)" ]'
-out=$(kit collect "file://$UP" --look 2>/dev/null); rc=$?
-v=$(printf '%s' "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["allowed"],d["can_allow"],d["skills"][0]["path"])' 2>&1)
-check "collect --look on an author not on the list: says so (a team source: no --allow)" '[ $rc -eq 0 ] && [ "$v" = "False False skills/foo" ]'
+out=$(kit collect "file://$UP" --look 2>&1); rc=$?
+check "collect --look on an author not on the list of a team source (no --allow): says so, downloads nothing" '[ $rc -ne 0 ] && echo "$out" | grep -q "不在 collect_sources" && echo "$out" | grep -q 不下載 && ! echo "$out" | grep -q "\"skills\""'
 out=$(kit collect "file://$UP" --path skills/foo --allow 2>&1); rc=$?
 check "collect --allow refused in a team source (no push: direct)" '[ $rc -ne 0 ] && echo "$out" | grep -q "push: direct" && [ ! -e "$CO/skills/foo" ]'
 # your own source: --allow adds the author to collect_sources ([a, b] on one line, or - lines, or no list yet)
-printf 'name: collector\npush: direct\ncollect_sources: [file://%s]   # authors\n' "$U2" > "$CO/kit.yaml"
+# (allowed_hosts listed: a file:/// folder on this machine has no host, so it is not refused)
+printf 'name: collector\npush: direct\nallowed_hosts: [gitea.example]\ncollect_sources: [file://%s]   # authors\n' "$U2" > "$CO/kit.yaml"
 v=$(kit collect "file://$UP" --look 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["can_allow"])')
 check "collect --look: your own source can add the author" '[ "$v" = True ]'
 out=$(kit collect "file://$UP" 2>&1); rc=$?
@@ -1359,6 +1359,16 @@ check "collect --allow: a - list gets a - line" '[ $rc -eq 0 ] && [ "$(sed -n 4,
 printf 'name: collector\npush: direct' > "$CO/kit.yaml"
 rm -rf "$CO/skills/one"; out=$(kit collect "file://$U1" --allow 2>&1); rc=$?
 check "collect --allow: no list yet gets one" '[ $rc -eq 0 ] && [ "$(tail -n 1 "$CO/kit.yaml")" = "collect_sources: [$U1]" ] && grep -qx "push: direct" "$CO/kit.yaml"'
+# the host must be in allowed_hosts (the source's own list, else every source's): --look and collect never go elsewhere
+printf 'name: collector\npush: direct\nallowed_hosts: [gitea.example]\ncollect_sources: [https://public-git.example/someone]\n' > "$CO/kit.yaml"
+out=$(kit collect https://public-git.example/someone/skills --look 2>&1); rc=$?
+check "collect --look: a host outside allowed_hosts is refused before anything is downloaded" '[ $rc -ne 0 ] && echo "$out" | grep -q "public-git.example 不在允許的主機清單" && ! echo "$out" | grep -q 沒辦法下載'
+out=$(kit collect https://public-git.example/someone/skills 2>&1); rc=$?
+check "collect: a host outside allowed_hosts is refused (the same list)" '[ $rc -ne 0 ] && echo "$out" | grep -q "public-git.example 不在允許的主機清單" && ! echo "$out" | grep -q 沒辦法下載'
+if [ -n "$PWSH" ]; then
+    out=$(kps collect https://public-git.example/someone/skills --look 2>&1); rc=$?
+    check "collect --look (kit.ps1): a host outside allowed_hosts is refused the same" '[ $rc -ne 0 ] && echo "$out" | grep -q "public-git.example 不在允許的主機清單"'
+fi
 rm -rf "$CO/skills/one" "$CO/skills/foo" "$CO/third_party.lock"
 cd "$T"
 

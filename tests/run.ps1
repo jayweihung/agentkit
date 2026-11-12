@@ -1127,11 +1127,11 @@ $j = $null; try { $j = $out | ConvertFrom-Json } catch { }
 Check 'collect --look: every skill, as JSON' { $rc -eq 0 -and $j.allowed -eq $true -and $j.can_allow -eq $false -and (@($j.skills | ForEach-Object { "$($_.path),$($_.name),$($_.description),$($_.license),$($_.scripts),$($_.exists)" }) -join ';') -eq 'a,a,say "a" now,MIT,run.sh,;b,b,say "b" now,MIT,,' }
 Check 'collect --look writes nothing' { $before -eq (@(Get-ChildItem -Recurse -File $CO | ForEach-Object { "$($_.FullName) $($_.Length)" }) -join '|') }
 Kit collect (FileUrl $UP) --look
-$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
-Check 'collect --look on an author not on the list: says so (a team source: no --allow)' { $rc -eq 0 -and $j.allowed -eq $false -and $j.can_allow -eq $false -and $j.skills[0].path -eq 'skills/foo' }
+Check 'collect --look on an author not on the list of a team source (no --allow): says so, downloads nothing' { $rc -ne 0 -and $out.Contains('不在 collect_sources') -and $out.Contains('不下載') -and -not $out.Contains('"skills"') }
 Kit collect (FileUrl $UP) --path skills/foo --allow
 Check 'collect --allow refused in a team source (no push: direct)' { $rc -ne 0 -and $out -match 'push: direct' -and -not (Test-Path "$CO/skills/foo") }
-W "$CO/kit.yaml" "name: collector`npush: direct`ncollect_sources: [$(FileUrl $U2)]   # authors`n"
+# (allowed_hosts listed: a file:/// folder on this machine has no host, so it is not refused)
+W "$CO/kit.yaml" "name: collector`npush: direct`nallowed_hosts: [gitea.example]`ncollect_sources: [$(FileUrl $U2)]   # authors`n"
 Kit collect (FileUrl $UP) --look
 $j = $null; try { $j = $out | ConvertFrom-Json } catch { }
 Check 'collect --look: your own source can add the author' { $j.can_allow -eq $true }
@@ -1150,6 +1150,12 @@ W "$CO/kit.yaml" "name: collector`npush: direct"
 Remove-Item -Recurse -Force "$CO/skills/one"
 Kit collect (FileUrl $U1) --allow
 Check 'collect --allow: no list yet gets one' { $l = @((ReadT "$CO/kit.yaml").TrimEnd("`n") -split "`n"); $rc -eq 0 -and $l[-1] -eq "collect_sources: [$id1]" -and ($l -contains 'push: direct') }
+# the host must be in allowed_hosts (the source's own list, else every source's): --look and collect never go elsewhere
+W "$CO/kit.yaml" "name: collector`npush: direct`nallowed_hosts: [gitea.example]`ncollect_sources: [https://public-git.example/someone]`n"
+Kit collect https://public-git.example/someone/skills --look
+Check 'collect --look: a host outside allowed_hosts is refused before anything is downloaded' { $rc -ne 0 -and $out.Contains('public-git.example 不在允許的主機清單') -and -not $out.Contains('沒辦法下載') }
+Kit collect https://public-git.example/someone/skills
+Check 'collect: a host outside allowed_hosts is refused (the same list)' { $rc -ne 0 -and $out.Contains('public-git.example 不在允許的主機清單') -and -not $out.Contains('沒辦法下載') }
 Pop-Location
 
 

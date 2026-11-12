@@ -197,8 +197,11 @@ check_host() { # refuse URLs whose host is not allowed
     is_url "$url" || return 0
     hosts=$(allowed_hosts)
     [ -n "$hosts" ] || return 0
-    h=$(url_host "$url")
-    printf '%s\n' "$hosts" | grep -qxF "$h" || die "$h 不在允許的主機清單：$(printf '%s' "$hosts" | paste -sd' ' -)"
+    case $url in
+        [Ff][Ii][Ll][Ee]:///*) ;;     # file:///path: a folder on this machine, no host to ask
+        *) h=$(url_host "$url")
+           printf '%s\n' "$hosts" | grep -qxF "$h" || die "$h 不在允許的主機清單：$(printf '%s' "$hosts" | paste -sd' ' -)";;
+    esac
     # git config "insteadOf" rules can rewrite a URL; check where git really goes
     local real; real=$(git ls-remote --get-url "$url" 2>/dev/null)
     [ -z "$real" ] || [ "$real" = "$url" ] || ! is_url "$real" || { h=$(url_host "$real"); printf '%s\n' "$hosts" | grep -qxF "$h" || die "git 設定把網址改到 ${h}，不在允許的主機清單"; }
@@ -3339,6 +3342,13 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
         ok=0
     fi
     local own=0; [ "$(push_mode "$dir")" = direct ] && own=1
+    # --look downloads only what kit collect could take: a host in allowed_hosts (the target source's own list, else
+    # every source's), and an author on collect_sources or one your own source can add (--allow)
+    PUSH_DIR=$dir check_host "$url"
+    if [ $ok = 0 ] && [ -n "$look" ]; then
+        [ -z "$real" ] || [ "$real" = "$url" ] || die "git 設定把 $url 改到 ${real}，不在 collect_sources，不下載"
+        [ $own = 1 ] || die "$(url_id "$url") 不在 collect_sources（$(basename "$dir")/kit.yaml），不下載；這是團隊的來源，要請維護者把它加進 kit.yaml 的 collect_sources"
+    fi
     if [ $ok = 0 ] && [ -z "$look" ]; then
         if [ -z "$allow" ]; then
             [ $own = 1 ] && die "$(url_id "$url") 不在 collect_sources（$(basename "$dir")/kit.yaml），不能收；確定要收就加 --allow，一起加進清單"

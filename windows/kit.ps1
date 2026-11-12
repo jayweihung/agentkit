@@ -559,8 +559,10 @@ function Check-Host([string]$url) { # refuse URLs whose host is not allowed
     if (-not (Is-Url $url)) { return }
     $hosts = @(Allowed-Hosts)
     if ($hosts.Count -eq 0) { return }
-    $h = Url-Host $url
-    if ($hosts -notcontains $h) { Die "$h 不在允許的主機清單：$($hosts -join ' ')" }
+    if (-not $url.StartsWith('file:///', [StringComparison]::OrdinalIgnoreCase)) {   # file:///path: a folder on this machine, no host to ask
+        $h = Url-Host $url
+        if ($hosts -notcontains $h) { Die "$h 不在允許的主機清單：$($hosts -join ' ')" }
+    }
     # git config "insteadOf" rules can rewrite a URL; check where git really goes
     $real = (Git-Safe ls-remote --get-url $url | Select-Object -First 1)
     if ($real -and $real -ne $url -and (Is-Url $real)) { $h = Url-Host $real; if ($hosts -notcontains $h) { Die "git 設定把網址改到 ${h}，不在允許的主機清單" } }
@@ -4107,6 +4109,13 @@ function Cmd-Collect($rest) {
         $ok = $false
     }
     $own = (Push-Mode $dir) -eq 'direct'
+    # --look downloads only what kit collect could take: a host in allowed_hosts (the target source's own list, else
+    # every source's), and an author on collect_sources or one your own source can add (--allow)
+    $savePush = $script:PushDir; $script:PushDir = $dir; Check-Host $url; $script:PushDir = $savePush
+    if (-not $ok -and $look) {
+        if ($moved) { Die "git 設定把 $url 改到 ${real}，不在 collect_sources，不下載" }
+        if (-not $own) { Die "$(Url-Id $url) 不在 collect_sources（$(Split-Path -Leaf $dir)/kit.yaml），不下載；這是團隊的來源，要請維護者把它加進 kit.yaml 的 collect_sources" }
+    }
     $add = $false
     if (-not $ok -and -not $look) {
         if (-not $allow) {

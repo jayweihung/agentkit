@@ -203,7 +203,7 @@ README 會一起帶過去（它就是使用說明），跟其他檔案一樣要�
     kit check                     送出前檢查
     kit push [--to 來源] [--dry-run]   檢查後開分支、push、在 Gitea 開 PR
 
-收別人寫好的 skill（例如 GitHub 上的）：
+收別人寫好的 skill（例如開源專案裡的；公司內只能從 `allowed_hosts` 列的主機收）：
 
     kit collect <原作者 repo 網址> [--to 來源]   收進來（帶原作者的 LICENSE，記在 third_party.lock）
     kit outdated                             看原作者有沒有新版
@@ -212,7 +212,9 @@ README 會一起帶過去（它就是使用說明），跟其他檔案一樣要�
 - 沒給 `--path` 時：repo 最外層有 `SKILL.md` 就收它；不然 repo 裡只有一個 `SKILL.md` 就收那個資料夾；有好幾個就列出來讓你用 `--path` 選。
 - 只收 `kit.yaml` 的 `collect_sources` 裡的作者。自己的來源（`push: direct`）可以加 `--allow`，收的時候一起把作者加進清單；團隊來源要維護者改清單。
   `kit push` 平常不送 `kit.yaml`；但它只改了 `collect_sources` 時（`--allow` 加的）會一起送。
+- 網址的主機要在 `allowed_hosts` 裡（收進來的來源自己有列就看它的，沒列就看所有來源的；都沒列就不限）。`file:///` 是本機的資料夾，不算主機。
 - `--look`：只下載來看、什麼都不寫，用 JSON 列出找到的 skill、授權、會執行的檔案（Herdr 面板的「下載看看」用它）。
+  只下載 `kit collect` 真的能收的：主機要在 `allowed_hosts`，作者要在 `collect_sources`，或是自己的來源可以用 `--allow` 加的；團隊來源不在清單的作者，直接說不能收，不下載。
 - 沒有 LICENSE 的不收；只收文字檔，不收捷徑、圖片和 `.github/` 這類資料夾。
 
 `kit push` 只送改過的 rule、skill、mcp、agent，只 push `kit/...` 分支，不動 main。
