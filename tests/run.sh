@@ -484,7 +484,7 @@ git -C "$FK" init -q; fkcommit
 echo "not tracked" > "$FK/untracked.md"
 out=$("$FK/unix/kit" export-self "$EX" --version 0.4.0+gitea.12 2>&1); rc=$?
 check "export-self succeeds, says the commit message" '[ $rc -eq 0 ] && echo "$out" | grep -q "kit 0.4.0+gitea.12"'
-check "export-self drops README, CHANGELOG, LICENSE, .github, private-words.txt" '[ ! -e "$EX/README.md" ] && [ ! -e "$EX/LICENSE" ] && [ ! -e "$EX/CHANGELOG.md" ] && [ ! -e "$EX/.github" ] && [ ! -e "$EX/private-words.txt" ]'
+check "export-self drops CHANGELOG, LICENSE, .github, private-words.txt; keeps README (the manual)" '[ -f "$EX/README.md" ] && [ ! -e "$EX/LICENSE" ] && [ ! -e "$EX/CHANGELOG.md" ] && [ ! -e "$EX/.github" ] && [ ! -e "$EX/private-words.txt" ]'
 check "export-self keeps tests, .gitattributes, .gitignore, kit" '[ -f "$EX/tests/t.sh" ] && [ -f "$EX/.gitattributes" ] && [ -f "$EX/.gitignore" ] && [ -x "$EX/unix/kit" ] && [ -f "$EX/windows/kit.ps1" ]'
 # kit's own repo must export too (a GitHub host in a test or an example once stopped every company update)
 if git -C "$HERE/.." rev-parse --git-dir >/dev/null 2>&1; then
@@ -494,6 +494,12 @@ fi
 check "export-self leaves out untracked files" '[ ! -e "$EX/untracked.md" ]'
 check "export-self writes VERSION" '[ "$(cat "$EX/VERSION")" = 0.4.0+gitea.12 ]'
 check "export-self INSTALL.md, no URL" 'grep -q "sh unix/install.sh" "$EX/INSTALL.md" && grep -qF "windows\\install.ps1" "$EX/INSTALL.md" && ! grep -qE "://|@[A-Za-z0-9.-]+:" "$EX/INSTALL.md"'
+check "export-self INSTALL.md: first use is docs/company.md, the manual README.md" 'grep -qF "照 docs/company.md 從頭做一次" "$EX/INSTALL.md" && grep -qF "用法看 README.md" "$EX/INSTALL.md"'
+if [ -n "$PWSH" ]; then
+    "$PWSH" -NoProfile -File "$FK/windows/kit.ps1" export-self "$T/export-ps" >/dev/null 2>&1
+    check "export-self: kit.ps1 writes the same INSTALL.md" 'cmp -s "$T/export-ps/INSTALL.md" "$EX/INSTALL.md"'
+    rm -rf "$T/export-ps"
+fi
 out=$("$FK/unix/kit" export-self "$EX" 2>&1); rc=$?
 check "export-self stops when the folder is not empty" '[ $rc -ne 0 ] && echo "$out" | grep -q 不是空的 && [ -f "$EX/VERSION" ]'
 gh='github''.com'

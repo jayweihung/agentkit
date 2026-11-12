@@ -456,11 +456,12 @@ W "$FK/untracked.md" "not tracked`n"
 $saveKit = $Kit; $Kit = "$FK/windows/kit.ps1"
 Kit export-self $EX --version 0.4.0+gitea.12
 Check 'export-self succeeds, says the commit message' { $rc -eq 0 -and $out.Contains('kit 0.4.0+gitea.12') }
-Check 'export-self drops README, CHANGELOG, LICENSE, .github, private-words.txt' { -not (Test-Path "$EX/README.md") -and -not (Test-Path "$EX/LICENSE") -and -not (Test-Path "$EX/CHANGELOG.md") -and -not (Test-Path "$EX/.github") -and -not (Test-Path "$EX/private-words.txt") }
+Check 'export-self drops CHANGELOG, LICENSE, .github, private-words.txt; keeps README (the manual)' { (Test-Path "$EX/README.md") -and -not (Test-Path "$EX/LICENSE") -and -not (Test-Path "$EX/CHANGELOG.md") -and -not (Test-Path "$EX/.github") -and -not (Test-Path "$EX/private-words.txt") }
 Check 'export-self keeps tests, .gitattributes, .gitignore, kit' { (Test-Path "$EX/tests/t.sh") -and (Test-Path "$EX/.gitattributes") -and (Test-Path "$EX/.gitignore") -and (Test-Path "$EX/unix/kit") -and (Test-Path "$EX/windows/kit.ps1") }
 Check 'export-self leaves out untracked files' { -not (Test-Path "$EX/untracked.md") }
 Check 'export-self writes VERSION' { (ReadT "$EX/VERSION") -eq "0.4.0+gitea.12`n" }
 Check 'export-self INSTALL.md, no URL' { $m = ReadT "$EX/INSTALL.md"; $m.Contains('sh unix/install.sh') -and $m.Contains('windows\install.ps1') -and $m -notmatch '://|@[A-Za-z0-9.-]+:' }
+Check 'export-self INSTALL.md: first use is docs/company.md, the manual README.md' { $m = ReadT "$EX/INSTALL.md"; $m.Contains('照 docs/company.md 從頭做一次') -and $m.Contains('用法看 README.md') }
 Kit export-self $EX
 Check 'export-self stops when the folder is not empty' { $rc -ne 0 -and $out.Contains('不是空的') -and (Test-Path "$EX/VERSION") }
 $gh = 'github' + '.com'

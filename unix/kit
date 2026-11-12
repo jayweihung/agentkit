@@ -2869,9 +2869,9 @@ kit_repo() { # the clone kit was installed from, else the repo this kit runs fro
     done
     return 1
 }
-export_skip() { # files that stay out of the export
+export_skip() { # files that stay out of the export (README goes along: it is the manual; the scan below still checks it)
     case /$1 in */.github/*) return 0;; esac
-    case $(basename "$1" | tr 'A-Z' 'a-z') in readme*|changelog*|license*|licence*|private-words.txt) return 0;; esac
+    case $(basename "$1" | tr 'A-Z' 'a-z') in changelog*|license*|licence*|private-words.txt) return 0;; esac
     return 1
 }
 mask_paths() { # mask_paths WORDFILE : paths on stdin -> those with a word in them, each such part shown as <不公開>
@@ -2889,6 +2889,7 @@ install_md() { # INSTALL.md of the export (no URLs; the same text as kit.ps1 wri
 # 安裝 kit
 
 先把公司的 agentkit repo clone 下來（網址問管理這個 repo 的人），再照你的系統做。
+第一次用（特別是 Windows）：照 docs/company.md 從頭做一次，從安裝到第一次送出修改都有。
 
 ## Windows
 
@@ -2912,6 +2913,8 @@ install_md() { # INSTALL.md of the export (no URLs; the same text as kit.ps1 wri
     kit init <團隊來源的網址>
     kit help
 
+每個指令的用法看 README.md，各版改了什麼看 docs/changes.md。
+
 ## Herdr
 
     kit herdr-panel install
@@ -2923,7 +2926,7 @@ cmd_export_self() {
     local out="" ver="" repo line mode rel f n probs
     while [ $# -gt 0 ]; do
         case $1 in
-            --version) ver=${2:-}; [ -n "$ver" ] || die "--version 後面要接版本，例：0.4.0+gitea.12"; shift 2;;
+            --version) ver=${2:-}; [ -n "$ver" ] || die "--version 後面要接版本，例：0.2.0+gitea.1"; shift 2;;
             -*) die "不認得 $1";;
             *) [ -z "$out" ] || die "多了一個參數：$1"; out=$1; shift;;
         esac

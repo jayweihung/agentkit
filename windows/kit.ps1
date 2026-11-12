@@ -3620,16 +3620,17 @@ function Kit-Repo { # the clone kit was installed from, else the repo this kit r
     }
     $null
 }
-function Export-Skip([string]$rel) { # files that stay out of the export
+function Export-Skip([string]$rel) { # files that stay out of the export (README goes along: it is the manual; the scan below still checks it)
     if ("/$rel".Contains('/.github/')) { return $true }
     $b = ($rel -split '/')[-1]
-    ($b -match '^(README|CHANGELOG|LICENSE|LICENCE)') -or $b -eq 'private-words.txt'
+    ($b -match '^(CHANGELOG|LICENSE|LICENCE)') -or $b -eq 'private-words.txt'
 }
 function Install-Md { # INSTALL.md of the export (no URLs; the same text as unix/kit writes)
     $t = @'
 # 安裝 kit
 
 先把公司的 agentkit repo clone 下來（網址問管理這個 repo 的人），再照你的系統做。
+第一次用（特別是 Windows）：照 docs/company.md 從頭做一次，從安裝到第一次送出修改都有。
 
 ## Windows
 
@@ -3653,6 +3654,8 @@ function Install-Md { # INSTALL.md of the export (no URLs; the same text as unix
     kit init <團隊來源的網址>
     kit help
 
+每個指令的用法看 README.md，各版改了什麼看 docs/changes.md。
+
 ## Herdr
 
     kit herdr-panel install
@@ -3669,7 +3672,7 @@ function Cmd-ExportSelf($rest) {
     $a = @($rest | Where-Object { $null -ne $_ })
     for ($i = 0; $i -lt $a.Count; $i++) {
         $x = [string]$a[$i]
-        if ($x -eq '--version') { if ($i + 1 -ge $a.Count -or -not $a[$i + 1]) { Die '--version 後面要接版本，例：0.4.0+gitea.12' }; $i++; $ver = [string]$a[$i] }
+        if ($x -eq '--version') { if ($i + 1 -ge $a.Count -or -not $a[$i + 1]) { Die '--version 後面要接版本，例：0.2.0+gitea.1' }; $i++; $ver = [string]$a[$i] }
         elseif ($x.StartsWith('-')) { Die "不認得 $x" }
         elseif ($out) { Die "多了一個參數：$x" }
         else { $out = $x }

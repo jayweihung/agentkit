@@ -37,7 +37,7 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
     kit self-update               更新 kit 本身
     kit uninstall [--self]        移除
 
-團隊的 kit.yaml 可以寫 `kit_version: 0.4.0`：kit 比這個舊的人，`kit sync` / `kit list` 會提醒一次去 `kit self-update`。
+團隊的 kit.yaml 可以寫 `kit_version: 0.2.0`：kit 比這個舊的人，`kit sync` / `kit list` 會提醒一次去 `kit self-update`。
 
 內容 repo 的 PR 自動檢查（Gitea Actions，Linux runner）：
 
@@ -187,9 +187,10 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 
 ## 把 kit 帶進公司的 git server
 
-    kit export-self <新的資料夾> [--version 0.4.0+gitea.12]
+    kit export-self <新的資料夾> [--version 0.2.0+gitea.1]
 
-只帶 git 有追蹤的檔案，拿掉 `.github/`、`README*`、`CHANGELOG*`、`LICENSE*`，加上一份沒有網址的 `INSTALL.md`。
+只帶 git 有追蹤的檔案，拿掉 `.github/`、`CHANGELOG*`、`LICENSE*`，加上一份沒有網址的 `INSTALL.md`（第一次用就照 `docs/company.md` 做）。
+README 會一起帶過去（它就是使用說明），跟其他檔案一樣要過下面的檢查。
 有 GitHub 的字、不該公開的字（`~/.config/agentkit/private-words.txt` 和來源裡的 `private-words.txt`）
 或非文字檔就失敗，並刪掉輸出資料夾。成功後把資料夾內容 commit 到公司的 repo，訊息只寫 `kit <版本>`。
 
