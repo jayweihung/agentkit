@@ -1919,7 +1919,93 @@ function Cmd-Sync {
     Seen-All
     Version-Nag
 }
-function Sync-Hook { # run by Claude at start: sync in the background, at most every 10 minutes
+# Is this Claude saving its transcript? (the same as unix/kit) A Claude Code started from inside another Claude's
+# shell inherits CLAUDE_CODE_CHILD_SESSION=1 and then writes no transcript (no /resume);
+# CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 makes it save again. Claude gives its hooks CHILD_SESSION=1 too, so this
+# reads the environment of the claude process (the nearest parent named claude), not kit's own.
+# Windows: the parent and the environment come from that process's PEB (ntdll NtQueryInformationProcess and
+# ReadProcessMemory, declared at run time, so no Add-Type and no compiler); 64-bit PowerShell only, anything that
+# cannot be read means no warning. Claude hands CHILD_SESSION to its children without setting it on itself, so the
+# PEB (the process's current environment) still shows what it was started with.
+# Codex and omp only skip their session log when told to (codex exec --ephemeral, omp --no-session): nothing to check.
+$script:NtApi = $null
+function Nt-Api {
+    if ($script:NtApi) { return $script:NtApi }
+    $ab = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly((New-Object Reflection.AssemblyName 'KitNt'), 'Run')
+    $tb = $ab.DefineDynamicModule('KitNt').DefineType('KitNt', 'Public, Class')
+    foreach ($d in @(@('ntdll.dll', 'NtQueryInformationProcess', [int], @([IntPtr], [int], [byte[]], [int], [IntPtr])),
+            @('kernel32.dll', 'OpenProcess', [IntPtr], @([int], [bool], [int])),
+            @('kernel32.dll', 'ReadProcessMemory', [bool], @([IntPtr], [IntPtr], [byte[]], [IntPtr], [IntPtr])),
+            @('kernel32.dll', 'CloseHandle', [bool], @([IntPtr])))) {
+        $m = $tb.DefinePInvokeMethod($d[1], $d[0], 'Public, Static, PinvokeImpl', 'Standard', $d[2], [Type[]]$d[3], 'Winapi', 'Unicode')
+        $m.SetImplementationFlags('PreserveSig')
+    }
+    $script:NtApi = $tb.CreateType(); $script:NtApi
+}
+function Win-Mem($api, [IntPtr]$h, [long]$addr, [long]$n) { # $n bytes at $addr in process $h, or $null
+    $b = New-Object byte[] $n
+    if ($api::ReadProcessMemory($h, [IntPtr]$addr, $b, [IntPtr]$n, [IntPtr]::Zero)) { , $b } else { $null }
+}
+function Win-Peb([int]$p, [bool]$wantEnv) { # the parent pid of process $p, or ($wantEnv) its environment lines; $null if unreadable
+    if ([IntPtr]::Size -ne 8) { return $null }                       # the offsets below are the 64-bit ones
+    $api = Nt-Api
+    $h = $api::OpenProcess(0x1010, $false, $p)                       # PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ
+    if ($h -eq [IntPtr]::Zero) { return $null }
+    try {
+        $b = New-Object byte[] 48                                    # PROCESS_BASIC_INFORMATION
+        if ($api::NtQueryInformationProcess($h, 0, $b, 48, [IntPtr]::Zero) -ne 0) { return $null }
+        if (-not $wantEnv) { return [int][BitConverter]::ToInt64($b, 40) }      # InheritedFromUniqueProcessId
+        $q = Win-Mem $api $h ([BitConverter]::ToInt64($b, 8) + 0x20) 8          # PEB.ProcessParameters
+        if ($null -eq $q) { return $null }; $pp = [BitConverter]::ToInt64($q, 0)
+        $q = Win-Mem $api $h ($pp + 0x80) 8                                      # .Environment
+        if ($null -eq $q) { return $null }; $ea = [BitConverter]::ToInt64($q, 0)
+        $q = Win-Mem $api $h ($pp + 0x3F0) 8                                     # .EnvironmentSize (bytes)
+        if ($null -eq $q) { return $null }; $n = [BitConverter]::ToInt64($q, 0)
+        if ($n -le 0 -or $n -gt 4MB) { return $null }
+        $q = Win-Mem $api $h $ea $n; if ($null -eq $q) { return $null }
+        $lines = New-Object Collections.Generic.List[string]
+        foreach ($l in [Text.Encoding]::Unicode.GetString($q).Split([char]0)) { if (-not $l) { break }; $lines.Add($l) }
+        $lines.ToArray()
+    } finally { [void]$api::CloseHandle($h) }
+}
+function Proc-Parent([int]$p) { # 0 when there is none (or it is gone: a newer process with its pid is not its parent)
+    if (-not $OnWindows) { $v = "$(& ps -o ppid= -p $p 2>$null)".Trim(); if ($v -match '^\d+$') { return [int]$v }; return 0 }
+    $q = Win-Peb $p $false; if (-not $q) { return 0 }
+    try { if ((Get-Process -Id $q -ErrorAction Stop).StartTime -gt (Get-Process -Id $p -ErrorAction Stop).StartTime) { return 0 } } catch { return 0 }
+    $q
+}
+function Proc-Name([int]$p) {
+    if ($OnWindows) { try { (Get-Process -Id $p -ErrorAction Stop).ProcessName } catch { '' } }
+    else { $v = "$(& ps -o comm= -p $p 2>$null)".Trim(); $v.Substring($v.LastIndexOf('/') + 1) }
+}
+function Proc-Env([int]$p) { # the start environment of process $p, one VAR=value per line
+    if ($OnWindows) { return Win-Peb $p $true }
+    if (Test-Path -LiteralPath "/proc/$p/environ") { return ([IO.File]::ReadAllText("/proc/$p/environ")).Split([char]0) }
+    $a = "$(& ps -ww -p $p -o command= 2>$null)"; $e = "$(& ps -E -ww -p $p -o command= 2>$null)"   # macOS: command line, then environment
+    if ($a -and $e.StartsWith($a)) { $e = $e.Substring($a.Length) }
+    $e.Split(' ')
+}
+function Transcript-Check { # print Claude's SessionStart JSON (a warning) when the claude above us saves no transcript
+    if ($env:KIT_TRANSCRIPT_CHECK -eq '0') { return }
+    try {
+        $sf = Join-Path $ClaudeDir 'settings.json'
+        if ((Test-Path -LiteralPath $sf) -and (Read-Text $sf).Contains('transcript-check')) { return }   # your own hook does it
+        $p = $PID; $c = ''
+        for ($i = 0; $i -lt 6; $i++) {
+            $p = Proc-Parent $p; if ($p -le 1) { return }
+            $c = Proc-Name $p; if ($c -eq 'claude') { break }
+        }
+        if ($c -ne 'claude') { return }
+        $e = @(Proc-Env $p)
+        if ($e -notcontains 'CLAUDE_CODE_CHILD_SESSION=1' -or $e -contains 'CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1') { return }
+        $restart = if ($OnWindows) { "`$env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE='1'; claude" } else { 'env -u CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 claude' }
+        $msg = "⚠ 這個 session 沒有在存對話紀錄：關掉之後 /resume 找不回來。請先叫它寫交接檔，再用會存檔的方式重開（$restart）。"
+        $ctx = 'WARNING: transcript saving is OFF for this session (the claude process was started with CLAUDE_CODE_CHILD_SESSION=1 and without CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1). If the user closes it, the conversation is lost and cannot be resumed. Tell the user this in your first reply (in Traditional Chinese), commit work often, and before the user closes it write a HANDOFF.md. Any Claude you launch yourself (in a new terminal or pane) must be started with: ' + $restart + ' ...'
+        [Console]::Out.WriteLine('{"systemMessage":' + (Json-Str $msg) + ',"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":' + (Json-Str $ctx) + '}}')
+    } catch { }
+}
+function Sync-Hook { # run by Claude at start: warn when it saves no transcript; sync in the background, at most every 10 minutes
+    Transcript-Check
     if (-not (Test-Path -LiteralPath $Machine)) { exit 0 }
     $stamp = Join-Path $KitConf 'last-sync'; $lock = Join-Path $KitConf 'sync.lock'
     if ((Test-Path -LiteralPath $stamp) -and (Get-Item -LiteralPath $stamp).LastWriteTime -gt (Get-Date).AddMinutes(-10)) { exit 0 }
