@@ -53,6 +53,19 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | 不支援 |
 
 改 JSON 前會留一份 `.kit-backup`。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。
+
+**Claude 沒在存對話紀錄時提醒你**：在另一個 Claude 的終端機裡開的 Claude（例如 Claude 幫你開新視窗）會帶著 `CLAUDE_CODE_CHILD_SESSION=1`，
+這樣它不寫對話紀錄，關掉後 `/resume` 找不回來。kit 的 SessionStart hook（就是上面那個自動同步）每次 Claude 開啟時會看
+Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 都設了這個變數），是這種情況就在畫面上警告，也告訴 Claude 要先寫交接檔。
+用 `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 claude` 開就會存（Mac／Linux：`env -u CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 claude`）。
+
+- Mac 用 `ps -E`、Linux 用 `/proc/<pid>/environ`。Windows 讀 `claude.exe` 的 PEB（不用編譯、不用管理員；要 64 位元的 PowerShell）；
+  用 npm 裝的 Claude（行程名字是 `node`）找不到，就不檢查。讀不到一律不警告。
+- 你自己已經有做同一件事的 hook（`~/.claude/settings.json` 裡有 `transcript-check` 這個字）時，kit 不再說一次。
+  不要 kit 檢查：在 settings.json 的 `env` 加 `"KIT_TRANSCRIPT_CHECK": "0"`。
+- Codex、omp 沒有這種情況：從別的 agent 裡開也照樣存（`~/.codex/sessions/`、`~/.omp/agent/sessions/`），
+  只有你自己下 `codex exec --ephemeral`、`omp --no-session` 才不存，所以 kit 不替它們檢查。
+
 `kit run <agent>` 只在這次啟動時帶入 agent 的東西，不改設定檔：
 
 | | rule + 提示 | skill | MCP | tools.only | tools.deny |

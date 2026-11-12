@@ -116,4 +116,5 @@ kit 會把來源 clone 到 `%USERPROFILE%\agentkit\<來源名字>`，再把團�
 - **新加的 MCP 沒出現**：把那個 agent 關掉重開。
 - **MCP 有列出來但連不上**：團隊的 `mcp/*.yaml` 用的指令（例如 `npx`、`python3`）這台電腦要有。`python3` 在 Windows 常常是微軟商店的空殼，要裝真的 Python。
 - **送出時說「git 的作者信箱 … 不是公司網域」**：`git config --global user.email 你的公司信箱`（`GIT_AUTHOR_EMAIL` 有設的話也要改）。
+- **Claude 一開就說「這個 session 沒有在存對話紀錄」**：這個 Claude 是從別的 Claude 裡開的，關掉後 `/resume` 找不回來。先叫它寫交接檔，關掉，在新的 PowerShell 打 `$env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE='1'; claude` 重開。
 - **Claude 沒讀到團隊規則**：打 `kit self-update` 換新版（舊版在 Windows 寫的路徑 Claude 讀不到），再 `kit sync`。

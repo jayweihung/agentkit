@@ -628,7 +628,37 @@ statusline_json() { # the statusLine kit puts in settings.json
     printf '{"type":"command","command":%s,"padding":0}' "$(json_str "'$k' statusline")"
 }
 
-sync_hook() { # run by Claude at start: sync in the background, at most every 10 minutes
+# Is this Claude saving its transcript? A Claude Code started from inside another Claude's shell inherits
+# CLAUDE_CODE_CHILD_SESSION=1 and then writes no ~/.claude/projects/.../<session>.jsonl (no /resume);
+# CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 makes it save again. Claude gives its hooks CHILD_SESSION=1 too, so this
+# reads the start environment of the claude process (the nearest parent named claude), not kit's own.
+# Codex and omp only skip their session log when told to (codex exec --ephemeral, omp --no-session): nothing to check.
+proc_env() { # the start environment of pid $1, one VAR=value per line
+    if [ -r "/proc/$1/environ" ]; then tr '\0' '\n' < "/proc/$1/environ"; return; fi
+    local a e   # macOS: ps -E prints the command line, then the environment
+    a=$(ps -ww -p "$1" -o command= 2>/dev/null); e=$(ps -E -ww -p "$1" -o command= 2>/dev/null)
+    printf '%s\n' "${e#"$a"}" | tr ' ' '\n'
+}
+transcript_check() { # print Claude's SessionStart JSON (a warning) when the claude above us saves no transcript
+    [ "${KIT_TRANSCRIPT_CHECK:-}" != 0 ] || return 0
+    grep -q 'transcript-check' "$CLAUDE_DIR/settings.json" 2>/dev/null && return 0  # your own hook does it: one warning
+    local p=$PPID i=0 c="" e
+    while [ $i -lt 6 ] && [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+        c=$(ps -o comm= -p "$p" 2>/dev/null); c=${c##*/}
+        [ "$c" = claude ] && break
+        p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' '); i=$((i+1))
+    done
+    [ "$c" = claude ] || return 0
+    e=$(proc_env "$p")
+    printf '%s\n' "$e" | grep -qx 'CLAUDE_CODE_CHILD_SESSION=1' || return 0
+    printf '%s\n' "$e" | grep -qx 'CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1' && return 0
+    cat <<'JSON'
+{"systemMessage":"⚠ 這個 session 沒有在存對話紀錄：關掉之後 /resume 找不回來。請先叫它寫交接檔，再用會存檔的方式重開（env -u CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 claude）。","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"WARNING: transcript saving is OFF for this session (the claude process was started with CLAUDE_CODE_CHILD_SESSION=1 and without CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1). If the user closes it, the conversation is lost and cannot be resumed. Tell the user this in your first reply (in Traditional Chinese), commit work often, and before the user closes it write a HANDOFF.md. Any Claude you launch yourself (in a new terminal or pane) must be started with: env -u CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 claude ..."}}
+JSON
+}
+
+sync_hook() { # run by Claude at start: warn when it saves no transcript; sync in the background, at most every 10 minutes
+    transcript_check
     [ -f "$MACHINE" ] || exit 0
     local stamp="$KIT_CONF/last-sync" lock="$KIT_CONF/sync.lock" log="$KIT_CONF/sync.log"
     [ -f "$stamp" ] && [ -z "$(find "$stamp" -mmin +10 2>/dev/null)" ] && exit 0
