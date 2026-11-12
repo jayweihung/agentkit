@@ -277,106 +277,6 @@ function Json-RmItem($root, [string]$path, $node) {
     $s = Json-Ser $node
     for ($i = $a.v.Count - 1; $i -ge 0; $i--) { if ((Json-Ser $a.v[$i]) -ceq $s) { $a.v.RemoveAt($i) } }
 }
-function Json-ItemIs($c, [string]$key, [string]$raw) { # is node c an object whose KEY is the raw string?
-    if ($c.t -ne 'o') { return $false }
-    $m = Json-Find $c $key
-    ($null -ne $m) -and $m.t -eq 'v' -and $m.raw -ceq $raw
-}
-function Json-RmWhere($n, [string]$key, [string]$raw) { # anywhere: remove array items whose KEY is the string
-    if ($n.t -eq 'v') { return }
-    for ($i = $n.v.Count - 1; $i -ge 0; $i--) {
-        if ($n.t -eq 'a' -and (Json-ItemIs $n.v[$i] $key $raw)) { $n.v.RemoveAt($i); continue }
-        Json-RmWhere $n.v[$i] $key $raw
-    }
-}
-function Json-AddNear($n, [string]$key, [string]$raw, [string]$json) { # anywhere: append JSON to each array with an item whose KEY is the string
-    if ($n.t -eq 'v') { return }
-    $hit = $false
-    $count = $n.v.Count
-    for ($i = 0; $i -lt $count; $i++) {
-        if ($n.t -eq 'a' -and (Json-ItemIs $n.v[$i] $key $raw)) { $hit = $true }
-        Json-AddNear $n.v[$i] $key $raw $json
-    }
-    if (-not $hit) { return }
-    $item = Json-Parse $json; $s = Json-Ser $item
-    foreach ($x in $n.v) { if ((Json-Ser $x) -ceq $s) { return } }
-    $n.v.Add($item)
-}
-function Json-SwapWhere($n, [string]$key, [string]$raw, [string]$new) { # anywhere: objects whose KEY is the string get NEW there
-    if ($n.t -eq 'v') { return }
-    if (Json-ItemIs $n $key $raw) { (Json-Find $n $key).raw = $new }
-    for ($i = 0; $i -lt $n.v.Count; $i++) { Json-SwapWhere $n.v[$i] $key $raw $new }
-}
-function Json-RmHolder($n, [string]$key, [string]$raw) { # anywhere: remove array items whose "children" hold nothing but objects whose KEY is the string
-    if ($n.t -eq 'v') { return }
-    for ($i = $n.v.Count - 1; $i -ge 0; $i--) {
-        $c = $n.v[$i]
-        if ($n.t -eq 'a' -and $c.t -eq 'o') {
-            $ch = Json-Find $c 'children'
-            if ($null -ne $ch -and $ch.t -eq 'a' -and $ch.v.Count -gt 0 -and @($ch.v | Where-Object { -not (Json-ItemIs $_ $key $raw) }).Count -eq 0) { $n.v.RemoveAt($i); continue }
-        }
-        Json-RmHolder $c $key $raw
-    }
-}
-function Json-AddBefore($n, [string]$key, [string]$raw, [string]$json) { # like Json-AddNear, but right before the first such item
-    if ($n.t -eq 'v') { return }
-    $at = -1
-    $count = $n.v.Count
-    for ($i = 0; $i -lt $count; $i++) {
-        if ($n.t -eq 'a' -and $at -lt 0 -and (Json-ItemIs $n.v[$i] $key $raw)) { $at = $i }
-        Json-AddBefore $n.v[$i] $key $raw $json
-    }
-    if ($at -lt 0) { return }
-    $item = Json-Parse $json; $s = Json-Ser $item
-    foreach ($x in $n.v) { if ((Json-Ser $x) -ceq $s) { return } }
-    $n.v.Insert($at, $item)
-}
-function Json-SetKey($o, [string]$key, $v) { # object o gets KEY = node v (in place, or added last)
-    $i = Json-Child $o $key
-    if ($i -ge 0) { $o.v[$i] = $v } else { $o.k.Add((Json-Str $key)); $o.v.Add($v) }
-}
-function Json-NewObj { @{ t = 'o'; k = (New-Object System.Collections.Generic.List[string]); v = (New-Object System.Collections.Generic.List[object]) } }
-function Json-RowAround($n, [string]$key, [string]$raw, [string]$id) { # the item (KEY is the string) of a non-row's children goes into a new row ID
-    if ($n.t -eq 'v') { return }
-    if ($n.t -eq 'o') {
-        $a = Json-Find $n 'children'; $ty = Json-Find $n 'type'
-        $isRow = ($null -ne $ty) -and $ty.t -eq 'v' -and $ty.raw -ceq '"row"'
-        if ($null -ne $a -and $a.t -eq 'a' -and -not $isRow) {
-            for ($i = 0; $i -lt $a.v.Count; $i++) {
-                $c = $a.v[$i]
-                if (-not (Json-ItemIs $c $key $raw)) { continue }
-                $r = Json-NewObj
-                Json-SetKey $r 'id' @{ t = 'v'; raw = (Json-Str $id) }
-                Json-SetKey $r 'type' @{ t = 'v'; raw = '"row"' }
-                $sz = Json-Find $c 'size'; if ($null -ne $sz) { Json-SetKey $r 'size' $sz }
-                $ch = @{ t = 'a'; v = (New-Object System.Collections.Generic.List[object]) }; $ch.v.Add($c)
-                Json-SetKey $r 'children' $ch
-                Json-SetKey $c 'size' (Json-Parse '{"weight": 1}')
-                $a.v[$i] = $r
-            }
-        }
-    }
-    for ($i = 0; $i -lt $n.v.Count; $i++) { Json-RowAround $n.v[$i] $key $raw $id }
-}
-function Json-UnRow($n, [string]$rawId) { # the row with this id: one child left takes its place (and its size); none left: removed
-    if ($n.t -eq 'v') { return }
-    for ($i = $n.v.Count - 1; $i -ge 0; $i--) {
-        $c = $n.v[$i]
-        if ($n.t -eq 'a' -and (Json-ItemIs $c 'id' $rawId)) {
-            $ch = Json-Find $c 'children'
-            if ($null -ne $ch -and $ch.t -eq 'a') {
-                if ($ch.v.Count -eq 0) { $n.v.RemoveAt($i); continue }
-                if ($ch.v.Count -eq 1 -and $ch.v[0].t -eq 'o') {
-                    $x = $ch.v[0]; $sz = Json-Find $c 'size'
-                    if ($null -ne $sz) { Json-SetKey $x 'size' $sz }
-                    else { $j = Json-Child $x 'size'; if ($j -ge 0) { $x.k.RemoveAt($j); $x.v.RemoveAt($j) } }
-                    $n.v[$i] = $x; $c = $x
-                }
-            }
-        }
-        Json-UnRow $c $rawId
-    }
-}
 function Json-Apply($root, $ops) {
     foreach ($op in $ops) {
         switch ($op[0]) {
@@ -386,13 +286,6 @@ function Json-Apply($root, $ops) {
             'rmstr'   { Json-RmItem $root $op[1] @{ t = 'v'; raw = (Json-Str $op[2]) } }
             'addjson' { Json-AddItem $root $op[1] (Json-Parse $op[2]) }
             'rmjson'  { Json-RmItem $root $op[1] (Json-Parse $op[2]) }
-            'rmwhere' { Json-RmWhere $root $op[1] (Json-Str $op[2]) }
-            'addnear' { Json-AddNear $root $op[1] (Json-Str $op[2]) $op[3] }
-            'swapwhere' { Json-SwapWhere $root $op[1] (Json-Str $op[2]) (Json-Str $op[3]) }
-            'rmholder' { Json-RmHolder $root $op[1] (Json-Str $op[2]) }
-            'addbefore' { Json-AddBefore $root $op[1] (Json-Str $op[2]) $op[3] }
-            'rowaround' { Json-RowAround $root $op[1] (Json-Str $op[2]) $op[3] }
-            'unrow'   { Json-UnRow $root (Json-Str $op[1]) }
             default   { throw "json: unknown op $($op[0])" }
         }
     }

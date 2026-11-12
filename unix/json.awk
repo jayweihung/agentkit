@@ -21,20 +21,7 @@
 #   rmstr   PATH  STRING   remove "STRING" from the array at PATH
 #   addjson PATH  JSON     append JSON to the array at PATH if no equal item exists
 #   rmjson  PATH  JSON     remove items equal to JSON from the array at PATH
-#   rmwhere KEY   STRING   anywhere in the file: remove array items (objects) whose KEY is "STRING"
-#   addnear KEY   STRING  JSON   anywhere in the file: append JSON to each array that has an
-#                                item (object) whose KEY is "STRING", if no equal item is there
-#   swapwhere KEY STRING  NEW    anywhere in the file: objects whose KEY is "STRING" get "NEW" there
-#   rmholder KEY  STRING   anywhere in the file: remove array items (objects) whose "children"
-#                          array holds nothing but objects whose KEY is "STRING"
-#   addbefore KEY STRING  JSON   like addnear, but JSON goes right before the first such item
-#   rowaround KEY STRING  ID     anywhere in the file: an object whose KEY is "STRING", in the
-#                          "children" of an object that is not "type": "row", is put inside a new
-#                          row {"id": ID, "type": "row", "size": its size, "children": [it]}; it gets
-#                          "size": {"weight": 1}. Run again: nothing more changes.
-#   unrow   ID             the row "id": ID with one child left is replaced by that child, which gets
-#                          the row's size back (rowaround undone); with no child left it is removed
-# PATH and KEY are keys joined by "." (keys must not contain "." or TAB).
+# PATH is keys joined by "." (keys must not contain "." or TAB).
 # STRING is plain text; " and \ are escaped by json.awk.
 #
 # Exit status: 0 ok, 2 parse error (nothing is written to stdout).
@@ -316,127 +303,7 @@ function apply_ops(file,    line, f, cnt, n, p, j, a, i, s, found) {
                 found = i; if (f[1] == "rmjson") C[a, i] = 0
             }
             if (f[1] == "addjson" && !found) { N[a]++; C[a, N[a]] = n }
-        } else if (f[1] == "rmwhere") {
-            rm_where(root, f[2], json_str(f[3]))
-        } else if (f[1] == "addnear") {
-            add_near(root, f[2], json_str(f[3]), f[4])
-        } else if (f[1] == "swapwhere") {
-            swap_where(root, f[2], json_str(f[3]), json_str(f[4]))
-        } else if (f[1] == "rmholder") {
-            rm_holder(root, f[2], json_str(f[3]))
-        } else if (f[1] == "addbefore") {
-            add_before(root, f[2], json_str(f[3]), f[4])
-        } else if (f[1] == "rowaround") {
-            row_around(root, f[2], json_str(f[3]), f[4])
-        } else if (f[1] == "unrow") {
-            un_row(root, json_str(f[2]))
         } else fail("unknown op " f[1])
     }
     close(file)
-}
-
-function item_is(c, key, s,    m) { # is node c an object whose KEY is the raw string s?
-    if (T[c] != "o") return 0
-    m = find_path(c, key)
-    return m != 0 && T[m] == "v" && V[m] == s
-}
-
-function rm_where(n, key, s,    i, c) {
-    if (T[n] == "v") return
-    for (i = 1; i <= N[n]; i++) {
-        c = C[n, i]; if (c == 0) continue
-        if (T[n] == "a" && item_is(c, key, s)) { C[n, i] = 0; continue }
-        rm_where(c, key, s)
-    }
-}
-
-function rm_holder(n, key, s,    i, c, j, k, m, all, any) {
-    if (T[n] == "v") return
-    for (i = 1; i <= N[n]; i++) {
-        c = C[n, i]; if (c == 0) continue
-        if (T[n] == "a" && T[c] == "o" && (j = child(c, "children")) && T[C[c, j]] == "a") {
-            k = C[c, j]; all = 1; any = 0
-            for (m = 1; m <= N[k]; m++) if (C[k, m]) { any = 1; if (!item_is(C[k, m], key, s)) all = 0 }
-            if (any && all) { C[n, i] = 0; continue }
-        }
-        rm_holder(c, key, s)
-    }
-}
-
-function add_near(n, key, s, js,    i, c, hit, item, t) {
-    if (T[n] == "v") return
-    hit = 0
-    for (i = 1; i <= N[n]; i++) {
-        c = C[n, i]; if (c == 0) continue
-        if (T[n] == "a" && item_is(c, key, s)) hit = 1
-        add_near(c, key, s, js)
-    }
-    if (!hit) return
-    item = parse_text(js); t = ser(item, "")
-    for (i = 1; i <= N[n]; i++) if (C[n, i] && ser(C[n, i], "") == t) return
-    N[n]++; C[n, N[n]] = item
-}
-
-function add_before(n, key, s, js,    i, c, at, item, t) {
-    if (T[n] == "v") return
-    at = 0
-    for (i = 1; i <= N[n]; i++) {
-        c = C[n, i]; if (c == 0) continue
-        if (T[n] == "a" && !at && item_is(c, key, s)) at = i
-        add_before(c, key, s, js)
-    }
-    if (!at) return
-    item = parse_text(js); t = ser(item, "")
-    for (i = 1; i <= N[n]; i++) if (C[n, i] && ser(C[n, i], "") == t) return
-    for (i = N[n]; i >= at; i--) C[n, i + 1] = C[n, i]
-    N[n]++; C[n, at] = item
-}
-
-function set_key(o, key, v,    j) { # object o gets KEY = node v (replaced in place, or added last)
-    j = child(o, key)
-    if (j) C[o, j] = v
-    else { N[o]++; K[o, N[o]] = "\"" key "\""; C[o, N[o]] = v }
-}
-
-function row_around(n, key, s, id,    i, j, a, c, m, r, ch, sz, isrow) {
-    if (T[n] == "v") return
-    if (T[n] == "o" && (j = child(n, "children")) && T[(a = C[n, j])] == "a") {
-        m = find_path(n, "type"); isrow = (m && T[m] == "v" && V[m] == "\"row\"")
-        for (i = 1; i <= N[a]; i++) {
-            c = C[a, i]
-            if (c == 0 || isrow || !item_is(c, key, s)) continue
-            r = new_node("o")
-            m = new_node("v"); V[m] = json_str(id); set_key(r, "id", m)
-            m = new_node("v"); V[m] = "\"row\""; set_key(r, "type", m)
-            if ((sz = child(c, "size"))) set_key(r, "size", C[c, sz])
-            ch = new_node("a"); N[ch] = 1; C[ch, 1] = c; set_key(r, "children", ch)
-            set_key(c, "size", parse_text("{\"weight\": 1}"))
-            C[a, i] = r
-        }
-    }
-    for (i = 1; i <= N[n]; i++) if (C[n, i]) row_around(C[n, i], key, s, id)
-}
-
-function un_row(n, sid,    i, c, j, k, m, x, live, sz) {
-    if (T[n] == "v") return
-    for (i = 1; i <= N[n]; i++) {
-        c = C[n, i]; if (c == 0) continue
-        if (T[n] == "a" && item_is(c, "id", sid) && (j = child(c, "children")) && T[(k = C[c, j])] == "a") {
-            live = 0; x = 0
-            for (m = 1; m <= N[k]; m++) if (C[k, m]) { live++; x = C[k, m] }
-            if (live == 0) { C[n, i] = 0; continue }
-            if (live == 1 && T[x] == "o") {
-                if ((sz = child(c, "size"))) set_key(x, "size", C[c, sz])
-                else if ((sz = child(x, "size"))) C[x, sz] = 0
-                C[n, i] = x; c = x
-            }
-        }
-        un_row(c, sid)
-    }
-}
-
-function swap_where(n, key, s, ns,    i, m) {
-    if (T[n] == "v") return
-    if (item_is(n, key, s)) { m = find_path(n, key); V[m] = ns }
-    for (i = 1; i <= N[n]; i++) if (C[n, i]) swap_where(C[n, i], key, s, ns)
 }

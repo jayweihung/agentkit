@@ -114,38 +114,6 @@ printf 'rmjson\thooks.SessionStart\t%s\n' "$H" > "$T/ops5"
 LC_ALL=C $AWK -f "$JA" -v ops="$T/ops5" "$T/h2" > "$T/h3"
 cmp -s "$T/h.json" "$T/h3" && ok || bad "rmjson did not restore"; 
 
-# rmwhere / addnear: find array items by a key anywhere in the tree (layout files of screen programs)
-cat > "$T/l.json" <<'J'
-{"id":"root","type":"row","children":[
-  {"id":"bar","type":"row","children":[{"id":"tabs","content":{"mod":"tabs"}},{"id":"x","content":{"mod":"kit"}}]},
-  {"id":"body","type":"row","children":[{"id":"main","content":{"tab":"active"}},{"id":"old","children":[{"content":{"mod":"kit"}}]}]},
-  {"id":"keep","content":{"mod":"tabsx"}}]}
-J
-P='{"id":"kit-panel","type":"column","children":[{"id":"kit","type":"block","content":{"mod":"kit"}}],"hidden":true}'
-printf 'rmwhere\tcontent.mod\tkit\nrmwhere\tid\told\naddnear\tcontent.mod\ttabs\t{"id":"kit-toggle"}\naddnear\tcontent.tab\tactive\t%s\naddnear\tcontent.mod\ttabs\t{"id":"kit-toggle"}\naddnear\tcontent.mod\tnone\t{"id":"no"}\n' "$P" > "$T/ops6"
-LC_ALL=C $AWK -f "$JA" -v ops="$T/ops6" "$T/l.json" > "$T/a"; rc=$?
-python3 - "$T/l.json" "$P" > "$T/p" <<'P'
-import json,sys
-d=json.load(open(sys.argv[1])); bar,body,keep=d["children"]
-del bar["children"][1]; del body["children"][1]
-bar["children"].append({"id":"kit-toggle"}); body["children"].append(json.loads(sys.argv[2]))
-sys.stdout.write(json.dumps(d,indent=2,ensure_ascii=False)+"\n")
-P
-if [ $rc -eq 0 ] && cmp -s "$T/a" "$T/p"; then ok; else bad "rmwhere/addnear"; diff "$T/a" "$T/p" | head -20; fi
-
-# swapwhere: change KEY's value wherever it is STRING (a layout's pane header: "pane" -> "kit-pane"), and back
-cat > "$T/s.json" <<'J'
-{"children":[{"content":{"tab":"active","pane":{"header":{"content":{"mod":"pane"},"reveal":"always"}}}},{"content":{"mod":"panes"}},{"x":{"content":{"mod":"pane"}}}]}
-J
-printf 'swapwhere\tcontent.mod\tpane\tkit-pane\n' > "$T/ops7"
-LC_ALL=C $AWK -f "$JA" -v ops="$T/ops7" "$T/s.json" > "$T/s2"; rc=$?
-v=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]))["children"];print(d[0]["content"]["pane"]["header"]["content"]["mod"],d[1]["content"]["mod"],d[2]["x"]["content"]["mod"])' "$T/s2")
-[ $rc -eq 0 ] && [ "$v" = "kit-pane panes kit-pane" ] && ok || bad "swapwhere got: $v"
-printf 'swapwhere\tcontent.mod\tkit-pane\tpane\n' > "$T/ops8"
-LC_ALL=C $AWK -f "$JA" -v ops="$T/ops8" "$T/s2" > "$T/s3"
-python3 -c 'import json,sys;sys.stdout.write(json.dumps(json.load(open(sys.argv[1])),indent=2)+"\n")' "$T/s.json" > "$T/s4"
-cmp -s "$T/s3" "$T/s4" && ok || bad "swapwhere back"
-
 # empty file counts as {}
 : > "$T/empty.json"
 printf 'set\ta\t1\n' > "$T/ops3"
@@ -159,26 +127,6 @@ LC_ALL=C $AWK -f "$JA" -v ops="$T/ops3" "$T/bom.json" > "$T/bom.out"; rc=$?
     [ "$(tr -d '\r' < "$T/bom.out" | tail -c +4)" = $'{\n  "a": 1\n}' ] && ok || bad "BOM / CRLF kept"
 v=$(LC_ALL=C $AWK -f "$JA" -v get=a "$T/bom.json")
 [ "$v" = 1 ] && ok || bad "get through a BOM: $v"
-
-# rmholder: a column holding only blocks with that mod goes, whatever its id; mixed columns stay
-printf '{"children":[{"id":"x","children":[{"content":{"mod":"kit"}}]},{"id":"y","children":[{"content":{"mod":"kit"}},{"content":{"mod":"tabs"}}]},{"id":"z","children":[]}]}' > "$T/h.json"
-printf 'rmholder\tcontent.mod\tkit\n' > "$T/ops9"
-v=$(LC_ALL=C $AWK -f "$JA" -v ops="$T/ops9" "$T/h.json" | python3 -c 'import json,sys;print(" ".join(c["id"] for c in json.load(sys.stdin)["children"]))')
-[ "$v" = "y z" ] && ok || bad "rmholder got: $v"
-
-# rowaround: a tab bar in a column goes into a row (its size; the bar fills the rest), not again on a second run;
-# addbefore puts items right before it; unrow puts the file back as it was
-printf '{\n  "id": "work",\n  "type": "column",\n  "children": [\n    {\n      "id": "tabs",\n      "size": {\n        "px": 42\n      },\n      "content": {\n        "mod": "tabs"\n      }\n    },\n    {\n      "id": "status"\n    }\n  ]\n}\n' > "$T/col.json"
-printf 'rowaround\tcontent.mod\ttabs\tkit-tabs-row\naddbefore\tcontent.mod\ttabs\t{"id":"a"}\naddbefore\tcontent.mod\ttabs\t{"id":"b"}\nrowaround\tcontent.mod\ttabs\tkit-tabs-row\n' > "$T/ops10"
-LC_ALL=C $AWK -f "$JA" -v ops="$T/ops10" "$T/col.json" > "$T/col.out"
-v=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));r=d["children"][0];print(r["id"],r["type"],r["size"]["px"]," ".join(c["id"] for c in r["children"]),r["children"][2]["size"]["weight"],d["children"][1]["id"])' "$T/col.out")
-[ "$v" = "kit-tabs-row row 42 a b tabs 1 status" ] && ok || bad "rowaround + addbefore got: $v"
-printf 'rmwhere\tid\ta\nrmwhere\tid\tb\nunrow\tkit-tabs-row\n' > "$T/ops11"
-LC_ALL=C $AWK -f "$JA" -v ops="$T/ops11" "$T/col.out" > "$T/col.back"
-cmp -s "$T/col.back" "$T/col.json" && ok || bad "unrow did not give the file back"
-printf '{"id":"bar","type":"row","children":[{"id":"tabs","content":{"mod":"tabs"}}]}' > "$T/row.json"
-v=$(LC_ALL=C $AWK -f "$JA" -v ops="$T/ops10" "$T/row.json" | python3 -c 'import json,sys;print(" ".join(c["id"] for c in json.load(sys.stdin)["children"]))')
-[ "$v" = "a b tabs" ] && ok || bad "a bar already in a row gets no new row: $v"
 
 echo "json.awk ($AWK): $pass passed, $fail failed"
 [ $fail -eq 0 ]
