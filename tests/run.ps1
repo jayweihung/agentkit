@@ -928,6 +928,89 @@ if (-not $OnWindows) {
     }
     Check 'context: unix/kit says the same' { $same }
 }
+# kit context --detail: a fake claude answers Claude Code's control requests (Claude), the logs split (Codex, omp)
+$FC = Join-Path $T 'fakeclaude'; [void](New-Item -ItemType Directory -Force -Path $FC)
+$SID = '0a1b2c3d-1111-2222-3333-444455556666'
+$TS7 = Join-Path (Join-Path (Join-Path $H '.claude/projects') ($P7 -creplace '[^A-Za-z0-9]', '-')) "$SID.jsonl"
+W "$FC/fake.ps1" @"
+`$a = (`$args | ForEach-Object { "`$_" }) -join ' '
+[IO.File]::AppendAllText('$T/claude-args', "`$a``n"); [IO.File]::AppendAllText('$T/claude-cwd', (Get-Location).ProviderPath + "``n")
+if (`$env:FAKE_SLEEP) { Start-Sleep -Seconds ([int]`$env:FAKE_SLEEP) }
+while (`$null -ne (`$l = [Console]::In.ReadLine())) {
+    if (`$l.Contains('"request_id":"i1"')) { [Console]::Out.WriteLine('{"type":"control_response","response":{"subtype":"success","request_id":"i1","response":{"account":{"email":"secret@example.com"}}}}') }
+    elseif (`$l.Contains('"request_id":"c1"')) { [Console]::Out.WriteLine([IO.File]::ReadAllText('$T/c1.json').Trim()) }
+    [Console]::Out.Flush()
+}
+"@
+if ($OnWindows) { W "$FC/claude.cmd" "@`"$Exe`" -NoProfile -ExecutionPolicy Bypass -File `"$FC\fake.ps1`" %*`r`n" }
+else { W "$FC/claude" "#!/bin/sh`nexec '$Exe' -NoProfile -File '$FC/fake.ps1' `"`$@`"`n"; & chmod +x "$FC/claude" }
+W "$T/c1.json" ('{"type":"control_response","response":{"subtype":"success","request_id":"c1","response":{"categories":[' +
+    '{"id":"system_prompt","name":"System prompt","tokens":4000,"kind":"used"},{"id":"system_tools","name":"System tools","tokens":6000,"kind":"used"},' +
+    '{"id":"system_tools_deferred","name":"System tools (deferred)","tokens":13000,"isDeferred":true,"kind":"deferred"},{"id":"mcp_tools","name":"MCP tools","tokens":3000,"kind":"used"},' +
+    '{"id":"memory_files","name":"Memory files","tokens":1200,"kind":"used"},{"id":"skills","name":"Skills","tokens":800,"kind":"used"},{"id":"messages","name":"Messages","tokens":100000,"kind":"used"},' +
+    '{"id":"autocompact_buffer","name":"Autocompact buffer","tokens":33000,"kind":"buffer"},{"id":"free_space","name":"Free space","tokens":252000,"kind":"free"}],' +
+    '"totalTokens":115000,"maxTokens":400000,"rawMaxTokens":400000,"percentage":29,"model":"claude-opus-5-5",' +
+    '"memoryFiles":[{"path":"' + (& $js "$P7/CLAUDE.md") + '","type":"Project","tokens":1000}],' +
+    '"mcpTools":[{"name":"mcp__gerrit__a","serverName":"gerrit","tokens":1000,"isLoaded":true},{"name":"mcp__kitping__ping","serverName":"kitping","tokens":500,"isLoaded":true}],"mcpInstructions":[],"agents":[],' +
+    '"slashCommands":{"totalCommands":5,"includedCommands":5,"tokens":300},"skills":{"totalSkills":0,"includedSkills":0,"tokens":800,"skillFrontmatter":[]},' +
+    '"autoCompactThreshold":367000,"isAutoCompactEnabled":true,"messageBreakdown":{"toolCallsByType":[],"attachmentsByType":[]}}}}' + "`n")
+W $TS7 ("{`"parentUuid`":null,`"type`":`"user`",`"message`":{`"role`":`"user`",`"content`":`"look at this`"},`"uuid`":`"u1`"}`n" +
+    "{`"parentUuid`":`"u1`",`"type`":`"assistant`",`"message`":{`"model`":`"claude-opus-5-5`",`"content`":[{`"type`":`"text`",`"text`":`"ok`"},{`"type`":`"tool_use`",`"id`":`"toolu_r1`",`"name`":`"Read`",`"input`":{`"file_path`":`"/x/a`"}}],`"usage`":{`"input_tokens`":5}},`"uuid`":`"u2`"}`n" +
+    "{`"parentUuid`":`"u2`",`"type`":`"user`",`"message`":{`"role`":`"user`",`"content`":[{`"tool_use_id`":`"toolu_r1`",`"type`":`"tool_result`",`"content`":`"$('0' * 2000)`"}]},`"uuid`":`"u3`"}`n")
+$ctx7 = "{`"pid`": $cp, `"session`": `"$SID`", `"used`": 130000, `"window`": 400000, `"pct`": 33, `"model`": `"claude-opus-5-5`", `"transcript`": `"$(& $js $TS7)`", `"cwd`": `"$(& $js $P7)`"}`n"
+W "$H/.config/agentkit/ctx/claude-$cp.json" $ctx7
+$pathBefore = $env:PATH; $env:PATH = "$FC$sep$env:PATH"
+$nArgs = { if (Test-Path "$T/claude-args") { @([IO.File]::ReadAllLines("$T/claude-args")).Count } else { 0 } }
+Kit context --pid $cp --tool claude --dir $P7 --detail; $d1 = $out
+Check 'context --detail (claude): Claude Code asked with every hook off, nothing kept, its session, in its folder' {
+    (ReadT "$T/claude-args").Contains("--resume $SID --no-session-persistence --settings ") -and @('', '/private') -ccontains ((ReadT "$T/claude-cwd").Trim() -replace ([regex]::Escape($P7) + '$'), '') -and -not $d1.Contains('secret@') }
+Check 'context --detail (claude): its numbers, the window, its commands, no error' {
+    $d1.Contains('{"tool": "claude", "used": 130000, "window": 400000, "pct": 33, "source": "get_context_usage", "model": "claude-opus-5-5", "at": ') -and
+    $d1.Contains("`"exact`": true, `"session`": `"$SID`", `"compact_at`": 367000, `"commands`": {`"compact`": `"/compact`", `"with_text`": true, `"clear`": `"/clear`"}") -and $d1.Contains('"error": null') }
+Check 'context --detail (claude): the categories in Chinese, deferred kept apart, MCP by server' {
+    $d1.Contains('{"id": "system_prompt", "name": "系統提示", "tokens": 4000, "kind": "used", "est": false}') -and
+    $d1.Contains('{"id": "system_tools_deferred", "name": "系統工具（延後載入）", "tokens": 13000, "kind": "deferred", "est": false}') -and
+    $d1.Contains('{"id": "mcp", "name": "MCP（依伺服器）", "tokens": 1500, "est": false, "items": [{"name": "gerrit", "tokens": 1000,') -and $d1.Contains('"name": "Read"') }
+$n1 = & $nArgs
+Kit context --pid $cp --tool claude --dir $P7 --detail
+Check 'context --detail: kept a minute (Claude not asked again)' { (& $nArgs) -eq $n1 -and $out -ceq $d1 }
+Kit context --pid $cp --tool claude --dir $P7 --detail --fresh
+Check 'context --detail --fresh: asked again' { (& $nArgs) -gt $n1 }
+$env:FAKE_SLEEP = '20'; $env:KIT_CTX_PROBE_TIMEOUT = '2'; $t0 = [DateTime]::UtcNow
+Kit context --pid $cp --tool claude --dir $P7 --detail --fresh
+$secs = ([DateTime]::UtcNow - $t0).TotalSeconds; Remove-Item env:FAKE_SLEEP, env:KIT_CTX_PROBE_TIMEOUT
+Check 'context --detail: Claude Code that does not answer is stopped (timeout), the answer says so, still JSON, estimated' {
+    $secs -lt 12 -and $out.Contains('"error": "Claude Code 沒有回答') -and $out.Contains('"exact": false') -and $out.Contains('"used": 130000, "window": 400000') }
+W "$H/.config/agentkit/ctx/claude-$cp.json" "{`"pid`": $cp, `"session`": `"x;rm -rf y`", `"used`": 1, `"window`": 2, `"pct`": 50, `"model`": `"m`"}`n"
+$n1 = & $nArgs
+Kit context --pid $cp --tool claude --dir $P7 --detail --fresh
+Check 'context --detail: a session id with other characters is not used (Claude not run)' { (& $nArgs) -eq $n1 -and $out.Contains('"error": "找不到這個 Claude 的 session"') }
+Remove-Item "$H/.config/agentkit/ctx/claude-$cp.json"
+W "$H/.claude/sessions/$cp.json" "{`"pid`":$cp,`"sessionId`":`"$SID`",`"cwd`":`"$(& $js $P7)`",`"startedAt`":1}`n"
+Kit context --pid $cp --tool claude --dir $P7 --detail --fresh
+Check 'context --detail: the session from ~/.claude/sessions/<pid>.json' { $out.Contains("`"session`": `"$SID`"") -and $out.Contains('"exact": true') }
+Remove-Item "$H/.claude/sessions/$cp.json"
+$env:PATH = $pathBefore
+# Codex and omp: the parts add up to their own total, their commands
+$usedSum = { param($s) $c = $s; $i = $c.IndexOf('"categories": ['); $j = $c.IndexOf('], "groups"'); if ($i -lt 0 -or $j -lt $i) { return -1 }
+    $n = 0; foreach ($m in [regex]::Matches($c.Substring($i, $j - $i), '"tokens": ([0-9]+), "kind": "used"')) { $n += [long]$m.Groups[1].Value }; $n }
+# Codex writes the folder as the system gives it (macOS: /private/var/...), so its own folder here
+$P8 = Join-Path $T 'ctxcodex'; [void](New-Item -ItemType Directory -Force -Path $P8); $P8 = (Resolve-Path $P8).ProviderPath
+if (-not $OnWindows) { $P8 = (& /bin/sh -c "cd '$P8' && pwd -P") }
+W "$H/.codex/sessions/2026/11/12/rollout-2026-11-12T02-00-00-def.jsonl" ((ReadT $RO).Replace('"cwd":"' + (& $js $P7) + '"', '"cwd":"' + (& $js $P8) + '"').Replace("{`"type`":`"turn_context`"",
+    "{`"type`":`"response_item`",`"payload`":{`"type`":`"message`",`"role`":`"user`",`"content`":[{`"type`":`"input_text`",`"text`":`"fix it`"}]}}`n" +
+    "{`"type`":`"response_item`",`"payload`":{`"type`":`"function_call`",`"name`":`"shell`",`"arguments`":`"{\`"cmd\`":\`"ls\`"}`",`"call_id`":`"c1`"}}`n" +
+    "{`"type`":`"response_item`",`"payload`":{`"type`":`"function_call_output`",`"call_id`":`"c1`",`"output`":`"$('0' * 1200)`"}}`n" +
+    "{`"type`":`"response_item`",`"payload`":{`"type`":`"message`",`"role`":`"assistant`",`"content`":[{`"type`":`"output_text`",`"text`":`"done`"}]}}`n{`"type`":`"turn_context`""))
+Kit context --pid 1 --tool codex --dir $P8 --detail
+Check 'context --detail (codex): its total, /compact without text, /new; the parts add up to it' {
+    $out.Contains('{"tool": "codex", "used": 48813, "window": 258400, ') -and $out.Contains('"commands": {"compact": "/compact", "with_text": false, "clear": "/new"}') -and (& $usedSum $out) -eq 48813 }
+Kit context --pid 1 --tool omp --dir $P7 --detail
+$ou = if ($out -match '"tool": "omp", "used": ([0-9]+),') { [long]$Matches[1] } else { -2 }
+Check 'context --detail (omp): /compact with text, /new; the parts add up to its total' {
+    $out.Contains('"commands": {"compact": "/compact", "with_text": true, "clear": "/new"}') -and $ou -gt 0 -and (& $usedSum $out) -eq $ou }
+Kit context --pid 1 --tool codex --dir $PC --detail
+Check 'context --detail: nothing found -> still one JSON answer' { $rc -eq 0 -and $out.TrimStart().StartsWith('{"tool": "codex"') }
 # Claude's statusLine: kit's when there is none; taken out by you, it stays out (said once); kit sync --force puts it back
 Set-Home (Join-Path $T 'home7b')
 Kit init $TEAM

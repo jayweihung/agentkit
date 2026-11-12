@@ -137,6 +137,25 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 
 **Claude 的 statusLine**：`kit sync` 會在 `~/.claude/settings.json` 加上 `statusLine`（執行 `kit statusline`），Claude 底下的狀態列會顯示「Opus 5.5 · context 35%（139k / 400k）」。你已經有自己的 statusLine 時 kit 不動它（只提醒一次），Claude 的用量改從對話紀錄估；Remote Control 的對話紀錄可能不即時。你把 kit 加的 statusLine 拿掉，kit 之後就不會再加回來（說一次）；要加回來打 `kit sync --force`。`kit uninstall` 會拿掉 kit 加的。
 
+### context 細項：token 用在哪裡
+
+    kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] --detail [--fresh]
+
+像 Claude Code 的 `/context`，印出一行 JSON（`kit.ps1` 印的一模一樣）。Herdr 裡按窗格上方的 context 那格看到的就是它（見 [docs/herdr.md](docs/herdr.md)）。
+
+- 上面那幾個欄位（`used` 是即時的總數），加上 `at`（什麼時候問的）、`exact`（分類是不是工具自己算的）、`session`、`compact_at`（自動壓縮的點）、`commands`（這個工具的壓縮、清空指令：Claude `/compact`（可帶文字）、`/clear`；Codex `/compact`（不帶文字）、`/new`；omp `/compact`（可帶文字）、`/new`）、`note`、`error`。
+- `categories`：各分類（系統提示、系統工具、MCP 工具、記憶檔／指示檔、Skills、對話訊息、壓縮後的摘要……），每個有 `tokens`、`kind`（`used`；`deferred` 延後載入，不佔空間；`buffer` 自動壓縮保留區；`free` 可用空間）、`est`（是不是估算）。
+- `groups`：可以展開的清單（記憶檔、Skills、MCP 依伺服器（裡面再分工具）、對話內容依種類、工具依名稱（呼叫＋結果）、附加內容依種類、自訂 agents、斜線指令），多的在前。
+- 同一個 pid 的答案留 60 秒（`KIT_CTX_DETAIL_TTL`，秒），`--fresh` 重新問。窗格上每 15 秒的一般 `kit context` 沒有變，一樣只讀數字。
+
+| agent | 細項從哪裡來 | 準不準 |
+|---|---|---|
+| Claude | 對它的 session 跑一次 `claude -p --resume <session> --no-session-persistence`，問 Claude Code 自己的 `get_context_usage`（`/context` 用的那個）：所有 hook 關掉（`--settings '{"disableAllHooks":true}'`）、不寫對話紀錄、不叫模型（不花錢），在 agent 的資料夾跑，最多 30 秒（`KIT_CTX_PROBE_TIMEOUT`；`KIT_CTX_PROBE=0` 不問）。session 依序找：kit 的 statusLine 存的、`~/.claude/sessions/<pid>.json`、`~/.claude/daemon/roster.json`（只讀 pid、replPid、sessionId、cwd）、那個資料夾在程式啟動後改過的最新對話紀錄；id 只能有英數字、`_`、`-` | 分類是 Claude Code 自己算的。總數用即時的；這次問不到的差額（剛加進來的、這個 session 之後才連上的 MCP）列成「其他／自上次更新以來」。對話內容、工具、附加內容的細項從對話紀錄估（大小 ÷ 4，一張圖約 1600，最後一次壓縮之前的不算），照比例對到 Claude 的數字。問不到（太舊、PATH 上沒有、逾時）時整份改成估算，`error` 寫原因 |
+| Codex | 它的 rollout 檔：base instructions、AGENTS.md、skills 清單、工具（依命名空間）、MCP（看到的、延後載入的、設定裡有但沒看到的）、訊息、工具呼叫和結果、壓縮摘要 | 總數是 Codex 自己記的；各部分用大小 ÷ 4 估，照比例對到總數（`est: true`）。AGENTS.md 從 git 根目錄往下找 |
+| omp | session 檔，加上 omp 會讀的指示檔、skills、MCP 設定 | 總數和「系統工具」是 omp 自己記的（context 快照）；其他估算，照比例對到總數。指示檔和 skills 照現在的檔案估 |
+
+對話內容只拿來算大小，不印出、不存；問 Claude Code 時它回的帳號資料不留。問的那一次不寫對話紀錄，但 Claude Code 啟動時照常會更新它自己的東西（例如 plugins 的快取，或在 `~/.claude/projects/<資料夾>/` 建一個空的 `memory/`）。紀錄檔超過 32 MB 時只讀第一行和最後 32 MB（`KIT_CTX_DETAIL_TAIL`，byte）。
+
 ## Herdr 的 kit 面板
 
 不想打指令的話，可以在 Herdr 裡用（Windows、Mac、Linux 都一樣）：

@@ -1602,13 +1602,18 @@ function After-Key([string]$k, [string]$t) { # the text after the last "KEY":
     if ($m.Success) { $t.Substring($m.Index + $m.Length) } else { $t }
 }
 function Sum-Of($t, [string[]]$keys) { $n = [long]0; foreach ($k in $keys) { $v = Num-Of $k $t; if ($v) { $n += [long]$v } }; $n }
+function Setting-Window([string]$m) { # the window Claude Code is told to use for a model (autoCompactWindow: modelSettings.<model>,
+    # else the top-level one), as its own /context shows it; '' when not set
+    $sf = Join-Path $ClaudeDir 'settings.json'
+    if (-not (Test-Path -LiteralPath $sf -PathType Leaf)) { return '' }
+    $b = $m -creplace '\[1m\]$', ''; $w = ''
+    try { $w = "$(Json-Get $sf "modelSettings.$b.autoCompactWindow")".Replace('"', '').Replace(' ', '') } catch { }
+    if (-not $w) { try { $w = "$(Json-Get $sf 'autoCompactWindow')".Replace('"', '').Replace(' ', '') } catch { } }
+    if ($w -cmatch '^[0-9]+\z') { $w } else { '' }
+}
 function Model-Window([string]$m) { # the context window Claude Code uses for a model: a setting (autoCompactWindow), else the model's own
-    $b = $m -replace '\[1m\]$', ''; $sf = Join-Path $ClaudeDir 'settings.json'; $w = ''
-    if (Test-Path -LiteralPath $sf) {
-        $w = "$(Json-Get $sf "modelSettings.$b.autoCompactWindow")".Trim('"', ' ')
-        if (-not $w) { $w = "$(Json-Get $sf 'autoCompactWindow')".Trim('"', ' ') }
-    }
-    if ($w -match '^[0-9]+$') { return $w }
+    $w = Setting-Window $m
+    if ($w) { return $w }
     if ($m -match '\[1m\]$|opus-5|opus-4-7|opus-4-8|sonnet-5|fable|mythos|haiku-5') { return '1000000' }
     if ($m -match '^(claude-|anthropic/)') { return '200000' }
     ''
@@ -1644,28 +1649,35 @@ function Claude-Pid { # the Claude process above this one (Claude runs the statu
 }
 function Ctx-Json([string]$tool, [string]$u, [string]$w, [string]$src, [string]$m, [string]$own = '') { # OWN: the tool's own way of counting
     $pct = 'null'
-    if ($u -and $w -and [long]$w -gt 0) { $pct = [string][long][Math]::Floor(([long]$u * 100 + [long]$w / 2) / [long]$w) }
+    if ($u -and $w -and [long]$w -gt 0) { $pct = Ctx-Pct $u $w }
     if ($own) { $pct = $own }
     if ($pct -ne 'null' -and [long]$pct -gt 100) { $pct = '100' }      # an estimate past the window: full
     '{"tool": ' + (Json-S $tool) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $pct + ', "source": ' + (Json-S $src) + ', "model": ' + (Json-S $m) + '}'
 }
+function Ctx-Pct([string]$u, [string]$w) { [string][long][Math]::Floor(([double][long]$u * 100 + [Math]::Floor([long]$w / 2)) / [long]$w) }   # (u * 100 + w / 2) / w in whole numbers
 function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for kit context, print a short status line
+    # (the window set in settings.json, autoCompactWindow, only when settings.json has one)
     $j = [Console]::In.ReadToEnd()
     $w = Num-Of 'context_window_size' $j
     $pm = [regex]::Match($j, '"used_percentage"\s*:\s*([0-9]+(\.[0-9]+)?)'); $pct = if ($pm.Success) { [string][long][Math]::Floor([double]::Parse($pm.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) + 0.5) } else { '' }
     $u = ''
     if ($j -match '"current_usage"\s*:\s*\{') { $u = [string](Sum-Of (After-Key 'current_usage' $j) @('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')) }
     $sid = Str-Of 'session_id' $j; $model = Str-Of 'id' (After-Key 'model' $j); $name = Str-Of 'display_name' $j
+    $tp = Str-Of 'transcript_path' $j; $cwd = Str-Of 'project_dir' $j; if (-not $cwd) { $cwd = Str-Of 'cwd' $j }
     $cp = Claude-Pid
     if ($cp) {
         try {
             Ensure-Dir $CtxDir
-            $line = '{"pid": ' + $cp + ', "session": ' + (Json-S $sid) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $(if ($pct) { $pct } else { 'null' }) + ', "model": ' + (Json-S $model) + "}`n"
+            # the paths as Claude wrote them (already JSON text)
+            $line = '{"pid": ' + $cp + ', "session": ' + (Json-S $sid) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $(if ($pct) { $pct } else { 'null' }) + ', "model": ' + (Json-S $model) + ', "transcript": "' + $tp + '", "cwd": "' + $cwd + "`"}`n"
             $tmp = Join-Path $CtxDir ".claude-$cp.$PID"; [IO.File]::WriteAllText($tmp, $line, (New-Object Text.UTF8Encoding $false))
             Move-Item -LiteralPath $tmp -Destination (Join-Path $CtxDir "claude-$cp.json") -Force
         } catch { }
     }
-    if (-not $pct -and $u -and $w -and [long]$w -gt 0) { $pct = [string][long][Math]::Floor(([long]$u * 100 + [long]$w / 2) / [long]$w) }
+    $sf = Join-Path $ClaudeDir 'settings.json'; $st = ''
+    if (Test-Path -LiteralPath $sf -PathType Leaf) { try { $st = Read-Text $sf } catch { } }
+    if ($st.Contains('autoCompactWindow')) { $sw = Setting-Window $model; if ($sw -and $sw -cne $w -and $u) { $w = $sw; $pct = Ctx-Pct $u $w } }
+    if (-not $pct -and $u -and $w -and [long]$w -gt 0) { $pct = Ctx-Pct $u $w }
     $nm = if ($name) { $name } else { 'Claude' }
     $uk = if ($u) { [long]$u } else { 0 }
     if ($pct -and $w) { [Console]::Out.Write("$nm · context $pct%（$([long][Math]::Floor($uk / 1000))k / $([long][Math]::Floor([long]$w / 1000))k）`n") } else { [Console]::Out.Write("$nm`n") }
@@ -1703,10 +1715,11 @@ function Claude-Scan([string]$f, [long]$n) { # the last reply with its usage (no
     @{ which = $which; a = $a; c = $c }
 }
 function Claude-Ctx([string]$cpid, [string]$cwd) {
-    $f = Join-Path $CtxDir "claude-$cpid.json"
-    if ($cpid -and (Test-Path -LiteralPath $f)) {
-        $j = Read-Text $f
-        return Ctx-Json 'claude' (Num-Of 'used' $j) (Num-Of 'window' $j) 'statusline' (Str-Of 'model' $j)
+    $f = Claude-Record $cpid
+    if ($f) {
+        # the window: what settings.json tells Claude Code (autoCompactWindow, as its own /context shows), else Claude's
+        $j = Read-Text $f; $m = Str-Of 'model' $j; $w = Setting-Window $m; if (-not $w) { $w = Num-Of 'window' $j }
+        return Ctx-Json 'claude' (Num-Of 'used' $j) $w 'statusline' $m
     }
     if (-not $cwd) { return Ctx-Json 'claude' '' '' '' '' }
     $d = Join-Path (Join-Path $ClaudeDir 'projects') ($cwd -replace '[^A-Za-z0-9]', '-')
@@ -1723,7 +1736,7 @@ function Codex-Pct([long]$u, [long]$w) { # Codex's own "% context left" turned i
     $e = $w - $b; $used = [Math]::Max([long]0, $u - $b); $rem = [Math]::Max([long]0, $e - $used)
     [string](100 - [long][Math]::Floor(($rem * 100 + [Math]::Floor($e / 2)) / $e))
 }
-function Codex-Scan([string]$f, [long]$n) { # its last token_count and turn_context
+function Codex-Last([string]$f, [long]$n) { # its last token_count and turn_context
     $o = Ctx-Open $f $n; $t = ''; $c = ''
     if ($o) {
         try {
@@ -1736,18 +1749,13 @@ function Codex-Scan([string]$f, [long]$n) { # its last token_count and turn_cont
     @{ which = $(if ((-not $t -or -not $c) -and $o -and $o[1]) { 'more' } else { 'ok' }); t = $t; c = $c }
 }
 function Codex-Ctx([string]$cwd) { # the newest rollout started in that folder
-    if (-not $cwd) { return Ctx-Json 'codex' '' '' '' '' }
-    $want = '"cwd":' + (Json-S $cwd)
-    foreach ($f in Newest-Files (Join-Path $CodexDir 'sessions') 'rollout-*.jsonl') {
-        $first = "$(Get-Content -LiteralPath $f -TotalCount 1 -Encoding UTF8)"
-        if (-not $first.Contains($want)) { continue }
-        $s = Codex-Scan $f $CtxTail; if ($s.which -eq 'more') { $s = Codex-Scan $f 0 }
-        $m = Str-Of 'model' $s.c
-        if (-not $s.t) { return Ctx-Json 'codex' '' '' 'rollout' $m }
-        $u = Num-Of 'total_tokens' (After-Key 'last_token_usage' $s.t); $w = Num-Of 'model_context_window' $s.t
-        return Ctx-Json 'codex' $u $w 'rollout' $m $(if ($u -and $w) { Codex-Pct ([long]$u) ([long]$w) } else { '' })
-    }
-    Ctx-Json 'codex' '' '' '' ''
+    $f = Codex-Rollout $cwd
+    if (-not $f) { return Ctx-Json 'codex' '' '' '' '' }
+    $s = Codex-Last $f $CtxTail; if ($s.which -eq 'more') { $s = Codex-Last $f 0 }
+    $m = Str-Of 'model' $s.c
+    if (-not $s.t) { return Ctx-Json 'codex' '' '' 'rollout' $m }
+    $u = Num-Of 'total_tokens' (After-Key 'last_token_usage' $s.t); $w = Num-Of 'model_context_window' $s.t
+    Ctx-Json 'codex' $u $w 'rollout' $m $(if ($u -and $w) { Codex-Pct ([long]$u) ([long]$w) } else { '' })
 }
 function Omp-Window([string]$m) {
     $db = Join-Path $OmpDir 'models.db'; $w = ''
@@ -1783,20 +1791,7 @@ function Omp-Scan([string]$f, [long]$n) {
     @{ which = $which; a = $a; c = $c; m = $m; tb = $tb; im = $im }
 }
 function Omp-Ctx([string]$opid, [string]$cwd) {
-    $f = ''
-    if (-not $OnWindows -and $opid) {
-        $tty = "$(& ps -o tty= -p $opid 2>$null)".Trim() -replace '^/dev/', '' -replace '/', '-'
-        if ($tty -and $tty -notmatch '^\?+$') { $bc = Join-Path (Join-Path $OmpDir 'terminal-sessions') $tty; if (Test-Path -LiteralPath $bc) { $f = "$(@(Get-Content -LiteralPath $bc -TotalCount 2 -Encoding UTF8)[1])" } }
-    }
-    if (-not $f -or -not (Test-Path -LiteralPath $f)) {
-        $f = ''
-        if ($cwd) {
-            $want = '"cwd":' + (Json-S $cwd)
-            foreach ($x in Newest-Files (Join-Path $OmpDir 'sessions') '*.jsonl') {
-                if (@(Get-Content -LiteralPath $x -TotalCount 3 -Encoding UTF8 | Where-Object { $_.Contains('"type":"session"') -and $_.Contains($want) }).Count -gt 0) { $f = $x; break }
-            }
-        }
-    }
+    $f = Omp-Session $opid $cwd
     if (-not $f) { return Ctx-Json 'omp' '' '' '' '' }
     $s = Omp-Scan $f $CtxTail; if ($s.which -eq 'more') { $s = Omp-Scan $f 0 }
     $m = Str-Of 'model' $s.m
@@ -1811,32 +1806,874 @@ function Omp-Ctx([string]$opid, [string]$cwd) {
     $u = [string]([long]$u + [long][Math]::Floor($s.tb / 4) + $s.im * 1600)
     Ctx-Json 'omp' $u $w 'session' $m
 }
-function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] : how full that agent's context is (JSON)
-    $use = '用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]'
-    $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''
+function Omp-Session([string]$opid, [string]$cwd) { # the session its terminal points at, else the newest of that folder ('' if none)
+    $f = ''
+    if (-not $OnWindows -and $opid) {
+        $tty = "$(& ps -o tty= -p $opid 2>$null)".Trim() -replace '^/dev/', '' -replace '/', '-'
+        if ($tty -and $tty -notmatch '^\?+$') { $bc = Join-Path (Join-Path $OmpDir 'terminal-sessions') $tty; if (Test-Path -LiteralPath $bc) { $f = "$(@(Get-Content -LiteralPath $bc -TotalCount 2 -Encoding UTF8)[1])" } }
+    }
+    if (-not $f -or -not (Test-Path -LiteralPath $f)) {
+        $f = ''
+        if ($cwd) {
+            $want = '"cwd":' + (Json-S $cwd)
+            foreach ($x in Newest-Files (Join-Path $OmpDir 'sessions') '*.jsonl') {
+                if (@(Get-Content -LiteralPath $x -TotalCount 3 -Encoding UTF8 | Where-Object { $_.Contains('"type":"session"') -and $_.Contains($want) }).Count -gt 0) { $f = $x; break }
+            }
+        }
+    }
+    $f
+}
+function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [--detail [--fresh]] : how full that agent's context is (JSON)
+    $use = '用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]'
+    $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $detail = $false; $fresh = $false
     for ($i = 0; $i -lt $rest.Count; $i++) {
         $a = [string]$rest[$i]
+        if ($a -ceq '--detail') { $detail = $true; continue }
+        if ($a -ceq '--fresh') { $fresh = $true; continue }
+        if ($a -cne '--pid' -and $a -cne '--tool' -and $a -cne '--dir') { Die $use }
         if ($i + 1 -ge $rest.Count) { Die $use }
-        if ($a -eq '--pid') { $cpid = [string]$rest[++$i] } elseif ($a -eq '--tool') { $tool = [string]$rest[++$i] } elseif ($a -eq '--dir') { $dir = [string]$rest[++$i] } else { Die $use }
+        $v = [string]$rest[++$i]
+        if ($a -ceq '--pid') { $cpid = $v } elseif ($a -ceq '--tool') { $tool = $v } else { $dir = $v }
     }
-    if ($cpid -notmatch '^[0-9]+$') { Die $use }
+    if ($cpid -cnotmatch '^[0-9]+\z') { Die $use }
     if (-not $tool) {
         $pa = Proc-Args ([int]$cpid)
         if ($pa) { $w = @($pa.Trim() -split '\s+'); $s2 = ($w[0] + ':' + $(if ($w.Count -gt 1) { $w[1] } else { '' }))
             $b = ($w[0].Trim('"') -split '[\\/]')[-1]
             if ($b -like 'claude*' -or $s2 -match ':.*claude') { $tool = 'claude' } elseif ($b -like 'codex*' -or $s2 -match ':.*codex') { $tool = 'codex' } elseif ($b -like 'omp*' -or $s2 -match ':.*omp') { $tool = 'omp' } }
     }
-    if ($tool -eq 'claude-code') { $tool = 'claude' }
+    if ($tool -ceq 'claude-code') { $tool = 'claude' } elseif ($tool -ceq 'pi') { $tool = 'omp' }
     if (-not $dir) { $dir = Proc-Cwd ([int]$cpid) }
-    # the kept numbers of Claude processes that are gone
+    # the kept numbers (and details) of processes that are gone
     if (Test-Path -LiteralPath $CtxDir) {
-        foreach ($f in @(Get-ChildItem -LiteralPath $CtxDir -Filter 'claude-*.json' -File -ErrorAction SilentlyContinue)) {
-            $p = $f.BaseName.Substring(7)
-            if ($p -ne $cpid -and $p -match '^[0-9]+$' -and -not (Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+        foreach ($f in @(Get-ChildItem -LiteralPath $CtxDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -clike 'claude-*.json' -or $_.Name -clike 'detail-*.json' })) {
+            $p = $f.Name.Substring($f.Name.IndexOf('-') + 1); $p = $p.Substring(0, $p.Length - 5)
+            if ($p -cne $cpid -and $p -cmatch '^[0-9]{1,9}\z' -and -not (Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
         }
     }
+    if ($detail) { Ctx-Detail $cpid $tool $dir $fresh; return }
     $out = switch ($tool) { 'claude' { Claude-Ctx $cpid $dir } 'codex' { Codex-Ctx $dir } 'omp' { Omp-Ctx $cpid $dir } default { Ctx-Json '' '' '' '' '' } }
     [Console]::Out.Write($out + "`n")
+}
+
+# ---------- kit context --detail: where the tokens go ----------
+# The same JSON line as unix/kit (its comments there say what is in it and where each part comes from). Sizes are
+# counted the way awk counts them there (LC_ALL=C): UTF-8 bytes of the text as it is in the file, still JSON-escaped;
+# the numbers are worked out in the same order, so the answer is the same to the token.
+# On Windows Claude Code gets its hooks-off setting as a file ($KIT_CONF/ctx/probe-settings.json): cmd.exe would
+# mangle the quotes of a JSON argument.
+$script:CtxDetailTail = [long]33554432; if ("$env:KIT_CTX_DETAIL_TAIL" -match '^[0-9]+$') { $script:CtxDetailTail = [long]$env:KIT_CTX_DETAIL_TAIL }
+$script:CtxProbeInit = '{"type":"control_request","request_id":"i1","request":{"subtype":"initialize"}}'
+$script:CtxProbeAsk = '{"type":"control_request","request_id":"c1","request":{"subtype":"get_context_usage"}}'
+$script:Ord = [StringComparison]::Ordinal
+$script:Inv = [Globalization.CultureInfo]::InvariantCulture
+$script:Sep = [string][IO.Path]::DirectorySeparatorChar
+$script:StrvRx = New-Object 'System.Collections.Generic.Dictionary[string,regex]'
+$script:CtlRx = [regex]'[\x01-\x1f]'
+$script:EscRx = [regex]'\\[nrtbf]'
+$script:DataRx = [regex]'"(data|image_url)":"[^"]*"'
+$script:TxtRx = [regex]'"text":"[^"\\]*(?:\\.[^"\\]*)*"'
+$script:NumRx = [regex]'^[ \t\n]*[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?'
+$script:StrNumRx = [regex]'^[ \t\n]*[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?[ \t\n]*\z'
+$script:TypeRx = [regex]'"type":"[a-z_]+"'
+$script:NsRx = [regex]'\{"type":"[a-z_]+","name":"'
+$script:RootRx = [regex]'- `r[0-9]+` = `[^`]*`'
+$script:ItemRx = [regex]'\\n- '
+$script:FileRx = [regex]'\(file: [^)]*\)'
+$script:ClaudePartRx = [regex]'\{"type":"(text|thinking|redacted_thinking|tool_use|server_tool_use)"'
+$script:ToolIdRx = [regex]'\{"tool_use_id":"'
+$script:OmpPartRx = [regex]'\{"type":"(text|thinking|toolCall|redactedThinking)"'
+$script:McpTomlRx = [regex]'^[ \t\r\n\f\v]*\[mcp_servers\.([^\].]*)\][ \t\r\n\f\v]*\z'
+$script:ClaudeSkipAt = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($x in 'skill_listing instructions deferred_tools_delta deferred_tools_record mcp_instructions_delta agent_listing_delta prompt_snapshot thinking_drop credential_org'.Split(' ')) { [void]$ClaudeSkipAt.Add($x) }
+$script:CtxNm = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+foreach ($x in @(@('system_prompt', '系統提示'), @('system_tools', '系統工具'), @('system_tools_deferred', '系統工具（延後載入）'),
+        @('mcp_tools', 'MCP 工具'), @('mcp_tools_deferred', 'MCP 工具（延後載入）'), @('mcp_instructions', 'MCP 伺服器說明'),
+        @('custom_agents', '自訂 agents'), @('memory_files', '記憶檔'), @('skills', 'Skills'), @('messages', '對話訊息'),
+        @('slash_commands', '斜線指令'), @('other', '其他／自上次更新以來'), @('autocompact_buffer', '自動壓縮保留區'),
+        @('free_space', '可用空間'), @('instructions', '指示檔'), @('compaction', '壓縮後的摘要'),
+        @('memory', '記憶檔'), @('mcp', 'MCP（依伺服器）'), @('tools', '工具（依類別）'), @('agents', '自訂 agents'),
+        @('commands', '斜線指令'), @('tool_results', '工具（呼叫＋結果，依工具）'), @('attachments', '附加內容（依種類）'),
+        @('msgs', '對話內容（依種類）'))) { $CtxNm[$x[0]] = $x[1] }
+function New-Dict([string]$t = 'double') { New-Object "System.Collections.Generic.Dictionary[string,$t]" }
+function New-List([string]$t = 'string') { , (New-Object "System.Collections.Generic.List[$t]") }
+function Dict-Get($d, [string]$k, $def = 0.0) { $v = $null; if ($d.TryGetValue($k, [ref]$v)) { $v } else { $def } }
+function Dict-Add($d, [string]$k, [double]$x) { $v = 0.0; [void]$d.TryGetValue($k, [ref]$v); $d[$k] = $v + $x }
+function Dict-Keys($a, $b) { # the keys of A, then those of B that A does not have
+    $o = New-List; foreach ($k in $a.Keys) { $o.Add($k) }; foreach ($k in $b.Keys) { if (-not $a.ContainsKey($k)) { $o.Add($k) } }; , $o
+}
+function Unix-Now { [long][Math]::Floor(([DateTime]::UtcNow - (New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc))).TotalSeconds) }
+function Ctx-Strv([string]$s, [string]$k) { # the text of "K":"..." in S (still JSON-escaped)
+    $rx = $null
+    if (-not $StrvRx.TryGetValue($k, [ref]$rx)) { $rx = New-Object regex ('"' + [regex]::Escape($k) + '":"([^"\\]*(?:\\.[^"\\]*)*)"'); $StrvRx[$k] = $rx }
+    $m = $rx.Match($s); if ($m.Success) { $m.Groups[1].Value } else { '' }
+}
+function Ctx-Unesc([string]$s) { # JSON escapes undone (a control character: a space)
+    $s = $s.Replace('\\', [string][char]1).Replace('\"', '"').Replace('\/', '/')
+    $CtlRx.Replace($EscRx.Replace($s, ' ').Replace([string][char]1, '\'), ' ')
+}
+function Ctx-Unjs([string]$s) { $s.Replace('\\', '\').Replace('\"', '"').Replace('\/', '/') }   # a JSON string's text as it is
+function Ctx-Rnd([double]$x) { [Math]::Truncate($x + 0.5) }
+function Ctx-Num([double]$x) { # a number the way awk prints it
+    if ($x -eq [Math]::Truncate($x) -and [Math]::Abs($x) -lt 1e15) { return ([long]$x).ToString($Inv) }
+    $x.ToString('G6', $Inv).Replace('E', 'e')
+}
+function Ctx-Val([string]$s) { # a text as awk takes it for a number
+    $m = $NumRx.Match($s); if (-not $m.Success) { return [double]0 }
+    [double]::Parse($m.Value.Trim(), [Globalization.NumberStyles]::Float, $Inv)
+}
+function Ctx-Imgs([string]$s) { # how many images (like unix/kit: "image" ones first, then "input_image" ones after the last)
+    $n = 0; $p = 0
+    while ($true) {
+        $i = $s.IndexOf('"type":"image"', $p, $Ord)
+        if ($i -lt 0) { $i = $s.IndexOf('"type":"input_image"', $p, $Ord) }
+        if ($i -lt 0) { return $n }
+        $n++; $p = $i + 12
+    }
+}
+function Ctx-Wt([string]$s) { # a piece's tokens: its bytes / 4 (not an image's data), and 1600 an image
+    $d = 0
+    if ($s.Contains('"data":"') -or $s.Contains('"image_url":"')) { foreach ($m in $DataRx.Matches($s)) { $d += $Utf8.GetByteCount($m.Value) } }
+    ($Utf8.GetByteCount($s) - $d) / 4 + (Ctx-Imgs $s) * 1600
+}
+function Ctx-Short([string]$p) { # a path with ~ for the home folder
+    $h = $UserHome
+    if ($h -and $p.StartsWith($h, $Ord) -and ($p.Length -eq $h.Length -or $p[$h.Length] -eq [char]'/' -or $p[$h.Length] -eq [char]'\')) { return '~' + $p.Substring($h.Length) }
+    $p
+}
+function Ctx-Head([string]$s, [int]$n) { # the whole characters in the first N bytes of S
+    if ($s.Length -gt $n) { $s = $s.Substring(0, $n) }
+    while (($b = $Utf8.GetByteCount($s)) -gt $n) { $s = $s.Substring(0, $s.Length - [Math]::Max(1, [Math]::Floor(($b - $n) / 3))) }
+    $s
+}
+function Ctx-Head80([string]$s) { $b = $Utf8.GetBytes($s); [Convert]::ToBase64String($b, 0, [Math]::Min(80, $b.Length)) }   # its first 80 bytes, to compare
+function Ctx-Parts([string]$s, $rx) { # S cut right before each match of RX (what comes before the first one dropped)
+    $ms = $rx.Matches($s); $o = New-List
+    for ($i = 0; $i -lt $ms.Count; $i++) { $e = if ($i + 1 -lt $ms.Count) { $ms[$i + 1].Index } else { $s.Length }; $o.Add($s.Substring($ms[$i].Index, $e - $ms[$i].Index)) }
+    , $o
+}
+function Ctx-Size([string]$f) { # the size of a file (through a link), -1 when it is not one that can be read
+    try { $fs = [IO.File]::Open($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)); try { return [long]$fs.Length } finally { $fs.Dispose() } } catch { return [long]-1 }
+}
+function Ctx-Join([string]$a, [string]$n) { if ($OnWindows -and ($a.EndsWith('\', $Ord) -or $a.EndsWith('/', $Ord))) { return $a + $n }; $a + $Sep + $n }
+function Ctx-SamePath([string]$a, [string]$b) {
+    if ($OnWindows) { return [string]::Equals($a.Replace('/', '\').TrimEnd('\'), $b.Replace('/', '\').TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) }
+    $a -ceq $b
+}
+function Ctx-Under([string]$p, [string]$dir) { # P is somewhere under DIR
+    if (-not $p) { return $false }
+    if ($OnWindows) { return $p.Replace('/', '\').StartsWith($dir.Replace('/', '\').TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) }
+    $p.StartsWith($dir + '/', $Ord)
+}
+function Ctx-Parent([string]$a) { # like dirname
+    if ($OnWindows) { try { return [string][IO.Path]::GetDirectoryName($a) } catch { return '' } }
+    $s = $a.TrimEnd('/'); if (-not $s) { return '/' }
+    $i = $s.LastIndexOf('/'); if ($i -lt 0) { return '.' }
+    $s = $s.Substring(0, $i).TrimEnd('/'); if ($s) { $s } else { '/' }
+}
+function Ctx-Up([string]$d) { # DIR and the folders above it up to its git root (or only DIR when it is in none), root first
+    $list = New-List; $a = $d
+    while ($true) {
+        $list.Insert(0, $a)
+        if (Test-Path -LiteralPath (Ctx-Join $a '.git')) { return , $list.ToArray() }
+        if ($a -ceq '/' -or (Ctx-SamePath $a $UserHome)) { break }
+        $up = Ctx-Parent $a
+        if (-not $up -or $up -ceq $a) { break }
+        $a = $up
+    }
+    , @($d)
+}
+function Ctx-Files([string]$note, $files, $out) { # "path TAB bytes TAB note" for each file that is there and not empty
+    foreach ($f in $files) { $n = Ctx-Size $f; if ($n -gt 0) { $out.Add("$f`t$n`t$note") } }
+}
+function Ctx-Stream([string]$f) { # @(reader, first line or $null): a log for a detail look: all of it, or its first line and the
+    # whole lines in its last KIT_CTX_DETAIL_TAIL bytes
+    try { $fs = New-Object IO.FileStream($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)) } catch { return $null }
+    try {
+        if ($fs.Length -le $CtxDetailTail) { return , @((New-Object IO.StreamReader($fs, $Utf8)), $null) }
+        $r = New-Object IO.StreamReader($fs, $Utf8, $true, 65536, $true); $first = $r.ReadLine(); $r.Dispose()
+        [void]$fs.Seek(-$CtxDetailTail, [IO.SeekOrigin]::End)
+        $r = New-Object IO.StreamReader($fs, $Utf8); [void]$r.ReadLine()                # (cut off in the middle)
+        , @($r, $first)
+    } catch { $fs.Dispose(); $null }
+}
+
+# the rows (a TAB between fields): H key value | C id name tokens kind est | G id name est | I group name tokens note path parent
+function Ctx-Q([string]$s) { '"' + $CtlRx.Replace($s.Replace('\', '\\').Replace('"', '\"'), '') + '"' }
+function Ctx-B([string]$v) { if ($v -ceq '1') { 'true' } else { 'false' } }
+function Ctx-Nul([string]$v) { if ($v -ceq '') { 'null' } else { $v } }
+function Ctx-Name([string]$id, [string]$x) {
+    if ($x.StartsWith('=', $Ord)) { return $x.Substring(1) }
+    $v = $null; if ($CtxNm.TryGetValue($id, [ref]$v)) { return $v }
+    if ($x -cne '') { $x } else { $id }
+}
+function Ctx-Less([string]$a, [string]$b) { # a < b the way awk compares two fields: as numbers when both are, else by bytes
+    if ($StrNumRx.IsMatch($a) -and $StrNumRx.IsMatch($b)) { return (Ctx-Val $a) -lt (Ctx-Val $b) }
+    $x = $Utf8.GetBytes($a); $y = $Utf8.GetBytes($b); $n = [Math]::Min($x.Length, $y.Length)
+    for ($i = 0; $i -lt $n; $i++) { if ($x[$i] -ne $y[$i]) { return $x[$i] -lt $y[$i] } }
+    $x.Length -lt $y.Length
+}
+function Ctx-Before($A, [int]$x, [int]$y) { # item X before item Y: more tokens first (none last), then by name, then as listed
+    $ta = $A.itk[$x]; $tc = $A.itk[$y]
+    if ($ta -ceq '' -and $tc -cne '') { return $false }
+    if ($tc -ceq '' -and $ta -cne '') { return $true }
+    if ($ta -cne '') { $na = Ctx-Val $ta; $nc = Ctx-Val $tc; if ($na -ne $nc) { return $na -gt $nc } }
+    Ctx-Less $A.inm[$x] $A.inm[$y]
+}
+function Ctx-Items($A, [string]$g, [string]$par) { # the items of group G under PAR, as JSON
+    $list = New-List 'int'
+    for ($i = 0; $i -lt $A.inm.Count; $i++) {
+        if ($A.ig[$i] -cne $g -or $A.ipar[$i] -cne $par) { continue }
+        $k = $list.Count; $list.Add($i)
+        while ($k -gt 0 -and (Ctx-Before $A $i $list[$k - 1])) { $list[$k] = $list[$k - 1]; $k-- }
+        $list[$k] = $i
+    }
+    $o = New-List
+    foreach ($i in $list) {
+        $t = '{"name": ' + (Ctx-Q $A.inm[$i]) + ', "tokens": ' + (Ctx-Nul $A.itk[$i]) + ', "note": ' + (Ctx-Q $A.inote[$i]) + ', "path": ' + (Ctx-Q $A.ipath[$i])
+        if ($par -ceq '' -and $A.inm[$i] -cne '') { $kids = Ctx-Items $A $g $A.inm[$i]; if ($kids -cne '') { $t += ', "items": [' + $kids + ']' } }
+        $o.Add($t + '}')
+        if ($par -ceq '' -and $A.itk[$i] -cne '') { Dict-Add $A.gsum $g (Ctx-Val $A.itk[$i]); [void]$A.gknown.Add($g) }
+    }
+    $o -join ', '
+}
+function Ctx-Assemble($rows, [string]$now) { # the rows -> the JSON line
+    $h = New-Dict 'string'; $cats = New-List; $gid = New-List; $gnm = New-List; $ges = New-List
+    $A = @{ ig = (New-List); inm = (New-List); itk = (New-List); inote = (New-List); ipath = (New-List); ipar = (New-List)
+        gsum = (New-Dict); gknown = (New-Object 'System.Collections.Generic.HashSet[string]') }
+    foreach ($r in $rows) {
+        $f = [string[]]($r.Split("`t") + @('', '', '', '', '', '', ''))
+        if ($f[0] -ceq 'H') { $h[$f[1]] = $f[2] }
+        elseif ($f[0] -ceq 'C') {
+            if (($f[3] -ceq '' -or (Ctx-Val $f[3]) -eq 0) -and $f[4] -cne 'free') { continue }
+            $cats.Add('{"id": ' + (Ctx-Q $f[1]) + ', "name": ' + (Ctx-Q (Ctx-Name $f[1] $f[2])) + ', "tokens": ' + (Ctx-Num (Ctx-Val $f[3])) + ', "kind": ' + (Ctx-Q $f[4]) + ', "est": ' + (Ctx-B $f[5]) + '}')
+        }
+        elseif ($f[0] -ceq 'G') { $gid.Add($f[1]); $gnm.Add((Ctx-Name $f[1] $f[2])); $ges.Add($f[3]) }
+        elseif ($f[0] -ceq 'I') { $A.ig.Add($f[1]); $A.inm.Add($f[2]); $A.itk.Add($f[3]); $A.inote.Add($f[4]); $A.ipath.Add($f[5]); $A.ipar.Add($f[6]) }
+    }
+    $u = Dict-Get $h 'used' ''; $w = Dict-Get $h 'window' ''; $p = Dict-Get $h 'pct' ''
+    if ($p -ceq '' -and $u -cne '' -and (Ctx-Val $w) -gt 0) { $wv = Ctx-Val $w; $p = Ctx-Num ([Math]::Truncate(((Ctx-Val $u) * 100 + [Math]::Truncate($wv / 2)) / $wv)) }
+    if ($p -cne '' -and (Ctx-Val $p) -gt 100) { $p = '100' }
+    $e = Dict-Get $h 'error' ''
+    $o = '{"tool": ' + (Ctx-Q (Dict-Get $h 'tool' '')) + ', "used": ' + (Ctx-Nul $u) + ', "window": ' + (Ctx-Nul $w) + ', "pct": ' + (Ctx-Nul $p) + ', "source": ' + (Ctx-Q (Dict-Get $h 'source' '')) + ', "model": ' + (Ctx-Q (Dict-Get $h 'model' ''))
+    $o += ', "at": ' + $now + ', "exact": ' + (Ctx-B (Dict-Get $h 'exact' '')) + ', "session": ' + (Ctx-Q (Dict-Get $h 'session' '')) + ', "compact_at": ' + (Ctx-Nul (Dict-Get $h 'compact_at' ''))
+    $o += ', "commands": {"compact": ' + (Ctx-Q (Dict-Get $h 'compact' '')) + ', "with_text": ' + (Ctx-B (Dict-Get $h 'with_text' '')) + ', "clear": ' + (Ctx-Q (Dict-Get $h 'clear' '')) + '}'
+    $o += ', "note": ' + (Ctx-Q (Dict-Get $h 'note' '')) + ', "error": ' + $(if ($e -ceq '') { 'null' } else { Ctx-Q $e }) + ', "categories": [' + ($cats -join ', ') + '], "groups": ['
+    $gs = New-List
+    for ($i = 0; $i -lt $gid.Count; $i++) {
+        $t = Ctx-Items $A $gid[$i] ''; if ($t -ceq '') { continue }
+        $gs.Add('{"id": ' + (Ctx-Q $gid[$i]) + ', "name": ' + (Ctx-Q $gnm[$i]) + ', "tokens": ' + $(if ($A.gknown.Contains($gid[$i])) { Ctx-Num $A.gsum[$gid[$i]] } else { 'null' }) + ', "est": ' + (Ctx-B $ges[$i]) + ', "items": [' + $t + ']}')
+    }
+    $o + ($gs -join ', ') + ']}'
+}
+function Row-H($rows, [string]$k) { foreach ($r in $rows) { if ($r.StartsWith("H`t$k`t", $Ord)) { return $r.Substring($k.Length + 3) } }; '' }
+function Rows-Add($R, $rows) { foreach ($x in $rows) { if (-not $x.StartsWith("H`t", $Ord)) { $R.Add($x) } } }   # all but the H rows
+
+# ---------- Claude ----------
+$script:ClaudeRec = $null
+function Claude-Record([string]$cpid) { # the file the status line keeps for that Claude ('' if none); on Windows also one of a
+    # claude process up to 3 levels under it (the pane's process may be a shell or cmd.exe that started Claude)
+    if (-not $cpid) { return '' }
+    $f = Join-Path $CtxDir "claude-$cpid.json"
+    if (Test-Path -LiteralPath $f -PathType Leaf) { return $f }
+    if (-not $OnWindows) { return '' }
+    if ($null -ne $script:ClaudeRec) { return $script:ClaudeRec }
+    $script:ClaudeRec = ''
+    if (@(Get-ChildItem -LiteralPath $CtxDir -Filter 'claude-*.json' -File -ErrorAction SilentlyContinue).Count -eq 0) { return '' }
+    $kids = @{}
+    foreach ($c in @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)) {
+        $pp = [int]$c.ParentProcessId; if (-not $kids.ContainsKey($pp)) { $kids[$pp] = New-List 'int' }; $kids[$pp].Add([int]$c.ProcessId)
+    }
+    $level = @([int]$cpid)
+    for ($d = 0; $d -lt 3; $d++) {
+        $next = @()
+        foreach ($p in $level) {
+            if (-not $kids.ContainsKey($p)) { continue }
+            foreach ($k in $kids[$p]) {
+                if ($k -eq $p) { continue }
+                $f = Join-Path $CtxDir "claude-$k.json"; if (Test-Path -LiteralPath $f -PathType Leaf) { $script:ClaudeRec = $f; return $f }
+                $next += $k
+            }
+        }
+        $level = $next
+    }
+    ''
+}
+function Claude-Session([string]$cpid, [string]$dir) { # @(id, folder, transcript) of the Claude Code in CPID (the id checked), else $null
+    # what the status line kept; else ~/.claude/sessions/<pid>.json (older Claude Code); else the daemon's roster
+    # (only pid / replPid / sessionId / cwd are read: it holds tokens too); else the newest transcript of its folder
+    # changed since it started
+    $sid = ''; $cwd = ''; $tp = ''
+    $f = Claude-Record $cpid
+    if ($f) { $j = Read-Text $f; $sid = Str-Of 'session' $j; $cwd = Ctx-Unjs (Str-Of 'cwd' $j); $tp = Ctx-Unjs (Str-Of 'transcript' $j) }
+    $f = Join-Path (Join-Path $ClaudeDir 'sessions') "$cpid.json"
+    if (-not $sid -and (Test-Path -LiteralPath $f -PathType Leaf)) { $j = Read-Text $f; $sid = Str-Of 'sessionId' $j; $cwd = Ctx-Unjs (Str-Of 'cwd' $j) }
+    $f = Join-Path (Join-Path $ClaudeDir 'daemon') 'roster.json'
+    if (-not $sid -and (Test-Path -LiteralPath $f -PathType Leaf)) {
+        $sid = ''; $cwd = ''; $w = @{}; $order = New-List
+        foreach ($l in @(Json-LeavesOf $f)) {
+            if ($null -eq $l -or $l.Count -ne 4 -or $l[0] -cne 'workers' -or @('pid', 'replPid', 'sessionId', 'cwd') -cnotcontains $l[2]) { continue }
+            $v = $l[3]; if ($v.StartsWith('"', $Ord)) { $v = $v.Substring(1) }; if ($v.EndsWith('"', $Ord)) { $v = $v.Substring(0, $v.Length - 1) }
+            if (-not $w.ContainsKey($l[1])) { $w[$l[1]] = New-Dict 'string'; $order.Add($l[1]) }
+            $w[$l[1]][$l[2]] = $v
+        }
+        foreach ($x in $order) {
+            if ((Dict-Get $w[$x] 'pid' '') -ceq $cpid -or (Dict-Get $w[$x] 'replPid' '') -ceq $cpid) { $sid = Dict-Get $w[$x] 'sessionId' ''; $cwd = Ctx-Unjs (Dict-Get $w[$x] 'cwd' ''); break }
+        }
+    }
+    if (-not $cwd) { $cwd = $dir }
+    if (-not $sid -and $cwd) {
+        $d = Join-Path (Join-Path $ClaudeDir 'projects') ($cwd -creplace '[^A-Za-z0-9]', '-')
+        $start = $null; try { $start = (Get-Process -Id ([int]$cpid) -ErrorAction Stop).StartTime } catch { }
+        if ($start -and (Test-Path -LiteralPath $d -PathType Container)) {
+            $now = Get-Date; $mins = [Math]::Floor(($now - $start).TotalSeconds / 60) + 2
+            $t = @(Get-ChildItem -LiteralPath $d -Filter '*.jsonl' -File -ErrorAction SilentlyContinue | Where-Object { [Math]::Ceiling(($now - $_.LastWriteTime).TotalMinutes) -lt $mins } | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+            if ($t.Count -gt 0) { $sid = $t[0].BaseName; $tp = $t[0].FullName }
+        }
+    }
+    if ($sid -cnotmatch '^[A-Za-z0-9_-]+\z') { return $null }
+    , @($sid, $cwd, $tp)
+}
+function Ctx-Arg([string]$a) { # one argument on a command line (Windows rules; .NET splits it the same way on mac/Linux)
+    if ($a -ne '' -and $a -notmatch '[\s"]') { return $a }
+    '"' + ([regex]::Replace($a, '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+function Ctx-Kill($p) { # the process and what it started
+    try {
+        if ($p.HasExited) { return }
+        if ($OnWindows) { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null; return }
+        if ($p.GetType().GetMethod('Kill', [Type[]]@([bool]))) { $p.Kill($true) } else { $p.Kill() }
+    } catch { }
+}
+function Claude-Bin { # how to start Claude Code: @(program, its arguments before claude's, claude), else $null
+    $c = @(Get-Command claude -CommandType Application -ErrorAction SilentlyContinue)
+    if ($c.Count -eq 0) { $c = @(Get-Command claude -CommandType ExternalScript -ErrorAction SilentlyContinue) }
+    $p = if ($c.Count -gt 0) { [string]$c[0].Path } else { '' }
+    if (-not $p) { $x = Join-Path (Join-Path (Join-Path $UserHome '.local') 'bin') $(if ($OnWindows) { 'claude.exe' } else { 'claude' }); if (Test-Path -LiteralPath $x -PathType Leaf) { $p = $x } }
+    if (-not $p) { return $null }
+    $e = [IO.Path]::GetExtension($p).ToLowerInvariant()
+    if ($e -eq '.cmd' -or $e -eq '.bat') { return , @($(if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }), 'cmd', $p) }
+    if ($e -eq '.ps1') { return , @((Get-Process -Id $PID).Path, '-NoProfile -ExecutionPolicy Bypass -File', $p) }
+    , @($p, '', $p)
+}
+function Claude-Probe([string]$sid, [string]$cwd) { # Claude Code's own get_context_usage answer for that session (one line), else ''
+    $b = Claude-Bin; if (-not $b) { return '' }
+    if (-not $cwd -or -not [IO.Directory]::Exists($cwd)) { return '' }
+    $t = 30; if ("$env:KIT_CTX_PROBE_TIMEOUT" -match '^[0-9]+$') { $t = [int]$env:KIT_CTX_PROBE_TIMEOUT }; if ($t -le 0) { $t = 86400 }
+    # every hook off (a SessionStart hook must not run), no transcript written; only the c1 line is kept (the
+    # initialize answer, which names the account, is never stored)
+    $set = '{"disableAllHooks":true}'
+    if ($OnWindows) { $sf = Join-Path $CtxDir 'probe-settings.json'; try { Ensure-Dir $CtxDir; [IO.File]::WriteAllText($sf, $set + "`n", $Utf8) } catch { return '' }; $set = $sf }
+    $a = '-p --input-format stream-json --output-format stream-json --verbose --resume ' + $sid + ' --no-session-persistence --settings ' + (Ctx-Arg $set)
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $b[0]
+    $psi.Arguments = if ($b[1] -eq '') { $a } elseif ($b[1] -eq 'cmd') { '/d /s /c "' + (Ctx-Arg $b[2]) + ' ' + $a + '"' } else { $b[1] + ' ' + (Ctx-Arg $b[2]) + ' ' + $a }
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WorkingDirectory = $cwd
+    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $Utf8; $psi.StandardErrorEncoding = $Utf8
+    $end = [DateTime]::UtcNow.AddSeconds($t); $line = ''; $p = $null
+    try {
+        $p = [Diagnostics.Process]::Start($psi)
+        [void]$p.StandardError.ReadToEndAsync()                                   # read, never shown
+        # straight to the pipe: Windows PowerShell's writer may put a BOM in front
+        try { $in = $Utf8.GetBytes($CtxProbeInit + "`n" + $CtxProbeAsk + "`n"); $p.StandardInput.BaseStream.Write($in, 0, $in.Length); $p.StandardInput.BaseStream.Flush() } catch { }
+        try { $p.StandardInput.BaseStream.Close() } catch { }
+        while ($true) {
+            $left = ($end - [DateTime]::UtcNow).TotalMilliseconds; if ($left -le 0) { break }
+            $r = $p.StandardOutput.ReadLineAsync()
+            if (-not $r.Wait([int][Math]::Min($left, 2147483647))) { break }
+            if ($null -eq $r.Result) { break }
+            if ($r.Result.Contains('"request_id":"c1"')) { $line = $r.Result; break }
+        }
+        if ($line) {                                                               # let it end by itself (within the time)
+            [void]$p.StandardOutput.ReadToEndAsync()
+            $left = ($end - [DateTime]::UtcNow).TotalMilliseconds; if ($left -gt 0) { [void]$p.WaitForExit([int][Math]::Min($left, 2147483647)) }
+        }
+    } catch { }
+    finally { if ($p) { Ctx-Kill $p; try { $p.Dispose() } catch { } } }
+    $line
+}
+function Claude-ProbeRows([string]$line, $R) { # what Claude Code said (the c1 line) -> rows, and H probe_total / probe_max /
+    # probe_model / msgs / buffer / threshold (or H probe_error)
+    $lv = New-List 'object'
+    try { Json-Leaves (Json-Parse $line) @() $lv } catch { $lv.Clear() }
+    $t = New-Dict 'string'; $v = New-Dict 'string'; $n = New-Dict; $err = ''
+    foreach ($l in $lv) {
+        $nf = $l.Count
+        if ($nf -eq 3 -and $l[0] -ceq 'response' -and $l[1] -ceq 'error') { $err = Ctx-V $l[2] }
+        if ($nf -lt 2 -or $l[0] -cne 'response' -or $l[1] -cne 'response') { continue }
+        $k = if ($nf -ge 3) { $l[2] } else { '' }; $x = Ctx-V $l[$nf - 1]
+        if ($nf -eq 4) { $t[$k] = $x; continue }
+        if ($nf -eq 6 -and ($k -ceq 'categories' -or $k -ceq 'memoryFiles' -or $k -ceq 'mcpTools' -or $k -ceq 'agents')) { Ctx-Top $n $k $l[3]; $v["$k`t$($l[3])`t$($l[4])"] = $x; continue }
+        if ($nf -eq 5 -and $k -ceq 'slashCommands') { $v["sc`t$($l[3])"] = $x; continue }
+        if ($nf -eq 7 -and $k -ceq 'skills' -and $l[3] -ceq 'skillFrontmatter') { Ctx-Top $n 'sk' $l[4]; $v["sk`t$($l[4])`t$($l[5])"] = $x; continue }
+    }
+    $tot = Dict-Get $t 'totalTokens' ''
+    if ($err -cne '' -or $tot -ceq '') { $R.Add("H`tprobe_error`t" + $(if ($err -cne '') { $err } else { 'Claude Code 沒有給 context 的細項' })); return }
+    $R.Add("H`tprobe_total`t$tot"); $R.Add("H`tprobe_max`t" + (Dict-Get $t 'maxTokens' '')); $R.Add("H`tprobe_model`t" + (Dict-Get $t 'model' ''))
+    if ((Dict-Get $t 'isAutoCompactEnabled' '') -ceq 'true') { $R.Add("H`tthreshold`t" + (Dict-Get $t 'autoCompactThreshold' '')) }
+    for ($i = 1; $i -le (Dict-Get $n 'categories'); $i++) {
+        $id = Dict-Get $v "categories`t$i`tid" ''; $tk = Dict-Get $v "categories`t$i`ttokens" ''
+        $kind = Dict-Get $v "categories`t$i`tkind" ''; if ($kind -ceq '') { $kind = if ((Dict-Get $v "categories`t$i`tisDeferred" '') -ceq 'true') { 'deferred' } else { 'used' } }
+        if ($kind -ceq 'free') { continue }
+        if ($id -ceq 'messages') { $R.Add("H`tmsgs`t$tk") }
+        if ($kind -ceq 'buffer') { $R.Add("H`tbuffer`t$tk") } else { $R.Add("C`t$id`t" + (Dict-Get $v "categories`t$i`tname" '') + "`t$tk`t$kind`t0") }
+    }
+    $R.Add("G`tmemory`t`t0")
+    for ($i = 1; $i -le (Dict-Get $n 'memoryFiles'); $i++) {
+        $p = Dict-Get $v "memoryFiles`t$i`tpath" ''
+        $R.Add("I`tmemory`t" + (Ctx-Short $p) + "`t" + (Dict-Get $v "memoryFiles`t$i`ttokens" '') + "`t" + (Dict-Get $v "memoryFiles`t$i`ttype" '') + "`t$p`t")
+    }
+    $R.Add("G`tskills`t`t0")
+    for ($i = 1; $i -le (Dict-Get $n 'sk'); $i++) { $R.Add("I`tskills`t" + (Dict-Get $v "sk`t$i`tname" '') + "`t" + (Dict-Get $v "sk`t$i`ttokens" '') + "`t" + (Dict-Get $v "sk`t$i`tsource" '') + "`t" + (Dict-Get $v "sk`t$i`tpath" '') + "`t") }
+    $R.Add("G`tmcp`t`t0")
+    $nt = Dict-Get $n 'mcpTools'; $so = New-List; $st = New-Dict; $sn = New-Dict
+    for ($i = 1; $i -le $nt; $i++) {
+        $s = Dict-Get $v "mcpTools`t$i`tserverName" ''
+        if (-not $st.ContainsKey($s)) { $so.Add($s) }
+        Dict-Add $st $s (Ctx-Val (Dict-Get $v "mcpTools`t$i`ttokens" '')); Dict-Add $sn $s 1
+    }
+    foreach ($s in $so) { $R.Add("I`tmcp`t$s`t" + (Ctx-Num $st[$s]) + "`t" + (Ctx-Num $sn[$s]) + " 個工具`t`t") }
+    for ($i = 1; $i -le $nt; $i++) {
+        $R.Add("I`tmcp`t" + (Dict-Get $v "mcpTools`t$i`tname" '') + "`t" + (Dict-Get $v "mcpTools`t$i`ttokens" '') + "`t" + $(if ((Dict-Get $v "mcpTools`t$i`tisLoaded" '') -ceq 'true') { '已載入' } else { '延後載入' }) + "`t`t" + (Dict-Get $v "mcpTools`t$i`tserverName" ''))
+    }
+    $R.Add("G`tagents`t`t0")
+    for ($i = 1; $i -le (Dict-Get $n 'agents'); $i++) {
+        $an = Dict-Get $v "agents`t$i`tagentType" ''; if ($an -ceq '') { $an = Dict-Get $v "agents`t$i`tname" '' }
+        $R.Add("I`tagents`t$an`t" + (Dict-Get $v "agents`t$i`ttokens" '') + "`t" + (Dict-Get $v "agents`t$i`tsource" '') + "`t`t")
+    }
+    if ((Ctx-Val (Dict-Get $v "sc`ttokens" '')) -gt 0) { $R.Add("G`tcommands`t`t0"); $R.Add("I`tcommands`t" + (Dict-Get $v "sc`tincludedCommands" '') + " 個指令`t" + (Dict-Get $v "sc`ttokens" '') + "`t`t`t") }
+}
+function Ctx-V([string]$s) { if ($s.StartsWith('"', $Ord)) { return Ctx-Unesc $s.Substring(1, $s.Length - 2) }; if ($s -ceq 'null') { '' } else { $s } }   # a leaf's value
+function Ctx-Top($n, [string]$k, [string]$i) { $x = Ctx-Val $i; if ($x -gt (Dict-Get $n $k)) { $n[$k] = $x } }   # the highest item number (json counts from 1)
+function Claude-Content([string]$s) { $i = $s.IndexOf('"content":', $Ord); if ($i -ge 0) { $s = $s.Substring($i) }; $j = $s.IndexOf('},"uuid":"', $Ord); if ($j -ge 0) { $s = $s.Substring(0, $j + 1) }; $s }
+function Claude-MsgScan([string]$f) { # what was said since the last compaction (the transcript), by kind and by tool
+    # (thinking from earlier turns is not counted: the API drops it; attachments Claude Code counts elsewhere neither)
+    $a = @{ user = 0.0; meta = 0.0; reply = 0.0; summ = 0.0; tc = (New-Dict); tr = (New-Dict); tn = (New-Dict); at = (New-Dict) }
+    $idn = New-Dict 'string'
+    $st = Ctx-Stream $f; if (-not $st) { return $a }
+    $r = $st[0]; $first = $st[1]
+    try {
+        while ($true) {
+            if ($null -ne $first) { $l = $first; $first = $null } else { $l = $r.ReadLine(); if ($null -eq $l) { break } }
+            if ($l.Contains('"isSidechain":true')) { continue }
+            if ($l.Contains('"type":"system"') -and $l.Contains('"compact_boundary"')) {
+                $a.user = 0.0; $a.meta = 0.0; $a.reply = 0.0; $a.summ = 0.0; $a.tc.Clear(); $a.tr.Clear(); $a.tn.Clear(); $a.at.Clear(); continue
+            }
+            if ($l.Contains('"type":"attachment"')) {
+                $i = $l.IndexOf('"rendered":[', $Ord); if ($i -lt 0) { continue }
+                $j = $l.IndexOf('"attachment":{', $Ord); $k = Ctx-Strv $(if ($j -ge 0) { $l.Substring($j) } else { $l }) 'type'
+                if ($k -ceq '' -or $ClaudeSkipAt.Contains($k)) { continue }
+                $s = $l.Substring($i); $j = $s.IndexOf(',"renderedRole"', $Ord); if ($j -ge 0) { $s = $s.Substring(0, $j + 1) }
+                Dict-Add $a.at $k (Ctx-Wt $s); continue
+            }
+            if ($l.Contains('"type":"assistant"')) {
+                $s = Claude-Content $l; $j = $s.IndexOf('"stop_reason"', $Ord); if ($j -ge 0) { $s = $s.Substring(0, $j + 1) }
+                foreach ($p in (Ctx-Parts $s $ClaudePartRx)) {
+                    if ($p.StartsWith('{"type":"text"', $Ord)) { $a.reply += $Utf8.GetByteCount((Ctx-Strv $p 'text')) / 4 }
+                    elseif ($p.StartsWith('{"type":"tool_use"', $Ord) -or $p.StartsWith('{"type":"server_tool_use"', $Ord)) {
+                        $nm = Ctx-Unesc (Ctx-Strv $p 'name'); $idn[(Ctx-Strv $p 'id')] = $nm; Dict-Add $a.tc $nm (Ctx-Wt $p); Dict-Add $a.tn $nm 1
+                    }
+                }
+                continue
+            }
+            if ($l.Contains('"type":"user"')) {
+                $s = Claude-Content $l
+                if ($l.Contains('"isCompactSummary":true')) { $a.summ += Ctx-Wt $s; continue }
+                if ($s.Contains('{"tool_use_id":"')) {
+                    foreach ($p in (Ctx-Parts $s $ToolIdRx)) {
+                        $id = $p.Substring(16); $q = $id.IndexOf('"', $Ord); $id = if ($q -ge 0) { $id.Substring(0, $q) } else { '' }
+                        Dict-Add $a.tr (Dict-Get $idn $id '?') (Ctx-Wt $p)
+                    }
+                    continue
+                }
+                if ($l.Contains('"isMeta":true')) { $a.meta += Ctx-Wt $s } else { $a.user += Ctx-Wt $s }
+            }
+        }
+    } finally { $r.Dispose() }
+    $a
+}
+function Claude-MsgRows($a, [string]$target, $R) { # the rows of what was said, scaled to TARGET -> its own total
+    $tcs = 0.0; foreach ($x in $a.tc.Values) { $tcs += $x }; $trs = 0.0; foreach ($x in $a.tr.Values) { $trs += $x }; $ats = 0.0; foreach ($x in $a.at.Values) { $ats += $x }
+    $all = $a.user + $a.meta + $a.reply + $a.summ + $tcs + $trs + $ats
+    $f = if ($target -cne '' -and (Ctx-Val $target) -gt 0 -and $all -gt 0) { (Ctx-Val $target) / $all } else { 1 }
+    $R.Add("G`tmsgs`t`t1")
+    foreach ($x in @(@('你的訊息', $a.user), @('系統附加的提示', $a.meta), @('回覆', $a.reply), @('工具呼叫', $tcs), @('工具結果', $trs), @('附加內容', $ats))) { $R.Add("I`tmsgs`t$($x[0])`t" + (Ctx-Num (Ctx-Rnd ($x[1] * $f))) + "`t`t`t") }
+    if ($a.summ -gt 0) { $R.Add("I`tmsgs`t壓縮後的摘要`t" + (Ctx-Num (Ctx-Rnd ($a.summ * $f))) + "`t`t`t") }
+    $R.Add("G`ttool_results`t`t1")
+    foreach ($k in (Dict-Keys $a.tc $a.tr)) { $R.Add("I`ttool_results`t$k`t" + (Ctx-Num (Ctx-Rnd (((Dict-Get $a.tc $k) + (Dict-Get $a.tr $k)) * $f))) + "`t" + (Ctx-Num (Dict-Get $a.tn $k)) + " 次`t`t") }
+    $R.Add("G`tattachments`t`t1")
+    foreach ($k in $a.at.Keys) { $R.Add("I`tattachments`t$k`t" + (Ctx-Num (Ctx-Rnd ($a.at[$k] * $f))) + "`t`t`t") }
+    Ctx-Rnd $all
+}
+function Claude-Detail([string]$cpid, [string]$dir, $R) { # the rows for a Claude Code
+    $live = Claude-Ctx $cpid $dir; $lu = Num-Of 'used' $live; $lw = Num-Of 'window' $live; $lm = Str-Of 'model' $live
+    foreach ($x in @("H`ttool`tclaude", "H`tcompact`t/compact", "H`twith_text`t1", "H`tclear`t/clear")) { $R.Add($x) }
+    $sid = ''; $cwd = ''; $tp = ''
+    $s = Claude-Session $cpid $dir; if ($s) { $sid = $s[0]; $cwd = $s[1]; $tp = $s[2] }
+    if (-not $cwd) { $cwd = $dir }
+    $pd = Join-Path $ClaudeDir 'projects'
+    if (-not (Ctx-Under $tp $pd) -or -not $tp.EndsWith('.jsonl', $Ord) -or -not (Test-Path -LiteralPath $tp -PathType Leaf)) { $tp = '' }
+    if (-not $tp -and $sid) { $tp = Join-Path (Join-Path $pd ($cwd -creplace '[^A-Za-z0-9]', '-')) "$sid.jsonl" }
+    if ($tp -and -not (Test-Path -LiteralPath $tp -PathType Leaf)) { $tp = '' }
+    $R.Add("H`tsession`t$sid")
+    $why = ''; $pr = New-List
+    if (-not $sid) { $why = '找不到這個 Claude 的 session' }
+    elseif ("$env:KIT_CTX_PROBE" -ceq '0') { $why = '沒有問 Claude Code（KIT_CTX_PROBE=0）' }
+    else {
+        $probe = Claude-Probe $sid $cwd
+        if (-not $probe) { $why = 'Claude Code 沒有回答（太舊、沒裝在 PATH 上，或超過 ' + $(if ($env:KIT_CTX_PROBE_TIMEOUT) { $env:KIT_CTX_PROBE_TIMEOUT } else { '30' }) + ' 秒）' }
+        else { Claude-ProbeRows $probe $pr; $why = Row-H $pr 'probe_error' }
+    }
+    $acc = if ($tp) { Claude-MsgScan $tp } else { $null }
+    if ($why) {
+        # Claude Code's own split is not there: the live total, and what was said estimated from the transcript
+        foreach ($x in @("H`terror`t$why", ("H`tsource`t" + (Str-Of 'source' $live)), "H`tmodel`t$lm", "H`texact`t0")) { $R.Add($x) }
+        $msgs = [double]0; if ($acc) { $msgs = Claude-MsgRows $acc '' (New-List) }
+        if ($lu -and $msgs -gt [double]$lu) { $msgs = [double]$lu }
+        if ($acc) { [void](Claude-MsgRows $acc (Ctx-Num $msgs) $R) }
+        $R.Add("H`tused`t$lu"); $R.Add("H`twindow`t$lw")
+        if ($lu) {
+            $R.Add("C`tsystem_prompt`t=系統提示、工具、記憶檔、Skills（估算）`t" + (Ctx-Num ([double]$lu - $msgs)) + "`tused`t1"); $R.Add("C`tmessages`t`t" + (Ctx-Num $msgs) + "`tused`t1")
+            if ($lw -and [long]$lw -gt [long]$lu) { $R.Add("C`tfree_space`t`t$([long]$lw - [long]$lu)`tfree`t0") }
+        }
+        $R.Add("H`tnote`t細項是從對話紀錄估的（大小 ÷ 4），只看得出對話裡各種內容大概佔多少。")
+        return
+    }
+    $tot = Row-H $pr 'probe_total'; $max = Row-H $pr 'probe_max'; $mdl = Row-H $pr 'probe_model'; $msgs = Row-H $pr 'msgs'; $buf = Row-H $pr 'buffer'; $thr = Row-H $pr 'threshold'
+    if (-not $mdl) { $mdl = $lm }
+    $w = Setting-Window $mdl; if (-not $w) { $w = $max }; if (-not $w) { $w = $lw }
+    # the live number (status line / transcript) is what the agent really has; a fresh process may not see all of it
+    # (MCP servers it did not start, what came since): the difference is its own row
+    $used = $tot; $other = [long]0
+    if ($lu -and $tot -cmatch '^[0-9]+\z' -and [long]$lu -gt [long]$tot) { $used = $lu; $other = [long]$lu - [long]$tot }
+    foreach ($x in @("H`tsource`tget_context_usage", "H`tmodel`t$mdl", "H`texact`t1", "H`tused`t$used", "H`twindow`t$w")) { $R.Add($x) }
+    if ($thr) { $R.Add("H`tcompact_at`t$thr") }
+    Rows-Add $R $pr
+    if ($other -gt 0) { $R.Add("C`tother`t`t$other`tused`t0") }
+    if ($buf) { $R.Add("C`tautocompact_buffer`t`t$buf`tbuffer`t0") }
+    $free = (Ctx-Int $w) - (Ctx-Int $used) - (Ctx-Int $buf); if ($free -lt 0) { $free = 0 }
+    $R.Add("C`tfree_space`t`t$free`tfree`t0")
+    if ($acc) { [void](Claude-MsgRows $acc $(if ($msgs) { $msgs } else { '0' }) $R) }
+    $R.Add("H`tnote`t分類是 Claude Code 自己算的；「對話內容」「工具」「附加內容」的細項是從對話紀錄估的（大小 ÷ 4，一張圖約 1600），照比例對到 Claude 算的總數。")
+}
+function Ctx-Int([string]$s) { if ($s -cmatch '^-?[0-9]+\z') { [long]$s } else { [long]0 } }
+
+# ---------- Codex ----------
+function Codex-Rollout([string]$dir) { # the newest rollout started in that folder ('' if none)
+    if (-not $dir -or -not (Test-Path -LiteralPath (Join-Path $CodexDir 'sessions') -PathType Container)) { return '' }
+    $want = '"cwd":' + (Json-S $dir)
+    foreach ($f in Newest-Files (Join-Path $CodexDir 'sessions') 'rollout-*.jsonl') {
+        if ("$(Get-Content -LiteralPath $f -TotalCount 1 -Encoding UTF8)".Contains($want)) { return $f }
+    }
+    ''
+}
+function Codex-InstrFiles([string]$dir) { # the AGENTS.md files Codex reads for DIR: its own (~/.codex), then each folder from the git root down
+    $o = New-List
+    $x = Ctx-Join $CodexDir 'AGENTS.override.md'; if ((Ctx-Size $x) -gt 0) { Ctx-Files 'Codex 帳號' @($x) $o } else { Ctx-Files 'Codex 帳號' @(Ctx-Join $CodexDir 'AGENTS.md') $o }
+    if ($dir) {
+        foreach ($d in (Ctx-Up $dir)) {
+            if (-not $d) { continue }
+            $x = Ctx-Join $d 'AGENTS.override.md'; if ((Ctx-Size $x) -gt 0) { Ctx-Files '資料夾' @($x) $o } else { Ctx-Files '資料夾' @(Ctx-Join $d 'AGENTS.md') $o }
+        }
+    }
+    , $o
+}
+function Codex-Reset($S) { foreach ($k in 'sysd', 'instr', 'skills', 'mcpl', 'user', 'reply', 'other', 'comp') { $S[$k] = 0.0 }; $S.tc.Clear(); $S.tr.Clear(); $S.tn.Clear(); $S.sk.Clear(); $S.dl.Clear() }
+function Codex-Tools($T, [string]$s) { # the tools Codex lists (the last list counts), by namespace
+    $T.nsw.Clear(); $T.nso.Clear(); $T.tw.Clear(); $T.tlo.Clear(); $T.ns = ''
+    $i = $s.IndexOf('"tools":[', $Ord); if ($i -ge 0) { $s = $s.Substring($i) }
+    foreach ($p in (Ctx-Parts $s $NsRx)) {
+        $ty = Ctx-Strv $p 'type'; $nm = Ctx-Unesc (Ctx-Strv $p 'name'); $w = $Utf8.GetByteCount($p) / 4
+        if ($ty -ceq 'namespace') { $T.ns = $nm; if (-not $T.nsw.ContainsKey($nm)) { $T.nso.Add($nm) }; Dict-Add $T.nsw $nm $w }
+        elseif ($T.ns -cne '') {
+            $key = $T.ns + "`t" + $nm
+            if (-not $T.tw.ContainsKey($key)) { if (-not $T.tlo.ContainsKey($T.ns)) { $T.tlo[$T.ns] = New-List }; $T.tlo[$T.ns].Add($nm) }
+            Dict-Add $T.tw $key $w
+        }
+        else { if (-not $T.nsw.ContainsKey($nm)) { $T.nso.Add($nm) }; Dict-Add $T.nsw $nm $w }
+    }
+}
+function Codex-Skills($S, $root, [string]$v) { # the skills Codex lists, with the folder each is in
+    foreach ($m in $RootRx.Matches($v)) { $e = $m.Value.Substring(3, $m.Length - 4); $root[$e.Substring(0, $e.IndexOf('`', $Ord))] = $e.Substring($e.IndexOf('= `', $Ord) + 3) }
+    $i = $v.IndexOf('### Available skills', $Ord); if ($i -lt 0) { return }
+    $parts = $ItemRx.Split($v.Substring($i))
+    for ($j = 1; $j -lt $parts.Count; $j++) {
+        $e = $parts[$j]; $k = $e.IndexOf('\n</skills_instructions>', $Ord); if ($k -ge 0) { $e = $e.Substring(0, $k) }
+        $q = $e.IndexOf(': ', $Ord); $nm = if ($q -ge 0) { $e.Substring(0, $q) } else { '' }
+        $rel = ''; $m = $FileRx.Match($e); if ($m.Success) { $rel = $m.Value.Substring(7, $m.Length - 8) }
+        $q = $rel.IndexOf('/', $Ord); $k = if ($q -ge 0) { $rel.Substring(0, $q) } else { '' }
+        $in = $root.ContainsKey($k); if ($in) { $rel = $root[$k] + $rel.Substring($q) }
+        $S.sk.Add(@((Ctx-Unesc $nm), ($Utf8.GetByteCount($e) / 4), (Ctx-Unesc $rel), $(if ($in) { Ctx-Short (Ctx-Unesc $root[$k]) } else { '' })))
+    }
+}
+function Codex-List($S, [string]$v) { # the deferred tools Codex lists (only their names and what they are)
+    $parts = $ItemRx.Split($v)
+    for ($j = 1; $j -lt $parts.Count; $j++) { $e = $parts[$j]; $q = $e.IndexOf(':', $Ord); $S.dl.Add(@((Ctx-Unesc $(if ($q -ge 0) { $e.Substring(0, $q) } else { '' })), ($Utf8.GetByteCount($e) / 4))) }
+}
+function Codex-Scan([string]$f, [string]$total, [string]$window, $files, $mcp, $R) { # the rollout -> rows
+    $S = @{ tc = (New-Dict); tr = (New-Dict); tn = (New-Dict); sk = (New-List 'object'); dl = (New-List 'object') }; Codex-Reset $S
+    $T = @{ nsw = (New-Dict); nso = (New-List); tw = (New-Dict); tlo = (New-Dict 'object'); ns = '' }
+    $base = 0.0; $bstart = ''; $dup = $false; $cn = New-Dict 'string'; $root = New-Dict 'string'
+    $conf = New-List; foreach ($x in $mcp) { if ($x -cne '' -and -not $conf.Contains($x)) { $conf.Add($x) } }
+    $st = Ctx-Stream $f
+    if ($st) {
+        $rd = $st[0]; $first = $st[1]
+        try {
+            while ($true) {
+                if ($null -ne $first) { $l = $first; $first = $null } else { $l = $rd.ReadLine(); if ($null -eq $l) { break } }
+                $tt = ''; $m = $TypeRx.Match($l); if ($m.Success) { $tt = $m.Value.Substring(8, $m.Length - 9) }
+                $pt = ''; $i = $l.IndexOf('"payload":{"type":"', $Ord); if ($i -ge 0) { $pt = $l.Substring($i + 19); $q = $pt.IndexOf('"', $Ord); $pt = if ($q -ge 0) { $pt.Substring(0, $q) } else { '' } }
+                if ($tt -ceq 'session_meta') {
+                    $i = $l.IndexOf('"base_instructions":', $Ord)
+                    if ($i -ge 0) {
+                        $b = $l.Substring($i); $bt = if ($b.StartsWith('"base_instructions":{', $Ord)) { Ctx-Strv $b 'text' } else { Ctx-Strv $b 'base_instructions' }
+                        $base = $Utf8.GetByteCount($bt) / 4; $bstart = if ($bt -ceq '') { '' } else { Ctx-Head80 $bt }
+                    }
+                    continue
+                }
+                if ($tt -ceq 'compacted') { Codex-Reset $S; $S.comp = $Utf8.GetByteCount($l) / 4; continue }
+                if ($tt -cne 'response_item') { continue }
+                if ($pt -ceq 'message') {
+                    $role = Ctx-Strv $l 'role'
+                    if ($role -ceq 'user') { $S.user += (Ctx-Imgs $l) * 1600 }
+                    foreach ($m in $TxtRx.Matches($l)) {
+                        $v = $m.Value.Substring(8, $m.Length - 9); $n = $Utf8.GetByteCount($v) / 4
+                        if ($role -ceq 'developer') {
+                            if ($bstart -cne '' -and (Ctx-Head80 $v) -ceq $bstart) { $S.sysd += $n; $dup = $true }
+                            elseif ($v.StartsWith('<skills_instructions>', $Ord)) { $S.skills += $n; Codex-Skills $S $root $v }
+                            elseif ($v.StartsWith('<tools>', $Ord)) { $S.mcpl += $n; Codex-List $S $v }
+                            else { $S.sysd += $n }
+                        } elseif ($role -ceq 'user') {
+                            if ($v.StartsWith('# AGENTS.md instructions', $Ord) -or $v.StartsWith('<user_instructions>', $Ord)) { $S.instr += $n }
+                            elseif ($v.StartsWith('<environment_context>', $Ord)) { $S.sysd += $n }
+                            else { $S.user += $n }
+                        } elseif ($role -ceq 'assistant') { $S.reply += $n }
+                        else { $S.other += $n }
+                    }
+                    continue
+                }
+                if ($pt -ceq 'reasoning') { continue }
+                if ($pt -ceq 'function_call' -or $pt -ceq 'custom_tool_call') {
+                    $nm = Ctx-Unesc (Ctx-Strv $l 'name'); $cn[(Ctx-Strv $l 'call_id')] = $nm
+                    Dict-Add $S.tc $nm ($Utf8.GetByteCount((Ctx-Strv $l $(if ($pt -ceq 'function_call') { 'arguments' } else { 'input' }))) / 4); Dict-Add $S.tn $nm 1; continue
+                }
+                if ($pt -ceq 'function_call_output' -or $pt -ceq 'custom_tool_call_output') {
+                    $nm = Dict-Get $cn (Ctx-Strv $l 'call_id') '?'
+                    $i = $l.IndexOf('"output":', $Ord); Dict-Add $S.tr $nm (Ctx-Wt $(if ($i -ge 0) { $l.Substring($i) } else { $l })); continue
+                }
+                if ($pt -ceq 'local_shell_call' -or $pt -ceq 'web_search_call' -or $pt -ceq 'tool_search_call') { $nm = $pt.Substring(0, $pt.Length - 5); Dict-Add $S.tc $nm ($Utf8.GetByteCount($l) / 4); Dict-Add $S.tn $nm 1; continue }
+                if ($pt -ceq 'additional_tools') { Codex-Tools $T $l; continue }
+                if ($pt -ceq 'compaction' -or $pt -ceq 'compaction_summary') { Codex-Reset $S; $S.comp = $Utf8.GetByteCount($l) / 4; continue }
+                $S.other += $Utf8.GetByteCount($l) / 4
+            }
+        } finally { $rd.Dispose() }
+    }
+    $tcs = 0.0; foreach ($x in $S.tc.Values) { $tcs += $x }; $trs = 0.0; foreach ($x in $S.tr.Values) { $trs += $x }
+    $stl = 0.0; $mcpt = 0.0; $nst = New-Dict; $ism = New-Dict 'bool'
+    foreach ($ns in $T.nso) {
+        $nw = Dict-Get $T.nsw $ns; $lst = Dict-Get $T.tlo $ns @()
+        foreach ($nm in $lst) { $nw += $T.tw[$ns + "`t" + $nm] }
+        $nst[$ns] = $nw; $ism[$ns] = ($ns.StartsWith('mcp__', $Ord) -or $conf.Contains($ns)); if ($ism[$ns]) { $mcpt += $nw } else { $stl += $nw }
+    }
+    $mcpt += $S.mcpl
+    $raw = New-Dict
+    $raw['system_prompt'] = $(if ($dup) { 0 } else { $base }) + $S.sysd; $raw['instructions'] = $S.instr; $raw['skills'] = $S.skills; $raw['system_tools'] = $stl
+    $raw['mcp_tools'] = $mcpt; $raw['messages'] = $S.user + $S.reply + $tcs + $trs + $S.other; $raw['compaction'] = $S.comp
+    $order = @('system_prompt', 'instructions', 'skills', 'system_tools', 'mcp_tools', 'messages', 'compaction')
+    $all = 0.0; foreach ($k in $order) { $all += $raw[$k] }
+    $tv = Ctx-Val $total; $has = ($total -cne '' -and $tv -gt 0 -and $all -gt 0)
+    $f = if ($has) { $tv / $all } else { 1 }
+    $big = ''; $sum = 0.0; $sc = New-Dict
+    foreach ($k in $order) { $sc[$k] = Ctx-Rnd ($raw[$k] * $f); $sum += $sc[$k]; if ($big -ceq '' -or $sc[$k] -gt $sc[$big]) { $big = $k } }
+    if ($has) { $sc[$big] += $tv - $sum }
+    if ($total -ceq '') { $R.Add("H`tused`t" + (Ctx-Num (Ctx-Rnd $all))) }
+    foreach ($k in $order) { $R.Add("C`t$k`t`t" + (Ctx-Num $sc[$k]) + "`tused`t1") }
+    if ($window -cne '' -and (Ctx-Val $window) -gt 0) { $fr = (Ctx-Val $window) - $(if ($total -cne '' -and $tv -gt 0) { $tv } else { Ctx-Rnd $all }); $R.Add("C`tfree_space`t`t" + (Ctx-Num $(if ($fr -gt 0) { $fr } else { 0 })) + "`tfree`t0") }
+    # the AGENTS.md files: their sizes, scaled to what the instructions came to
+    $fs = 0.0; foreach ($x in $files) { $y = $x.Split("`t"); if ($y.Count -ge 3) { $fs += (Ctx-Val $y[1]) / 4 } }
+    $R.Add("G`tinstructions`t`t1")
+    foreach ($x in $files) {
+        $y = $x.Split("`t"); if ($y.Count -lt 3) { continue }
+        $tk = if ($S.instr -gt 0 -and $fs -gt 0) { Ctx-Num (Ctx-Rnd ((Ctx-Val $y[1]) / 4 * $sc['instructions'] / $fs)) } else { '' }
+        $R.Add("I`tinstructions`t" + (Ctx-Short $y[0]) + "`t$tk`t" + $(if ($S.instr -gt 0) { $y[2] } else { '這次對話沒讀到' }) + "`t" + $y[0] + "`t")
+    }
+    $R.Add("G`tskills`t`t1")
+    foreach ($e in $S.sk) { $R.Add("I`tskills`t" + $e[0] + "`t" + $(if ($S.skills -gt 0) { Ctx-Num (Ctx-Rnd ($e[1] * $sc['skills'] / $S.skills)) } else { '' }) + "`t" + $e[3] + "`t" + $e[2] + "`t") }
+    $R.Add("G`ttools`t`t1"); $R.Add("G`tmcp`t`t1")
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($ns in $T.nso) {
+        $g = if ($ism[$ns]) { 'mcp' } else { 'tools' }; $lst = @(Dict-Get $T.tlo $ns @())
+        $R.Add("I`t$g`t$ns`t" + (Ctx-Num (Ctx-Rnd ($nst[$ns] * $f))) + "`t$($lst.Count) 個工具`t`t")
+        foreach ($nm in $lst) { $R.Add("I`t$g`t$nm`t" + (Ctx-Num (Ctx-Rnd ($T.tw[$ns + "`t" + $nm] * $f))) + "`t`t`t$ns") }
+        [void]$seen.Add($ns)
+    }
+    foreach ($e in $S.dl) { $R.Add("I`tmcp`t" + $e[0] + "`t" + (Ctx-Num (Ctx-Rnd ($e[1] * $f))) + "`t延後載入（只放名字和說明）`t`t"); [void]$seen.Add($e[0]) }
+    foreach ($k in $conf) { if (-not $seen.Contains($k) -and -not $seen.Contains('mcp__' + $k)) { $R.Add("I`tmcp`t$k`t`t設定裡有，這次對話沒看到它的工具`t`t") } }
+    $R.Add("G`tmsgs`t`t1")
+    foreach ($x in @(@('你的訊息', $S.user), @('回覆', $S.reply), @('工具呼叫', $tcs), @('工具結果', $trs), @('其他', $S.other))) { $R.Add("I`tmsgs`t$($x[0])`t" + (Ctx-Num (Ctx-Rnd ($x[1] * $f))) + "`t`t`t") }
+    $R.Add("G`ttool_results`t`t1")
+    foreach ($k in (Dict-Keys $S.tc $S.tr)) { $R.Add("I`ttool_results`t$k`t" + (Ctx-Num (Ctx-Rnd (((Dict-Get $S.tc $k) + (Dict-Get $S.tr $k)) * $f))) + "`t" + (Ctx-Num (Dict-Get $S.tn $k)) + " 次`t`t") }
+}
+function Codex-Detail([string]$dir, $R) { # the rows for a Codex
+    foreach ($x in @("H`ttool`tcodex", "H`tcompact`t/compact", "H`twith_text`t0", "H`tclear`t/new", "H`tsource`trollout", "H`texact`t0")) { $R.Add($x) }
+    $f = Codex-Rollout $dir; if (-not $f) { $R.Add("H`terror`t找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）"); return }
+    $c = Codex-Ctx $dir; $u = Num-Of 'used' $c; $w = Num-Of 'window' $c
+    foreach ($x in @(("H`tmodel`t" + (Str-Of 'model' $c)), "H`tused`t$u", "H`twindow`t$w", ("H`tpct`t" + (Num-Of 'pct' $c)))) { $R.Add($x) }
+    if ((Ctx-Size $f) -gt $CtxDetailTail) { $R.Add("H`tbig`t1") }
+    $mcp = New-List; $cf = Ctx-Join $CodexDir 'config.toml'
+    if (Test-Path -LiteralPath $cf -PathType Leaf) { foreach ($l in (Read-Text $cf).Split("`n")) { $m = $McpTomlRx.Match($l); if ($m.Success) { $mcp.Add($m.Groups[1].Value.Replace('"', '')) } } }
+    Codex-Scan $f $u $w (Codex-InstrFiles $dir) $mcp $R
+    $R.Add("H`tnote`t總數是 Codex 自己記的（最後一次 token_count）；分到各類是從對話紀錄估的（大小 ÷ 4），照比例對到總數。Codex 自己顯示的 % 會先扣掉 12000（它的基本用量）。")
+}
+
+# ---------- omp ----------
+function Omp-InstrFiles([string]$dir) { # the instruction files omp may read for DIR (omp reads several tools' ones; a guess from what is there)
+    $o = New-List
+    Ctx-Files 'omp 帳號' @(Ctx-Join $OmpDir 'AGENTS.md') $o
+    Ctx-Files 'Claude 帳號' @(Ctx-Join $ClaudeDir 'CLAUDE.md') $o
+    if ($dir) {
+        foreach ($d in (Ctx-Up $dir)) {
+            if (-not $d -or (Ctx-SamePath $d $UserHome)) { continue }
+            Ctx-Files '資料夾' @((Ctx-Join $d 'AGENTS.md'), (Ctx-Join $d 'CLAUDE.md'), (Ctx-Join (Ctx-Join $d '.omp') 'AGENTS.md'), (Ctx-Join (Ctx-Join $d '.claude') 'CLAUDE.md')) $o
+        }
+    }
+    , $o
+}
+function Omp-SkillFiles([string]$dir) { # "name TAB bytes TAB path TAB where" for the skills omp may list: their name and description
+    # ("where" as unix/kit has it: the skill's folder name)
+    $o = New-List; $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $ds = @((Ctx-Join $OmpDir 'skills'), $AgentsSkills, (Ctx-Join $ClaudeDir 'skills'))
+    if ($dir) { $ds += @((Ctx-Join (Ctx-Join $dir '.omp') 'skills'), (Ctx-Join (Ctx-Join $dir '.agents') 'skills'), (Ctx-Join (Ctx-Join $dir '.claude') 'skills')) }
+    foreach ($d in $ds) {
+        if (-not [IO.Directory]::Exists($d)) { continue }
+        $subs = [string[]]@(foreach ($x in [IO.Directory]::GetDirectories($d)) { $n = [IO.Path]::GetFileName($x); if (-not $n.StartsWith('.', $Ord)) { $n } })
+        [Array]::Sort($subs, [StringComparer]::Ordinal)
+        foreach ($n in $subs) {
+            $f = Ctx-Join (Ctx-Join $d $n) 'SKILL.md'
+            try { $text = [IO.File]::ReadAllText($f, $Utf8) } catch { continue }
+            $nm = $n; $w = $n; $nn = ''; $de = ''; $c = 0
+            foreach ($l in $text.Split("`n")) {
+                if ($l -ceq '---') { $c++; if ($c -eq 2) { break }; continue }
+                if ($c -eq 1 -and $l.StartsWith('name:', $Ord)) { $nn = $l -creplace '^name:[ \t]*', '' }
+                if ($c -eq 1 -and $l.StartsWith('description:', $Ord)) { $de = $l -creplace '^description:[ \t]*', '' }
+            }
+            if ($nn -cne '') { $nm = $nn }
+            if (-not $seen.Add($nm)) { continue }
+            $o.Add("$nm`t$($Utf8.GetByteCount($nm) + $Utf8.GetByteCount($de) + 20)`t$f`t$(Ctx-Short $w)")
+        }
+    }
+    , $o
+}
+function Omp-Num([string]$s, [string]$k) { $m = [regex]::Match($s, '"' + $k + '":([0-9]+)'); if ($m.Success) { $m.Groups[1].Value } else { '' } }
+function Omp-MsgText([string]$s) { $i = $s.IndexOf(',"details":', $Ord); if ($i -ge 0) { $s.Substring(0, $i) } else { $s } }   # what is sent (not "details")
+function Omp-DetailScan([string]$f, [string]$total, [string]$window, $files, $skills, $mcp, $R) { # the session -> rows
+    $ek = New-List; $en = New-List; $ew = New-List 'double'; $el = New-List 'long'
+    $lid = New-Dict 'long'; $cl = [long]0; $keep = ''; $summ = 0.0; $rb = $false; $nmt = ''; $tst = ''; $nr = [long]0
+    $st = Ctx-Stream $f
+    if ($st) {
+        $rd = $st[0]; $first = $st[1]
+        try {
+            while ($true) {
+                if ($null -ne $first) { $l = $first; $first = $null } else { $l = $rd.ReadLine(); if ($null -eq $l) { break } }
+                $nr++
+                $id = Ctx-Strv (Ctx-Head $l 200) 'id'; if ($id -cne '') { $lid[$id] = $nr }
+                if ($l.StartsWith('{"type":"compaction"', $Ord)) { $cl = $nr; $keep = Ctx-Strv $l 'firstKeptEntryId'; $summ = $Utf8.GetByteCount((Ctx-Strv $l 'summary')) / 4; $rb = $false; continue }
+                if ($l.StartsWith('{"type":"reset_boundary"', $Ord)) { $cl = $nr; $keep = ''; $summ = 0.0; $rb = $true; continue }
+                if ($l.StartsWith('{"type":"custom_message"', $Ord)) { $ek.Add('at'); $en.Add((Ctx-Strv $l 'customType')); $ew.Add((Ctx-Wt (Omp-MsgText $l))); $el.Add($nr); continue }
+                if (-not $l.StartsWith('{"type":"message"', $Ord)) { continue }
+                $role = Ctx-Strv $l 'role'; $s = Omp-MsgText $l
+                if ($role -ceq 'assistant') {
+                    if ($l.Contains('"stopReason":"aborted"') -or $l.Contains('"stopReason":"error"')) { continue }
+                    $i = $l.IndexOf('"contextSnapshot":{', $Ord); if ($i -ge 0) { $cs = $l.Substring($i); $nmt = Omp-Num $cs 'nonMessageTokens'; $tst = Omp-Num $cs 'toolSchemaTokens' }
+                    foreach ($p in (Ctx-Parts $s $OmpPartRx)) {
+                        if ($p.StartsWith('{"type":"text"', $Ord)) { $ek.Add('reply'); $en.Add(''); $ew.Add($Utf8.GetByteCount((Ctx-Strv $p 'text')) / 4); $el.Add($nr) }
+                        elseif ($p.StartsWith('{"type":"toolCall"', $Ord)) { $ek.Add('tc'); $en.Add((Ctx-Unesc (Ctx-Strv $p 'name'))); $ew.Add((Ctx-Wt $p)); $el.Add($nr) }
+                    }
+                } elseif ($role -ceq 'toolResult') { $nm = Ctx-Unesc (Ctx-Strv $l 'toolName'); if ($nm -ceq '') { $nm = '?' }; $ek.Add('tr'); $en.Add($nm); $ew.Add((Ctx-Wt $s)); $el.Add($nr) }
+                elseif ($role -ceq 'user') { $ek.Add('user'); $en.Add(''); $ew.Add((Ctx-Wt $s)); $el.Add($nr) }
+                else { $ek.Add('other'); $en.Add($role); $ew.Add((Ctx-Wt $s)); $el.Add($nr) }
+            }
+        } finally { $rd.Dispose() }
+    }
+    $start = [long]1
+    if ($cl) { $start = $cl + 1; if ($keep -cne '' -and $lid.ContainsKey($keep) -and $lid[$keep] -lt $cl) { $start = $lid[$keep] } }
+    $tc = New-Dict; $tr = New-Dict; $tn = New-Dict; $at = New-Dict; $raw = New-Dict; $tcs = 0.0; $trs = 0.0; $ats = 0.0
+    for ($e = 0; $e -lt $ek.Count; $e++) {
+        if ($el[$e] -lt $start -or $el[$e] -eq $cl) { continue }
+        $k = $ek[$e]; $wv = $ew[$e]
+        if ($k -ceq 'tc') { Dict-Add $tc $en[$e] $wv; Dict-Add $tn $en[$e] 1; $tcs += $wv }
+        elseif ($k -ceq 'tr') { Dict-Add $tr $en[$e] $wv; $trs += $wv }
+        elseif ($k -ceq 'at') { Dict-Add $at $en[$e] $wv; $ats += $wv }
+        else { Dict-Add $raw $k $wv }
+    }
+    if ($cl -and -not $rb) { $raw['summ'] = $summ }
+    $ru = Dict-Get $raw 'user'; $rr = Dict-Get $raw 'reply'; $ro = Dict-Get $raw 'other'; $rs = Dict-Get $raw 'summ'
+    $all = $ru + $rr + $tcs + $trs + $ats + $ro + $rs
+    $fsz = 0.0; foreach ($x in $files) { $y = $x.Split("`t"); if ($y.Count -ge 3) { $fsz += (Ctx-Val $y[1]) / 4 } }
+    $ssz = 0.0; foreach ($x in $skills) { $y = $x.Split("`t"); if ($y.Count -ge 4) { $ssz += (Ctx-Val $y[1]) / 4 } }
+    $tv = Ctx-Val $total
+    if ($nmt -cne '' -and $total -cne '') {
+        # the numbers omp keeps: what is not the conversation, and of that the tools
+        $tools = Ctx-Val $tst; $rest = (Ctx-Val $nmt) - $tools; if ($rest -lt 0) { $rest = 0 }
+        $fi = $fsz; $sk = $ssz; if ($fi + $sk -gt $rest) { if ($fi + $sk -gt 0) { $fi = Ctx-Rnd ($fsz * $rest / ($fsz + $ssz)); $sk = $rest - $fi } }
+        $fi = Ctx-Rnd $fi; $sk = Ctx-Rnd $sk; $sp = $rest - $fi - $sk
+        $mt = $tv - (Ctx-Val $nmt); if ($mt -lt 0) { $mt = 0 }
+        $R.Add("C`tsystem_prompt`t`t" + (Ctx-Num $sp) + "`tused`t1"); $R.Add("C`tsystem_tools`t`t" + (Ctx-Num $tools) + "`tused`t0")
+        $R.Add("C`tinstructions`t`t" + (Ctx-Num $fi) + "`tused`t1"); $R.Add("C`tskills`t`t" + (Ctx-Num $sk) + "`tused`t1")
+    } else {
+        $ar = Ctx-Rnd $all; $mt = if ($total -cne '') { $tv } else { $ar }; if ($mt -gt $ar) { $mt = $ar }
+        $sp = $(if ($total -cne '') { $tv } else { $ar }) - $mt; $fi = 0; $sk = 0
+        $R.Add("C`tsystem_prompt`t=系統提示、工具、指示檔、Skills（估算）`t" + (Ctx-Num $sp) + "`tused`t1")
+    }
+    $f = if ($all -gt 0) { $mt / $all } else { 1 }
+    $cm = Ctx-Rnd ($rs * $f); $R.Add("C`tmessages`t`t" + (Ctx-Num ($mt - $cm)) + "`tused`t1"); $R.Add("C`tcompaction`t`t" + (Ctx-Num $cm) + "`tused`t1")
+    if ($window -cne '' -and (Ctx-Val $window) -gt 0 -and $total -cne '') { $fr = (Ctx-Val $window) - $tv; $R.Add("C`tfree_space`t`t" + (Ctx-Num $(if ($fr -gt 0) { $fr } else { 0 })) + "`tfree`t0") }
+    $R.Add("G`tinstructions`t`t1")
+    foreach ($x in $files) { $y = $x.Split("`t"); if ($y.Count -ge 3) { $R.Add("I`tinstructions`t" + (Ctx-Short $y[0]) + "`t" + $(if ($fsz -gt 0 -and $fi -gt 0) { Ctx-Num (Ctx-Rnd ((Ctx-Val $y[1]) / 4 * $fi / $fsz)) } else { '' }) + "`t" + $y[2] + "`t" + $y[0] + "`t") } }
+    $R.Add("G`tskills`t`t1")
+    foreach ($x in $skills) { $y = $x.Split("`t"); if ($y.Count -ge 4) { $R.Add("I`tskills`t" + $y[0] + "`t" + $(if ($ssz -gt 0 -and $sk -gt 0) { Ctx-Num (Ctx-Rnd ((Ctx-Val $y[1]) / 4 * $sk / $ssz)) } else { '' }) + "`t" + $y[3] + "`t" + $y[2] + "`t") } }
+    $R.Add("G`tmcp`t`t1")
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($x in $mcp) { if ($x -cne '' -and $seen.Add($x)) { $R.Add("I`tmcp`t$x`t`t設定的 MCP（它的工具算在「系統工具」）`t`t") } }
+    $R.Add("G`tmsgs`t`t1")
+    foreach ($x in @(@('你的訊息', $ru), @('回覆', $rr), @('工具呼叫', $tcs), @('工具結果', $trs), @('附加內容', $ats), @('其他', $ro))) { $R.Add("I`tmsgs`t$($x[0])`t" + (Ctx-Num (Ctx-Rnd ($x[1] * $f))) + "`t`t`t") }
+    if ($cm -gt 0) { $R.Add("I`tmsgs`t壓縮後的摘要`t" + (Ctx-Num $cm) + "`t`t`t") }
+    $R.Add("G`ttool_results`t`t1")
+    foreach ($k in (Dict-Keys $tc $tr)) { $R.Add("I`ttool_results`t$k`t" + (Ctx-Num (Ctx-Rnd (((Dict-Get $tc $k) + (Dict-Get $tr $k)) * $f))) + "`t" + (Ctx-Num (Dict-Get $tn $k)) + " 次`t`t") }
+    $R.Add("G`tattachments`t`t1")
+    foreach ($k in $at.Keys) { $R.Add("I`tattachments`t$k`t" + (Ctx-Num (Ctx-Rnd ($at[$k] * $f))) + "`t`t`t") }
+}
+function Omp-Detail([string]$opid, [string]$dir, $R) { # the rows for an omp
+    foreach ($x in @("H`ttool`tomp", "H`tcompact`t/compact", "H`twith_text`t1", "H`tclear`t/new", "H`tsource`tsession", "H`texact`t0")) { $R.Add($x) }
+    $f = Omp-Session $opid $dir; if (-not $f) { $R.Add("H`terror`t找不到這個 omp 的 session（~/.omp/agent/sessions）"); return }
+    $c = Omp-Ctx $opid $dir
+    foreach ($x in @(("H`tmodel`t" + (Str-Of 'model' $c)), ("H`tused`t" + (Num-Of 'used' $c)), ("H`twindow`t" + (Num-Of 'window' $c)))) { $R.Add($x) }
+    $mcp = New-List; $mf = @(Ctx-Join $OmpDir 'mcp.json'); if ($dir) { $mf += @((Ctx-Join (Ctx-Join $dir '.omp') 'mcp.json'), (Ctx-Join $dir '.mcp.json')) }
+    foreach ($x in $mf) { if (Test-Path -LiteralPath $x -PathType Leaf) { foreach ($k in @(Json-Keys $x @('mcpServers'))) { $mcp.Add($k) } } }
+    Omp-DetailScan $f (Num-Of 'used' $c) (Num-Of 'window' $c) (Omp-InstrFiles $dir) (Omp-SkillFiles $dir) $mcp $R
+    $R.Add("H`tnote`t總數和「系統工具」是 omp 自己記的（最後一次回覆的 context 快照）；其他分類和細項是從檔案和對話紀錄估的（大小 ÷ 4），照比例對到 omp 的數字。指示檔和 skills 是照現在的檔案估的。")
+}
+
+function Ctx-Rows([string]$cpid, [string]$tool, [string]$dir, $R) { # the rows for one agent
+    if ($tool -ceq 'claude') { Claude-Detail $cpid $dir $R }
+    elseif ($tool -ceq 'codex') { Codex-Detail $dir $R }
+    elseif ($tool -ceq 'omp') { Omp-Detail $cpid $dir $R }
+    else { $R.Add("H`terror`t不是 Claude Code、Codex 或 omp") }
+}
+function Ctx-Detail([string]$cpid, [string]$tool, [string]$dir, [bool]$fresh) { # the detail JSON, kept a minute
+    $f = Join-Path $CtxDir "detail-$cpid.json"; $now = Unix-Now
+    $ttl = if ($env:KIT_CTX_DETAIL_TTL) { $env:KIT_CTX_DETAIL_TTL } else { '60' }
+    if (-not $fresh -and (Test-Path -LiteralPath $f -PathType Leaf)) {
+        $j = ''; try { $j = (Read-Text $f).TrimEnd("`n") } catch { }
+        $at = Num-Of 'at' $j
+        if ($at -and $ttl -cmatch '^-?[0-9]+\z' -and $now - [long]$at -lt [long]$ttl -and $now - [long]$at -ge 0 -and (Str-Of 'tool' $j) -ceq $tool) { [Console]::Out.Write($j + "`n"); return }
+    }
+    $R = New-List
+    Ctx-Rows $cpid $tool $dir $R
+    $j = Ctx-Assemble $R ([string]$now)
+    try { Ensure-Dir $CtxDir; $tmp = "$f.$PID"; [IO.File]::WriteAllText($tmp, $j + "`n", $Utf8); Move-Item -LiteralPath $tmp -Destination $f -Force } catch { }
+    [Console]::Out.Write($j + "`n")
 }
 
 # ---------- commands ----------
@@ -3526,7 +4363,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
   kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
-  kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]   那個 agent 的 context 用了多少（JSON）
+  kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]
+                                  那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
                                     用 kit 的裝法裝，太舊就升級（Herdr 的「安裝」按鈕就是這個）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）

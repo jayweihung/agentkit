@@ -1002,6 +1002,182 @@ check "statusline: a short line for Claude" '[ "$out" = "Opus 5.5 · context 35%
 check "statusline: the numbers kept for that Claude process" '[ -f "$H7/.config/agentkit/ctx/claude-$cp.json" ]'
 out=$(CX --pid "$cp" --tool claude --dir "$P7")
 check "context (claude): what the status line kept wins" '[ "$out" = "{\"tool\": \"claude\", \"used\": 139600, \"window\": 400000, \"pct\": 35, \"source\": \"statusline\", \"model\": \"claude-opus-5-5\"}" ]'
+# the window: what settings.json tells Claude Code (autoCompactWindow), as Claude's own /context shows, not the status line's
+SID=0a1b2c3d-1111-2222-3333-444455556666; PD7="$H7/.claude/projects/$(printf '%s' "$P7" | sed 's|[^A-Za-z0-9]|-|g')"; TS7="$PD7/$SID.jsonl"
+printf '{"pid": %s, "session": "%s", "used": 130000, "window": 1000000, "pct": 13, "model": "claude-opus-5-5", "transcript": "%s", "cwd": "%s"}\n' "$$" "$SID" "$TS7" "$P7" > "$H7/.config/agentkit/ctx/claude-$$.json"
+out=$(CX --pid $$ --tool claude --dir "$P7")
+check "context (claude): the window set in settings.json (autoCompactWindow) wins over the status line's" '[ "$out" = "{\"tool\": \"claude\", \"used\": 130000, \"window\": 400000, \"pct\": 33, \"source\": \"statusline\", \"model\": \"claude-opus-5-5\"}" ]'
+printf '{"session_id":"%s","transcript_path":"%s","cwd":"/x","workspace":{"current_dir":"/x/sub","project_dir":"%s"},"model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_window":{"context_window_size":1000000,"current_usage":{"input_tokens":2,"cache_creation_input_tokens":1146,"cache_read_input_tokens":138452},"used_percentage":14}}' "$SID" "$TS7" "$P7" > "$T/sl2.json"
+mkdir -p "$T/fb9"; printf '#!/bin/sh\necho $$ > "%s/cpid9"\n"%s" statusline < "%s/sl2.json"\n' "$T" "$KIT" "$T" > "$T/fb9/claude"; chmod +x "$T/fb9/claude"
+out=$("$T/fb9/claude"); cp9=$(cat "$T/cpid9")
+check "statusline: the session, its transcript and folder kept too; the line uses the window from settings.json" '[ "$out" = "Opus 5.5 · context 35%（139k / 400k）" ] && grep -qF "\"session\": \"$SID\"" "$H7/.config/agentkit/ctx/claude-$cp9.json" && grep -qF "\"transcript\": \"$TS7\", \"cwd\": \"$P7\"}" "$H7/.config/agentkit/ctx/claude-$cp9.json"'
+# kit context --detail (Claude): a fake claude answers Claude Code's control requests
+FC="$T/fakeclaude"; mkdir -p "$FC"
+cat > "$FC/claude" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$T/claude-args"; pwd -P >> "$T/claude-cwd"
+[ -z "\${FAKE_SLEEP:-}" ] || sleep "\$FAKE_SLEEP"
+while IFS= read -r l; do
+    case \$l in
+        *'"request_id":"i1"'*) printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"i1","response":{"account":{"email":"secret@example.com"}}}}';;
+        *'"request_id":"c1"'*) cat "$T/c1.json";;
+    esac
+done
+EOF
+chmod +x "$FC/claude"
+cat > "$T/c1.json" <<EOF
+{"type":"control_response","response":{"subtype":"success","request_id":"c1","response":{"categories":[{"id":"system_prompt","name":"System prompt","tokens":4000,"color":"promptBorder","kind":"used"},{"id":"system_tools","name":"System tools","tokens":6000,"color":"inactive","kind":"used"},{"id":"system_tools_deferred","name":"System tools (deferred)","tokens":13000,"color":"inactive","isDeferred":true,"kind":"deferred"},{"id":"mcp_tools","name":"MCP tools","tokens":3000,"color":"cyan","kind":"used"},{"id":"memory_files","name":"Memory files","tokens":1200,"color":"claude","kind":"used"},{"id":"skills","name":"Skills","tokens":800,"color":"warning","kind":"used"},{"id":"messages","name":"Messages","tokens":100000,"color":"purple","kind":"used"},{"id":"autocompact_buffer","name":"Autocompact buffer","tokens":33000,"color":"inactive","kind":"buffer"},{"id":"free_space","name":"Free space","tokens":252000,"color":"promptBorder","kind":"free"}],"totalTokens":115000,"maxTokens":400000,"rawMaxTokens":400000,"autocompactSource":"settings","percentage":29,"gridRows":[[{"color":"x","isFilled":true}]],"model":"claude-opus-5-5","memoryFiles":[{"path":"$H7/.claude/CLAUDE.md","type":"User","tokens":200},{"path":"$P7/CLAUDE.md","type":"Project","tokens":1000}],"mcpTools":[{"name":"mcp__gerrit__a","serverName":"gerrit","tokens":1000,"isLoaded":true},{"name":"mcp__gerrit__b","serverName":"gerrit","tokens":1500,"isLoaded":false},{"name":"mcp__kitping__ping","serverName":"kitping","tokens":500,"isLoaded":true}],"mcpInstructions":[],"agents":[{"agentType":"gerrit","source":"userSettings","tokens":120}],"slashCommands":{"totalCommands":5,"includedCommands":5,"tokens":300},"skills":{"totalSkills":2,"includedSkills":2,"tokens":800,"skillFrontmatter":[{"name":"tiny","source":"projectSettings","path":"$P7/.claude/skills/tiny/SKILL.md","tokens":300},{"name":"gerrit-review","source":"userSettings","path":"$H7/.claude/skills/gerrit-review/SKILL.md","tokens":500}]},"autoCompactThreshold":367000,"isAutoCompactEnabled":true,"messageBreakdown":{"toolCallTokens":1,"toolResultTokens":2,"toolCallsByType":[{"name":"Bash","callTokens":1,"resultTokens":2}],"attachmentsByType":[]},"apiUsage":{"input_tokens":2,"output_tokens":3,"cache_creation_input_tokens":4,"cache_read_input_tokens":5}}}}
+EOF
+# its transcript: what came before the compaction does not count; an image is about 1600, not its bytes
+{
+    printf '{"parentUuid":null,"isSidechain":false,"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"tool_use","id":"toolu_old","name":"Bash","input":{"command":"%s"}}],"stop_reason":"tool_use","usage":{"input_tokens":5}},"uuid":"u1"}\n' "$(printf '%0800d' 0)"
+    printf '{"parentUuid":"u1","isSidechain":false,"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":300000,"postTokens":9000},"uuid":"u2"}\n'
+    printf '{"parentUuid":"u2","isSidechain":false,"type":"user","message":{"role":"user","content":"%s"},"isCompactSummary":true,"uuid":"u3"}\n' "$(printf '%0400d' 0)"
+    printf '{"parentUuid":"u3","isSidechain":false,"type":"user","message":{"role":"user","content":"look at this"},"uuid":"u4","timestamp":"t"}\n'
+    printf '{"parentUuid":"u4","isSidechain":false,"type":"attachment","attachment":{"type":"skill_listing","content":"%s"},"rendered":[{"content":"%s"}],"renderedRole":"system","uuid":"u5"}\n' "$(printf '%0400d' 0)" "$(printf '%0400d' 0)"
+    printf '{"parentUuid":"u5","isSidechain":false,"type":"attachment","attachment":{"type":"file","filename":"x"},"rendered":[{"content":"%s"}],"renderedRole":"user","uuid":"u6"}\n' "$(printf '%0200d' 0)"
+    printf '{"parentUuid":"u6","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"thinking","thinking":"%s","signature":"sig"},{"type":"text","text":"reading it"},{"type":"tool_use","id":"toolu_r1","name":"Read","input":{"file_path":"/x/a.png"}}],"stop_reason":"tool_use","usage":{"input_tokens":5}},"uuid":"u7"}\n' "$(printf '%0900d' 0)"
+    printf '{"parentUuid":"u7","isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_r1","type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"%s"}}]}]},"uuid":"u8","toolUseResult":{"file":"%s"}}\n' "$(printf '%09000d' 0)" "$(printf '%09000d' 0)"
+} > "$TS7"
+rm -f "$T/claude-args" "$T/claude-cwd"
+out=$(PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail)
+dj_claude=$out
+check "context --detail (claude): Claude Code asked with every hook off, nothing kept, its session, in its folder" 'grep -qF -- "--resume $SID --no-session-persistence --settings {\"disableAllHooks\":true}" "$T/claude-args" && [ "$(cat "$T/claude-cwd")" = "$P7" ] && ! echo "$out" | grep -q secret@'
+check "context --detail (claude): its numbers, the live total wins (the rest is its own row), the window from settings.json" 'echo "$out" | grep -qF "{\"tool\": \"claude\", \"used\": 130000, \"window\": 400000, \"pct\": 33, \"source\": \"get_context_usage\", \"model\": \"claude-opus-5-5\", \"at\": " && echo "$out" | grep -qF "\"exact\": true, \"session\": \"$SID\", \"compact_at\": 367000, \"commands\": {\"compact\": \"/compact\", \"with_text\": true, \"clear\": \"/clear\"}" && echo "$out" | grep -qF "\"error\": null"'
+check "context --detail (claude): the categories in Chinese, deferred kept apart, free space what is left" 'echo "$out" | grep -qF "\"categories\": [{\"id\": \"system_prompt\", \"name\": \"系統提示\", \"tokens\": 4000, \"kind\": \"used\", \"est\": false}, {\"id\": \"system_tools\", \"name\": \"系統工具\", \"tokens\": 6000, \"kind\": \"used\", \"est\": false}, {\"id\": \"system_tools_deferred\", \"name\": \"系統工具（延後載入）\", \"tokens\": 13000, \"kind\": \"deferred\", \"est\": false}, {\"id\": \"mcp_tools\", \"name\": \"MCP 工具\", \"tokens\": 3000, \"kind\": \"used\", \"est\": false}, {\"id\": \"memory_files\", \"name\": \"記憶檔\", \"tokens\": 1200, \"kind\": \"used\", \"est\": false}, {\"id\": \"skills\", \"name\": \"Skills\", \"tokens\": 800, \"kind\": \"used\", \"est\": false}, {\"id\": \"messages\", \"name\": \"對話訊息\", \"tokens\": 100000, \"kind\": \"used\", \"est\": false}, {\"id\": \"other\", \"name\": \"其他／自上次更新以來\", \"tokens\": 15000, \"kind\": \"used\", \"est\": false}, {\"id\": \"autocompact_buffer\", \"name\": \"自動壓縮保留區\", \"tokens\": 33000, \"kind\": \"buffer\", \"est\": false}, {\"id\": \"free_space\", \"name\": \"可用空間\", \"tokens\": 237000, \"kind\": \"free\", \"est\": false}]"'
+check "context --detail (claude): memory files, skills, MCP by server (its tools inside), agents, commands; most first" 'echo "$out" | grep -qF "{\"id\": \"memory\", \"name\": \"記憶檔\", \"tokens\": 1200, \"est\": false, \"items\": [{\"name\": \"$P7/CLAUDE.md\", \"tokens\": 1000, \"note\": \"Project\", \"path\": \"$P7/CLAUDE.md\"}, {\"name\": \"~/.claude/CLAUDE.md\", \"tokens\": 200, \"note\": \"User\", \"path\": \"$H7/.claude/CLAUDE.md\"}]}" && echo "$out" | grep -qF "{\"id\": \"skills\", \"name\": \"Skills\", \"tokens\": 800, \"est\": false, \"items\": [{\"name\": \"gerrit-review\", \"tokens\": 500," && echo "$out" | grep -qF "{\"id\": \"mcp\", \"name\": \"MCP（依伺服器）\", \"tokens\": 3000, \"est\": false, \"items\": [{\"name\": \"gerrit\", \"tokens\": 2500, \"note\": \"2 個工具\", \"path\": \"\", \"items\": [{\"name\": \"mcp__gerrit__b\", \"tokens\": 1500, \"note\": \"延後載入\", \"path\": \"\"}, {\"name\": \"mcp__gerrit__a\", \"tokens\": 1000, \"note\": \"已載入\", \"path\": \"\"}]}, {\"name\": \"kitping\", \"tokens\": 500," && echo "$out" | grep -qF "{\"id\": \"agents\", \"name\": \"自訂 agents\", \"tokens\": 120," && echo "$out" | grep -qF "{\"name\": \"5 個指令\", \"tokens\": 300,"'
+tr_items=$(echo "$out" | sed -n 's/.*"id": "tool_results", "name": "[^"]*", "tokens": [0-9]*, "est": true, "items": \[\([^]]*\)\].*/\1/p')
+msg_total=$(echo "$out" | sed -n 's/.*"id": "msgs", "name": "對話內容（依種類）", "tokens": \([0-9]*\),.*/\1/p')
+check "context --detail (claude): what was said, estimated after the last compaction and scaled to Claude's own number (thinking and listings not counted)" '[ -n "$msg_total" ] && [ $((msg_total - 100000)) -ge -5 ] && [ $((msg_total - 100000)) -le 5 ] && echo "$tr_items" | grep -qF "\"name\": \"Read\"" && ! echo "$tr_items" | grep -q Bash && echo "$out" | grep -qF "\"name\": \"壓縮後的摘要\"" && echo "$out" | grep -qF "{\"id\": \"attachments\", \"name\": \"附加內容（依種類）\", \"tokens\": " && ! echo "$out" | grep -q skill_listing'
+# the image: about 1600 (not its 9000 bytes); the Read result is about 1600 + its bytes / 4, scaled like the rest
+n1=$(wc -l < "$T/claude-args")
+out2=$(PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail)
+check "context --detail: kept a minute (Claude not asked again)" '[ "$(wc -l < "$T/claude-args")" = "$n1" ] && [ "$out2" = "$out" ]'
+PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh >/dev/null
+check "context --detail --fresh: asked again" '[ "$(wc -l < "$T/claude-args")" -gt "$n1" ]'
+t0=$(date +%s); out=$(FAKE_SLEEP=20 KIT_CTX_PROBE_TIMEOUT=2 PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh); t1=$(date +%s)
+check "context --detail: Claude Code that does not answer is stopped (timeout), the answer says so, still JSON, estimated" '[ $((t1 - t0)) -lt 10 ] && echo "$out" | grep -qF "\"error\": \"Claude Code 沒有回答" && echo "$out" | grep -qF "\"exact\": false" && echo "$out" | grep -qF "\"used\": 130000, \"window\": 400000" && echo "$out" | grep -qF "\"id\": \"msgs\""'
+printf '{"pid": %s, "session": "x;rm -rf y", "used": 1, "window": 2, "pct": 50, "model": "m"}\n' "$$" > "$H7/.config/agentkit/ctx/claude-$$.json"
+n1=$(wc -l < "$T/claude-args")
+out=$(PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh)
+check "context --detail: a session id with other characters is not used (Claude not run)" '[ "$(wc -l < "$T/claude-args")" = "$n1" ] && echo "$out" | grep -qF "\"error\": \"找不到這個 Claude 的 session\""'
+rm -f "$H7/.config/agentkit/ctx/claude-$$.json"
+# no status line: ~/.claude/sessions/<pid>.json (older Claude Code), then the daemon roster (only pid / replPid / sessionId / cwd)
+mkdir -p "$H7/.claude/sessions" "$H7/.claude/daemon"
+printf '{"workers":{"w1":{"pid":1,"replPid":%s,"sessionId":"%s","cwd":"%s","token":"sk-secret-1"}}}\n' "$$" "$SID" "$P7" > "$H7/.claude/daemon/roster.json"
+out=$(PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh)
+check "context --detail: the session from the daemon roster (its replPid); its token never shown" 'echo "$out" | grep -qF "\"session\": \"$SID\"" && echo "$out" | grep -qF "\"exact\": true" && ! echo "$out" | grep -q sk-secret'
+rm -f "$H7/.claude/daemon/roster.json"
+printf '{"pid":%s,"sessionId":"%s","cwd":"%s","startedAt":1}\n' "$$" "$SID" "$P7" > "$H7/.claude/sessions/$$.json"
+out=$(PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh)
+check "context --detail: the session from ~/.claude/sessions/<pid>.json" 'echo "$out" | grep -qF "\"session\": \"$SID\"" && echo "$out" | grep -qF "\"exact\": true"'
+rm -f "$H7/.claude/sessions/$$.json"
+# Codex: its rollout, split by what it holds, scaled to its own total
+P9="$T/cxproj"; mkdir -p "$P9/.git" "$P9/sub"; P9=$(cd "$P9" && pwd -P); RO9="$H7/.codex/sessions/2026/11/12/rollout-2026-11-12T03-00-00-c9.jsonl"
+echo "team rules for the repo" > "$P9/AGENTS.md"; echo "only here" > "$P9/sub/AGENTS.md"; printf 'mine\n' > "$H7/.codex/AGENTS.md"
+printf '[mcp_servers.kitping]\ncommand = "x"\n[mcp_servers.kitping.env]\nA = "1"\n[mcp_servers."unused"]\ncommand = "y"\n' > "$H7/.codex/config.toml"
+{
+    printf '{"timestamp":"t","type":"session_meta","payload":{"id":"c9","cwd":"%s/sub","base_instructions":{"text":"You are Codex, %s"}}}\n' "$P9" "$(printf '%0400d' 0)"
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","description":"core","tools":[{"type":"custom","name":"exec","description":"%s"},{"type":"function","name":"wait","description":"w"}]},{"type":"namespace","name":"mcp__kitping","description":"ping","tools":[{"type":"function","name":"ping","description":"%s"}]}]}}\n' "$(printf '%0800d' 0)" "$(printf '%0200d' 0)"
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are Codex, %s"},{"type":"input_text","text":"<skills_instructions>\\n## Skills\\n### Skill roots\\n- `r0` = `%s/.agents/skills`\\n### Available skills\\n- alpha: does a %s (file: r0/alpha/SKILL.md)\\n- plug:beta: does b (file: r0/beta/SKILL.md)\\n</skills_instructions>"},{"type":"input_text","text":"<tools>\\nDeferred tool namespaces:\\n- mcp__apps__docs: docs %s\\n</tools>"}]}}\n' "$(printf '%0400d' 0)" "$H7" "$(printf '%0100d' 0)" "$(printf '%040d' 0)"
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\\n%s"},{"type":"input_text","text":"<environment_context>x</environment_context>"}]}}\n' "$(printf '%0200d' 0)"
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fix it"}]}}\n'
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"%s"}}\n' "$(printf '%02000d' 0)"
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\\"cmd\\":\\"ls\\"}","call_id":"c1"}}\n'
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"%s"}}\n' "$(printf '%01200d' 0)"
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"%s","call_id":"c2"}}\n' "$(printf '%0300d' 0)"
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c2","output":"ok"}}\n'
+    printf '{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done %s"}]}}\n' "$(printf '%0100d' 0)"
+    printf '{"timestamp":"t","type":"turn_context","payload":{"cwd":"%s/sub","model":"gpt-6-luna"}}\n' "$P9"
+    printf '{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":99999},"last_token_usage":{"input_tokens":20000,"cached_input_tokens":18000,"output_tokens":500,"reasoning_output_tokens":100,"total_tokens":20500},"model_context_window":258400}}}\n'
+} > "$RO9"
+out=$(CX --pid 1 --tool codex --dir "$P9/sub" --detail)
+dj_codex=$out
+sum=0; for n in $(echo "$out" | sed 's/.*"categories": \[//; s/\], "groups".*//' | grep -o '"tokens": [0-9]*, "kind": "used"' | grep -o '[0-9]*'); do sum=$((sum + n)); done
+check "context --detail (codex): Codex's own total and %, its commands (/compact takes no text here, /new)" 'echo "$out" | grep -qF "{\"tool\": \"codex\", \"used\": 20500, \"window\": 258400, \"pct\": 3, \"source\": \"rollout\", \"model\": \"gpt-6-luna\", \"at\": " && echo "$out" | grep -qF "\"exact\": false" && echo "$out" | grep -qF "\"commands\": {\"compact\": \"/compact\", \"with_text\": false, \"clear\": \"/new\"}"'
+check "context --detail (codex): the parts add up to its total exactly" '[ "$sum" = 20500 ] && echo "$out" | grep -qF "{\"id\": \"free_space\", \"name\": \"可用空間\", \"tokens\": 237900, \"kind\": \"free\", \"est\": false}"'
+check "context --detail (codex): AGENTS.md files from the git root down (and Codex's own), skills with their folder, tools by namespace, MCP (seen, deferred, configured)" 'echo "$out" | grep -qF "\"path\": \"$P9/AGENTS.md\"" && echo "$out" | grep -qF "\"path\": \"$P9/sub/AGENTS.md\"" && echo "$out" | grep -qF "{\"name\": \"~/.codex/AGENTS.md\"" && echo "$out" | grep -qF "{\"name\": \"alpha\", \"tokens\": " && echo "$out" | grep -qF "\"note\": \"~/.agents/skills\", \"path\": \"$H7/.agents/skills/alpha/SKILL.md\"" && echo "$out" | grep -qF "{\"name\": \"plug:beta\"" && echo "$out" | grep -qF "{\"name\": \"functions\", \"tokens\": " && echo "$out" | grep -qF "\"note\": \"2 個工具\"" && echo "$out" | grep -qF "{\"name\": \"mcp__kitping\", \"tokens\": " && echo "$out" | grep -qF "{\"name\": \"mcp__apps__docs\", \"tokens\": " && echo "$out" | grep -qF "{\"name\": \"unused\", \"tokens\": null, \"note\": \"設定裡有，這次對話沒看到它的工具\""'
+check "context --detail (codex): calls and results by tool (reasoning not counted)" 'echo "$out" | grep -qF "{\"name\": \"shell\", \"tokens\": " && echo "$out" | grep -qF "{\"name\": \"apply_patch\", \"tokens\": " && echo "$out" | grep -qF "\"note\": \"1 次\""'
+printf '{"timestamp":"t","type":"compacted","payload":{"message":"%s","replacement_history":[]}}\n' "$(printf '%0400d' 0)" >> "$RO9"
+printf '{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":4000},"model_context_window":258400}}}\n' >> "$RO9"
+out=$(CX --pid 1 --tool codex --dir "$P9/sub" --detail --fresh)
+check "context --detail (codex): compacted -> what came before is gone, the summary counts" 'echo "$out" | grep -qF "\"used\": 4000," && echo "$out" | grep -qF "{\"id\": \"compaction\", \"name\": \"壓縮後的摘要\"" && ! echo "$out" | grep -qF "{\"name\": \"shell\""'
+# omp: its own numbers (the conversation, the tools), the rest estimated and scaled
+P10="$T/ompproj"; mkdir -p "$P10/.agents/skills/sk1"; P10=$(cd "$P10" && pwd -P); OS10="$H7/.omp/agent/sessions/y/s10.jsonl"; mkdir -p "$H7/.omp/agent/sessions/y"
+printf -- '---\nname: sk1\ndescription: %s\n---\nbody\n' "$(printf '%0200d' 0)" > "$P10/.agents/skills/sk1/SKILL.md"; echo "omp rules" > "$H7/.omp/agent/AGENTS.md"; echo "repo rules" > "$P10/AGENTS.md"
+printf '{"mcpServers":{"gerrit":{"command":"x"}}}\n' > "$H7/.omp/agent/mcp.json"
+{
+    printf '{"type":"session","version":3,"id":"s10","cwd":"%s"}\n{"type":"model_change","id":"m0","model":"anthropic/claude-opus-5-5"}\n' "$P10"
+    printf '{"type":"message","id":"e1","message":{"role":"user","content":[{"type":"text","text":"old question %s"}]}}\n' "$(printf '%0800d' 0)"
+    printf '{"type":"message","id":"e2","message":{"role":"user","content":[{"type":"text","text":"kept question"}]}}\n'
+    printf '{"type":"message","id":"e3","message":{"role":"assistant","content":[{"type":"thinking","thinking":"%s"},{"type":"text","text":"ok"},{"type":"toolCall","id":"tc1","name":"read","arguments":{"path":"/x"}}],"usage":{"input":1},"contextSnapshot":{"promptTokens":50000,"nonMessageTokens":12000,"toolSchemaTokens":8000,"compactionEpoch":0},"stopReason":"toolUse"}}\n' "$(printf '%0500d' 0)"
+    printf '{"type":"message","id":"e4","message":{"role":"toolResult","toolCallId":"tc1","toolName":"read","content":[{"type":"text","text":"%s"}],"details":{"x":"%s"}}}\n' "$(printf '%02000d' 0)" "$(printf '%09000d' 0)"
+    printf '{"type":"compaction","id":"k1","summary":"%s","firstKeptEntryId":"e2","tokensBefore":60000,"tokensAfter":30000}\n' "$(printf '%0400d' 0)"
+    printf '{"type":"custom_message","id":"x1","customType":"todo-nudge","content":"remember %s","display":false}\n' "$(printf '%0100d' 0)"
+} > "$OS10"
+out=$(CX --pid 1 --tool omp --dir "$P10" --detail)
+dj_omp=$out
+sum=0; for n in $(echo "$out" | sed 's/.*"categories": \[//; s/\], "groups".*//' | grep -o '"tokens": [0-9]*, "kind": "used"' | grep -o '[0-9]*'); do sum=$((sum + n)); done
+check "context --detail (omp): omp's total (after the compaction), its tools exactly, /compact with text, /new" 'echo "$out" | grep -qF "{\"tool\": \"omp\", \"used\": 30000, \"window\": " && echo "$out" | grep -qF "\"source\": \"session\", \"model\": \"anthropic/claude-opus-5-5\"" && echo "$out" | grep -qF "{\"id\": \"system_tools\", \"name\": \"系統工具\", \"tokens\": 8000, \"kind\": \"used\", \"est\": false}" && echo "$out" | grep -qF "\"commands\": {\"compact\": \"/compact\", \"with_text\": true, \"clear\": \"/new\"}"'
+check "context --detail (omp): the parts add up to its total; instruction files, skills, MCP from its settings, tools by name, what omp adds" '[ "$sum" = 30000 ] && echo "$out" | grep -qF "{\"name\": \"~/.omp/agent/AGENTS.md\"" && echo "$out" | grep -qF "\"path\": \"$P10/AGENTS.md\"" && echo "$out" | grep -qF "{\"name\": \"sk1\", \"tokens\": " && echo "$out" | grep -qF "{\"name\": \"gerrit\", \"tokens\": null, \"note\": \"設定的 MCP" && echo "$out" | grep -qF "{\"name\": \"read\", \"tokens\": " && echo "$out" | grep -qF "{\"name\": \"todo-nudge\", \"tokens\": " && echo "$out" | grep -qF "{\"id\": \"compaction\", \"name\": \"壓縮後的摘要\""'
+if [ -n "$PWSH" ]; then
+    printf '{"pid": %s, "session": "%s", "used": 130000, "window": 1000000, "pct": 13, "model": "claude-opus-5-5", "transcript": "%s", "cwd": "%s"}\n' "$$" "$SID" "$TS7" "$P7" > "$H7/.config/agentkit/ctx/claude-$$.json"
+    same=1
+    for a in "--pid $$ --tool claude --dir $P7" "--pid 1 --tool codex --dir $P9/sub" "--pid 1 --tool omp --dir $P10" "--pid 1 --tool codex --dir $P10"; do
+        x=$(PATH="$FC:$PATH" kit context $a --detail --fresh 2>&1 | sed 's/"at": [0-9]*/"at": 0/')
+        y=$(PATH="$FC:$PATH" kps context $a --detail --fresh 2>&1 | sed 's/"at": [0-9]*/"at": 0/')
+        [ "$x" = "$y" ] || { same=0; echo "  differs: $a"; printf '%s\n' "$x" | tr ',' '\n' > "$T/dx"; printf '%s\n' "$y" | tr ',' '\n' > "$T/dy"; diff "$T/dx" "$T/dy" | head -n 6; }
+    done
+    check "context --detail: kit.ps1 says the same (Claude, Codex, omp, nothing found)" '[ $same = 1 ]'
+    out=$(kps context --pid $$ --tool claude --dir "$P7" 2>&1); out2=$(kps statusline < "$T/sl2.json" 2>/dev/null)
+    check "context, statusline (kit.ps1): the window set in settings.json (autoCompactWindow) too" '[ "$out" = "{\"tool\": \"claude\", \"used\": 130000, \"window\": 400000, \"pct\": 33, \"source\": \"statusline\", \"model\": \"claude-opus-5-5\"}" ] && [ "$out2" = "Opus 5.5 · context 35%（139k / 400k）" ]'
+    rm -f "$H7/.config/agentkit/ctx/claude-$$.json"
+fi
+# the context window's buttons (herdr/kit-pane, its part without Herdr): what each tool gets typed in, and when
+if command -v node >/dev/null 2>&1; then
+    sed -n '/^\/\/ ---- what the context window runs, sends and says/,/^\/\/ ---- end ----/p' "$HERE/../herdr/kit-pane/main.js" > "$T/pane.js"
+    cat >> "$T/pane.js" <<'EOF'
+const json = (k) => JSON.parse(process.env[k]);
+const C = json("DJ_CLAUDE").commands, X = json("DJ_CODEX").commands, O = json("DJ_OMP").commands;
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const say = (name, ok) => console.log(`${ok ? "ok" : "BAD"} ${name}`);
+say("send", eq([sendText(C, "compact", "  keep the\n plan "), sendText(C, "compact", ""), sendText(C, "clear")], ["/compact keep the plan", "/compact", "/clear"])
+  && eq([sendText(X, "compact", "keep it"), sendText(X, "clear")], ["/compact", "/new"])
+  && eq([sendText(O, "compact", "keep it"), sendText(O, "clear")], ["/compact keep it", "/new"])
+  && sendText(C, "other") === null && sendText({}, "clear") === null && sendText(null, "compact") === null);
+say("waiting", eq(sendArgs("t7", "idle", "/clear"), ["send", "--if", "idle", "t7", "/clear"]) && eq(sendArgs("m1/t7", "done", "/compact x"), ["send", "m1/t7", "/compact x"])
+  && [sendArgs("t7", "working", "/clear"), sendArgs("t7", "blocked", "/clear"), sendArgs("t7", null, "/clear"), sendArgs("", "idle", "/clear"), sendArgs("t7", "idle", null)].every((x) => x === null));
+say("args", eq(ctxArgs(42, "claude", "/x y", true, true), ["context", "--pid", "42", "--tool", "claude", "--dir", "/x y", "--detail", "--fresh"])
+  && eq(ctxArgs(42, null, "", false, true), ["context", "--pid", "42"])
+  && toolOf("pi", "x") === "omp" && toolOf(null, "claude") === "claude" && toolOf("claude-code") === "claude" && toolOf("Codex") === "codex" && toolOf("bash", "shell") === null);
+const items = [{ kind: "skill", name: "a", status: "used" }, { kind: "rule", name: "sec", status: "required", path: "C:\\s\\rules\\sec.md" },
+  { kind: "rule", name: "style", status: "used", path: "/s/rules/style.md" }, { kind: "mcp", name: "gerrit", status: "used" }, { kind: "skill", name: "b", status: "unused" }];
+const home = { items, here: { folder: { dir: "/h", why: "家目錄就是整個帳號", items: [] } } };
+const inDir = { items, here: { folder: { dir: "/p", why: "", items: ["skill:a", "skill:b"] } } };
+say("remove", eq(removal(home, "skills", "a").args, ["rm", "skill", "a"]) && eq(removal(home, "mcp", "mcp__gerrit").args, ["rm", "mcp", "gerrit"])
+  && eq(removal(home, "memory", "~/s/rules/style.md", "/s/rules/style.md").args, ["rm", "rule", "style"])
+  && removal(home, "memory", "x", "C:/s/rules/sec.md").required === true && removal(home, "skills", "b") === null && removal(home, "msgs", "a") === null
+  && eq(removal(inDir, "skills", "a").args, ["rm", "--dir", "/p", "skill", "a"]) && eq(removal(inDir, "skills", "b").args, ["rm", "--dir", "/p", "skill", "b"])
+  && removal(inDir, "mcp", "gerrit") === null && removal({ ...home, here: { user: "root" } }, "skills", "a") === null && removal({ error: "x" }, "skills", "a") === null);
+const full = { tool: "claude", used: 330000, window: 400000, compact_at: 367000, commands: C, categories: [{ id: "mcp_tools", tokens: 30000 }, { id: "skills", tokens: 800 }],
+  groups: [{ id: "tool_results", items: [{ name: "Read", tokens: 90000 }, { name: "Bash", tokens: 1000 }] }, { id: "mcp", items: [{ name: "gerrit", tokens: 25000 }, { name: "other", tokens: 5000 }] },
+    { id: "memory", items: [{ name: "~/.claude/CLAUDE.md", tokens: 2500 }] }] };
+const tips = ctxTips(full, (g, n) => g === "mcp" && n === "gerrit");
+say("tips", tips.length === 4 && tips[0].startsWith("快滿了（到 367k 會自動壓縮）") && tips[1].includes("「Read」的呼叫和結果約 90.0k（27%）") && tips[2].includes("用不到的（gerrit）可以在下面「MCP」拿掉")
+  && tips[3].startsWith("~/.claude/CLAUDE.md 有 2.5k") && ctxTips({ ...full, used: 20000, compact_at: 0, categories: [], groups: [] }).length === 0 && ctxTips(null).length === 0);
+const sum = summaryText(json("DJ_CLAUDE"), "Claude Code", "這台電腦 · ~/x").split("\n");
+say("summary", sum[0] === "Claude Code 的 context · 這台電腦 · ~/x" && sum[1] === "已使用 33% · 130,000 / 400,000 tokens · claude-opus-5-5"
+  && sum.includes("  系統工具（延後載入）：用到才載入（13,000）") && sum.includes("  其他／自上次更新以來：15,000（3.8%）") && sum.includes("  gerrit：2,500（2 個工具）")
+  && sum[sum.length - 1] === "距自動壓縮還有 237,000");
+EOF
+    out=$(DJ_CLAUDE=$dj_claude DJ_CODEX=$dj_codex DJ_OMP=$dj_omp node "$T/pane.js" 2>&1)
+    check "context window (Herdr): what is typed in for each tool (Claude /compact <what to keep>, /clear; Codex /compact alone, /new; omp /compact <what to keep>, /new)" 'echo "$out" | grep -qx "ok send"'
+    check "context window (Herdr): sent only while the agent waits (idle: --if idle; done), never while it works or needs you" 'echo "$out" | grep -qx "ok waiting"'
+    check "context window (Herdr): kit context's arguments, the tool from what the agent reports" 'echo "$out" | grep -qx "ok args"'
+    check "context window (Herdr): 拿掉 only what kit manages, the Kit popup's rule (folder: kit rm --dir; home: the account; required never)" 'echo "$out" | grep -qx "ok remove"'
+    check "context window (Herdr): 怎麼省 only from the numbers; the 複製 summary" 'echo "$out" | grep -qx "ok tips" && echo "$out" | grep -qx "ok summary"'
+    [ "$(echo "$out" | grep -c '^ok ')" = 6 ] || echo "$out" | grep -v '^ok ' | head -n 5
+fi
 big=$(printf '%0400d' 0)
 printf '{"type":"user","message":{"content":"%s"}}\n' "$big" >> "$CT"
 printf '{"type":"event_msg","payload":{"type":"agent_message","message":"%s"}}\n' "$big" >> "$RO"

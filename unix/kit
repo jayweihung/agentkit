@@ -1248,13 +1248,17 @@ num_of() { # num_of KEY TEXT -> the first number after "KEY": in TEXT (JSON)
 }
 str_of() { printf '%s' "$2" | grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 | sed 's/^[^:]*:[[:space:]]*"//; s/"$//'; }
 after_key() { printf '%s' "$2" | sed "s/.*\"$1\"[[:space:]]*:[[:space:]]*//"; }   # the text after the last "KEY":
-model_window() { # the context window Claude Code uses for a model: a setting (autoCompactWindow), else the model's own
+setting_window() { # the window Claude Code is told to use for a model (autoCompactWindow: modelSettings.<model>, else
+    # the top-level one), as its own /context shows it; nothing when not set
     local m=${1%\[1m\]} w=""
-    [ -f "$CLAUDE_DIR/settings.json" ] && {
-        w=$(json_get "$CLAUDE_DIR/settings.json" "modelSettings.$m.autoCompactWindow" | tr -d '" ')
-        [ -n "$w" ] || w=$(json_get "$CLAUDE_DIR/settings.json" autoCompactWindow | tr -d '" ')
-    }
-    case $w in ""|auto) w="";; *[!0-9]*) w="";; esac
+    [ -f "$CLAUDE_DIR/settings.json" ] || return 0
+    w=$(json_get "$CLAUDE_DIR/settings.json" "modelSettings.$m.autoCompactWindow" | tr -d '" ')
+    [ -n "$w" ] || w=$(json_get "$CLAUDE_DIR/settings.json" autoCompactWindow | tr -d '" ')
+    case $w in ""|auto|*[!0-9]*) ;; *) echo "$w";; esac
+}
+model_window() { # the context window Claude Code uses for a model: a setting (autoCompactWindow), else the model's own
+    local w
+    w=$(setting_window "$1")
     [ -n "$w" ] && { echo "$w"; return; }
     case $1 in
         *\[1m\]|*opus-5*|*opus-4-7*|*opus-4-8*|*sonnet-5*|*fable*|*mythos*|*haiku-5*) echo 1000000;;
@@ -1282,10 +1286,11 @@ ctx_json() { # ctx_json TOOL USED WINDOW SOURCE MODEL [PCT] -> the answer (PCT: 
     printf '{"tool": %s, "used": %s, "window": %s, "pct": %s, "source": %s, "model": %s}\n' "$(json_s "$1")" "${u:-null}" "${w:-null}" "$pct" "$(json_s "$4")" "$(json_s "$5")"
 }
 cmd_statusline() { # what Claude's statusLine runs: keep the numbers for kit context, print a short status line
-    # (it runs on every update of Claude's status line: one awk for what Claude hands over, one ps for the Claude process)
-    local w pct u sid model name pid tmp us
+    # (it runs on every update of Claude's status line: one awk for what Claude hands over, one ps for the Claude process;
+    # the window set in settings.json, autoCompactWindow, only when settings.json has one)
+    local w pct u sid model name tp cwd pid tmp us sw st=""
     us=$(printf '\037')
-    IFS=$us read -r w pct u sid model name <<EOF
+    IFS=$us read -r w pct u sid model name tp cwd <<EOF
 $(LC_ALL=C awk -v us="$us" '
     function after(s, k,   p) { p = 0; while (match(substr(s, p + 1), "\"" k "\"[ \t\r\n]*:[ \t\r\n]*")) p += RSTART + RLENGTH - 1; return p ? substr(s, p + 1) : s }
     function num(s, k) { if (!match(s, "\"" k "\"[ \t\r\n]*:[ \t\r\n]*[0-9]+")) return ""; s = substr(s, RSTART, RLENGTH); sub(/^.*:[ \t\r\n]*/, "", s); return s }
@@ -1295,14 +1300,20 @@ $(LC_ALL=C awk -v us="$us" '
         pct = ""; if (match(j, /"used_percentage"[ \t\r\n]*:[ \t\r\n]*[0-9]+(\.[0-9]+)?/)) { v = substr(j, RSTART, RLENGTH); sub(/^[^:]*:[ \t\r\n]*/, "", v); pct = sprintf("%d", v + 0.5) }
         u = ""; if (match(j, /"current_usage"/) && index(substr(j, RSTART), "{")) {
             c = after(j, "current_usage"); if (c !~ /^null/) u = sprintf("%d", num(c, "input_tokens") + num(c, "cache_creation_input_tokens") + num(c, "cache_read_input_tokens")) }
-        printf "%s%s%s%s%s%s%s%s%s%s%s\n", num(j, "context_window_size"), us, pct, us, u, us, str(j, "session_id"), us, str(after(j, "model"), "id"), us, str(j, "display_name")
+        d = str(j, "project_dir"); if (d == "") d = str(j, "cwd")
+        printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n", num(j, "context_window_size"), us, pct, us, u, us, str(j, "session_id"), us, str(after(j, "model"), "id"), us, str(j, "display_name"), us, str(j, "transcript_path"), us, d
     }')
 EOF
     pid=$(claude_pid)
     if [ -n "$pid" ]; then
         { [ -d "$CTX_DIR" ] || mkdir -p "$CTX_DIR"; } 2>/dev/null && tmp="$CTX_DIR/.claude-$pid.$$" && {
-            printf '{"pid": %s, "session": %s, "used": %s, "window": %s, "pct": %s, "model": %s}\n' "$pid" "$(json_s "$sid")" "${u:-null}" "${w:-null}" "${pct:-null}" "$(json_s "$model")" > "$tmp" && mv -f "$tmp" "$CTX_DIR/claude-$pid.json"; } 2>/dev/null
+            # the paths as Claude wrote them (already JSON text)
+            printf '{"pid": %s, "session": %s, "used": %s, "window": %s, "pct": %s, "model": %s, "transcript": "%s", "cwd": "%s"}\n' "$pid" "$(json_s "$sid")" "${u:-null}" "${w:-null}" "${pct:-null}" "$(json_s "$model")" "$tp" "$cwd" > "$tmp" && mv -f "$tmp" "$CTX_DIR/claude-$pid.json"; } 2>/dev/null
     fi
+    [ -f "$CLAUDE_DIR/settings.json" ] && st=$(< "$CLAUDE_DIR/settings.json") 2>/dev/null
+    case $st in *autoCompactWindow*) sw=$(setting_window "$model")
+        [ -n "$sw" ] && [ "$sw" != "$w" ] && [ -n "$u" ] && { w=$sw; pct=$(( (u * 100 + w / 2) / w )); };;
+    esac
     [ -n "$pct" ] || { [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] && pct=$(( (u * 100 + w / 2) / w )); }
     if [ -n "$pct" ] && [ -n "$w" ]; then printf '%s · context %s%%（%sk / %sk）\n' "${name:-Claude}" "$pct" "$(( ${u:-0} / 1000 ))" "$(( w / 1000 ))"
     else printf '%s\n' "${name:-Claude}"; fi
@@ -1324,7 +1335,9 @@ newest_files() { # newest_files DIR NAME : files called NAME under DIR changed i
 claude_ctx() { # claude_ctx PID CWD
     local f="$CTX_DIR/claude-$1.json" j d t which line cb u w m post
     if [ -n "$1" ] && [ -f "$f" ]; then
-        j=$(cat "$f"); u=$(num_of used "$j"); w=$(num_of window "$j"); m=$(str_of model "$j")
+        # the window: what settings.json tells Claude Code (autoCompactWindow, as its own /context shows), else Claude's
+        j=$(cat "$f"); u=$(num_of used "$j"); m=$(str_of model "$j"); w=$(setting_window "$m")
+        [ -n "$w" ] || w=$(num_of window "$j")
         ctx_json claude "$u" "$w" statusline "$m"; return
     fi
     [ -n "$2" ] || { ctx_json claude "" "" "" ""; return; }
@@ -1419,12 +1432,14 @@ EOF
     u=$(( u + ${tb:-0} / 4 + ${im:-0} * 1600 ))
     ctx_json omp "$u" "$w" session "$m"
 }
-cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] : how full that agent's context is (JSON)
-    local pid="" tool="" dir="" a f p use="用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]"
+cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [--detail [--fresh]] : how full that agent's context is (JSON)
+    local pid="" tool="" dir="" detail="" fresh="" a f p use="用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]"
     while [ $# -gt 0 ]; do
         case $1 in
             --pid|--tool|--dir) [ $# -ge 2 ] || die "$use"
                 case $1 in --pid) pid=$2;; --tool) tool=$2;; *) dir=$2;; esac; shift 2;;
+            --detail) detail=1; shift;;
+            --fresh) fresh=1; shift;;
             *) die "$use";;
         esac
     done
@@ -1433,19 +1448,599 @@ cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] : 
         a=$(proc_args "$pid"); set -- $a
         case ${1##*/}:${2:-} in claude*|*:*claude*) tool=claude;; codex*|*:*codex*) tool=codex;; omp*|*:*omp*) tool=omp;; esac
     fi
-    case $tool in claude-code) tool=claude;; esac
+    case $tool in claude-code) tool=claude;; pi) tool=omp;; esac
     [ -n "$dir" ] || dir=$(proc_cwd "$pid")
-    # the kept numbers of Claude processes that are gone
-    for f in "$CTX_DIR"/claude-*.json; do
-        [ -f "$f" ] || continue; p=${f##*/claude-}; p=${p%.json}
+    # the kept numbers (and details) of processes that are gone
+    for f in "$CTX_DIR"/claude-*.json "$CTX_DIR"/detail-*.json; do
+        [ -f "$f" ] || continue; p=${f##*/}; p=${p#*-}; p=${p%.json}
+        case $p in ""|*[!0-9]*) continue;; esac
         [ "$p" = "$pid" ] || kill -0 "$p" 2>/dev/null || rm -f "$f"
     done
+    [ -z "$detail" ] || { ctx_detail "$pid" "$tool" "$dir" "$fresh"; return 0; }
     case $tool in
         claude) claude_ctx "$pid" "$dir";;
         codex) codex_ctx "$dir";;
         omp) omp_ctx "$pid" "$dir";;
         *) ctx_json "" "" "" "" "";;
     esac
+}
+
+# ---------- kit context --detail: where the tokens go ----------
+# One JSON line (kit.ps1 prints the same), for the Herdr pane header's context window:
+#   {"tool", "used", "window", "pct", "source", "model", "at", "exact", "session", "compact_at",
+#    "commands": {"compact", "with_text", "clear"}, "note", "error",
+#    "categories": [{"id", "name", "tokens", "kind": used|deferred|buffer|free, "est"}],
+#    "groups": [{"id", "name", "tokens", "est", "items": [{"name", "tokens", "note", "path"[, "items": [...]]}]}]}
+# Claude: Claude Code's own count (get_context_usage), asked of a fresh `claude -p --resume <its session>
+#   --no-session-persistence` with every hook off: it writes no transcript, runs no hook, asks no model. What was said,
+#   by kind and by tool, is estimated from the transcript (bytes / 4, an image 1600) and scaled to Claude's own number.
+# Codex, omp: their own files. The total is the tool's own count (Codex's last token_count, omp's context snapshot);
+#   the parts are estimated the same way and scaled to it ("est": true). Only sizes are read, never what was said.
+# The producers print rows (a TAB between fields), ctx_assemble makes the JSON:
+#   H key value | C id name tokens kind est | G id name est | I group name tokens note path parent
+# Kept a minute per process ($KIT_CONF/ctx/detail-<pid>.json); --fresh asks again.
+CTX_DETAIL_TAIL=${KIT_CTX_DETAIL_TAIL:-33554432}
+CTX_PROBE_INIT='{"type":"control_request","request_id":"i1","request":{"subtype":"initialize"}}'
+CTX_PROBE_ASK='{"type":"control_request","request_id":"c1","request":{"subtype":"get_context_usage"}}'
+# shared awk: the text of "KEY":"..." (still JSON-escaped), JSON escapes undone, a whole number, a piece's tokens
+CTX_AWK='
+function strv(s, k,   re) { re = "\"" k "\":\"([^\"\\\\]|\\\\.)*\""; if (!match(s, re)) return ""; return substr(s, RSTART + length(k) + 4, RLENGTH - length(k) - 5) }
+function unesc(s) { gsub(/\\\\/, "\001", s); gsub(/\\"/, "\"", s); gsub(/\\\//, "/", s); gsub(/\\[nrtbf]/, " ", s); gsub(/\001/, "\\", s); gsub(/[\001-\037]/, " ", s); return s }
+function rnd(x) { return int(x + 0.5) }
+function imgs(s,   n, i) { n = 0; while ((i = index(s, "\"type\":\"image\"")) > 0 || (i = index(s, "\"type\":\"input_image\"")) > 0) { n++; s = substr(s, i + 12) }; return n }
+function datalen(s,   d) { d = 0; while (match(s, /"(data|image_url)":"[^"]*"/)) { d += RLENGTH; s = substr(s, RSTART + RLENGTH) }; return d }
+function wt(s) { return (length(s) - datalen(s)) / 4 + imgs(s) * 1600 }
+function texts(s,   n) { n = 0; while (match(s, /"text":"([^"\\]|\\.)*"/)) { n += RLENGTH - 9; s = substr(s, RSTART + RLENGTH) }; return n }
+function short(p) { if (home != "" && index(p, home) == 1 && (length(p) == length(home) || substr(p, length(home) + 1, 1) ~ /[\/\\]/)) return "~" substr(p, length(home) + 1); return p }
+'
+ctx_capped() { # ctx_capped SECS CMD... : CMD, stopped after SECS seconds (with everything it started)
+    local s=$1; shift
+    if command -v perl >/dev/null 2>&1; then
+        perl -e '$t = shift; $p = fork; die unless defined $p; if (!$p) { setpgrp(0, 0); exec @ARGV or exit 127 }
+            $SIG{ALRM} = sub { kill "TERM", -$p; sleep 1; kill "KILL", -$p; exit 124 }; alarm $t; waitpid($p, 0); exit($? >> 8)' "$s" "$@"
+    elif command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"
+    else "$@"; fi
+}
+ctx_stream() { # ctx_stream FILE : a log for a detail look: all of it, or its first line and the last KIT_CTX_DETAIL_TAIL bytes
+    local size
+    size=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
+    if [ "${size:-0}" -gt "$CTX_DETAIL_TAIL" ]; then head -n 1 "$1"; tail -c "$CTX_DETAIL_TAIL" "$1" | tail -n +2
+    else cat "$1"; fi
+}
+ctx_big() { local size; size=$(wc -c < "$1" 2>/dev/null | tr -d ' '); [ "${size:-0}" -gt "$CTX_DETAIL_TAIL" ]; }
+unjs() { printf '%s' "$1" | sed 's/\\\\/\\/g; s/\\"/"/g; s/\\\//\//g'; }   # a JSON string's text as it is
+ctx_files() { # ctx_files NOTE FILE... : "path TAB bytes TAB note" for each file that is there and not empty
+    local n=$1 f b; shift
+    for f in "$@"; do
+        [ -f "$f" ] || continue; b=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+        [ "${b:-0}" -gt 0 ] && printf '%s\t%s\t%s\n' "$f" "$b" "$n"
+    done
+}
+ctx_up() { # ctx_up DIR : DIR and the folders above it up to its git root (or only DIR when it is in none), root first
+    local a=$1 list="" top=""
+    while :; do
+        list="$a
+$list"
+        [ -e "$a/.git" ] && { top=1; break; }
+        [ "$a" = / ] || [ "$a" = "$HOME" ] && break
+        a=$(dirname "$a")
+    done
+    [ -n "$top" ] && printf '%s' "$list" || printf '%s\n' "$1"
+}
+
+ctx_assemble() { # ctx_assemble NOW : rows (stdin) -> the JSON line
+    LC_ALL=C awk -F '\t' -v now="$1" '
+    BEGIN {
+        nm["system_prompt"] = "系統提示"; nm["system_tools"] = "系統工具"; nm["system_tools_deferred"] = "系統工具（延後載入）"
+        nm["mcp_tools"] = "MCP 工具"; nm["mcp_tools_deferred"] = "MCP 工具（延後載入）"; nm["mcp_instructions"] = "MCP 伺服器說明"
+        nm["custom_agents"] = "自訂 agents"; nm["memory_files"] = "記憶檔"; nm["skills"] = "Skills"; nm["messages"] = "對話訊息"
+        nm["slash_commands"] = "斜線指令"; nm["other"] = "其他／自上次更新以來"; nm["autocompact_buffer"] = "自動壓縮保留區"
+        nm["free_space"] = "可用空間"; nm["instructions"] = "指示檔"; nm["compaction"] = "壓縮後的摘要"
+        nm["memory"] = "記憶檔"; nm["mcp"] = "MCP（依伺服器）"; nm["tools"] = "工具（依類別）"; nm["agents"] = "自訂 agents"
+        nm["commands"] = "斜線指令"; nm["tool_results"] = "工具（呼叫＋結果，依工具）"; nm["attachments"] = "附加內容（依種類）"
+        nm["msgs"] = "對話內容（依種類）"
+    }
+    function q(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/[\001-\037]/, "", s); return "\"" s "\"" }
+    function n(v) { return v == "" ? "null" : v }
+    function b(v) { return v == "1" ? "true" : "false" }
+    function before(a, c) { # more tokens first (none last), then by name (bytes), then as listed
+        if (itk[a] == "" && itk[c] != "") return 0; if (itk[c] == "" && itk[a] != "") return 1
+        if (itk[a] != "" && itk[a] + 0 != itk[c] + 0) return itk[a] + 0 > itk[c] + 0
+        return inm[a] < inm[c] }
+    function items(g, par,   i, k, m, list, out, t, kids) {
+        m = 0
+        for (i = 1; i <= ni; i++) if (ig[i] == g && ipar[i] == par) { k = ++m; while (k > 1 && before(i, list[k - 1])) { list[k] = list[k - 1]; k-- }; list[k] = i }
+        out = ""
+        for (k = 1; k <= m; k++) {
+            i = list[k]
+            t = "{\"name\": " q(inm[i]) ", \"tokens\": " n(itk[i]) ", \"note\": " q(inote[i]) ", \"path\": " q(ipath[i])
+            if (par == "" && inm[i] != "") { kids = items(g, inm[i]); if (kids != "") t = t ", \"items\": [" kids "]" }
+            out = out (k > 1 ? ", " : "") t "}"
+            if (par == "" && itk[i] != "") { gsum[g] += itk[i]; gknown[g] = 1 }
+        }
+        return out
+    }
+    $1 == "H" { h[$2] = $3; next }
+    function name(id, x) { if (substr(x, 1, 1) == "=") return substr(x, 2); if (id in nm) return nm[id]; return x != "" ? x : id }
+    $1 == "C" { if (($4 == "" || $4 + 0 == 0) && $5 != "free") next; nc++; cid[nc] = $2; cnm[nc] = name($2, $3); ctk[nc] = $4 + 0; ckd[nc] = $5; ces[nc] = $6; next }
+    $1 == "G" { ng++; gid[ng] = $2; gnm[ng] = name($2, $3); ges[ng] = $4; next }
+    $1 == "I" { ni++; ig[ni] = $2; inm[ni] = $3; itk[ni] = $4; inote[ni] = $5; ipath[ni] = $6; ipar[ni] = $7; next }
+    END {
+        u = h["used"]; w = h["window"]; p = h["pct"]
+        if (p == "" && u != "" && w + 0 > 0) p = int((u * 100 + int(w / 2)) / w)
+        if (p != "" && p + 0 > 100) p = 100
+        o = "{\"tool\": " q(h["tool"]) ", \"used\": " n(u) ", \"window\": " n(w) ", \"pct\": " n(p) ", \"source\": " q(h["source"]) ", \"model\": " q(h["model"])
+        o = o ", \"at\": " now ", \"exact\": " b(h["exact"]) ", \"session\": " q(h["session"]) ", \"compact_at\": " n(h["compact_at"])
+        o = o ", \"commands\": {\"compact\": " q(h["compact"]) ", \"with_text\": " b(h["with_text"]) ", \"clear\": " q(h["clear"]) "}"
+        o = o ", \"note\": " q(h["note"]) ", \"error\": " (h["error"] == "" ? "null" : q(h["error"])) ", \"categories\": ["
+        for (i = 1; i <= nc; i++) o = o (i > 1 ? ", " : "") "{\"id\": " q(cid[i]) ", \"name\": " q(cnm[i]) ", \"tokens\": " ctk[i] ", \"kind\": " q(ckd[i]) ", \"est\": " b(ces[i]) "}"
+        o = o "], \"groups\": ["; k = 0
+        for (i = 1; i <= ng; i++) {
+            t = items(gid[i], ""); if (t == "") continue
+            o = o (k++ ? ", " : "") "{\"id\": " q(gid[i]) ", \"name\": " q(gnm[i]) ", \"tokens\": " (gknown[gid[i]] ? gsum[gid[i]] : "null") ", \"est\": " b(ges[i]) ", \"items\": [" t "]}"
+        }
+        print o "]}"
+    }'
+}
+
+# ---------- Claude ----------
+claude_session() { # claude_session PID DIR -> "id TAB folder TAB transcript" of the Claude Code in PID (the id checked)
+    # what the status line kept; else ~/.claude/sessions/<pid>.json (older Claude Code); else the daemon's roster
+    # (only pid / replPid / sessionId / cwd are read: it holds tokens too); else the newest transcript of its folder
+    # changed since it started
+    local pid=$1 dir=$2 f j sid="" cwd="" tp="" d e mins
+    f="$CTX_DIR/claude-$pid.json"
+    [ -f "$f" ] && { j=$(cat "$f"); sid=$(str_of session "$j"); cwd=$(unjs "$(str_of cwd "$j")"); tp=$(unjs "$(str_of transcript "$j")"); }
+    if [ -z "$sid" ] && [ -f "$CLAUDE_DIR/sessions/$pid.json" ]; then
+        j=$(cat "$CLAUDE_DIR/sessions/$pid.json"); sid=$(str_of sessionId "$j"); cwd=$(unjs "$(str_of cwd "$j")")
+    fi
+    if [ -z "$sid" ] && [ -f "$CLAUDE_DIR/daemon/roster.json" ]; then
+        { IFS=$TAB read -r sid cwd; } <<EOF
+$(LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$CLAUDE_DIR/daemon/roster.json" 2>/dev/null | LC_ALL=C awk -F '\t' -v p="$pid" '
+    $1 == "workers" && NF == 4 && ($3 == "pid" || $3 == "replPid" || $3 == "sessionId" || $3 == "cwd") { v = $4; gsub(/^"|"$/, "", v); w[$2, $3] = v; k[$2] = 1 }
+    END { for (x in k) if (w[x, "pid"] == p || w[x, "replPid"] == p) { print w[x, "sessionId"] "\t" w[x, "cwd"]; exit } }')
+EOF
+        cwd=$(unjs "$cwd")
+    fi
+    [ -n "$cwd" ] || cwd=$dir
+    if [ -z "$sid" ] && [ -n "$cwd" ]; then
+        d="$CLAUDE_DIR/projects/$(printf '%s' "$cwd" | sed 's|[^A-Za-z0-9]|-|g')"
+        e=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
+        mins=$(printf '%s' "$e" | awk -F '[-:]' '{ s = 0; if (NF == 4) s = $1 * 86400 + $2 * 3600 + $3 * 60 + $4; else if (NF == 3) s = $1 * 3600 + $2 * 60 + $3; else if (NF == 2) s = $1 * 60 + $2; print int(s / 60) + 2 }')
+        [ -d "$d" ] && [ -n "$e" ] && f=$(find "$d" -maxdepth 1 -name '*.jsonl' -mmin "-$mins" -print0 2>/dev/null | xargs -0 -r ls -t 2>/dev/null | head -n 1) && [ -n "$f" ] && { sid=$(basename "$f" .jsonl); tp=$f; }
+    fi
+    case $sid in ""|*[!A-Za-z0-9_-]*) return 1;; esac
+    printf '%s\t%s\t%s\n' "$sid" "$cwd" "$tp"
+}
+claude_probe() { # claude_probe ID DIR : Claude Code's own get_context_usage answer for that session (one line), else nothing
+    local bin t=${KIT_CTX_PROBE_TIMEOUT:-30}
+    bin=$(command -v claude 2>/dev/null) || bin="$HOME/.local/bin/claude"
+    [ -x "$bin" ] || return 1
+    # every hook off (a SessionStart hook must not run), no transcript written; only the c1 line is kept (the
+    # initialize answer, which names the account, is never stored)
+    printf '%s\n%s\n' "$CTX_PROBE_INIT" "$CTX_PROBE_ASK" |
+        ( cd "$2" 2>/dev/null || exit 1; ctx_capped "$t" "$bin" -p --input-format stream-json --output-format stream-json --verbose \
+            --resume "$1" --no-session-persistence --settings '{"disableAllHooks":true}' 2>/dev/null ) |
+        LC_ALL=C awk 'index($0, "\"request_id\":\"c1\"") { print; exit }'
+}
+claude_probe_rows() { # what Claude Code said (stdin: the c1 line) -> rows, and H total / max / msgs / buffer / threshold
+    LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 2>/dev/null | LC_ALL=C awk -F '\t' -v home="$HOME" "$CTX_AWK"'
+    function v(s) { if (substr(s, 1, 1) == "\"") return unesc(substr(s, 2, length(s) - 2)); return s == "null" ? "" : s }
+    function top(i, a) { return i + 0 > a + 0 ? i + 0 : a }   # (json.awk counts items from 1)
+    $1 == "response" && $2 == "error" && NF == 3 { err = v($3) }
+    $1 != "response" || $2 != "response" { next }
+    { k = $3; x = v($NF) }
+    NF == 4 { t[k] = x; next }
+    k == "categories" && NF == 6 { nc = top($4, nc); c[$4, $5] = x; next }
+    k == "memoryFiles" && NF == 6 { nm = top($4, nm); mf[$4, $5] = x; next }
+    k == "mcpTools" && NF == 6 { nt = top($4, nt); mt[$4, $5] = x; next }
+    k == "agents" && NF == 6 { na = top($4, na); ag[$4, $5] = x; next }
+    k == "slashCommands" && NF == 5 { sc[$4] = x; next }
+    k == "skills" && $4 == "skillFrontmatter" && NF == 7 { ns = top($5, ns); sk[$5, $6] = x; next }
+    END {
+        if (err != "" || t["totalTokens"] == "") { print "H\tprobe_error\t" (err != "" ? err : "Claude Code 沒有給 context 的細項"); exit }
+        print "H\tprobe_total\t" t["totalTokens"]; print "H\tprobe_max\t" t["maxTokens"]; print "H\tprobe_model\t" t["model"]
+        if (t["isAutoCompactEnabled"] == "true") print "H\tthreshold\t" t["autoCompactThreshold"]
+        for (i = 1; i <= nc; i++) {
+            kind = c[i, "kind"]; if (kind == "") kind = c[i, "isDeferred"] == "true" ? "deferred" : "used"
+            if (kind == "free") continue
+            if (c[i, "id"] == "messages") print "H\tmsgs\t" c[i, "tokens"]
+            if (kind == "buffer") print "H\tbuffer\t" c[i, "tokens"]
+            else print "C\t" c[i, "id"] "\t" c[i, "name"] "\t" c[i, "tokens"] "\t" kind "\t0"
+        }
+        print "G\tmemory\t\t0"
+        for (i = 1; i <= nm; i++) print "I\tmemory\t" short(mf[i, "path"]) "\t" mf[i, "tokens"] "\t" mf[i, "type"] "\t" mf[i, "path"] "\t"
+        print "G\tskills\t\t0"
+        for (i = 1; i <= ns; i++) print "I\tskills\t" sk[i, "name"] "\t" sk[i, "tokens"] "\t" sk[i, "source"] "\t" sk[i, "path"] "\t"
+        print "G\tmcp\t\t0"
+        for (i = 1; i <= nt; i++) { s = mt[i, "serverName"]; if (!(s in sv)) { sv[s] = 1; so[++nso] = s }; st[s] += mt[i, "tokens"]; sn[s]++ }
+        for (i = 1; i <= nso; i++) print "I\tmcp\t" so[i] "\t" st[so[i]] "\t" sn[so[i]] " 個工具\t\t"
+        for (i = 1; i <= nt; i++) print "I\tmcp\t" mt[i, "name"] "\t" mt[i, "tokens"] "\t" (mt[i, "isLoaded"] == "true" ? "已載入" : "延後載入") "\t\t" mt[i, "serverName"]
+        print "G\tagents\t\t0"
+        for (i = 1; i <= na; i++) print "I\tagents\t" (ag[i, "agentType"] != "" ? ag[i, "agentType"] : ag[i, "name"]) "\t" ag[i, "tokens"] "\t" ag[i, "source"] "\t\t"
+        if (sc["tokens"] + 0 > 0) { print "G\tcommands\t\t0"; print "I\tcommands\t" sc["includedCommands"] " 個指令\t" sc["tokens"] "\t\t\t" }
+    }'
+}
+claude_msg_rows() { # claude_msg_rows TARGET : what was said since the last compaction (stdin: the transcript), scaled to TARGET
+    # (thinking from earlier turns is not counted: the API drops it; attachments Claude Code counts elsewhere neither)
+    LC_ALL=C awk -v target="$1" "$CTX_AWK"'
+    function reset() { user = meta = reply = summ = 0; split("", tc); split("", tr); split("", tn); split("", at) }
+    function content(s,   i, j) { i = index(s, "\"content\":"); if (i) s = substr(s, i); j = index(s, "},\"uuid\":\""); if (j) s = substr(s, 1, j); return s }
+    BEGIN { reset(); split("skill_listing instructions deferred_tools_delta deferred_tools_record mcp_instructions_delta agent_listing_delta prompt_snapshot thinking_drop credential_org", sk, " "); for (i in sk) skip[sk[i]] = 1 }
+    index($0, "\"isSidechain\":true") { next }
+    index($0, "\"type\":\"system\"") && index($0, "\"compact_boundary\"") { reset(); next }
+    index($0, "\"type\":\"attachment\"") {
+        if (!(i = index($0, "\"rendered\":["))) next
+        a = strv(substr($0, index($0, "\"attachment\":{")), "type"); if (a == "" || (a in skip)) next
+        s = substr($0, i); j = index(s, ",\"renderedRole\""); if (j) s = substr(s, 1, j)
+        at[a] += wt(s); next }
+    index($0, "\"type\":\"assistant\"") {
+        s = content($0); j = index(s, "\"stop_reason\""); if (j) s = substr(s, 1, j)
+        gsub(/\{"type":"(text|thinking|redacted_thinking|tool_use|server_tool_use)"/, "\001&", s); m = split(s, part, "\001")
+        for (i = 2; i <= m; i++) {
+            p = part[i]
+            if (index(p, "{\"type\":\"text\"") == 1) reply += length(strv(p, "text")) / 4
+            else if (index(p, "{\"type\":\"tool_use\"") == 1 || index(p, "{\"type\":\"server_tool_use\"") == 1) { nm = unesc(strv(p, "name")); idn[strv(p, "id")] = nm; tc[nm] += wt(p); tn[nm]++ }
+        }
+        next }
+    index($0, "\"type\":\"user\"") {
+        s = content($0)
+        if (index($0, "\"isCompactSummary\":true")) { summ += wt(s); next }
+        if (index(s, "{\"tool_use_id\":\"")) {
+            gsub(/\{"tool_use_id":"/, "\001&", s); m = split(s, part, "\001")
+            for (i = 2; i <= m; i++) { id = substr(part[i], 17); id = substr(id, 1, index(id, "\"") - 1); nm = (id in idn) ? idn[id] : "?"; tr[nm] += wt(part[i]) }
+            next }
+        if (index($0, "\"isMeta\":true")) meta += wt(s); else user += wt(s)
+        next }
+    END {
+        tcs = trs = ats = 0
+        for (k in tc) tcs += tc[k]; for (k in tr) trs += tr[k]; for (k in at) ats += at[k]
+        all = user + meta + reply + summ + tcs + trs + ats
+        f = (target > 0 && all > 0) ? target / all : 1
+        print "H\tmsgs_raw\t" rnd(all)
+        print "G\tmsgs\t\t1"
+        print "I\tmsgs\t你的訊息\t" rnd(user * f) "\t\t\t"; print "I\tmsgs\t系統附加的提示\t" rnd(meta * f) "\t\t\t"
+        print "I\tmsgs\t回覆\t" rnd(reply * f) "\t\t\t"; print "I\tmsgs\t工具呼叫\t" rnd(tcs * f) "\t\t\t"
+        print "I\tmsgs\t工具結果\t" rnd(trs * f) "\t\t\t"; print "I\tmsgs\t附加內容\t" rnd(ats * f) "\t\t\t"
+        if (summ > 0) print "I\tmsgs\t壓縮後的摘要\t" rnd(summ * f) "\t\t\t"
+        print "G\ttool_results\t\t1"
+        for (k in tc) seen[k] = 1; for (k in tr) seen[k] = 1
+        for (k in seen) print "I\ttool_results\t" k "\t" rnd((tc[k] + tr[k]) * f) "\t" (tn[k] + 0) " 次\t\t"
+        print "G\tattachments\t\t1"
+        for (k in at) print "I\tattachments\t" k "\t" rnd(at[k] * f) "\t\t\t"
+    }'
+}
+claude_detail() { # claude_detail PID DIR -> rows
+    local pid=$1 dir=$2 s sid="" cwd="" tp="" live lu lw lm probe rows tot max mdl msgs buf thr w used other free why=""
+    live=$(claude_ctx "$pid" "$dir"); lu=$(num_of used "$live"); lw=$(num_of window "$live"); lm=$(str_of model "$live")
+    printf 'H\ttool\tclaude\nH\tcompact\t/compact\nH\twith_text\t1\nH\tclear\t/clear\n'
+    if s=$(claude_session "$pid" "$dir"); then
+        IFS=$TAB read -r sid cwd tp <<EOF
+$s
+EOF
+    fi
+    [ -n "$cwd" ] || cwd=$dir
+    case $tp in "$CLAUDE_DIR"/projects/*.jsonl) [ -f "$tp" ] || tp="";; *) tp="";; esac
+    [ -n "$tp" ] || { [ -n "$sid" ] && tp="$CLAUDE_DIR/projects/$(printf '%s' "$cwd" | sed 's|[^A-Za-z0-9]|-|g')/$sid.jsonl"; }
+    [ -f "$tp" ] || tp=""
+    printf 'H\tsession\t%s\n' "$sid"
+    if [ -z "$sid" ]; then why="找不到這個 Claude 的 session"
+    elif [ "${KIT_CTX_PROBE:-1}" = 0 ]; then why="沒有問 Claude Code（KIT_CTX_PROBE=0）"
+    else
+        probe=$(claude_probe "$sid" "$cwd")
+        if [ -z "$probe" ]; then why="Claude Code 沒有回答（太舊、沒裝在 PATH 上，或超過 ${KIT_CTX_PROBE_TIMEOUT:-30} 秒）"
+        else
+            rows=$(printf '%s\n' "$probe" | claude_probe_rows)
+            why=$(printf '%s\n' "$rows" | sed -n 's/^H	probe_error	//p' | head -n 1)
+        fi
+    fi
+    if [ -n "$why" ]; then
+        # Claude Code's own split is not there: the live total, and what was said estimated from the transcript
+        printf 'H\terror\t%s\nH\tsource\t%s\nH\tmodel\t%s\nH\texact\t0\n' "$why" "$(str_of source "$live")" "$lm"
+        rows=$( [ -n "$tp" ] && ctx_stream "$tp" | claude_msg_rows "")
+        msgs=$(printf '%s\n' "$rows" | sed -n 's/^H	msgs_raw	//p'); msgs=${msgs:-0}
+        [ -n "$lu" ] && [ "$msgs" -gt "$lu" ] && msgs=$lu
+        rows=$( [ -n "$tp" ] && ctx_stream "$tp" | claude_msg_rows "$msgs")
+        printf '%s\n' "$rows" | grep -v '^H	'
+        printf 'H\tused\t%s\nH\twindow\t%s\n' "$lu" "$lw"
+        if [ -n "$lu" ]; then
+            printf 'C\tsystem_prompt\t=系統提示、工具、記憶檔、Skills（估算）\t%s\tused\t1\nC\tmessages\t\t%s\tused\t1\n' "$(( lu - msgs ))" "$msgs"
+            [ -n "$lw" ] && [ "$lw" -gt "$lu" ] && printf 'C\tfree_space\t\t%s\tfree\t0\n' "$(( lw - lu ))"
+        fi
+        printf 'H\tnote\t%s\n' "細項是從對話紀錄估的（大小 ÷ 4），只看得出對話裡各種內容大概佔多少。"
+        return 0
+    fi
+    tot=$(printf '%s\n' "$rows" | sed -n 's/^H	probe_total	//p'); max=$(printf '%s\n' "$rows" | sed -n 's/^H	probe_max	//p')
+    mdl=$(printf '%s\n' "$rows" | sed -n 's/^H	probe_model	//p'); msgs=$(printf '%s\n' "$rows" | sed -n 's/^H	msgs	//p')
+    buf=$(printf '%s\n' "$rows" | sed -n 's/^H	buffer	//p'); thr=$(printf '%s\n' "$rows" | sed -n 's/^H	threshold	//p')
+    [ -n "$mdl" ] || mdl=$lm
+    w=$(setting_window "$mdl"); [ -n "$w" ] || w=$max; [ -n "$w" ] || w=$lw
+    # the live number (status line / transcript) is what the agent really has; a fresh process may not see all of it
+    # (MCP servers it did not start, what came since): the difference is its own row
+    used=$tot; other=0
+    if [ -n "$lu" ] && [ "$lu" -gt "$tot" ]; then used=$lu; other=$(( lu - tot )); fi
+    printf 'H\tsource\tget_context_usage\nH\tmodel\t%s\nH\texact\t1\nH\tused\t%s\nH\twindow\t%s\n' "$mdl" "$used" "$w"
+    [ -n "$thr" ] && printf 'H\tcompact_at\t%s\n' "$thr"
+    printf '%s\n' "$rows" | grep -v '^H	'
+    [ "$other" -gt 0 ] && printf 'C\tother\t\t%s\tused\t0\n' "$other"
+    [ -n "$buf" ] && printf 'C\tautocompact_buffer\t\t%s\tbuffer\t0\n' "$buf"
+    free=$(( ${w:-0} - used - ${buf:-0} )); [ "$free" -gt 0 ] || free=0
+    printf 'C\tfree_space\t\t%s\tfree\t0\n' "$free"
+    [ -n "$tp" ] && ctx_stream "$tp" | claude_msg_rows "${msgs:-0}" | grep -v '^H	'
+    printf 'H\tnote\t%s\n' "分類是 Claude Code 自己算的；「對話內容」「工具」「附加內容」的細項是從對話紀錄估的（大小 ÷ 4，一張圖約 1600），照比例對到 Claude 算的總數。"
+}
+
+# ---------- Codex ----------
+codex_rollout() { # codex_rollout DIR : the newest rollout started in that folder
+    local f want
+    [ -n "$1" ] && [ -d "$CODEX_DIR/sessions" ] || return 1
+    want="\"cwd\":$(json_s "$1")"
+    while IFS= read -r f; do
+        [ -n "$f" ] && head -n 1 "$f" | grep -qF "$want" && { printf '%s\n' "$f"; return 0; }
+    done <<EOF
+$(newest_files "$CODEX_DIR/sessions" 'rollout-*.jsonl')
+EOF
+    return 1
+}
+codex_instr_files() { # the AGENTS.md files Codex reads for DIR: its own (~/.codex), then each folder from the git root down
+    local d n=0
+    if [ -s "$CODEX_DIR/AGENTS.override.md" ]; then ctx_files "Codex 帳號" "$CODEX_DIR/AGENTS.override.md"; else ctx_files "Codex 帳號" "$CODEX_DIR/AGENTS.md"; fi
+    [ -n "$1" ] || return 0
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        if [ -s "$d/AGENTS.override.md" ]; then ctx_files "資料夾" "$d/AGENTS.override.md"; else ctx_files "資料夾" "$d/AGENTS.md"; fi
+    done <<EOF
+$(ctx_up "$1")
+EOF
+}
+codex_detail() { # codex_detail DIR -> rows
+    local f c m u w files mcp
+    printf 'H\ttool\tcodex\nH\tcompact\t/compact\nH\twith_text\t0\nH\tclear\t/new\nH\tsource\trollout\nH\texact\t0\n'
+    f=$(codex_rollout "$1") || { printf 'H\terror\t%s\n' "找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）"; return 0; }
+    c=$(codex_ctx "$1"); u=$(num_of used "$c"); w=$(num_of window "$c"); m=$(str_of model "$c")
+    printf 'H\tmodel\t%s\nH\tused\t%s\nH\twindow\t%s\nH\tpct\t%s\n' "$m" "$u" "$w" "$(num_of pct "$c")"
+    ctx_big "$f" && printf 'H\tbig\t1\n'
+    files=$(codex_instr_files "$1")
+    mcp=$( [ -f "$CODEX_DIR/config.toml" ] && sed -n 's/^[[:space:]]*\[mcp_servers\.\([^].]*\)\][[:space:]]*$/\1/p' "$CODEX_DIR/config.toml" | tr -d '"')
+    ctx_stream "$f" | CTX_FILES=$files CTX_MCP=$mcp LC_ALL=C awk -v total="$u" -v window="$w" -v home="$HOME" "$CTX_AWK"'
+    function reset() { sysd = instr = skills = mcpl = user = reply = other = comp = 0; split("", tc); split("", tr); split("", tn); split("", skn); split("", skw); split("", skp); split("", skr); nsk = 0; split("", dln); split("", dlw); ndl = 0 }
+    function tools(s,   m, i, p, ty, nm, part) {
+        split("", nsw); split("", tw); split("", tl); split("", tlo); split("", tln); split("", nso); nns = 0; ns = ""
+        s = substr(s, index(s, "\"tools\":["))
+        gsub(/\{"type":"[a-z_]+","name":"/, "\001&", s); m = split(s, part, "\001")
+        for (i = 2; i <= m; i++) {
+            p = part[i]; ty = strv(p, "type"); nm = unesc(strv(p, "name"))
+            if (ty == "namespace") { ns = nm; if (!(ns in nsw)) nso[++nns] = ns; nsw[ns] += length(p) / 4 }
+            else if (ns != "") { tw[ns, nm] += length(p) / 4; if (!((ns, nm) in tl)) { tl[ns, nm] = 1; tlo[ns, ++tln[ns]] = nm } }
+            else { if (!(nm in nsw)) nso[++nns] = nm; nsw[nm] += length(p) / 4 }
+        }
+    }
+    function skillsof(v,   x, i, m, e, nm, rel, k, part) {
+        x = v; while (match(x, /- `r[0-9]+` = `[^`]*`/)) { e = substr(x, RSTART + 3, RLENGTH - 4); k = substr(e, 1, index(e, "`") - 1); root[k] = substr(e, index(e, "= `") + 3); x = substr(x, RSTART + RLENGTH) }
+        i = index(v, "### Available skills"); if (!i) return
+        m = split(substr(v, i), part, /\\n- /)
+        for (i = 2; i <= m; i++) {
+            e = part[i]; k = index(e, "\\n</skills_instructions>"); if (k) e = substr(e, 1, k - 1)
+            nm = substr(e, 1, index(e, ": ") - 1); rel = ""
+            if (match(e, /\(file: [^)]*\)/)) rel = substr(e, RSTART + 7, RLENGTH - 8)
+            k = substr(rel, 1, index(rel, "/") - 1); if (k in root) rel = root[k] substr(rel, index(rel, "/"))
+            skn[++nsk] = unesc(nm); skw[nsk] = length(e) / 4; skp[nsk] = unesc(rel); skr[nsk] = (k in root) ? short(unesc(root[k])) : ""
+        }
+    }
+    function listof(v,   m, i, e, part) { m = split(v, part, /\\n- /); for (i = 2; i <= m; i++) { e = part[i]; dln[++ndl] = unesc(substr(e, 1, index(e, ":") - 1)); dlw[ndl] = length(e) / 4 } }
+    BEGIN { reset(); m = split(ENVIRON["CTX_MCP"], x, "\n"); for (i = 1; i <= m; i++) if (x[i] != "") conf[x[i]] = 1 }
+    {
+        tt = ""; if (match($0, /"type":"[a-z_]+"/)) tt = substr($0, RSTART + 8, RLENGTH - 9)
+        pt = ""; if ((i = index($0, "\"payload\":{\"type\":\"")) > 0) { pt = substr($0, i + 19); pt = substr(pt, 1, index(pt, "\"") - 1) }
+    }
+    tt == "session_meta" { i = index($0, "\"base_instructions\":"); if (i) { b = substr($0, i); bt = (index(b, "\"base_instructions\":{") == 1) ? strv(b, "text") : strv(b, "base_instructions"); base = length(bt) / 4; bstart = substr(bt, 1, 80) } next }
+    tt == "compacted" { reset(); comp = length($0) / 4; next }
+    tt != "response_item" { next }
+    pt == "message" {
+        role = strv($0, "role"); s = $0
+        if (role == "user") user += imgs(s) * 1600
+        while (match(s, /"text":"([^"\\]|\\.)*"/)) {
+            v = substr(s, RSTART + 8, RLENGTH - 9); n = length(v) / 4; s = substr(s, RSTART + RLENGTH)
+            if (role == "developer") {
+                if (bstart != "" && substr(v, 1, 80) == bstart) { sysd += n; dup = 1 }
+                else if (index(v, "<skills_instructions>") == 1) { skills += n; skillsof(v) }
+                else if (index(v, "<tools>") == 1) { mcpl += n; listof(v) }
+                else sysd += n
+            } else if (role == "user") {
+                if (index(v, "# AGENTS.md instructions") == 1 || index(v, "<user_instructions>") == 1) instr += n
+                else if (index(v, "<environment_context>") == 1) sysd += n
+                else user += n
+            } else if (role == "assistant") reply += n
+            else other += n
+        }
+        next }
+    pt == "reasoning" { next }
+    pt == "function_call" || pt == "custom_tool_call" { nm = unesc(strv($0, "name")); cn[strv($0, "call_id")] = nm; tc[nm] += length(strv($0, pt == "function_call" ? "arguments" : "input")) / 4; tn[nm]++; next }
+    pt == "function_call_output" || pt == "custom_tool_call_output" { id = strv($0, "call_id"); nm = (id in cn) ? cn[id] : "?"; s = substr($0, index($0, "\"output\":")); tr[nm] += wt(s); next }
+    pt == "local_shell_call" || pt == "web_search_call" || pt == "tool_search_call" { nm = pt; sub(/_call$/, "", nm); tc[nm] += length($0) / 4; tn[nm]++; next }
+    pt == "additional_tools" { tools($0); next }
+    pt == "compaction" || pt == "compaction_summary" { reset(); comp = length($0) / 4; next }
+    { other += length($0) / 4 }
+    END {
+        tcs = trs = 0; for (k in tc) tcs += tc[k]; for (k in tr) trs += tr[k]
+        stl = mcp = 0
+        for (i = 1; i <= nns; i++) { ns = nso[i]; t = nsw[ns]; for (j = 1; j <= tln[ns]; j++) t += tw[ns, tlo[ns, j]]; nst[ns] = t; ism[ns] = (index(ns, "mcp__") == 1 || (ns in conf)); if (ism[ns]) mcp += t; else stl += t }
+        mcp += mcpl
+        sp = (dup ? 0 : base) + sysd; msg = user + reply + tcs + trs + other
+        raw["system_prompt"] = sp; raw["instructions"] = instr; raw["skills"] = skills; raw["system_tools"] = stl; raw["mcp_tools"] = mcp; raw["messages"] = msg; raw["compaction"] = comp
+        split("system_prompt instructions skills system_tools mcp_tools messages compaction", order, " ")
+        all = 0; for (k in raw) all += raw[k]
+        f = (total > 0 && all > 0) ? total / all : 1
+        big = ""; sum = 0
+        for (i = 1; i <= 7; i++) { k = order[i]; sc[k] = rnd(raw[k] * f); sum += sc[k]; if (big == "" || sc[k] > sc[big]) big = k }
+        if (total > 0 && all > 0) sc[big] += total - sum
+        if (total == "") print "H\tused\t" rnd(all)
+        for (i = 1; i <= 7; i++) { k = order[i]; print "C\t" k "\t\t" sc[k] "\tused\t1" }
+        if (window > 0) { fr = window - (total > 0 ? total : rnd(all)); print "C\tfree_space\t\t" (fr > 0 ? fr : 0) "\tfree\t0" }
+        # the AGENTS.md files: their sizes, scaled to what the instructions came to
+        m = split(ENVIRON["CTX_FILES"], x, "\n"); fs = 0
+        for (i = 1; i <= m; i++) if (split(x[i], y, "\t") >= 3) fs += y[2] / 4
+        print "G\tinstructions\t\t1"
+        for (i = 1; i <= m; i++) if (split(x[i], y, "\t") >= 3) print "I\tinstructions\t" short(y[1]) "\t" (instr > 0 && fs > 0 ? rnd(y[2] / 4 * sc["instructions"] / fs) : "") "\t" (instr > 0 ? y[3] : "這次對話沒讀到") "\t" y[1] "\t"
+        print "G\tskills\t\t1"
+        for (i = 1; i <= nsk; i++) print "I\tskills\t" skn[i] "\t" (skills > 0 ? rnd(skw[i] * sc["skills"] / skills) : "") "\t" skr[i] "\t" skp[i] "\t"
+        print "G\ttools\t\t1"; print "G\tmcp\t\t1"
+        for (i = 1; i <= nns; i++) {
+            ns = nso[i]; g = ism[ns] ? "mcp" : "tools"
+            print "I\t" g "\t" ns "\t" rnd(nst[ns] * f) "\t" (tln[ns] + 0) " 個工具\t\t"
+            for (j = 1; j <= tln[ns]; j++) print "I\t" g "\t" tlo[ns, j] "\t" rnd(tw[ns, tlo[ns, j]] * f) "\t\t\t" ns
+            seen[ns] = 1
+        }
+        for (i = 1; i <= ndl; i++) { print "I\tmcp\t" dln[i] "\t" rnd(dlw[i] * f) "\t延後載入（只放名字和說明）\t\t"; seen[dln[i]] = 1 }
+        for (k in conf) if (!(k in seen) && !(("mcp__" k) in seen)) print "I\tmcp\t" k "\t\t設定裡有，這次對話沒看到它的工具\t\t"
+        print "G\tmsgs\t\t1"
+        print "I\tmsgs\t你的訊息\t" rnd(user * f) "\t\t\t"; print "I\tmsgs\t回覆\t" rnd(reply * f) "\t\t\t"
+        print "I\tmsgs\t工具呼叫\t" rnd(tcs * f) "\t\t\t"; print "I\tmsgs\t工具結果\t" rnd(trs * f) "\t\t\t"; print "I\tmsgs\t其他\t" rnd(other * f) "\t\t\t"
+        print "G\ttool_results\t\t1"
+        for (k in tc) seen2[k] = 1; for (k in tr) seen2[k] = 1
+        for (k in seen2) print "I\ttool_results\t" k "\t" rnd((tc[k] + tr[k]) * f) "\t" (tn[k] + 0) " 次\t\t"
+    }'
+    printf 'H\tnote\t%s\n' "總數是 Codex 自己記的（最後一次 token_count）；分到各類是從對話紀錄估的（大小 ÷ 4），照比例對到總數。Codex 自己顯示的 % 會先扣掉 12000（它的基本用量）。"
+}
+
+# ---------- omp ----------
+omp_session() { # omp_session PID DIR : the session its terminal points at, else the newest of that folder
+    local f="" x tty want
+    tty=$(ps -o tty= -p "$1" 2>/dev/null | tr -d ' ' | sed 's|^/dev/||; s|/|-|g')
+    case $tty in ""|"?"|"??") ;; *) [ -f "$OMP_DIR/terminal-sessions/$tty" ] && f=$(sed -n 2p "$OMP_DIR/terminal-sessions/$tty");; esac
+    if [ -z "$f" ] || [ ! -f "$f" ]; then
+        f=""; want="\"cwd\":$(json_s "$2")"
+        [ -n "$2" ] && while IFS= read -r x; do
+            [ -n "$x" ] && head -n 3 "$x" | grep '"type":"session"' | grep -qF "$want" && { f=$x; break; }
+        done <<EOF
+$(newest_files "$OMP_DIR/sessions" '*.jsonl')
+EOF
+    fi
+    [ -n "$f" ] && printf '%s\n' "$f"
+}
+omp_instr_files() { # the instruction files omp may read for DIR (omp reads several tools' ones; a guess from what is there)
+    local d
+    ctx_files "omp 帳號" "$OMP_DIR/AGENTS.md"
+    ctx_files "Claude 帳號" "$CLAUDE_DIR/CLAUDE.md"
+    [ -n "$1" ] || return 0
+    while IFS= read -r d; do
+        [ -n "$d" ] && [ "$d" != "$HOME" ] && ctx_files "資料夾" "$d/AGENTS.md" "$d/CLAUDE.md" "$d/.omp/AGENTS.md" "$d/.claude/CLAUDE.md"
+    done <<EOF
+$(ctx_up "$1")
+EOF
+}
+omp_skill_files() { # "name TAB bytes TAB path TAB where" for the skills omp may list: their name and description
+    local d f
+    for d in "$OMP_DIR/skills" "$AGENTS_SKILLS" "$CLAUDE_DIR/skills" ${1:+"$1/.omp/skills" "$1/.agents/skills" "$1/.claude/skills"}; do
+        for f in "$d"/*/SKILL.md; do [ -f "$f" ] && printf '%s\n' "$f"; done
+    done | LC_ALL=C awk -v home="$HOME" "$CTX_AWK"'
+        { f = $0; n = ""; d = ""; c = 0; nm = f; sub(/\/SKILL\.md$/, "", nm); sub(/.*\//, "", nm); w = nm; sub(/\/[^\/]*\/SKILL\.md$/, "", w)
+          while ((getline l < f) > 0) { if (l == "---") { if (++c == 2) break; continue }; if (c == 1 && l ~ /^name:/) { n = l; sub(/^name:[ \t]*/, "", n) }; if (c == 1 && l ~ /^description:/) { d = l; sub(/^description:[ \t]*/, "", d) } }
+          close(f); if (n != "") nm = n; if (nm in seen) next; seen[nm] = 1
+          printf "%s\t%d\t%s\t%s\n", nm, length(nm) + length(d) + 20, f, short(w) }'
+}
+omp_detail() { # omp_detail PID DIR -> rows
+    local f c u w m mcp x files skills
+    printf 'H\ttool\tomp\nH\tcompact\t/compact\nH\twith_text\t1\nH\tclear\t/new\nH\tsource\tsession\nH\texact\t0\n'
+    f=$(omp_session "$1" "$2"); [ -n "$f" ] || { printf 'H\terror\t%s\n' "找不到這個 omp 的 session（~/.omp/agent/sessions）"; return 0; }
+    c=$(omp_ctx "$1" "$2"); u=$(num_of used "$c"); w=$(num_of window "$c"); m=$(str_of model "$c")
+    printf 'H\tmodel\t%s\nH\tused\t%s\nH\twindow\t%s\n' "$m" "$u" "$w"
+    mcp=$(for x in "$OMP_DIR/mcp.json" ${2:+"$2/.omp/mcp.json" "$2/.mcp.json"}; do [ -f "$x" ] && json_keys "$x" mcpServers; done)
+    files=$(omp_instr_files "$2"); skills=$(omp_skill_files "$2")
+    ctx_stream "$f" | CTX_FILES=$files CTX_SKILLS=$skills CTX_MCP=$mcp LC_ALL=C awk -v total="$u" -v window="$w" -v home="$HOME" "$CTX_AWK"'
+    function add(k, nm, x) { ne++; ek[ne] = k; en[ne] = nm; ew[ne] = x; el[ne] = NR }
+    function msgtext(s,   i) { i = index(s, ",\"details\":"); if (i) s = substr(s, 1, i - 1); return s }
+    { id = strv(substr($0, 1, 200), "id"); if (id != "") lid[id] = NR }
+    index($0, "{\"type\":\"compaction\"") == 1 { cl = NR; keep = strv($0, "firstKeptEntryId"); summ = length(strv($0, "summary")) / 4; rb = 0; next }
+    index($0, "{\"type\":\"reset_boundary\"") == 1 { cl = NR; keep = ""; summ = 0; rb = 1; next }
+    index($0, "{\"type\":\"custom_message\"") == 1 { add("at", strv($0, "customType"), wt(msgtext($0))); next }
+    index($0, "{\"type\":\"message\"") != 1 { next }
+    {
+        role = strv($0, "role"); s = msgtext($0)
+        if (role == "assistant") {
+            if (index($0, "\"stopReason\":\"aborted\"") || index($0, "\"stopReason\":\"error\"")) next
+            if ((i = index($0, "\"contextSnapshot\":{")) > 0) { cs = substr($0, i); nmt = num(cs, "nonMessageTokens"); tst = num(cs, "toolSchemaTokens") }
+            gsub(/\{"type":"(text|thinking|toolCall|redactedThinking)"/, "\001&", s); m = split(s, part, "\001")
+            for (j = 2; j <= m; j++) {
+                p = part[j]
+                if (index(p, "{\"type\":\"text\"") == 1) add("reply", "", length(strv(p, "text")) / 4)
+                else if (index(p, "{\"type\":\"toolCall\"") == 1) { nm = unesc(strv(p, "name")); idn[strv(p, "id")] = nm; add("tc", nm, wt(p)) }
+            }
+        } else if (role == "toolResult") { nm = unesc(strv($0, "toolName")); if (nm == "") nm = "?"; add("tr", nm, wt(s)) }
+        else if (role == "user") add("user", "", wt(s))
+        else add("other", role, wt(s))
+    }
+    function num(s, k) { if (!match(s, "\"" k "\":[0-9]+")) return ""; return substr(s, RSTART + length(k) + 3, RLENGTH - length(k) - 3) }
+    END {
+        start = 1
+        if (cl) { start = cl + 1; if (keep != "" && (keep in lid) && lid[keep] < cl) start = lid[keep] }
+        for (e = 1; e <= ne; e++) {
+            if (el[e] < start || el[e] == cl) continue
+            k = ek[e]; wv = ew[e]
+            if (k == "tc") { tc[en[e]] += wv; tn[en[e]]++; tcs += wv }
+            else if (k == "tr") { tr[en[e]] += wv; trs += wv }
+            else if (k == "at") { at[en[e]] += wv; ats += wv }
+            else raw[k] += wv
+        }
+        if (cl && !rb) raw["summ"] = summ
+        msg = raw["user"] + raw["reply"] + tcs + trs + ats + raw["other"]; all = msg + raw["summ"]
+        m = split(ENVIRON["CTX_FILES"], fl, "\n"); fsz = 0; for (i = 1; i <= m; i++) if (split(fl[i], y, "\t") >= 3) fsz += y[2] / 4
+        ms = split(ENVIRON["CTX_SKILLS"], sl, "\n"); ssz = 0; for (i = 1; i <= ms; i++) if (split(sl[i], y, "\t") >= 4) ssz += y[2] / 4
+        if (nmt != "" && total != "") {
+            # the numbers omp keeps: what is not the conversation, and of that the tools
+            tools = tst + 0; rest = nmt - tools; if (rest < 0) rest = 0
+            fi = fsz; sk = ssz; if (fi + sk > rest) { if (fi + sk > 0) { fi = rnd(fsz * rest / (fsz + ssz)); sk = rest - fi } }
+            fi = rnd(fi); sk = rnd(sk); sp = rest - fi - sk
+            mt = total - nmt; if (mt < 0) mt = 0
+            print "C\tsystem_prompt\t\t" sp "\tused\t1"; print "C\tsystem_tools\t\t" tools "\tused\t0"
+            print "C\tinstructions\t\t" fi "\tused\t1"; print "C\tskills\t\t" sk "\tused\t1"
+        } else {
+            mt = total != "" ? total : rnd(all); if (mt > rnd(all)) mt = rnd(all); sp = (total != "" ? total : rnd(all)) - mt; fi = 0; sk = 0
+            print "C\tsystem_prompt\t=系統提示、工具、指示檔、Skills（估算）\t" sp "\tused\t1"
+        }
+        f = all > 0 ? mt / all : 1
+        cm = rnd(raw["summ"] * f); print "C\tmessages\t\t" (mt - cm) "\tused\t1"; print "C\tcompaction\t\t" cm "\tused\t1"
+        if (window > 0 && total != "") { fr = window - total; print "C\tfree_space\t\t" (fr > 0 ? fr : 0) "\tfree\t0" }
+        print "G\tinstructions\t\t1"
+        for (i = 1; i <= m; i++) if (split(fl[i], y, "\t") >= 3) print "I\tinstructions\t" short(y[1]) "\t" (fsz > 0 && fi > 0 ? rnd(y[2] / 4 * fi / fsz) : "") "\t" y[3] "\t" y[1] "\t"
+        print "G\tskills\t\t1"
+        for (i = 1; i <= ms; i++) if (split(sl[i], y, "\t") >= 4) print "I\tskills\t" y[1] "\t" (ssz > 0 && sk > 0 ? rnd(y[2] / 4 * sk / ssz) : "") "\t" y[4] "\t" y[3] "\t"
+        print "G\tmcp\t\t1"
+        n = split(ENVIRON["CTX_MCP"], x, "\n"); for (i = 1; i <= n; i++) if (x[i] != "" && !(x[i] in seen)) { seen[x[i]] = 1; print "I\tmcp\t" x[i] "\t\t設定的 MCP（它的工具算在「系統工具」）\t\t" }
+        print "G\tmsgs\t\t1"
+        print "I\tmsgs\t你的訊息\t" rnd(raw["user"] * f) "\t\t\t"; print "I\tmsgs\t回覆\t" rnd(raw["reply"] * f) "\t\t\t"
+        print "I\tmsgs\t工具呼叫\t" rnd(tcs * f) "\t\t\t"; print "I\tmsgs\t工具結果\t" rnd(trs * f) "\t\t\t"
+        print "I\tmsgs\t附加內容\t" rnd(ats * f) "\t\t\t"; print "I\tmsgs\t其他\t" rnd(raw["other"] * f) "\t\t\t"
+        if (cm > 0) print "I\tmsgs\t壓縮後的摘要\t" cm "\t\t\t"
+        print "G\ttool_results\t\t1"
+        for (k in tc) seen2[k] = 1; for (k in tr) seen2[k] = 1
+        for (k in seen2) print "I\ttool_results\t" k "\t" rnd((tc[k] + tr[k]) * f) "\t" (tn[k] + 0) " 次\t\t"
+        print "G\tattachments\t\t1"
+        for (k in at) print "I\tattachments\t" k "\t" rnd(at[k] * f) "\t\t\t"
+    }'
+    printf 'H\tnote\t%s\n' "總數和「系統工具」是 omp 自己記的（最後一次回覆的 context 快照）；其他分類和細項是從檔案和對話紀錄估的（大小 ÷ 4），照比例對到 omp 的數字。指示檔和 skills 是照現在的檔案估的。"
+}
+
+ctx_rows() { # ctx_rows PID TOOL DIR : the rows for one agent
+    case $2 in
+        claude) claude_detail "$1" "$3";;
+        codex) codex_detail "$3";;
+        omp) omp_detail "$1" "$3";;
+        *) printf 'H\terror\t%s\n' "不是 Claude Code、Codex 或 omp";;
+    esac
+}
+ctx_detail() { # ctx_detail PID TOOL DIR FRESH : the detail JSON, kept a minute
+    local pid=$1 tool=$2 dir=$3 f="$CTX_DIR/detail-$1.json" j now at
+    now=$(date +%s)
+    if [ -z "$4" ] && [ -f "$f" ]; then
+        j=$(cat "$f"); at=$(num_of at "$j")
+        if [ -n "$at" ] && [ $(( now - at )) -lt "${KIT_CTX_DETAIL_TTL:-60}" ] && [ $(( now - at )) -ge 0 ] && [ "$(str_of tool "$j")" = "$tool" ]; then
+            printf '%s\n' "$j"; return 0
+        fi
+    fi
+    j=$(ctx_rows "$pid" "$tool" "$dir" | ctx_assemble "$now")
+    { [ -d "$CTX_DIR" ] || mkdir -p "$CTX_DIR"; } 2>/dev/null && { printf '%s\n' "$j" > "$f.$$" && mv -f "$f.$$" "$f"; } 2>/dev/null
+    printf '%s\n' "$j"
 }
 
 # ---------- commands ----------
@@ -3083,7 +3678,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
   kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
-  kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾]   那個 agent 的 context 用了多少（JSON）
+  kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]
+                                  那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
                                     用 kit 的裝法裝，太舊就升級（Herdr 的「安裝」按鈕就是這個）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
