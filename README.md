@@ -171,18 +171,118 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 
 對話內容只拿來算大小，不印出、不存；問 Claude Code 時它回的帳號資料不留。問的那一次不寫對話紀錄，但 Claude Code 啟動時照常會更新它自己的東西（例如 plugins 的快取，或在 `~/.claude/projects/<資料夾>/` 建一個空的 `memory/`）。紀錄檔超過 32 MB 時只讀第一行和最後 32 MB（`KIT_CTX_DETAIL_TAIL`，byte）。
 
-## 給畫面程式讀的輸出
+## 給程式讀的介面
 
-kit 本身只有指令。想用按的（例如在終端機程式裡加一個 kit 面板），那個程式跑這些指令、讀它們印的 JSON：
-
-    kit list --json [--dir 資料夾]   來源、每個項目的種類、名字、狀態、說明、檔案位置、是不是新的、缺哪些程式
-    kit agents --json                每個 agent 用了哪些規則、skill、MCP
-    kit context --pid <pid> ...      agent 的 context 用了多少（見上面）
-    kit collect <網址> --look        收之前先看看（見下面）
-    kit api                          印一個整數（現在是 1）
-
-`kit api` 是給畫面程式確認看得懂 kit 的輸出：上面這些輸出的格式不相容地改變時才加一。印出來的不是它認得的數字（或舊的 kit 沒有這個指令），畫面程式就該請你更新 kit 或它自己。
+kit 本身只有指令。想用按的（例如在終端機程式裡加一個 kit 面板），那個程式跑下面這些指令。**這一節是唯一的清單**：沒列在這裡的輸出（給人看的字）隨時會改，程式不要去解析。
 kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
+
+### 版本：`kit api`
+
+    kit api        →  1.0
+
+印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.0。
+
+### 共同規則
+
+- 下面的 JSON 指令：stdout **只有** JSON；給人看的字（進度、警告、kit check 的問題）都在 stderr，可以照原樣顯示給人看。
+- 成功：exit 0。失敗：exit 不是 0，stdout 一行
+
+      {"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}
+
+  `message` 是給人看的（跟 stderr 上的一樣），程式只看 `code`：
+
+  | code | 意思 |
+  |---|---|
+  | `usage` | 參數不對 |
+  | `not_init` | 還沒 `kit init` |
+  | `busy` | 另一個 kit 正在跑（等一下再試） |
+  | `no_source` | `--to` 找不到那個來源或資料夾 |
+  | `not_git` | 來源不是 git repo |
+  | `check_failed` | `kit check` 有問題（細節在 stderr），什麼都沒送 |
+  | `no_git_identity` | git 還沒設名字和信箱 |
+  | `author_not_allowed` | git 信箱不是 `author_domains` 的網域 |
+  | `bad_push_mode` | `kit.yaml` 的 `push` 不是 `pr` 或 `direct` |
+  | `no_origin` | `push: pr` 的來源沒有 origin |
+  | `no_remote` | `push: direct` 的來源沒有 remote |
+  | `not_on_branch` | `push: direct`：現在不在分支上 |
+  | `out_of_sync` | `push: direct`：本機和 remote 不一致（有沒推的 commit、remote 有新的、remote 沒有這個分支） |
+  | `host_not_allowed` | 主機不在 `allowed_hosts` |
+  | `push_failed` | commit 或 push 失敗（`push: direct` 時 commit 可能已經在本機） |
+  | `not_maintainer` | `collect` 只有維護者能用 |
+  | `not_allowed` | `collect`：作者不在 `collect_sources` |
+  | `download_failed` | `collect`：下載失敗 |
+  | `no_skill` | `collect`：找不到 `SKILL.md` |
+  | `error` | 其他 |
+
+  之後可能加新的 code（minor 加一）：不認得的 code 當作 `error`。
+- 字串照 JSON 規則跳脫；路徑是這台電腦的寫法。欄位順序固定，但程式應該照名字讀。
+
+### `kit list --json [--dir 資料夾] [--pid 程式編號]`
+
+    {
+      "kit": "0.3.0",
+      "sources": [
+        {"name": "team", "source": "<網址或資料夾>", "dir": "<clone 的資料夾>", "push": "pr", "changed": ["rules/a.md", "skills/b/SKILL.md"]}],
+      "tools": ["claude", "codex", "omp"],
+      "items": [
+        {"kind": "skill", "name": "b", "status": "used", "new": false, "changed": true, "source": "team", "description": "…", "path": "<檔案>",
+         "needs": [{"tool": "node", "title": "Node.js", "min": "18", "have": "", "ok": false, "install": "<要跑的指令>"}],
+         "packages": [{"kind": "npm", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}]}],
+      "kit_version_wanted": ""
+    }
+
+- `sources[].push`：`pr`（送出要開 PR）或 `direct`（直接推）。`sources[].changed`：`kit push --to <name>` 會送的檔案（相對來源資料夾，`/` 分隔；改過的 rule、skill、mcp、agent、`third_party.lock`，加上只改了 `collect_sources` 的 `kit.yaml`）；沒有就是 `[]`，不是 git repo 也是 `[]`。
+- `items[].kind`：`rule`、`skill`、`mcp`、`agent`。`status`：`required`（團隊必備）、`used`、`unused`、`agent`。`new`：還沒在 `kit list` 看過。`changed`：`kit push` 會送它（skill：它資料夾裡任何一個檔案）。
+- `needs`、`packages` 只有 skill 有（`packages` 沒有要裝的就不出現），見「skill 需要的程式」。
+- `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。
+
+### `kit agents --json`
+
+    {"kit": "0.3.0", "tools": ["claude"], "available": {"rule": [...], "skill": [...], "mcp": [...]},
+     "agents": [{"name", "description", "source", "path", "git", "rules", "skills", "mcp", "tools_only", "tools_deny", "prompt"}]}
+
+`git`：`new`（還沒 commit）、`changed`（改過）、`""`（沒改）、`no-git`。
+
+### `kit push [--to 來源] [--dry-run] --json`
+
+一行：
+
+    {"source": "team", "dir": "<來源資料夾>", "push": "pr", "dry_run": true,
+     "files": ["skills/b/SKILL.md"], "skipped": ["notes.txt"], "commit": "kit: update skill:b",
+     "branch": "kit/b-20261113", "into": "main", "remotes": ["origin"],
+     "sent": false, "pr_url": null, "compare_url": "https://gitea.example/acme/team/compare/main...kit/b-20261113"}
+
+- `files`：要送（或送了）的檔案；`[]`＝沒有要送的（這時 `commit`、`branch`、`into` 是 `null`，`remotes` 是 `[]`）。`skipped`：改了但不會送的檔案。
+- `push: "pr"`：`branch` 是新開的 `kit/...` 分支，`into` 是 PR 要合進的分支，`remotes` 是 `["origin"]`。`pr_url`：自動開好的 PR（沒有 token 或沒開成就是 `null`）；`compare_url`：自己開 PR 的網址（不知道 Gitea 在哪就是 `null`）。送出後改的檔案移到那個分支，PR 合併、`kit sync` 後才回來。
+- `push: "direct"`：`branch` 是現在的分支，`into`、`pr_url`、`compare_url` 是 `null`，`remotes` 是會推過去的每個 remote。
+- `sent`：真的 commit 並推出去了（`--dry-run` 一定是 `false`）。
+- 沒有 `--to`：在有 `kit.yaml` 的資料夾裡就是它，不然是第一個來源。要送前先 `--dry-run --json` 給人確認，再不帶 `--dry-run` 送；兩次的 `files` 不一樣就表示中間有人改過。
+
+### `kit collect <網址> --look [--path 資料夾] [--ref 分支] [--to 來源]`
+
+    {"source", "dir", "push", "url", "id", "commit", "allowed", "can_allow",
+     "skills": [{"path", "name", "valid", "description", "license", "scripts", "skipped", "exists", "dest"}]}
+
+只下載來看、什麼都不寫。`allowed`：作者在 `collect_sources`；`can_allow`：不在，但自己的來源可以用 `--allow` 加。`exists`：`collected`（之前收過）、`own`（自己寫的同名 skill）、`""`。
+
+### `kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]`
+
+一行 JSON，欄位見上面「agent 的 context 用了多少」和「context 細項」。找不到資料不算失敗：`used`、`window`、`pct` 是 `null`（`--detail` 時另外有字串 `error` 寫原因）。參數不對時印給人看的字、exit 不是 0（不是上面的錯誤 JSON）。
+
+### 動作類指令
+
+這些印給人看的字（不要解析），程式只看 exit code（0＝成功），失敗時把 stdout、stderr 顯示給人看：
+
+    kit add|rm [--dir 資料夾] rule|skill|mcp <名字>
+    kit agent <名字> add|rm rule|skill|mcp <東西>
+    kit new rule|skill|mcp|agent <名字> [--to 來源]
+    kit sync
+    kit run <agent> [--tool codex|omp]
+    kit install-tool <程式名> [--min 版本]
+    kit install-deps <skill> [npm|pip]
+    kit collect <網址> --to 來源 [--path 資料夾] [--allow]
+    kit push --to 來源                    （要結果的話加 --json，見上面）
 
 ## 把 kit 帶進公司的 git server
 
@@ -212,7 +312,7 @@ README 會一起帶過去（它就是使用說明），跟其他檔案一樣要�
 - 只收 `kit.yaml` 的 `collect_sources` 裡的作者。自己的來源（`push: direct`）可以加 `--allow`，收的時候一起把作者加進清單；團隊來源要維護者改清單。
   `kit push` 平常不送 `kit.yaml`；但它只改了 `collect_sources` 時（`--allow` 加的）會一起送。
 - 網址的主機要在 `allowed_hosts` 裡（收進來的來源自己有列就看它的，沒列就看所有來源的；都沒列就不限）。`file:///` 是本機的資料夾，不算主機。
-- `--look`：只下載來看、什麼都不寫，用 JSON 列出找到的 skill、授權、會執行的檔案（畫面程式的「下載看看」可以用它）。
+- `--look`：只下載來看、什麼都不寫，用 JSON 列出找到的 skill、授權、會執行的檔案（見「給程式讀的介面」）。
   只下載 `kit collect` 真的能收的：主機要在 `allowed_hosts`，作者要在 `collect_sources`，或是自己的來源可以用 `--allow` 加的；團隊來源不在清單的作者，直接說不能收，不下載。
 - 沒有 LICENSE 的不收；只收文字檔，不收捷徑、圖片和 `.github/` 這類資料夾。
 

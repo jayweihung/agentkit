@@ -42,7 +42,7 @@ kit 會把來源 clone 到 `%USERPROFILE%\agentkit\<來源名字>`，再把團�
 
 ## 3. 畫面程式和其他主機
 
-kit 本身只有指令，這份說明都用指令做。Herdr 的面板不在 kit 裡，看你的 Herdr 設定說明。
+kit 沒有畫面，這份說明都用指令做。終端機程式裡的 kit 面板，看那個程式的設定說明。
 
 **每台要跑 agent 的電腦或主機都要裝 kit**：例如連到公司 Linux 開 agent 的話，那台也要裝 kit（`sh unix/install.sh`）並 `kit init`。
 

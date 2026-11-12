@@ -4,7 +4,7 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
-## 下一版（還沒發佈）
+## 0.3.0（2026-11-13）
 
 更新後要做：`kit self-update`、`kit sync`。用 Herdr 的 kit 面板的話，Herdr 的面板改由你的 Herdr 設定提供（看那邊的說明）。
 
@@ -12,8 +12,18 @@
 - Herdr 的 kit 面板（Kit 清單、Agents、每個窗格的 Kit 按鈕和 context 那格）搬出 kit：Herdr 的面板改由你的 Herdr 設定提供（看那邊的說明）。kit 裡不再有 Herdr 的東西。
 - `kit herdr-panel install|uninstall` 拿掉了。
 - 升級（`kit self-update`、重跑安裝）時，已經裝在 Herdr 裡的舊面板 kit 不會去動：不更新、也不刪，怎麼換掉看你的 Herdr 設定說明。kit 自己安裝資料夾裡舊版留下的 `herdr/` 會刪掉。
-- 新增 `kit api`：印一行整數（現在是 `1`）。給畫面程式確認看得懂 kit 的輸出（`kit list --json`、`kit agents --json`、`kit context`、`kit collect --look`）；輸出格式不相容地改變時才加一。
+
+**給程式讀的介面（1.0）**：README 的「給程式讀的介面」是唯一的清單（指令、欄位、錯誤 code）。
+- 新增 `kit api`：印 `major.minor`（現在 `1.0`）。不相容的改變 major 加一，新增欄位或指令 minor 加一。
+- 新增 `kit push --json`（可以加 `--dry-run`）：一行 JSON 寫會送（或送了）哪些檔案、沒送的檔案、commit 訊息、分支、PR 要合進哪裡、推到哪些 remote、PR 的網址。
+- `kit list --json`：每個來源多 `changed`（`kit push` 會送的檔案），每個項目多 `changed`（`kit push` 會送它）。畫面程式不用再自己跑 git。
+- `kit list --json`、`kit agents --json`、`kit push --json`、`kit collect --look`：stdout 只有 JSON，給人看的字都在 stderr；失敗時 stdout 是 `{"error": {"code": ..., "message": ...}}`（例如還沒 `kit init` 是 `not_init`）。
+- `kit help` 列出 `kit collect ... --look` 和 `kit list --json --dir ... --pid ...`。
+
+**其他**
 - `json.awk`（和 `kit.ps1` 裡對應的部分）拿掉只給 Herdr 版面用的操作（`rmwhere`、`addnear`、`addbefore`、`swapwhere`、`rmholder`、`rowaround`、`unrow`）。
+- Windows：`kit push` 判斷哪些檔案要送時分大小寫，跟 Mac／Linux 一樣（`Rules/x.md` 不算 rule）。
+- 在來源資料夾裡跑 `kit push`、`kit new` 這類指令時，kit 用解開捷徑後的資料夾路徑（Mac／Linux 跟 Windows 一樣）。
 
 ## 0.2.0（2026-11-12）
 
