@@ -171,6 +171,21 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 
 對話內容只拿來算大小，不印出、不存；問 Claude Code 時它回的帳號資料不留。問的那一次不寫對話紀錄，但 Claude Code 啟動時照常會更新它自己的東西（例如 plugins 的快取，或在 `~/.claude/projects/<資料夾>/` 建一個空的 `memory/`）。紀錄檔超過 32 MB 時只讀第一行和最後 32 MB（`KIT_CTX_DETAIL_TAIL`，byte）。
 
+## agent 讀過、改過的檔案
+
+    kit files --pid <agent 的 pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
+
+列出那個 agent 讀過（`read`）、改過（`edit`）、新寫（`write`）的檔案，最新的在前面，同一個檔案只列一次（看最後一次碰它），最多 200 個。
+給畫面程式做「這個 agent 碰過哪些檔案」的清單、點一下用編輯器打開（`--json`）；沒有 `--json` 時印給人看的清單。
+`--pid`、`--tool`、`--dir` 跟 `kit context` 一樣（沒給 `--tool` 就從程式看出來，沒給 `--dir` 就用它現在的資料夾）。
+
+- 從 agent 自己的紀錄檔讀，只拿路徑，不印也不存對話內容或檔案內容。紀錄檔只讀最後 8 MB（`KIT_CTX_TAIL`）。
+- Claude：它的對話紀錄，加上它的 sub-agent 的（`<session>/subagents/*.jsonl`），照紀錄裡的時間排在一起。`Read`、`Edit`／`MultiEdit`／`NotebookEdit`、`Write`。
+- Codex：它的 patch 改了哪些檔案（新增的算 `write`，改、刪、搬的算 `edit`）。Codex 是用 shell 讀檔案的，看不出讀了什麼，所以沒有 `read`。
+- omp：它的 `read`、`edit`、`write` 工具（`read` 的 `:行號` 拿掉；`skill://` 這類不是檔案的不算）。
+- 相對路徑接在 agent 的資料夾後面。檔案已經不在的：讀過的不列，寫過、改過的還是列（`exists: false`）。
+- `--git`：再加上那個資料夾所在的 git repo 裡 `git status` 有變動的檔案（標 `git`，排在後面，已經列過的不重複，只列還在的檔案；改名的列新名字）。不是 git repo 就不加。
+
 ## 給程式讀的介面
 
 kit 本身只有指令。想用按的（例如在終端機程式裡加一個 kit 面板），那個程式跑下面這些指令。**這一節是唯一的清單**：沒列在這裡的輸出（給人看的字）隨時會改，程式不要去解析。
@@ -178,10 +193,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.0
+    kit api        →  1.1
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.0。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.1（1.0 加上 `kit files`：要用它的程式先確認 minor 至少是 1）。
 
 ### 共同規則
 
@@ -222,7 +237,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 ### `kit list --json [--dir 資料夾] [--pid 程式編號]`
 
     {
-      "kit": "0.3.0",
+      "kit": "0.4.0",
       "sources": [
         {"name": "team", "source": "<網址或資料夾>", "dir": "<clone 的資料夾>", "push": "pr", "changed": ["rules/a.md", "skills/b/SKILL.md"]}],
       "tools": ["claude", "codex", "omp"],
@@ -240,7 +255,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### `kit agents --json`
 
-    {"kit": "0.3.0", "tools": ["claude"], "available": {"rule": [...], "skill": [...], "mcp": [...]},
+    {"kit": "0.4.0", "tools": ["claude"], "available": {"rule": [...], "skill": [...], "mcp": [...]},
      "agents": [{"name", "description", "source", "path", "git", "rules", "skills", "mcp", "tools_only", "tools_deny", "prompt"}]}
 
 `git`：`new`（還沒 commit）、`changed`（改過）、`""`（沒改）、`no-git`。
@@ -270,6 +285,21 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 ### `kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]`
 
 一行 JSON，欄位見上面「agent 的 context 用了多少」和「context 細項」。找不到資料不算失敗：`used`、`window`、`pct` 是 `null`（`--detail` 時另外有字串 `error` 寫原因）。參數不對時印給人看的字、exit 不是 0（不是上面的錯誤 JSON）。
+
+### `kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] --json`（1.1 起）
+
+一行：
+
+    {"tool": "claude", "log": "<紀錄檔>", "dir": "<agent 的資料夾>",
+     "files": [{"path": "/work/app/src/main.py", "tag": "edit", "exists": true},
+               {"path": "/work/app/README.md", "tag": "read", "exists": true}]}
+
+- `tool`：`claude`、`codex`、`omp`（看不出來是 `""`，不認得的照 `--tool` 寫的）。`log`：讀的紀錄檔（Claude：主對話的那個；找不到是 `""`）。`dir`：agent 的資料夾（`--dir`，或它現在的資料夾）。
+- `files`：最新的在前面，同一個路徑只有一個（看最後一次碰它），最多 200 個（含 `--git` 加的）。`path` 是絕對路徑；有磁碟機代號的（Windows）寫成 `C:/x/y`（`/`，代號照紀錄裡的寫法），比對時不分大小寫。
+- `tag`：`read`（讀過）、`edit`（改過；Codex 刪掉、搬走的也算）、`write`（整個寫、新增）、`git`（`--git` 加的，`git status` 有變動）。之後可能加新的 tag（minor 加一）：不認得的當作 `edit`。
+- `exists`：現在是不是一個檔案。不在的只會是 `edit` 或 `write`（讀過但不在的、`git` 的不列）。
+- 找不到紀錄檔（或不認得那種 agent）不算失敗：`files` 是 `[]`（`--git` 的照樣有）、`log` 是 `""`，最後另外有 `"note"`（給人看的原因）。
+- 參數不對：exit 1，`{"error": {"code": "usage", ...}}`。
 
 ### 動作類指令
 

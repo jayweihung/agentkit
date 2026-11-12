@@ -4,6 +4,16 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.4.0（2026-11-13）
+
+更新後要做：`kit self-update`。
+
+**agent 讀過、改過的檔案**
+- 新增 `kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]`：從 agent 自己的紀錄檔列出它讀過、改過、新寫的檔案（新的在前，同一個檔案只列一次，最多 200 個）。Claude 連它的 sub-agent 一起看；Codex 只看得到 patch 改的檔案；omp 看它的 read／edit／write。`--git` 再加上 `git status` 有變動的檔案。只拿路徑，不讀出對話或檔案內容。
+- 給畫面程式用（例如在 agent 窗格上跳出清單、點一下用編輯器打開）：`--json` 印一行 JSON，欄位見 README 的「給程式讀的介面」。
+
+**給程式讀的介面（1.1）**：`kit api` 印 `1.1`（新增 `kit files`）。要用 `kit files` 的程式先確認 minor 至少是 1。
+
 ## 0.3.0（2026-11-13）
 
 更新後要做：`kit self-update`、`kit sync`。用 Herdr 的 kit 面板的話，Herdr 的面板改由你的 Herdr 設定提供（看那邊的說明）。

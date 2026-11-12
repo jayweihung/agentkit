@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.0
+KIT_API=1.1
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -1485,8 +1485,18 @@ EOF
     u=$(( u + ${tb:-0} / 4 + ${im:-0} * 1600 ))
     ctx_json omp "$u" "$w" session "$m"
 }
+agent_guess() { # agent_guess PID TOOL DIR : A_TOOL (TOOL, else guessed from the process: claude|codex|omp) and A_DIR (DIR, else
+    # the process's folder), for kit context and kit files
+    local a p=$1; A_TOOL=$2; A_DIR=$3
+    if [ -z "$A_TOOL" ]; then
+        a=$(proc_args "$p"); set -- $a
+        case ${1##*/}:${2:-} in claude*|*:*claude*) A_TOOL=claude;; codex*|*:*codex*) A_TOOL=codex;; omp*|*:*omp*) A_TOOL=omp;; esac
+    fi
+    case $A_TOOL in claude-code) A_TOOL=claude;; pi) A_TOOL=omp;; esac
+    [ -n "$A_DIR" ] || A_DIR=$(proc_cwd "$p")
+}
 cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [--detail [--fresh]] : how full that agent's context is (JSON)
-    local pid="" tool="" dir="" detail="" fresh="" a f p use="用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]"
+    local pid="" tool="" dir="" detail="" fresh="" f p use="用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]"
     while [ $# -gt 0 ]; do
         case $1 in
             --pid|--tool|--dir) [ $# -ge 2 ] || die "$use"
@@ -1497,12 +1507,7 @@ cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [-
         esac
     done
     case $pid in ""|*[!0-9]*) die "$use";; esac
-    if [ -z "$tool" ]; then
-        a=$(proc_args "$pid"); set -- $a
-        case ${1##*/}:${2:-} in claude*|*:*claude*) tool=claude;; codex*|*:*codex*) tool=codex;; omp*|*:*omp*) tool=omp;; esac
-    fi
-    case $tool in claude-code) tool=claude;; pi) tool=omp;; esac
-    [ -n "$dir" ] || dir=$(proc_cwd "$pid")
+    agent_guess "$pid" "$tool" "$dir"; tool=$A_TOOL; dir=$A_DIR
     # the kept numbers (and details) of processes that are gone
     for f in "$CTX_DIR"/claude-*.json "$CTX_DIR"/detail-*.json; do
         [ -f "$f" ] || continue; p=${f##*/}; p=${p#*-}; p=${p%.json}
@@ -1665,6 +1670,17 @@ EOF
     case $sid in ""|*[!A-Za-z0-9_-]*) return 1;; esac
     printf '%s\t%s\t%s\n' "$sid" "$cwd" "$tp"
 }
+claude_where() { # claude_where PID DIR -> "id TAB folder TAB transcript" (transcript: only one under ~/.claude/projects that
+    # is there, else empty); fails when there is no session
+    local s sid cwd tp
+    s=$(claude_session "$1" "$2") || return 1
+    sid=${s%%"$TAB"*}; s=${s#*"$TAB"}; cwd=${s%%"$TAB"*}; tp=${s#*"$TAB"}
+    [ -n "$cwd" ] || cwd=$2
+    case $tp in "$CLAUDE_DIR"/projects/*.jsonl) [ -f "$tp" ] || tp="";; *) tp="";; esac
+    [ -n "$tp" ] || tp="$CLAUDE_DIR/projects/$(printf '%s' "$cwd" | sed 's|[^A-Za-z0-9]|-|g')/$sid.jsonl"
+    [ -f "$tp" ] || tp=""
+    printf '%s\t%s\t%s\n' "$sid" "$cwd" "$tp"
+}
 claude_probe() { # claude_probe ID DIR : Claude Code's own get_context_usage answer for that session (one line), else nothing
     local bin t=${KIT_CTX_PROBE_TIMEOUT:-30}
     bin=$(command -v claude 2>/dev/null) || bin="$HOME/.local/bin/claude"
@@ -1767,15 +1783,8 @@ claude_detail() { # claude_detail PID DIR -> rows
     local pid=$1 dir=$2 s sid="" cwd="" tp="" live lu lw lm probe rows tot max mdl msgs buf thr w used other free why=""
     live=$(claude_ctx "$pid" "$dir"); lu=$(num_of used "$live"); lw=$(num_of window "$live"); lm=$(str_of model "$live")
     printf 'H\ttool\tclaude\nH\tcompact\t/compact\nH\twith_text\t1\nH\tclear\t/clear\n'
-    if s=$(claude_session "$pid" "$dir"); then
-        IFS=$TAB read -r sid cwd tp <<EOF
-$s
-EOF
-    fi
+    if s=$(claude_where "$pid" "$dir"); then sid=${s%%"$TAB"*}; s=${s#*"$TAB"}; cwd=${s%%"$TAB"*}; tp=${s#*"$TAB"}; fi
     [ -n "$cwd" ] || cwd=$dir
-    case $tp in "$CLAUDE_DIR"/projects/*.jsonl) [ -f "$tp" ] || tp="";; *) tp="";; esac
-    [ -n "$tp" ] || { [ -n "$sid" ] && tp="$CLAUDE_DIR/projects/$(printf '%s' "$cwd" | sed 's|[^A-Za-z0-9]|-|g')/$sid.jsonl"; }
-    [ -f "$tp" ] || tp=""
     printf 'H\tsession\t%s\n' "$sid"
     if [ -z "$sid" ]; then why="找不到這個 Claude 的 session"
     elif [ "${KIT_CTX_PROBE:-1}" = 0 ]; then why="沒有問 Claude Code（KIT_CTX_PROBE=0）"
@@ -2094,6 +2103,178 @@ ctx_detail() { # ctx_detail PID TOOL DIR FRESH : the detail JSON, kept a minute
     j=$(ctx_rows "$pid" "$tool" "$dir" | ctx_assemble "$now")
     { [ -d "$CTX_DIR" ] || mkdir -p "$CTX_DIR"; } 2>/dev/null && { printf '%s\n' "$j" > "$f.$$" && mv -f "$f.$$" "$f"; } 2>/dev/null
     printf '%s\n' "$j"
+}
+
+# ---------- kit files: the files an agent read or changed ----------
+# One JSON line (kit.ps1 prints the same), from the agent's own log; only paths are taken from it, never what was said:
+#   {"tool", "log", "dir", "files": [{"path", "tag": read|edit|write|git, "exists"}][, "note"]}
+# Newest first, one entry per path (its newest touch), at most FILES_MAX; a path that is gone only when it was written
+# or edited. Each log: its last KIT_CTX_TAIL bytes (8 MB).
+# Claude: its transcript and its sub-agents' (<session>/subagents/*.jsonl), merged by the records' timestamps (then by
+#   the files' age, oldest first, and line order); Read / Edit, MultiEdit, NotebookEdit / Write. api-request records
+#   repeat old calls: skipped.
+# Codex: what its patches changed (FileChange items, patch_apply events, *** Add/Update/Delete File: in its tool calls);
+#   Codex reads files through the shell, so reads are not seen.
+# omp: its read / edit / write tool calls (a read's :LINES taken off; xd://, skill:// ... are not files).
+# The producers print "time TAB file TAB n TAB tag TAB path" (time: 17 digits, path as in the log, escapes undone).
+FILES_MAX=200
+FILES_CLAUDE='
+cut && NR == 1 { next }
+/^\{"type":"api-request/ { next }
+index($0, "\"type\":\"assistant\"") && index($0, "\"type\":\"tool_use\"") {
+    s = $0; x = ""; while (match(s, /"timestamp":"[^"]*"/)) { x = substr(s, RSTART + 13, RLENGTH - 14); s = substr(s, RSTART + RLENGTH) }
+    if (x != "") { gsub(/[^0-9]/, "", x); t = substr(x "00000000000000000", 1, 17) } else if (t == "") t = "00000000000000000"
+    s = $0
+    while ((i = index(s, "\"type\":\"tool_use\"")) > 0) {
+        s = substr(s, i + 17); seg = s; j = index(seg, "\"type\":\"tool_use\""); if (j) seg = substr(seg, 1, j - 1)
+        n = strv(seg, "name"); g = ""
+        if (n == "Read") g = "read"; else if (n == "Write") g = "write"; else if (n == "Edit" || n == "MultiEdit" || n == "NotebookEdit") g = "edit"
+        if (g == "") continue
+        p = strv(seg, "file_path"); if (p == "") p = strv(seg, "notebook_path")
+        if (p != "") print t "\t" fi "\t" (++r) "\t" g "\t" unesc(p)
+    }
+}'
+FILES_CODEX='
+function ptxt(s, lv,   o, c) { # the path after "*** Add File: " up to the end of its line (LV: 2 when the patch is a string in a string)
+    o = ""
+    while (s != "") {
+        c = substr(s, 1, 1)
+        if (c == "\"") break
+        if (c == "\\") {
+            if (lv == 1 && substr(s, 2, 1) == "\\") { o = o "\\"; s = substr(s, 3); continue }
+            if (lv == 1 && substr(s, 2, 1) == "/") { o = o "/"; s = substr(s, 3); continue }
+            if (lv == 2 && substr(s, 1, 4) == "\\\\\\\\") { o = o "\\"; s = substr(s, 5); continue }
+            break
+        }
+        o = o c; s = substr(s, 2)
+    }
+    sub(/[ \t]+$/, "", o); return o
+}
+function out(g, p) { if (p != "") print "00000000000000000\t" fi "\t" (++r) "\t" g "\t" p }
+cut && NR == 1 { next }
+(index($0, "\"type\":\"FileChange\"") || index($0, "\"type\":\"patch_apply_")) && (i = index($0, "\"changes\":")) {
+    s = substr($0, i + 10)
+    while (match(s, /"([^"\\]|\\.)*":\{("type":)?"(add|update|delete)"/)) {
+        m = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+        out(m ~ /"add"$/ ? "write" : "edit", unesc(substr(m, 2, index(m, "\":{") - 2)))
+    }
+    s = substr($0, i + 10)
+    while (match(s, /"path":"([^"\\]|\\.)*","kind":\{"type":"(add|update|delete)"/)) {
+        m = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+        out(m ~ /"add"$/ ? "write" : "edit", unesc(substr(m, 9, index(m, "\",\"kind\":") - 9)))
+    }
+    s = substr($0, i + 10)
+    while (match(s, /"move_path":"([^"\\]|\\.)*"/)) { out("edit", unesc(substr(s, RSTART + 13, RLENGTH - 14))); s = substr(s, RSTART + RLENGTH) }
+    next
+}
+index($0, "\"type\":\"custom_tool_call\"") || index($0, "\"type\":\"function_call\"") {
+    s = $0
+    while (match(s, /\*\*\* (Add File|Update File|Delete File|Move to): /)) {
+        lv = substr(s, RSTART - 3, 3) == "\\\\n" ? 2 : 1; m = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+        out(m ~ /Add/ ? "write" : "edit", ptxt(s, lv))
+    }
+}'
+FILES_OMP='
+function out(g, p) { if (p != "" && p !~ /^[A-Za-z][A-Za-z0-9+.-]+:\/\//) print "00000000000000000\t" fi "\t" (++r) "\t" g "\t" p }
+cut && NR == 1 { next }
+index($0, "\"role\":\"assistant\"") && index($0, "{\"type\":\"toolCall\"") {
+    s = $0
+    while ((i = index(s, "{\"type\":\"toolCall\"")) > 0) {
+        s = substr(s, i + 18); seg = s; j = index(seg, "{\"type\":\"toolCall\""); if (j) seg = substr(seg, 1, j - 1)
+        n = strv(seg, "name"); if (n != "read" && n != "edit" && n != "write") continue
+        k = index(seg, "\"arguments\":{"); if (!k) continue
+        a = substr(seg, k + 12); p = unesc(strv(a, "path"))
+        if (n == "read") sub(/:[0-9][0-9,-]*$/, "", p)
+        out(n, p)
+        if (n != "edit") continue
+        x = strv(a, "input")   # hashline edits: a [path#hash] line before each file
+        while (match(x, /(^|\\n)\[[^]]+#[0-9A-Za-z]+]\\n/)) {
+            h = substr(x, RSTART, RLENGTH); x = substr(x, RSTART + RLENGTH - 2)
+            sub(/^\\n/, "", h); sub(/#[0-9A-Za-z]+]\\n$/, "", h); out("edit", unesc(substr(h, 2)))
+        }
+    }
+}'
+# newest first, one per path: absolute (a relative one under DIR; ~/ is the home folder), a path with a drive letter
+# (or \\server) with / and compared ignoring case; then the --git ones (after a line --git--), not already listed
+FILES_PICK='
+BEGIN { dir = ENVIRON["FILES_DIR"]; home = ENVIRON["HOME"] }
+function abs(p,   d, i) {
+    if (substr(p, 1, 2) == "~/" && home != "") p = home substr(p, 2)
+    if (p !~ /^\// && p !~ /^[A-Za-z]:[\\\/]/ && p !~ /^\\\\/) {
+        if (dir == "") return ""
+        while (substr(p, 1, 2) == "./") p = substr(p, 3)
+        d = dir; sub(/[\\\/]+$/, "", d); p = d "/" p
+    }
+    if (p ~ /^[A-Za-z]:[\\\/]/ || p ~ /^\\\\/) gsub(/\\/, "/", p)
+    while ((i = index(p, "/./")) > 0) p = substr(p, 1, i) substr(p, i + 3)
+    return p
+}
+function key(p) { return (p ~ /^[A-Za-z]:\// || p ~ /^\/\//) ? tolower(p) : p }
+function pick(g, p,   k) { p = abs(p); if (p == "") return; k = key(p); if (k in seen) return; seen[k] = 1; print g "\t" p }
+$0 == "--git--" { git = 1; next }
+{ g = $1; p = substr($0, length(g) + 2) }
+!git { n++; tg[n] = g; pa[n] = p; next }
+{ m++; gp[m] = p }
+END { for (i = n; i >= 1; i--) pick(tg[i], pa[i]); for (i = 1; i <= m; i++) pick("git", gp[i]) }'
+files_rows() { # files_rows TOOL LOG : the rows of every file the log (and, Claude, its sub-agents) shows, oldest first
+    local f i=0 prog
+    case $1 in claude) prog=$FILES_CLAUDE;; codex) prog=$FILES_CODEX;; omp) prog=$FILES_OMP;; *) return 0;; esac
+    [ -n "$2" ] && [ -f "$2" ] || return 0
+    { if [ "$1" = claude ]; then ls -tr "$2" "${2%.jsonl}/subagents/"*.jsonl 2>/dev/null; else printf '%s\n' "$2"; fi; } |
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue; i=$((i + 1))
+        ctx_scan "$f" "BEGIN { fi = $i }$CTX_AWK$prog"
+    done | LC_ALL=C sort -t "$TAB" -k1,1 -k2,2n -k3,3n
+}
+files_git() { # files_git DIR : "git TAB path" for what git status shows in the repo DIR is in (a rename: its new name)
+    local g top
+    [ -n "$1" ] && [ -d "$1" ] && g=$(prog_path git) || return 0
+    top=$(GIT_OPTIONAL_LOCKS=0 "$g" -C "$1" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] || return 0
+    GIT_OPTIONAL_LOCKS=0 "$g" -C "$1" status --porcelain -z --ignore-submodules=all 2>/dev/null | tr '\0' '\n' |
+        FILES_TOP=$top LC_ALL=C awk 'BEGIN { top = ENVIRON["FILES_TOP"] } skip { skip = 0; next }
+            length($0) > 3 { if (substr($0, 1, 2) ~ /[RC]/) skip = 1; print "git\t" top "/" substr($0, 4) }'
+}
+cmd_files() { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git] [--json] : the files that agent read or changed
+    local pid="" tool="" dir="" git="" json="" log="" note="" s picked tag p e n=0 out="" human=""
+    local use="用法：kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]"
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --pid|--tool|--dir) [ $# -ge 2 ] || die_c usage "$use"
+                case $1 in --pid) pid=$2;; --tool) tool=$2;; *) dir=$2;; esac; shift 2;;
+            --git) git=1; shift;;
+            --json) json=1; shift;;
+            *) die_c usage "$use";;
+        esac
+    done
+    case $pid in ""|*[!0-9]*) die_c usage "$use";; esac
+    agent_guess "$pid" "$tool" "$dir"; tool=$A_TOOL; dir=$A_DIR
+    case $tool in
+        claude) s=$(claude_where "$pid" "$dir") && log=${s##*"$TAB"}
+                [ -n "$log" ] || note="找不到這個 Claude 的對話紀錄（~/.claude/projects）";;
+        codex) log=$(codex_rollout "$dir") || note="找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）";;
+        omp) log=$(omp_session "$pid" "$dir"); [ -n "$log" ] || note="找不到這個 omp 的 session（~/.omp/agent/sessions）";;
+        "") note="看不出是哪種 agent（用 --tool claude|codex|omp 指定）";;
+        *) note="不認得這種 agent：${tool}（只認得 claude、codex、omp）";;
+    esac
+    picked=$( { files_rows "$tool" "$log" | cut -f 4-; [ -z "$git" ] || { echo --git--; files_git "$dir"; }; } |
+        FILES_DIR=$dir LC_ALL=C awk -F '\t' "$FILES_PICK")
+    while IFS= read -r p; do
+        tag=${p%%"$TAB"*}; p=${p#*"$TAB"}
+        [ -n "$p" ] || continue
+        if [ -f "$p" ]; then e=true; else case $tag in read|git) continue;; esac; e=false; fi
+        n=$((n + 1)); [ $n -le $FILES_MAX ] || break
+        out="$out${out:+, }{\"path\": $(json_s "$p"), \"tag\": \"$tag\", \"exists\": $e}"
+        human="$human$p  $tag$( [ $e = true ] || printf '（已經不在）')$LF"
+    done <<EOF
+$picked
+EOF
+    if [ -n "$json" ]; then
+        printf '{"tool": %s, "log": %s, "dir": %s, "files": [%s]%s}\n' "$(json_s "$tool")" "$(json_s "$log")" "$(json_s "$dir")" "$out" \
+            "$( [ -z "$note" ] || printf ', "note": %s' "$(json_s "$note")")" >&3
+    else
+        [ -z "$note" ] || warn "$note"
+        if [ -n "$human" ]; then printf '%s' "$human"; else warn "沒有看到讀過或改過的檔案"; fi
+    fi
 }
 
 # ---------- commands ----------
@@ -3652,6 +3833,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
   kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]
                                   那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
+  kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
+                                  那個 agent 讀過、改過的檔案，新的在前（--json 給程式讀；--git：再加上 git 有變動的）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
 
@@ -3679,14 +3862,14 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
-  kit api                           給程式讀的介面版本（major.minor，例如 1.0）：給畫面程式確認看得懂 kit 的輸出。
+  kit api                           給程式讀的介面版本（major.minor，例如 1.1）：給畫面程式確認看得懂 kit 的輸出。
                                     不相容的改變 major 加一；新增欄位或指令 minor 加一（清單看 README 的「給程式讀的介面」）
 EOF
 }
 
-# programs read JSON: list/agents/push --json and collect --look print only JSON on stdout (errors too)
+# programs read JSON: list/agents/push/files --json and collect --look print only JSON on stdout (errors too)
 case ${1:-} in
-    list|ls|agents|push) for a in "$@"; do [ "$a" = --json ] && { json_mode; break; }; done;;
+    list|ls|agents|push|files) for a in "$@"; do [ "$a" = --json ] && { json_mode; break; }; done;;
     collect) for a in "$@"; do [ "$a" = --look ] && { json_mode; break; }; done;;
 esac
 # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook takes it itself)
@@ -3716,6 +3899,7 @@ case ${1:-} in
     install-tool) shift; cmd_install_tool "$@";;
     install-deps) shift; cmd_install_deps "$@";;
     context)   shift; cmd_context "$@";;
+    files)     shift; cmd_files "$@";;
     statusline) shift; cmd_statusline "$@";;
     collect)   shift; cmd_collect "$@";;
     outdated)  shift; cmd_outdated "$@";;

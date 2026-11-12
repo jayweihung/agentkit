@@ -227,7 +227,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.0)' { $rc -eq 0 -and $out -ceq '1.0' }
+Check 'api: one line, major.minor (1.1)' { $rc -eq 0 -and $out -ceq '1.1' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -242,9 +242,9 @@ Check 'help: --json --dir is under kit list' { $out -match "(?m)^  kit list .*`n
 $teamYaml = ReadT "$TEAM/kit.yaml"
 function Team-Version([string]$v) { W "$TEAM/kit.yaml" ($teamYaml.TrimEnd("`n") + "`nkit_version: $v`n") }
 function State-Nag { @((ReadT "$H/.config/agentkit/state.tsv") -split "`n" | Where-Object { $_.StartsWith("nag`t") }).Count }
-Team-Version '0.4.0'
+Team-Version '0.9.0'
 Kit sync
-Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 0.4.0 以上，你的是 ' + $KitVer + '。請打  kit self-update') }
+Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 0.9.0 以上，你的是 ' + $KitVer + '。請打  kit self-update') }
 Kit sync; $o1 = $out; Kit list
 Check 'old kit: told only once' { -not ($o1 + $out).Contains('團隊要') }
 Team-Version '0.10.0'
@@ -1122,6 +1122,62 @@ Check 'statusLine taken out by you: said once, still out' { -not $out.Contains('
 Kit sync --force
 Check 'kit sync --force: kit''s statusLine back' { (JGet "$H/.claude/settings.json" 'statusLine.command') -match 'statusline' }
 Kit uninstall
+
+# ---------- kit files: what an agent read or changed (from its own log) ----------
+$oldH = $H; Set-Home (Join-Path $T 'home8')
+$PF = Join-Path $T 'filesproj'; [void](New-Item -ItemType Directory -Force -Path (Join-Path $PF 'sub')); $PF = (Resolve-Path $PF).ProviderPath
+$PFs = $PF.Replace('\', '/'); $jPF = & $js $PF   # kit files writes a path with a drive letter with /
+foreach ($f in 'a.txt', 'b.txt', 'sub/c.txt', 'nb.ipynb', 'api.txt', 'r1.txt', 'd.txt') { W (Join-Path $PF $f) "x`n" }
+$SID8 = '0a1b2c3d-8888-4444-3333-444455556666'; $PD8 = Join-Path (Join-Path $H '.claude/projects') ($PF -replace '[^A-Za-z0-9]', '-')
+W (Join-Path $H ".claude/sessions/$PID.json") "{`"pid`":$PID,`"sessionId`":`"$SID8`",`"cwd`":`"$jPF`"}`n"
+W (Join-Path $PD8 "$SID8.jsonl") (('{"parentUuid":null,"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"@P/a.txt"}},{"type":"tool_use","id":"t2","name":"Edit","input":{"replace_all":false,"file_path":"@P/b.txt","old_string":"\"file_path\":\"/evil\"","new_string":"SECRET"}},{"type":"tool_use","id":"t3","name":"NotebookEdit","input":{"notebook_path":"@P/nb.ipynb"}}]},"uuid":"u1","timestamp":"2026-11-13T01:00:00.000Z"}' + "`n" +
+    '{"type":"api-request","messages":[{"type":"assistant","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"@P/api.txt"}}]}]}' + "`n" +
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t4","name":"Write","input":{"file_path":"sub/c.txt","content":"SECRET"}},{"type":"tool_use","id":"t5","name":"Read","input":{"file_path":"@P/gone.txt"}},{"type":"tool_use","id":"t6","name":"Write","input":{"file_path":"@P/made.txt","content":"x"}}]},"uuid":"u2","timestamp":"2026-11-13T03:00:00.000Z"}' + "`n").Replace('@P', $jPF))
+W (Join-Path $PD8 "$SID8/subagents/agent-x.jsonl") ('{"isSidechain":true,"message":{"content":[{"type":"tool_use","id":"s1","name":"Read","input":{"file_path":"@P/b.txt"}}]},"type":"assistant","timestamp":"2026-11-13T02:00:00.000Z"}' + "`n").Replace('@P', $jPF)
+$FL = '{"path": "@F/made.txt", "tag": "write", "exists": false}, {"path": "@F/sub/c.txt", "tag": "write", "exists": true}, {"path": "@F/b.txt", "tag": "read", "exists": true}, {"path": "@F/nb.ipynb", "tag": "edit", "exists": true}, {"path": "@F/a.txt", "tag": "read", "exists": true}'.Replace('@F', $PFs)
+KitJ files --pid $PID --tool claude --dir $PF --json
+Check 'files (claude): newest first, one per path, its sub-agent''s merged by time, a relative path under the folder; no api-request, no content' {
+    $rc -eq 0 -and $out.StartsWith('{"tool": "claude", "log": "') -and $out.EndsWith("$SID8.jsonl`", `"dir`": `"$jPF`", `"files`": [$FL]}") -and -not ($out -match 'api\.txt|gone\.txt|SECRET|evil') }
+Kit files --pid $PID --tool claude --dir $PF
+Check 'files: without --json a plain list (path, tag)' { $out.Split("`n")[0].Trim() -ceq "$PFs/made.txt  write（已經不在）" }
+# --git: what git status shows too (paths from the repo's top, a rename's new name, nothing gone or twice)
+Push-Location $PF
+& git init -q; & git add -A; & git -c user.name=a -c user.email=a@a -c core.autocrlf=false commit -qm x; & git mv r1.txt r2.txt; Remove-Item d.txt; Add-Content -LiteralPath b.txt -Value y; W (Join-Path $PF 'g.txt') "n`n"
+$top = "$(& git rev-parse --show-toplevel)".Trim()
+Pop-Location
+KitJ files --pid 1 --tool codex --dir (Join-Path $PF 'sub') --git --json
+Check 'files --git: git status''s files, a rename''s new name, nothing gone; no log: a note' {
+    $out -ceq ('{"tool": "codex", "log": "", "dir": "' + (& $js (Join-Path $PF 'sub')) + '", "files": [{"path": "@T/b.txt", "tag": "git", "exists": true}, {"path": "@T/r2.txt", "tag": "git", "exists": true}, {"path": "@T/g.txt", "tag": "git", "exists": true}], "note": "找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）"}').Replace('@T', $top) }
+KitJ files --pid $PID --tool claude --dir $PF --git --json
+Check 'files --git: after the log''s files' { $out.EndsWith(("[$FL, " + '{"path": "@T/r2.txt", "tag": "git", "exists": true}, {"path": "@T/g.txt", "tag": "git", "exists": true}]}').Replace('@T', $top)) }
+KitJ files --pid 1 --tool vim --dir $PF --json
+Check 'files: an agent kit does not know -> a note, not an error' { $rc -eq 0 -and $out -ceq "{`"tool`": `"vim`", `"log`": `"`", `"dir`": `"$jPF`", `"files`": [], `"note`": `"不認得這種 agent：vim（只認得 claude、codex、omp）`"}" }
+KitJ files --json
+Check 'files: no --pid -> exit 1, error usage on stdout' { $rc -eq 1 -and $out -ceq '{"error": {"code": "usage", "message": "用法：kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]"}}' }
+# Codex: what its patches changed; omp: its read / edit / write calls
+W "$H/.codex/sessions/2026/11/13/rollout-2026-11-13T01-00-00-c8.jsonl" (('{"timestamp":"t","type":"session_meta","payload":{"id":"c8","cwd":"@P"}}' + "`n" +
+    '{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: a.txt\n+SECRET\n*** End Patch\n","call_id":"c1"}}' + "`n" +
+    '{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"apply_patch\",\"*** Begin Patch\\n*** Add File: new.txt\\n+x\\n*** Update File: sub/c.txt\\n*** Move to: sub/c2.txt\\n\"]}","call_id":"c2"}}' + "`n" +
+    '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","changes":{"@P/nb.ipynb":{"type":"update","unified_diff":"\"x\":{\"type\":\"add\"}","move_path":null},"@P/g.txt":{"type":"add","content":"SECRET"}},"status":"completed"}}}' + "`n").Replace('@P', $jPF))
+KitJ files --pid 1 --tool codex --dir $PF --json
+Check 'files (codex): what its patches changed (added: write), relative paths under the folder, renamed; no content' {
+    $out.EndsWith('"files": [{"path": "@F/g.txt", "tag": "write", "exists": true}, {"path": "@F/nb.ipynb", "tag": "edit", "exists": true}, {"path": "@F/sub/c2.txt", "tag": "edit", "exists": false}, {"path": "@F/sub/c.txt", "tag": "edit", "exists": true}, {"path": "@F/new.txt", "tag": "write", "exists": false}, {"path": "@F/a.txt", "tag": "edit", "exists": true}]}'.Replace('@F', $PFs)) }
+W "$H/.omp/agent/sessions/z/s8.jsonl" (('{"type":"session","version":3,"id":"s8","cwd":"@P"}' + "`n" +
+    '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"1","name":"read","arguments":{"path":"@P/a.txt:10-20"}},{"type":"toolCall","id":"2","name":"read","arguments":{"path":"skill://x"}},{"type":"toolCall","id":"3","name":"write","arguments":{"path":"sub/w.txt","content":"SECRET"}}]}}' + "`n" +
+    '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"5","name":"edit","arguments":{"i":"e","input":"[@P/b.txt#F86E]\nPUT >1:\n+SECRET\n"}},{"type":"toolCall","id":"7","name":"write","arguments":{"path":"Q:\\Work\\X.txt"}},{"type":"toolCall","id":"8","name":"edit","arguments":{"path":"q:/work/x.txt"}}]}}' + "`n").Replace('@P', $jPF))
+KitJ files --pid 1 --tool pi --dir $PF --json
+Check 'files (omp): its read/edit/write calls; a drive-letter path with / and compared ignoring case' {
+    $out.EndsWith('"files": [{"path": "q:/work/x.txt", "tag": "edit", "exists": false}, {"path": "@F/b.txt", "tag": "edit", "exists": true}, {"path": "@F/sub/w.txt", "tag": "write", "exists": false}, {"path": "@F/a.txt", "tag": "read", "exists": true}]}'.Replace('@F', $PFs)) }
+if (-not $OnWindows) {
+    $same = $true
+    foreach ($a in @("--pid $PID --tool claude --dir '$PF' --json", "--pid $PID --tool claude --dir '$PF' --git --json", "--pid 1 --tool codex --dir '$PF' --json", "--pid 1 --tool omp --dir '$PF' --json", "--pid 1 --tool vim --dir '$PF' --json", "--json")) {
+        $u = (& /bin/sh -c "cd '$Repo' && HOME='$H' unix/kit files $a 2>/dev/null") -join "`n"
+        Invoke-Expression "KitJ files $a"
+        if ($u -cne $out) { $same = $false; [Console]::WriteLine("  differs: $a") }
+    }
+    Check 'files: unix/kit says the same' { $same }
+}
+Set-Home $oldH
 
 # ---------- collect / outdated (other people's skills; a local repo plays the author) ----------
 function FileUrl([string]$p) { $p = $p.Replace('\', '/'); if ($p.StartsWith('/')) { "file://$p" } else { "file:///$p" } }

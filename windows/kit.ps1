@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.0'
+$script:KitApi = '1.1'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -50,7 +50,7 @@ $script:LogPath = $null
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 
 # ---------- small helpers ----------
-# With --json (list, agents, push) or collect --look, stdout carries only JSON: kit's words go to stderr, and a stop is
+# With --json (list, agents, push, files) or collect --look, stdout carries only JSON: kit's words go to stderr, and a stop is
 # also told on stdout as {"error": {"code": CODE, "message": the same words}} (unix/kit prints the same).
 $script:JsonOut = $false
 function Say([string]$msg) {
@@ -1775,6 +1775,18 @@ function Omp-Session([string]$opid, [string]$cwd) { # the session its terminal p
     }
     $f
 }
+function Agent-Guess([string]$cpid, [string]$tool, [string]$dir) { # @(tool, folder): TOOL, else guessed from the process
+    # (claude|codex|omp); DIR, else the process's folder (for kit context and kit files)
+    if (-not $tool) {
+        $pa = Proc-Args ([int]$cpid)
+        if ($pa) { $w = @($pa.Trim() -split '\s+'); $s2 = ($w[0] + ':' + $(if ($w.Count -gt 1) { $w[1] } else { '' }))
+            $b = ($w[0].Trim('"') -split '[\\/]')[-1]
+            if ($b -like 'claude*' -or $s2 -match ':.*claude') { $tool = 'claude' } elseif ($b -like 'codex*' -or $s2 -match ':.*codex') { $tool = 'codex' } elseif ($b -like 'omp*' -or $s2 -match ':.*omp') { $tool = 'omp' } }
+    }
+    if ($tool -ceq 'claude-code') { $tool = 'claude' } elseif ($tool -ceq 'pi') { $tool = 'omp' }
+    if (-not $dir) { $dir = Proc-Cwd ([int]$cpid) }
+    , @($tool, $dir)
+}
 function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [--detail [--fresh]] : how full that agent's context is (JSON)
     $use = '用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]'
     $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $detail = $false; $fresh = $false
@@ -1788,14 +1800,7 @@ function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] 
         if ($a -ceq '--pid') { $cpid = $v } elseif ($a -ceq '--tool') { $tool = $v } else { $dir = $v }
     }
     if ($cpid -cnotmatch '^[0-9]+\z') { Die $use }
-    if (-not $tool) {
-        $pa = Proc-Args ([int]$cpid)
-        if ($pa) { $w = @($pa.Trim() -split '\s+'); $s2 = ($w[0] + ':' + $(if ($w.Count -gt 1) { $w[1] } else { '' }))
-            $b = ($w[0].Trim('"') -split '[\\/]')[-1]
-            if ($b -like 'claude*' -or $s2 -match ':.*claude') { $tool = 'claude' } elseif ($b -like 'codex*' -or $s2 -match ':.*codex') { $tool = 'codex' } elseif ($b -like 'omp*' -or $s2 -match ':.*omp') { $tool = 'omp' } }
-    }
-    if ($tool -ceq 'claude-code') { $tool = 'claude' } elseif ($tool -ceq 'pi') { $tool = 'omp' }
-    if (-not $dir) { $dir = Proc-Cwd ([int]$cpid) }
+    $g = Agent-Guess $cpid $tool $dir; $tool = $g[0]; $dir = $g[1]
     # the kept numbers (and details) of processes that are gone
     if (Test-Path -LiteralPath $CtxDir) {
         foreach ($f in @(Get-ChildItem -LiteralPath $CtxDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -clike 'claude-*.json' -or $_.Name -clike 'detail-*.json' })) {
@@ -2086,6 +2091,17 @@ function Claude-Session([string]$cpid, [string]$dir) { # @(id, folder, transcrip
     if ($sid -cnotmatch '^[A-Za-z0-9_-]+\z') { return $null }
     , @($sid, $cwd, $tp)
 }
+function Claude-Where([string]$cpid, [string]$dir) { # @(id, folder, transcript) (transcript: only one under ~/.claude/projects
+    # that is there, else ''), else $null when there is no session
+    $s = Claude-Session $cpid $dir; if (-not $s) { return $null }
+    $sid = $s[0]; $cwd = $s[1]; $tp = $s[2]
+    if (-not $cwd) { $cwd = $dir }
+    $pd = Join-Path $ClaudeDir 'projects'
+    if (-not (Ctx-Under $tp $pd) -or -not $tp.EndsWith('.jsonl', $Ord) -or -not (Test-Path -LiteralPath $tp -PathType Leaf)) { $tp = '' }
+    if (-not $tp) { $tp = Join-Path (Join-Path $pd ($cwd -creplace '[^A-Za-z0-9]', '-')) "$sid.jsonl" }
+    if (-not (Test-Path -LiteralPath $tp -PathType Leaf)) { $tp = '' }
+    , @($sid, $cwd, $tp)
+}
 function Ctx-Arg([string]$a) { # one argument on a command line (Windows rules; .NET splits it the same way on mac/Linux)
     if ($a -ne '' -and $a -notmatch '[\s"]') { return $a }
     '"' + ([regex]::Replace($a, '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
@@ -2262,12 +2278,8 @@ function Claude-Detail([string]$cpid, [string]$dir, $R) { # the rows for a Claud
     $live = Claude-Ctx $cpid $dir; $lu = Num-Of 'used' $live; $lw = Num-Of 'window' $live; $lm = Str-Of 'model' $live
     foreach ($x in @("H`ttool`tclaude", "H`tcompact`t/compact", "H`twith_text`t1", "H`tclear`t/clear")) { $R.Add($x) }
     $sid = ''; $cwd = ''; $tp = ''
-    $s = Claude-Session $cpid $dir; if ($s) { $sid = $s[0]; $cwd = $s[1]; $tp = $s[2] }
+    $s = Claude-Where $cpid $dir; if ($s) { $sid = $s[0]; $cwd = $s[1]; $tp = $s[2] }
     if (-not $cwd) { $cwd = $dir }
-    $pd = Join-Path $ClaudeDir 'projects'
-    if (-not (Ctx-Under $tp $pd) -or -not $tp.EndsWith('.jsonl', $Ord) -or -not (Test-Path -LiteralPath $tp -PathType Leaf)) { $tp = '' }
-    if (-not $tp -and $sid) { $tp = Join-Path (Join-Path $pd ($cwd -creplace '[^A-Za-z0-9]', '-')) "$sid.jsonl" }
-    if ($tp -and -not (Test-Path -LiteralPath $tp -PathType Leaf)) { $tp = '' }
     $R.Add("H`tsession`t$sid")
     $why = ''; $pr = New-List
     if (-not $sid) { $why = '找不到這個 Claude 的 session' }
@@ -2626,6 +2638,194 @@ function Ctx-Detail([string]$cpid, [string]$tool, [string]$dir, [bool]$fresh) { 
     $j = Ctx-Assemble $R ([string]$now)
     try { Ensure-Dir $CtxDir; $tmp = "$f.$PID"; [IO.File]::WriteAllText($tmp, $j + "`n", $Utf8); Move-Item -LiteralPath $tmp -Destination $f -Force } catch { }
     [Console]::Out.Write($j + "`n")
+}
+
+# ---------- kit files: the files an agent read or changed ----------
+# The same JSON line as unix/kit (its comments there say what is taken from each tool's log). Only paths are taken from
+# a log, never what was said. Each log: its last KIT_CTX_TAIL bytes (8 MB).
+$script:FilesMax = 200
+$script:FilesZero = '00000000000000000'
+$script:FilesTsRx = [regex]'"timestamp":"[^"]*"'
+$script:FilesChangeRx = [regex]'"(?:[^"\\]|\\.)*":\{(?:"type":)?"(add|update|delete)"'
+$script:FilesKindRx = [regex]'"path":"((?:[^"\\]|\\.)*)","kind":\{"type":"(add|update|delete)"'
+$script:FilesMoveRx = [regex]'"move_path":"((?:[^"\\]|\\.)*)"'
+$script:FilesPatchRx = [regex]'\*\*\* (Add File|Update File|Delete File|Move to): '
+$script:FilesHashRx = [regex]'(?:^|\\n)\[([^\]]+)#[0-9A-Za-z]+\]\\n'
+$script:FilesUriRx = [regex]'^[A-Za-z][A-Za-z0-9+.-]+://'
+function Files-Ptxt([string]$s, [int]$lv) { # the path after "*** Add File: " up to the end of its line (LV: 2 when the patch is a string in a string)
+    $o = New-Object Text.StringBuilder; $i = 0
+    while ($i -lt $s.Length) {
+        $c = $s[$i]
+        if ($c -eq [char]'"') { break }
+        if ($c -eq [char]'\') {
+            if ($lv -eq 1 -and $i + 1 -lt $s.Length -and $s[$i + 1] -eq [char]'\') { [void]$o.Append('\'); $i += 2; continue }
+            if ($lv -eq 1 -and $i + 1 -lt $s.Length -and $s[$i + 1] -eq [char]'/') { [void]$o.Append('/'); $i += 2; continue }
+            if ($lv -eq 2 -and $i + 3 -lt $s.Length -and $s.Substring($i, 4) -ceq '\\\\') { [void]$o.Append('\'); $i += 4; continue }
+            break
+        }
+        [void]$o.Append($c); $i++
+    }
+    $o.ToString().TrimEnd([char]' ', [char]"`t")
+}
+function Files-Scan([string]$tool, [string]$f, [int]$fi, $Keys, $Vals) { # the rows of one log: a sort key (time, file, n) in KEYS, @(tag, path) in VALS
+    $o = Ctx-Open $f $CtxTail; if (-not $o) { return }
+    $t = ''; $r = 0
+    try {
+        while ($null -ne ($l = $o[0].ReadLine())) {
+            $add = New-Object 'System.Collections.Generic.List[object]'
+            if ($tool -ceq 'claude') {
+                if ($l.StartsWith('{"type":"api-request', $Ord) -or -not $l.Contains('"type":"assistant"') -or -not $l.Contains('"type":"tool_use"')) { continue }
+                $ms = $FilesTsRx.Matches($l)
+                $x = ''; if ($ms.Count -gt 0) { $x = $ms[$ms.Count - 1].Value; $x = $x.Substring(13, $x.Length - 14) }
+                if ($x) { $t = (($x -creplace '[^0-9]', '') + $FilesZero).Substring(0, 17) } elseif (-not $t) { $t = $FilesZero }
+                $s = $l; $i = $s.IndexOf('"type":"tool_use"', $Ord)
+                while ($i -ge 0) {
+                    $s = $s.Substring($i + 17); $i = $s.IndexOf('"type":"tool_use"', $Ord)
+                    $seg = if ($i -ge 0) { $s.Substring(0, $i) } else { $s }
+                    $n = Ctx-Strv $seg 'name'; $g = ''
+                    if ($n -ceq 'Read') { $g = 'read' } elseif ($n -ceq 'Write') { $g = 'write' } elseif ($n -ceq 'Edit' -or $n -ceq 'MultiEdit' -or $n -ceq 'NotebookEdit') { $g = 'edit' }
+                    if (-not $g) { continue }
+                    $p = Ctx-Strv $seg 'file_path'; if (-not $p) { $p = Ctx-Strv $seg 'notebook_path' }
+                    if ($p) { $add.Add(@($g, (Ctx-Unesc $p))) }
+                }
+            } elseif ($tool -ceq 'codex') {
+                $t = $FilesZero
+                $i = $l.IndexOf('"changes":', $Ord)
+                if (($l.Contains('"type":"FileChange"') -or $l.Contains('"type":"patch_apply_')) -and $i -ge 0) {
+                    $s = $l.Substring($i + 10)
+                    foreach ($m in $FilesChangeRx.Matches($s)) {
+                        $v = $m.Value; $add.Add(@($(if ($m.Groups[1].Value -ceq 'add') { 'write' } else { 'edit' }), (Ctx-Unesc $v.Substring(1, $v.IndexOf('":{', $Ord) - 1))))
+                    }
+                    foreach ($m in $FilesKindRx.Matches($s)) { $add.Add(@($(if ($m.Groups[2].Value -ceq 'add') { 'write' } else { 'edit' }), (Ctx-Unesc $m.Groups[1].Value))) }
+                    foreach ($m in $FilesMoveRx.Matches($s)) { $add.Add(@('edit', (Ctx-Unesc $m.Groups[1].Value))) }
+                } elseif ($l.Contains('"type":"custom_tool_call"') -or $l.Contains('"type":"function_call"')) {
+                    $pos = 0
+                    foreach ($m in $FilesPatchRx.Matches($l)) {
+                        $b = [Math]::Max($pos, $m.Index - 3); $lv = if ($l.Substring($b, $m.Index - $b) -ceq '\\n') { 2 } else { 1 }
+                        $pos = $m.Index + $m.Length
+                        $add.Add(@($(if ($m.Groups[1].Value -ceq 'Add File') { 'write' } else { 'edit' }), (Files-Ptxt $l.Substring($pos) $lv)))
+                    }
+                }
+            } else {
+                $t = $FilesZero
+                if (-not $l.Contains('"role":"assistant"') -or -not $l.Contains('{"type":"toolCall"')) { continue }
+                $s = $l; $i = $s.IndexOf('{"type":"toolCall"', $Ord)
+                while ($i -ge 0) {
+                    $s = $s.Substring($i + 18); $i = $s.IndexOf('{"type":"toolCall"', $Ord)
+                    $seg = if ($i -ge 0) { $s.Substring(0, $i) } else { $s }
+                    $n = Ctx-Strv $seg 'name'; if ($n -cne 'read' -and $n -cne 'edit' -and $n -cne 'write') { continue }
+                    $k = $seg.IndexOf('"arguments":{', $Ord); if ($k -lt 0) { continue }
+                    $a = $seg.Substring($k + 12); $p = Ctx-Unesc (Ctx-Strv $a 'path')
+                    if ($n -ceq 'read') { $p = $p -creplace ':[0-9][0-9,-]*\z', '' }
+                    $add.Add(@($n, $p))
+                    if ($n -cne 'edit') { continue }
+                    $x = Ctx-Strv $a 'input'; $q = 0   # hashline edits: a [path#hash] line before each file
+                    while (($m = $FilesHashRx.Match($x, $q)).Success) { $add.Add(@('edit', (Ctx-Unesc $m.Groups[1].Value))); $q = $m.Index + $m.Length - 2 }
+                }
+            }
+            foreach ($e in $add) {
+                if (-not $e[1] -or ($tool -ceq 'omp' -and $FilesUriRx.IsMatch($e[1]))) { continue }
+                $r++; $Keys.Add($t + $fi.ToString('D6', $Inv) + $r.ToString('D10', $Inv)); $Vals.Add($e)
+            }
+        }
+    } finally { $o[0].Dispose() }
+}
+function Files-Rows([string]$tool, [string]$log) { # @(tag, path) of every file the log (and, Claude, its sub-agents) shows, oldest first
+    if (@('claude', 'codex', 'omp') -cnotcontains $tool -or -not $log -or -not (Test-Path -LiteralPath $log -PathType Leaf)) { return , @() }
+    $fs = @($log)
+    if ($tool -ceq 'claude') {   # the oldest file first (as ls -tr)
+        $sd = Join-Path $log.Substring(0, $log.Length - 6) 'subagents'
+        $all = @(Get-Item -LiteralPath $log) + @(Get-ChildItem -LiteralPath $sd -Filter '*.jsonl' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name.EndsWith('.jsonl', $Ord) })
+        $fs = @($all | Sort-Object @{ Expression = { $_.LastWriteTimeUtc }; Ascending = $true }, @{ Expression = { $_.FullName }; Descending = $true } | ForEach-Object { $_.FullName })
+    }
+    $K = New-List; $V = New-Object 'System.Collections.Generic.List[object]'; $fi = 0
+    foreach ($f in $fs) { if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }; $fi++; Files-Scan $tool $f $fi $K $V }
+    $ka = $K.ToArray(); $ix = New-Object 'int[]' $ka.Length; for ($i = 0; $i -lt $ix.Length; $i++) { $ix[$i] = $i }
+    [Array]::Sort($ka, $ix, [StringComparer]::Ordinal)   # (an index: PowerShell may hand Sort a copy of an object[])
+    $out = New-Object 'System.Collections.Generic.List[object]'; foreach ($i in $ix) { $out.Add($V[$i]) }
+    , $out
+}
+function Files-Git([string]$dir) { # what git status shows in the repo DIR is in (absolute; a rename: its new name)
+    $out = New-List
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) { return , $out }
+    $g = Prog-Path 'git'; if (-not $g) { return , $out }
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; $ol = $env:GIT_OPTIONAL_LOCKS; $env:GIT_OPTIONAL_LOCKS = '0'
+    try {
+        $top = "$(& $g -C $dir rev-parse --show-toplevel 2>$null)".Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $top) { return , $out }
+        $z = (@(& $g -C $dir status --porcelain -z --ignore-submodules=all 2>$null) | ForEach-Object { "$_" }) -join "`n"
+        if ($LASTEXITCODE -ne 0) { return , $out }
+        $skip = $false
+        foreach ($e in $z.Split([char]0)) {
+            if ($skip) { $skip = $false; continue }
+            if ($e.Length -le 3) { continue }
+            if ($e.Substring(0, 2) -cmatch '[RC]') { $skip = $true }
+            $out.Add($top + '/' + $e.Substring(3))
+        }
+    } finally { $ErrorActionPreference = $old; $env:GIT_OPTIONAL_LOCKS = $ol }
+    , $out
+}
+function Files-Abs([string]$p, [string]$dir) { # absolute (a relative one under DIR; ~/ is the home folder); a drive letter (or \\server): with /
+    if ($p.StartsWith('~/', $Ord) -and $UserHome) { $p = $UserHome + $p.Substring(1) }
+    if (-not $p.StartsWith('/', $Ord) -and $p -cnotmatch '^[A-Za-z]:[\\/]' -and -not $p.StartsWith('\\', $Ord)) {
+        if (-not $dir) { return '' }
+        while ($p.StartsWith('./', $Ord)) { $p = $p.Substring(2) }
+        $p = ($dir -creplace '[\\/]+\z', '') + '/' + $p
+    }
+    if ($p -cmatch '^[A-Za-z]:[\\/]' -or $p.StartsWith('\\', $Ord)) { $p = $p.Replace('\', '/') }
+    while (($i = $p.IndexOf('/./', $Ord)) -ge 0) { $p = $p.Substring(0, $i + 1) + $p.Substring($i + 3) }
+    $p
+}
+function Files-Pick($rows, $gits, [string]$dir) { # newest first, one per path (with a drive letter: compared ignoring case); then the git ones
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    $all = New-Object 'System.Collections.Generic.List[object]'
+    for ($i = $rows.Count - 1; $i -ge 0; $i--) { $all.Add($rows[$i]) }
+    foreach ($p in $gits) { $all.Add(@('git', $p)) }
+    foreach ($e in $all) {
+        $p = Files-Abs $e[1] $dir; if (-not $p) { continue }
+        $k = if ($p -cmatch '^[A-Za-z]:/' -or $p.StartsWith('//', $Ord)) { $p.ToLowerInvariant() } else { $p }
+        if ($seen.Add($k)) { $out.Add(@($e[0], $p)) }
+    }
+    , $out
+}
+function Cmd-Files($rest) { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git] [--json] : the files that agent read or changed
+    $use = '用法：kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]'
+    $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $git = $false; $json = $false
+    for ($i = 0; $i -lt $rest.Count; $i++) {
+        $a = [string]$rest[$i]
+        if ($a -ceq '--git') { $git = $true; continue }
+        if ($a -ceq '--json') { $json = $true; continue }
+        if ($a -cne '--pid' -and $a -cne '--tool' -and $a -cne '--dir') { Die-C usage $use }
+        if ($i + 1 -ge $rest.Count) { Die-C usage $use }
+        $v = [string]$rest[++$i]
+        if ($a -ceq '--pid') { $cpid = $v } elseif ($a -ceq '--tool') { $tool = $v } else { $dir = $v }
+    }
+    if ($cpid -cnotmatch '^[0-9]+\z') { Die-C usage $use }
+    $g = Agent-Guess $cpid $tool $dir; $tool = [string]$g[0]; $dir = [string]$g[1]
+    $log = ''; $note = ''
+    if ($tool -ceq 'claude') { $s = Claude-Where $cpid $dir; if ($s) { $log = $s[2] }; if (-not $log) { $note = '找不到這個 Claude 的對話紀錄（~/.claude/projects）' } }
+    elseif ($tool -ceq 'codex') { $log = Codex-Rollout $dir; if (-not $log) { $note = '找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）' } }
+    elseif ($tool -ceq 'omp') { $log = Omp-Session $cpid $dir; if (-not $log) { $note = '找不到這個 omp 的 session（~/.omp/agent/sessions）' } }
+    elseif (-not $tool) { $note = '看不出是哪種 agent（用 --tool claude|codex|omp 指定）' }
+    else { $note = "不認得這種 agent：${tool}（只認得 claude、codex、omp）" }
+    $gits = if ($git) { Files-Git $dir } else { @() }
+    $items = New-List; $human = New-List; $n = 0
+    foreach ($e in (Files-Pick (Files-Rows $tool $log) $gits $dir)) {
+        $tag = $e[0]; $p = $e[1]
+        if ([IO.File]::Exists($p)) { $ex = 'true' } elseif ($tag -ceq 'read' -or $tag -ceq 'git') { continue } else { $ex = 'false' }
+        $n++; if ($n -gt $FilesMax) { break }
+        $items.Add('{"path": ' + (Json-S $p) + ', "tag": "' + $tag + '", "exists": ' + $ex + '}')
+        $human.Add("$p  $tag" + $(if ($ex -ceq 'false') { '（已經不在）' } else { '' }))
+    }
+    if ($json) {
+        $j = '{"tool": ' + (Json-S $tool) + ', "log": ' + (Json-S $log) + ', "dir": ' + (Json-S $dir) + ', "files": [' + ($items -join ', ') + ']'
+        if ($note) { $j += ', "note": ' + (Json-S $note) }
+        Out-Json ($j + '}')
+    } else {
+        if ($note) { Warn $note }
+        if ($human.Count -gt 0) { foreach ($h in $human) { Say $h } } else { Warn '沒有看到讀過或改過的檔案' }
+    }
 }
 
 # ---------- commands ----------
@@ -4315,6 +4515,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
   kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]
                                   那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
+  kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
+                                  那個 agent 讀過、改過的檔案，新的在前（--json 給程式讀；--git：再加上 git 有變動的）
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit sync [--force]                現在更新（kit run 會自動做）
 
@@ -4341,7 +4543,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
   kit --version
-  kit api                           給程式讀的介面版本（major.minor，例如 1.0）：給畫面程式確認看得懂 kit 的輸出。
+  kit api                           給程式讀的介面版本（major.minor，例如 1.1）：給畫面程式確認看得懂 kit 的輸出。
                                     不相容的改變 major 加一；新增欄位或指令 minor 加一（清單看 README 的「給程式讀的介面」）
 '@
 }
@@ -4349,8 +4551,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 # ---------- main ----------
 $cmd = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
 $rest = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
-# programs read JSON: list/agents/push --json and collect --look print only JSON on stdout (errors too)
-if ((@('list', 'ls', 'agents', 'push') -ccontains $cmd -and @($rest) -ccontains '--json') -or ($cmd -ceq 'collect' -and @($rest) -ccontains '--look')) { $script:JsonOut = $true }
+# programs read JSON: list/agents/push/files --json and collect --look print only JSON on stdout (errors too)
+if ((@('list', 'ls', 'agents', 'push', 'files') -ccontains $cmd -and @($rest) -ccontains '--json') -or ($cmd -ceq 'collect' -and @($rest) -ccontains '--look')) { $script:JsonOut = $true }
 try {
     # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook / --bg take it themselves)
     if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent', 'install-deps') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
@@ -4368,6 +4570,7 @@ try {
         'install-tool' { Cmd-InstallTool $rest }
         'install-deps' { Cmd-InstallDeps $rest }
         'context' { Cmd-Context $rest }
+        'files' { Cmd-Files $rest }
         'statusline' { Cmd-Statusline }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
         'run' { Cmd-Run $rest }
