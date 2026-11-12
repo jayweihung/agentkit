@@ -99,7 +99,7 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
   - pip 一律是 `python3 -m pip install --user --only-binary=:all: <套件>`：只裝現成的 wheel，套件的 `setup.py` 不會被執行。
   - winget 先用 `--scope user`（只裝給這個帳號）；那個套件沒有這種安裝程式時，kit 會說一聲再改成一般安裝。
 - **怎麼看這台有沒有**：只看有配方的程式（沒有 `tools/<名字>.yaml` 的名字不會被執行），跑它的 `--version`，最多讀 4 KB、最多等 5 秒（`KIT_PROBE_WAIT` 可改）。Mac 沒裝 Command Line Tools 時，`/usr/bin/git`、`/usr/bin/python3` 只會跳出安裝視窗，kit 當作沒有。
-- **在哪裡看到**：Herdr 的 Kit 清單，skill 下面會出現「⚠ 需要 Node.js 18 以上（這台沒有）［安裝］」。按「安裝」先顯示 kit 要執行的指令，按「確定安裝」才執行。
+- **在哪裡看到**：`kit tools`，和 `kit list --json` 裡每個 skill 的 `needs`（畫面程式可以拿來在 skill 下面顯示「⚠ 需要 Node.js 18 以上（這台沒有）［安裝］」，按了再跑 `kit install-tool`）。
 - 從網路收來的 skill 不會帶 `tools/` 進來：只有你自己倉裡、或團隊審過的 `tools/` 會用到。
 
 ### skill 自己的套件（npm install、pip install）
@@ -139,7 +139,7 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 
     kit context --pid <agent 的 pid> [--tool claude|codex|omp] [--dir 資料夾]
 
-印出 JSON：`used`（用了幾個 token）、`window`（上限）、`pct`（%）、`source`（從哪裡讀的）、`model`。Herdr 每個 agent 窗格上方的「context 35% 139k/400k」就是它（70% 以上變黃、90% 以上變紅）。只讀數字，不讀對話內容。
+印出 JSON：`used`（用了幾個 token）、`window`（上限）、`pct`（%）、`source`（從哪裡讀的）、`model`。給畫面程式在 agent 窗格上顯示「context 35% 139k/400k」這種數字用。只讀數字，不讀對話內容。
 
 | agent | 從哪裡讀 | % 怎麼算 |
 |---|---|---|
@@ -156,12 +156,12 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 
     kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] --detail [--fresh]
 
-像 Claude Code 的 `/context`，印出一行 JSON（`kit.ps1` 印的一模一樣）。Herdr 裡按窗格上方的 context 那格看到的就是它（見 [docs/herdr.md](docs/herdr.md)）。
+像 Claude Code 的 `/context`，印出一行 JSON（`kit.ps1` 印的一模一樣），給畫面程式顯示細項用。
 
 - 上面那幾個欄位（`used` 是即時的總數），加上 `at`（什麼時候問的）、`exact`（分類是不是工具自己算的）、`session`、`compact_at`（自動壓縮的點）、`commands`（這個工具的壓縮、清空指令：Claude `/compact`（可帶文字）、`/clear`；Codex `/compact`（不帶文字）、`/new`；omp `/compact`（可帶文字）、`/new`）、`note`、`error`。
 - `categories`：各分類（系統提示、系統工具、MCP 工具、記憶檔／指示檔、Skills、對話訊息、壓縮後的摘要……），每個有 `tokens`、`kind`（`used`；`deferred` 延後載入，不佔空間；`buffer` 自動壓縮保留區；`free` 可用空間）、`est`（是不是估算）。
 - `groups`：可以展開的清單（記憶檔、Skills、MCP 依伺服器（裡面再分工具）、對話內容依種類、工具依名稱（呼叫＋結果）、附加內容依種類、自訂 agents、斜線指令），多的在前。
-- 同一個 pid 的答案留 60 秒（`KIT_CTX_DETAIL_TTL`，秒），`--fresh` 重新問。窗格上每 15 秒的一般 `kit context` 沒有變，一樣只讀數字。
+- 同一個 pid 的答案留 60 秒（`KIT_CTX_DETAIL_TTL`，秒），`--fresh` 重新問。一般的 `kit context`（沒有 `--detail`）沒有變，一樣只讀數字。
 
 | agent | 細項從哪裡來 | 準不準 |
 |---|---|---|
@@ -171,19 +171,18 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 
 對話內容只拿來算大小，不印出、不存；問 Claude Code 時它回的帳號資料不留。問的那一次不寫對話紀錄，但 Claude Code 啟動時照常會更新它自己的東西（例如 plugins 的快取，或在 `~/.claude/projects/<資料夾>/` 建一個空的 `memory/`）。紀錄檔超過 32 MB 時只讀第一行和最後 32 MB（`KIT_CTX_DETAIL_TAIL`，byte）。
 
-## Herdr 的 kit 面板
+## 給畫面程式讀的輸出
 
-不想打指令的話，可以在 Herdr 裡用（Windows、Mac、Linux 都一樣）：
+kit 本身只有指令。想用按的（例如在終端機程式裡加一個 kit 面板），那個程式跑這些指令、讀它們印的 JSON：
 
-- **每個 agent 視窗上的 Kit 按鈕**：這個 agent 在用哪些規則、skill、MCP，加上或拿掉。
-- **上排的 Kit（倉庫）**：看、改、新增規則、skill、MCP，改好按清單上面黃色那條的「送出」（`kit push`）。
-- **上排的 Agents**：kit 做好的 agent 用了哪些東西，用 Claude、Codex 或 omp 開起來。
+    kit list --json [--dir 資料夾]   來源、每個項目的種類、名字、狀態、說明、檔案位置、是不是新的、缺哪些程式
+    kit agents --json                每個 agent 用了哪些規則、skill、MCP
+    kit context --pid <pid> ...      agent 的 context 用了多少（見上面）
+    kit collect <網址> --look        收之前先看看（見下面）
+    kit api                          印一個整數（現在是 1）
 
-    kit herdr-panel install       裝進 Herdr
-    kit herdr-panel uninstall     拿掉，Herdr 回到原本的樣子
-
-畫面和每顆按鈕的說明（附示意圖）：[docs/herdr.md](docs/herdr.md)。
-面板讀的是 `kit list --json`、`kit agents --json`（給程式讀的 JSON：來源、每個項目的種類、名字、狀態、說明、檔案位置、是不是新的）。
+`kit api` 是給畫面程式確認看得懂 kit 的輸出：上面這些輸出的格式不相容地改變時才加一。印出來的不是它認得的數字（或舊的 kit 沒有這個指令），畫面程式就該請你更新 kit 或它自己。
+kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ## 把 kit 帶進公司的 git server
 
@@ -213,7 +212,7 @@ README 會一起帶過去（它就是使用說明），跟其他檔案一樣要�
 - 只收 `kit.yaml` 的 `collect_sources` 裡的作者。自己的來源（`push: direct`）可以加 `--allow`，收的時候一起把作者加進清單；團隊來源要維護者改清單。
   `kit push` 平常不送 `kit.yaml`；但它只改了 `collect_sources` 時（`--allow` 加的）會一起送。
 - 網址的主機要在 `allowed_hosts` 裡（收進來的來源自己有列就看它的，沒列就看所有來源的；都沒列就不限）。`file:///` 是本機的資料夾，不算主機。
-- `--look`：只下載來看、什麼都不寫，用 JSON 列出找到的 skill、授權、會執行的檔案（Herdr 面板的「下載看看」用它）。
+- `--look`：只下載來看、什麼都不寫，用 JSON 列出找到的 skill、授權、會執行的檔案（畫面程式的「下載看看」可以用它）。
   只下載 `kit collect` 真的能收的：主機要在 `allowed_hosts`，作者要在 `collect_sources`，或是自己的來源可以用 `--allow` 加的；團隊來源不在清單的作者，直接說不能收，不下載。
 - 沒有 LICENSE 的不收；只收文字檔，不收捷徑、圖片和 `.github/` 這類資料夾。
 
