@@ -1873,7 +1873,7 @@ function Dir-ClaudeDeny([string]$dir, $names) { # deny rules -> .claude/settings
 }
 # Claude Code's own tools that kit knows: a placed agent's tools.only becomes deny rules for the others (Claude's settings
 # have no "only these"; a tool Claude adds later is not in the list). unix/kit has the same list.
-$ClaudeTools = @('Agent', 'Bash', 'Edit', 'Glob', 'Grep', 'MultiEdit', 'NotebookEdit', 'Read', 'Task', 'TodoWrite', 'WebFetch', 'WebSearch', 'Write')
+$ClaudeTools = @('Agent', 'Bash', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'Read', 'Task', 'TodoWrite', 'WebFetch', 'WebSearch', 'Write')
 function Place-Deny($only, $deny) { # the deny rules of a placed agent's folder (Claude): DENY, and with ONLY the other built-in tools
     $only = @($only | Where-Object { $_ })
     $out = @($deny | Where-Object { $_ })
@@ -4616,7 +4616,7 @@ function Cmd-Place($rest) { # kit place <agent> <dir> [--tool claude|codex|omp] 
     # what this tool cannot take from the agent in a folder (the README's table)
     $only = @(YGet-From $fm 'tools.only'); $deny = @(YGet-From $fm 'tools.deny')
     switch ($tool) {
-        'claude' { if ($only.Count -gt 0) { $warns += 'Claude 的設定沒有「只開這些工具」：tools.only 改成把其他內建工具寫進 deny（Claude 之後新加的工具擋不到）' } }
+        'claude' { }                                     # tools.only: deny for the others (kit check tells the author)
         'codex' {
             if ($only.Count -gt 0) { $warns += 'Codex 不能只開某些內建工具：tools.only 不套用' }
             if (@($deny | Where-Object { $_ -and -not $_.StartsWith('mcp__') }).Count -gt 0) { $warns += 'Codex 只能禁用 MCP 的工具：其他的 tools.deny 不套用' }
@@ -4925,6 +4925,8 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
                     $key = if ($k -eq 'mcp') { 'mcp' } else { "${k}s" }
                     foreach ($r in @(YGet-From $fm $key)) { if ($r -and -not $where.Contains("${k}:$r")) { Problem "${rel}: 找不到 ${k}:$r" } }
                 }
+                # for whoever writes it, not a problem: what tools.only can't do in Claude Code
+                if ($loud -and @(YGet-From $fm 'tools.only').Count -gt 0) { Warn "${rel}: tools.only 在 Claude 是把其他內建工具寫進 deny：Claude 之後新加的內建工具擋不到（要擋就寫進 tools.deny）" }
             }
         }
         foreach ($n in Names-In (Join-Path $d 'rules') '*.md') {

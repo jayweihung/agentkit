@@ -996,8 +996,9 @@ EOF
     rm -f "$ops"; drop_made "$f"
 }
 # Claude Code's own tools that kit knows: a placed agent's tools.only becomes deny rules for the others (Claude's settings
-# have no "only these"; a tool Claude adds later is not in the list). kit.ps1 has the same list.
-CLAUDE_TOOLS="Agent Bash Edit Glob Grep MultiEdit NotebookEdit Read Task TodoWrite WebFetch WebSearch Write"
+# have no "only these"; a tool Claude adds later is not in the list). kit.ps1 has the same list. No MultiEdit: newer
+# Claude Code has none (a deny rule for it is warned about), and in one that has it, denying Edit covers it.
+CLAUDE_TOOLS="Agent Bash Edit Glob Grep NotebookEdit Read Task TodoWrite WebFetch WebSearch Write"
 place_deny() { # place_deny ONLY DENY : the deny rules of a placed agent's folder (Claude): DENY, and with ONLY the other built-in tools
     local t
     { printf '%s\n' "$2"
@@ -3260,7 +3261,7 @@ cmd_place() { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR
     # what this tool cannot take from the agent in a folder (the README's table)
     only=$(fm_val "$fm" tools.only); deny=$(fm_val "$fm" tools.deny)
     case $tool in
-    claude) [ -z "$only" ] || warns="${warns}Claude 的設定沒有「只開這些工具」：tools.only 改成把其他內建工具寫進 deny（Claude 之後新加的工具擋不到）$LF";;
+    claude) ;;                                               # tools.only: deny for the others (kit check tells the author)
     codex)
         [ -z "$only" ] || warns="${warns}Codex 不能只開某些內建工具：tools.only 不套用$LF"
         printf '%s\n' "$deny" | grep -v '^mcp__' | grep -q . && warns="${warns}Codex 只能禁用 MCP 的工具：其他的 tools.deny 不套用$LF";;
@@ -3636,7 +3637,9 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
                 for k in rule skill mcp; do      # the keys: rules, skills, mcp
                     v=${k}s; [ $k = mcp ] && v=mcp
                     for ref in $(fm_val "$fm" "$v"); do grep -q "^$k:$ref$TAB" "$names" || problem "$rel: 找不到 $k:$ref"; done
-                done;;
+                done
+                # for whoever writes it, not a problem: what tools.only can't do in Claude Code
+                [ -z "$(fm_val "$fm" tools.only)" ] || warn "$rel: tools.only 在 Claude 是把其他內建工具寫進 deny：Claude 之後新加的內建工具擋不到（要擋就寫進 tools.deny）";;
             esac
         done
         for f in "$d"/rules/*.md; do [ -f "$f" ] || continue; valid_name "$(basename "$f" .md)" || problem "${f#"$d"/}: 名字只能用小寫英文、數字和 -"; [ -s "$f" ] || problem "${f#"$d"/}: 是空的"; done

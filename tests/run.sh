@@ -304,6 +304,8 @@ out=$(kit check "$TEAM" 2>&1)
 check "check: an agent's missing MCP is reported" 'echo "$out" | grep -qF "agents/gerrit.md: 找不到 mcp:nope"'
 cp "$T/gerrit.bak" "$TEAM/agents/gerrit.md"
 rm -rf "$TEAM/skills/quote"
+out=$(kit check "$TEAM" 2>&1)
+check "check: an agent with tools.only: a note for its author (what Claude can't do), not a problem" 'echo "$out" | grep -qF "kit: agents/gerrit.md: tools.only 在 Claude 是把其他內建工具寫進 deny" && ! echo "$out" | grep -qF "kit check: agents/gerrit.md: tools.only"'
 
 # ---------- kit_version: tell once when the team wants a newer kit ----------
 cp "$TEAM/kit.yaml" "$T/kit.yaml.orig"
@@ -902,7 +904,6 @@ H6="$T/home6"; mkdir -p "$H6/.codex" "$H6/.omp/agent"
 W="$T/spaces"; mkdir -p "$W"; W=$(cd "$W" && pwd -P)
 printf -- '---\nname: helper\ndescription: helps\nskills: [gerrit-review, not-there]\n---\n\nYou help.\n' > "$TEAM/agents/helper.md"
 snap() { (cd "$1" && find . -type f -exec cksum {} + | LC_ALL=C sort -k3); }
-ONLY_W="Claude 的設定沒有「只開這些工具」：tools.only 改成把其他內建工具寫進 deny（Claude 之後新加的工具擋不到）"
 (
 export HOME="$H6"
 # a deny rule kit wants that you had already: yours (kit uninstall leaves it)
@@ -911,12 +912,12 @@ kit init "$TEAM" >/dev/null 2>&1
 check "deny you had already: not counted as kit's" '! grep -q "^deny[[:space:]]" "$H6/.config/agentkit/state.tsv" && [ "$(jget "$H6/.claude/settings.json" permissions.deny | tr -d " \n")" = "[\"mcp__gerrit__submit_change\"]" ]'
 G="$W/gerrit"
 out=$(kit place gerrit "$G" --json 2>/dev/null); rc=$?
-check "place --json: one line: dir, agent, tool, command, warnings" '[ $rc -eq 0 ] && [ "$out" = "{\"dir\": \"$G\", \"agent\": \"gerrit\", \"tool\": \"claude\", \"command\": [\"claude\"], \"warnings\": [\"$ONLY_W\"]}" ]'
+check "place --json: one line: dir, agent, tool, command, warnings" '[ $rc -eq 0 ] && [ "$out" = "{\"dir\": \"$G\", \"agent\": \"gerrit\", \"tool\": \"claude\", \"command\": [\"claude\"], \"warnings\": []}" ]'
 check "place: .agentkit says which agent; the agent's rules, skills, MCP come from the agent file (not listed)" 'grep -qx "agent:gerrit" "$G/.agentkit" && grep -qx "tool:claude" "$G/.agentkit" && ! grep -q "^rule:\|^skill:\|^mcp:" "$G/.agentkit"'
 check "place: CLAUDE.md imports the rule, then the agent's prompt" 'grep -q "^@.*rules/gerrit-flow.md" "$G/CLAUDE.md" && grep -qx "<!-- agent: gerrit -->" "$G/CLAUDE.md" && grep -qx "You are the Gerrit helper." "$G/CLAUDE.md"'
 check "place: AGENTS.md (Codex, omp): the rule text and the prompt" 'grep -q "Only comment, never submit." "$G/AGENTS.md" && grep -qx "You are the Gerrit helper." "$G/AGENTS.md"'
 check "place: skills for Claude and Codex/omp, the MCP in .mcp.json" '[ -f "$G/.claude/skills/gerrit-review/SKILL.md" ] && [ -f "$G/.agents/skills/gerrit-review/SKILL.md" ] && [ "$(jget "$G/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ]'
-check "place: Claude's tool limits in settings.local.json (tools.deny, and the built-in tools tools.only leaves out)" 'python3 -c "import json,sys;d=json.load(open(sys.argv[1]));x=d[\"permissions\"][\"deny\"];assert x[0]==\"mcp__gerrit__submit_change\" and \"Bash\" in x and \"Write\" in x and \"Agent\" in x and not set(x)&{\"Read\",\"Grep\",\"Glob\"};assert d[\"enabledMcpjsonServers\"]==[\"gerrit\"]" "$G/.claude/settings.local.json" && [ ! -e "$G/.claude/settings.local.json.kit-backup" ]'
+check "place: Claude's tool limits in settings.local.json (tools.deny, and the built-in tools tools.only leaves out)" 'python3 -c "import json,sys;d=json.load(open(sys.argv[1]));x=d[\"permissions\"][\"deny\"];assert x[0]==\"mcp__gerrit__submit_change\" and \"Bash\" in x and \"Write\" in x and \"Agent\" in x and \"MultiEdit\" not in x and not set(x)&{\"Read\",\"Grep\",\"Glob\"};assert d[\"enabledMcpjsonServers\"]==[\"gerrit\"]" "$G/.claude/settings.local.json" && [ ! -e "$G/.claude/settings.local.json.kit-backup" ]'
 check "place: Codex: the agent's MCP tool deny as disabled_tools in the folder's config" 'grep -q "^\[mcp_servers.gerrit\]" "$G/.codex/config.toml" && grep -qF "disabled_tools = [\"submit_change\"]" "$G/.codex/config.toml"'
 check "place: not the account" '[ ! -e "$H6/.claude/skills/gerrit-review" ] && ! grep -q "Gerrit helper" "$H6/.claude/CLAUDE.md" && ! grep -q "\"Write\"" "$H6/.claude/settings.json"'
 check "place: kit keeps the folder up to date (kit sync)" 'grep -qxF "$G" "$HOME/.config/agentkit/dirs"'

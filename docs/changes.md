@@ -4,6 +4,14 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.5.2（2026-11-13）
+
+更新後要做：`kit self-update`、`kit sync`（放過 agent 的資料夾會重寫 Claude 的工具限制）。
+
+**把 agent 放到資料夾（kit place）**
+- 放好之後不再顯示「Claude 的設定沒有『只開這些工具』……」這行：放 agent 的人對它什麼都不能做。改成寫 agent 檔的人跑 `kit check`（`kit push` 也會跑）時看到一行提醒，不算問題。Codex、omp 真的不套用的限制照樣會說。
+- Claude 的工具限制不再寫 `MultiEdit`：新的 Claude Code 沒有這個工具，每次開都會警告「Deny rule MultiEdit matches no tool」。有這個工具的舊版 Claude，擋 `Edit` 就會一起擋它。
+
 ## 0.5.1（2026-11-13）
 
 更新後要做：`kit self-update`。

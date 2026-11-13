@@ -103,6 +103,8 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 | Codex | ✅ | ✅ | ✅ | ✗ | 只限 MCP 工具 |
 | omp | ✅ | ✅ | ✗（要用 `kit add mcp` 加到全域） | ✗ | ✗ |
 
+Claude 的 tools.only：Claude 之後新加的內建工具不在 kit 的清單裡，擋不到（要擋就寫進 tools.deny）。這件事放 agent 的人不會看到，寫 agent 檔的人跑 `kit check` 時會看到一行提醒。
+
 ## skill 需要的程式（node、python…）
 
 有的 skill 要靠別的程式才能跑，例如 archify 要 Node.js 18 以上。kit 會自己看出來，缺了就幫你裝（你按了才裝）。

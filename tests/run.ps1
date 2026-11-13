@@ -248,6 +248,8 @@ W "$TEAM/agents/gerrit.md" "---`nname: gerrit`ndescription: Gerrit helper`nmcp: 
 Kit check $TEAM
 Check "check: an agent's missing MCP is reported" { $out.Contains('agents/gerrit.md: 找不到 mcp:nope') }
 W "$TEAM/agents/gerrit.md" $gBak
+Kit check $TEAM
+Check 'check: an agent with tools.only: a note for its author (what Claude can''t do), not a problem' { $out.Contains('agents/gerrit.md: tools.only 在 Claude 是把其他內建工具寫進 deny') -and -not $out.Contains('kit check: agents/gerrit.md: tools.only') }
 # kit run leaves a marker (process -> agent): kit list --json --pid tells the pane's agent
 $rund = Join-Path $H '.config/agentkit/run'; W (Join-Path $rund "$PID") "gerrit`n"
 $sp = @{ FilePath = $Exe; ArgumentList = @('-NoProfile', '-Command', 'exit 0'); PassThru = $true }; if ($OnWindows) { $sp['WindowStyle'] = 'Hidden' }
@@ -827,17 +829,16 @@ $SP = Join-Path $T 'spaces'; [void](New-Item -ItemType Directory -Force -Path $S
 $SR = if ($OnWindows) { (Get-Item -LiteralPath $SP).FullName } else { "$(& /bin/sh -c 'cd "$1" && pwd -P' sh $SP)".Trim() }
 function JS([string]$s) { $s.Replace('\', '\\') }   # a path as kit writes it in JSON
 function Snap([string]$d) { (@(Get-ChildItem -LiteralPath $d -Recurse -Force -File | Sort-Object FullName | ForEach-Object { $_.FullName + ' ' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) })) -join "`n" }
-$OnlyW = 'Claude 的設定沒有「只開這些工具」：tools.only 改成把其他內建工具寫進 deny（Claude 之後新加的工具擋不到）'
 # a deny rule kit wants that you had already: yours (kit uninstall leaves it)
 W "$H/.claude/settings.json" "{`"permissions`": {`"deny`": [`"mcp__gerrit__submit_change`"]}}`n"
 Kit init $TEAM
 Check 'deny you had already: not counted as kit''s' { -not ((ReadT "$H/.config/agentkit/state.tsv") -match "(?m)^deny`t") -and (Flat (JGet "$H/.claude/settings.json" 'permissions.deny')) -ceq '["mcp__gerrit__submit_change"]' }
 $G = Join-Path $SP 'gerrit'; $GR = Join-Path $SR 'gerrit'
 KitJ place gerrit $G --json
-Check 'place --json: one line: dir, agent, tool, command, warnings' { $rc -eq 0 -and $out -ceq "{`"dir`": `"$(JS $GR)`", `"agent`": `"gerrit`", `"tool`": `"claude`", `"command`": [`"claude`"], `"warnings`": [`"$OnlyW`"]}" }
+Check 'place --json: one line: dir, agent, tool, command, warnings' { $rc -eq 0 -and $out -ceq "{`"dir`": `"$(JS $GR)`", `"agent`": `"gerrit`", `"tool`": `"claude`", `"command`": [`"claude`"], `"warnings`": []}" }
 Check 'place: .agentkit says which agent; the agent''s rules, skills, MCP come from the agent file (not listed)' { $a = ReadT "$G/.agentkit"; $a.Contains("agent:gerrit`ntool:claude`n") -and -not ($a -cmatch '(?m)^(rule|skill|mcp):') }
 Check 'place: CLAUDE.md imports the rule, then the prompt; AGENTS.md has both as text' { $c = ReadT "$G/CLAUDE.md"; $c.Contains('rules/gerrit-flow.md') -and $c.Contains("<!-- agent: gerrit -->`nYou are the Gerrit helper.`n") -and (ReadT "$G/AGENTS.md").Contains('Only comment, never submit.') -and (ReadT "$G/AGENTS.md").Contains('You are the Gerrit helper.') }
-Check 'place: skills, the MCP, Claude''s tool limits in settings.local.json' { (Test-Path "$G/.claude/skills/gerrit-review/SKILL.md") -and (Test-Path "$G/.agents/skills/gerrit-review/SKILL.md") -and (JGet "$G/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (Flat (JGet "$G/.claude/settings.local.json" 'permissions.deny')) -ceq '["mcp__gerrit__submit_change","Agent","Bash","Edit","MultiEdit","NotebookEdit","Task","TodoWrite","WebFetch","WebSearch","Write"]' -and -not (Test-Path "$G/.claude/settings.local.json.kit-backup") }
+Check 'place: skills, the MCP, Claude''s tool limits in settings.local.json' { (Test-Path "$G/.claude/skills/gerrit-review/SKILL.md") -and (Test-Path "$G/.agents/skills/gerrit-review/SKILL.md") -and (JGet "$G/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (Flat (JGet "$G/.claude/settings.local.json" 'permissions.deny')) -ceq '["mcp__gerrit__submit_change","Agent","Bash","Edit","NotebookEdit","Task","TodoWrite","WebFetch","WebSearch","Write"]' -and -not (Test-Path "$G/.claude/settings.local.json.kit-backup") }
 Check 'place: Codex: the MCP tool deny as disabled_tools in the folder''s config' { (ReadT "$G/.codex/config.toml").Contains("[mcp_servers.gerrit]") -and (ReadT "$G/.codex/config.toml").Contains('disabled_tools = ["submit_change"]') }
 Check 'place: not the account' { -not (Test-Path "$H/.claude/skills/gerrit-review") -and -not ((ReadT "$H/.claude/CLAUDE.md").Contains('Gerrit helper')) }
 $s1 = Snap $G
