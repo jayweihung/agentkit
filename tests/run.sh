@@ -207,7 +207,7 @@ cp "$HOME/.claude.json" "$T/cj.bak"
 printf 'set\tprojects|%s|mcpServers|lm\t{"command": "y"}\nset\tmcpServers|um\t{"command": "z"}\n' "$PP" > "$T/cj.ops"
 LC_ALL=C awk -f "$JA" -v ops="$T/cj.ops" -v sep="|" "$T/cj.bak" > "$HOME/.claude.json"
 kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here.json" 2>&1; rc=$?
-check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"agent\": null, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": []}, \"items\": [" "$T/here.json"'
+check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"agent\": null, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": [], \"agent\": null}, \"items\": [" "$T/here.json"'
 check "list --json --dir: rules here and above, AGENTS.md for codex/omp" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"CLAUDE.md\", \"path\": \"$PP/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \".claude/rules/r1.md\", \"path\": \"$PP/.claude/rules/r1.md\", \"tools\": \"claude\", \"description\": \"Rule one\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"$PU/CLAUDE.md\", \"path\": \"$PU/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"Project rules\"}" "$T/here.json" &&
@@ -227,7 +227,7 @@ check "list --json --pid: numbers only" '[ $rc -ne 0 ] && echo "$out" | grep -q 
 RUND="$HOME/.config/agentkit/run"; mkdir -p "$RUND"; echo gerrit > "$RUND/$$"
 ( : ) & dp=$!; wait $dp; echo gone > "$RUND/$dp"
 kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here2.json" 2>&1
-check "list --json --pid: the agent kit run started there" 'grep -qF "\"user\": null, \"agent\": {\"name\": \"gerrit\", \"source\": \"team\", \"rules\": [\"gerrit-flow\"], \"skills\": [\"gerrit-review\"], \"mcp\": [\"gerrit\"]}, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": []}, \"items\": [" "$T/here2.json"'
+check "list --json --pid: the agent kit run started there" 'grep -qF "\"user\": null, \"agent\": {\"name\": \"gerrit\", \"source\": \"team\", \"rules\": [\"gerrit-flow\"], \"skills\": [\"gerrit-review\"], \"mcp\": [\"gerrit\"]}, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": [], \"agent\": null}, \"items\": [" "$T/here2.json"'
 check "list --json --pid: the marker of a kit run that ended is dropped" '[ ! -e "$RUND/$dp" ] && [ -e "$RUND/$$" ]'
 if [ -n "$PWSH" ]; then
     echo gone > "$RUND/$dp"
@@ -896,6 +896,86 @@ check "uninstall: Codex config byte-identical" 'cmp -s "$H5/.codex/config.toml" 
 echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"
+
+# ---------- kit place: an agent's own folder (a kit panel: drag an agent onto a space) ----------
+H6="$T/home6"; mkdir -p "$H6/.codex" "$H6/.omp/agent"
+W="$T/spaces"; mkdir -p "$W"; W=$(cd "$W" && pwd -P)
+printf -- '---\nname: helper\ndescription: helps\nskills: [gerrit-review, not-there]\n---\n\nYou help.\n' > "$TEAM/agents/helper.md"
+snap() { (cd "$1" && find . -type f -exec cksum {} + | LC_ALL=C sort -k3); }
+ONLY_W="Claude 的設定沒有「只開這些工具」：tools.only 改成把其他內建工具寫進 deny（Claude 之後新加的工具擋不到）"
+(
+export HOME="$H6"
+kit init "$TEAM" >/dev/null 2>&1
+G="$W/gerrit"
+out=$(kit place gerrit "$G" --json 2>/dev/null); rc=$?
+check "place --json: one line: dir, agent, tool, command, warnings" '[ $rc -eq 0 ] && [ "$out" = "{\"dir\": \"$G\", \"agent\": \"gerrit\", \"tool\": \"claude\", \"command\": [\"claude\"], \"warnings\": [\"$ONLY_W\"]}" ]'
+check "place: .agentkit says which agent, lists its rules, skills, MCP" 'grep -qx "agent:gerrit" "$G/.agentkit" && grep -qx "tool:claude" "$G/.agentkit" && grep -qx "rule:gerrit-flow" "$G/.agentkit" && grep -qx "skill:gerrit-review" "$G/.agentkit" && grep -qx "mcp:gerrit" "$G/.agentkit"'
+check "place: CLAUDE.md imports the rule, then the agent's prompt" 'grep -q "^@.*rules/gerrit-flow.md" "$G/CLAUDE.md" && grep -qx "<!-- agent: gerrit -->" "$G/CLAUDE.md" && grep -qx "You are the Gerrit helper." "$G/CLAUDE.md"'
+check "place: AGENTS.md (Codex, omp): the rule text and the prompt" 'grep -q "Only comment, never submit." "$G/AGENTS.md" && grep -qx "You are the Gerrit helper." "$G/AGENTS.md"'
+check "place: skills for Claude and Codex/omp, the MCP in .mcp.json" '[ -f "$G/.claude/skills/gerrit-review/SKILL.md" ] && [ -f "$G/.agents/skills/gerrit-review/SKILL.md" ] && [ "$(jget "$G/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ]'
+check "place: Claude's tool limits in settings.local.json (tools.deny, and the built-in tools tools.only leaves out)" 'python3 -c "import json,sys;d=json.load(open(sys.argv[1]));x=d[\"permissions\"][\"deny\"];assert x[0]==\"mcp__gerrit__submit_change\" and \"Bash\" in x and \"Write\" in x and \"Agent\" in x and not set(x)&{\"Read\",\"Grep\",\"Glob\"};assert d[\"enabledMcpjsonServers\"]==[\"gerrit\"]" "$G/.claude/settings.local.json" && [ ! -e "$G/.claude/settings.local.json.kit-backup" ]'
+check "place: Codex: the agent's MCP tool deny as disabled_tools in the folder's config" 'grep -q "^\[mcp_servers.gerrit\]" "$G/.codex/config.toml" && grep -qF "disabled_tools = [\"submit_change\"]" "$G/.codex/config.toml"'
+check "place: not the account" '[ ! -e "$H6/.claude/skills/gerrit-review" ] && ! grep -q "Gerrit helper" "$H6/.claude/CLAUDE.md" && ! grep -q "\"Write\"" "$H6/.claude/settings.json"'
+check "place: kit keeps the folder up to date (kit sync)" 'grep -qxF "$G" "$HOME/.config/agentkit/dirs"'
+snap "$G" > "$T/place1"
+out=$(kit place gerrit "$G/" --json 2>/dev/null); rc=$?
+check "place again (same agent): fine, nothing changes" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"dir\": \"$G\"" && snap "$G" | cmp -s - "$T/place1"'
+kit list --json --dir "$G" > "$T/place.json" 2>/dev/null
+check "list --json --dir: here.folder.agent names the placed agent" 'python3 -c "import json,sys;f=json.load(open(sys.argv[1]))[\"here\"][\"folder\"];assert f[\"agent\"]==\"gerrit\" and f[\"dir\"]==sys.argv[2]" "$T/place.json" "$G"'
+kit list --json --dir "$W" > "$T/place0.json" 2>/dev/null
+check "list --json --dir: a folder without one: agent null" 'python3 -c "import json,sys;assert json.load(open(sys.argv[1]))[\"here\"][\"folder\"][\"agent\"] is None" "$T/place0.json"'
+# refusals: nothing written
+out=$(kit place helper "$G" --json 2>/dev/null); rc=$?
+check "place: refuses a folder that is another agent (other_agent), untouched" '[ $rc -ne 0 ] && echo "$out" | grep -qF "\"code\": \"other_agent\"" && snap "$G" | cmp -s - "$T/place1"'
+mkdir -p "$W/busy"; echo mine > "$W/busy/notes.txt"
+out=$(kit place helper "$W/busy" --json 2>/dev/null); rc=$?
+check "place: refuses a folder with files and no marker (not_empty)" '[ $rc -ne 0 ] && echo "$out" | grep -qF "\"code\": \"not_empty\"" && [ ! -e "$W/busy/.agentkit" ]'
+out=$(kit place helper "$W/no/such" --json 2>/dev/null); rc=$?
+check "place: the parent must be there (no_parent), nothing made" '[ $rc -ne 0 ] && echo "$out" | grep -qF "\"code\": \"no_parent\"" && [ ! -e "$W/no" ]'
+out=$(kit place nobody "$W/x" --json 2>/dev/null); rc=$?
+check "place: an unknown agent (no_agent)" '[ $rc -ne 0 ] && echo "$out" | grep -qF "\"code\": \"no_agent\"" && [ ! -e "$W/x" ]'
+out=$(kit place helper "$H6" --json 2>/dev/null); rc=$?
+check "place: not the home folder (bad_dir)" '[ $rc -ne 0 ] && echo "$out" | grep -qF "\"code\": \"bad_dir\"" && [ ! -e "$H6/.agentkit" ]'
+out=$(kit place helper --json 2>/dev/null); rc=$?
+check "place: usage" '[ $rc -ne 0 ] && echo "$out" | grep -qF "\"code\": \"usage\""'
+# a second agent in a second folder; an empty folder that is there already is fine
+HP="$W/helper"; mkdir "$HP"
+out=$(kit place helper "$HP" --json 2>/dev/null); rc=$?
+check "place: a second agent in its own folder; a missing item is a warning" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"warnings\": [\"skill not-there 不在任何來源裡：沒有放進來\"]" && grep -qx "agent:helper" "$HP/.agentkit" && grep -qx "You help." "$HP/CLAUDE.md" && ! grep -q "Gerrit helper" "$HP/CLAUDE.md" && ! grep -q "You help." "$G/CLAUDE.md" && [ ! -e "$HP/.claude/settings.local.json" ]'
+# afterwards each folder changes on its own (kit add|rm --dir)
+kit add --dir "$HP" rule coding-style >/dev/null 2>&1
+check "add --dir after place: only that folder, the prompt stays after the rules" 'grep -q "^@.*rules/coding-style.md" "$HP/CLAUDE.md" && ! grep -q "coding-style" "$G/CLAUDE.md" && [ "$(tail -2 "$HP/CLAUDE.md" | head -1)" = "You help." ] && grep -qx "agent:helper" "$HP/.agentkit"'
+kit rm --dir "$G" skill gerrit-review >/dev/null 2>&1
+check "rm --dir after place: only that folder" '[ ! -e "$G/.claude/skills/gerrit-review" ] && [ -f "$HP/.claude/skills/gerrit-review/SKILL.md" ]'
+kit rm --dir "$G" rule gerrit-flow >/dev/null 2>&1; kit rm --dir "$G" mcp gerrit >/dev/null 2>&1; kit sync >/dev/null 2>&1
+check "rm --dir all after place: still that agent (marker, prompt, tool limits), still kept up to date" 'grep -qx "agent:gerrit" "$G/.agentkit" && grep -qx "You are the Gerrit helper." "$G/CLAUDE.md" && jget "$G/.claude/settings.local.json" permissions.deny | grep -q "\"Bash\"" && [ ! -e "$G/.mcp.json" ] && grep -qxF "$G" "$HOME/.config/agentkit/dirs"'
+printf -- '---\nname: helper\ndescription: helps\nskills: [gerrit-review]\n---\nYou help, version 2.\n' > "$TEAM/agents/helper.md"; kit sync >/dev/null 2>&1
+check "sync: a changed prompt reaches the placed folder" 'grep -qx "You help, version 2." "$HP/CLAUDE.md" && ! grep -qx "You help." "$HP/CLAUDE.md"'
+out=$(kit place gerrit "$W/gx" --tool codex --json 2>/dev/null); rc=$?
+check "place --tool codex: the command and what Codex cannot do" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"tool\": \"codex\", \"command\": [\"codex\"], \"warnings\": [\"Codex 不能只開某些內建工具：tools.only 不套用\"]" && grep -qx "tool:codex" "$W/gx/.agentkit" && grep -qx "You are the Gerrit helper." "$W/gx/AGENTS.md"'
+out=$(kit place gerrit "$W/go" --tool omp --json 2>/dev/null); rc=$?
+check "place --tool omp: what omp cannot do in a folder (MCP, tool limits)" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"command\": [\"omp\"], \"warnings\": [\"omp 只讀整個帳號的 MCP" && echo "$out" | grep -qF "omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用\"]"'
+out=$(kit place gerrit "$W/gv" --tool vim --json 2>/dev/null); rc=$?
+check "place --tool: only claude, codex, omp" '[ $rc -ne 0 ] && echo "$out" | grep -qF "\"code\": \"usage\"" && [ ! -e "$W/gv" ]'
+if [ -n "$PWSH" ]; then
+  # kit.ps1: the same JSON and the same files, in a home of its own
+  pl() { local w=$1; shift
+    export HOME="$w/home"; mkdir -p "$HOME/.codex" "$HOME/.omp/agent" "$w/s"; "$@" init "$TEAM" >/dev/null 2>&1
+    for a in "gerrit $w/s/g --tool claude" "gerrit $w/s/g" "gerrit $w/s/c --tool codex" "gerrit $w/s/o --tool omp" "helper $w/s/g" "nobody $w/s/n" "helper $w/s/no/such"; do
+      "$@" place $a --json 2>/dev/null; echo "rc=$?"; done
+    "$@" list --json --dir "$w/s/g" 2>/dev/null | grep -F '"folder"' | sed 's/, "items": \[$//'
+    (cd "$w/s" && for f in $(find . -type f | LC_ALL=C sort); do echo "== $f"; cat "$f"; done); }
+  mkdir -p "$T/pl1" "$T/pl2"; P1=$(cd "$T/pl1" && pwd -P); P2=$(cd "$T/pl2" && pwd -P)
+  a=$(pl "$P1" kps | sed "s#$P1#W#g"); b=$(pl "$P2" kit | sed "s#$P2#W#g")
+  check "kit.ps1 place: the same JSON, errors, here.folder.agent and files as unix/kit" '[ "$a" = "$b" ] && echo "$a" | grep -q "\"agent\": \"gerrit\"}"'
+  [ "$a" = "$b" ] || diff <(echo "$a") <(echo "$b") | head -20
+fi
+kit uninstall >/dev/null 2>&1
+check "uninstall: the placed folders are empty again (kit's files out)" '[ -z "$(ls -A "$G")" ] && [ -z "$(ls -A "$HP")" ] && [ -z "$(ls -A "$W/gx")" ]'
+echo "$pass $fail" > "$T/sub"
+)
+read pass fail < "$T/sub"
+rm -f "$TEAM/agents/helper.md"
 
 # ---------- the programs a skill needs (kit tools / install-tool, "needs" in list --json) ----------
 H6="$T/home6"; FB="$T/fakebin"; mkdir -p "$H6" "$FB"

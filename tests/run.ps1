@@ -803,7 +803,7 @@ Kit add --dir $FP mcp gerrit
 Check 'add --dir mcp: .mcp.json has it and the own; Claude does not ask' { (JGet "$FP/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (JGet "$FP/.mcp.json" 'mcpServers.own.command') -eq '"y"' -and (Flat (JGet "$FP/.claude/settings.local.json" 'enabledMcpjsonServers')) -eq '["gerrit"]' }
 Check 'add --dir mcp: the folder Codex config, and Codex trusts the folder' { (ReadT "$FP/.codex/config.toml").Contains('[mcp_servers.gerrit]') -and (ReadT "$H/.codex/config.toml").Contains("[projects.`"$($FR.Replace('\', '\\'))`"]`ntrust_level = `"trusted`"") }
 Kit list --json --dir (Join-Path $FP 'sub')
-Check 'list --json: the folder with .agentkit, its items' { $out.Contains("`"folder`": {`"dir`": $(& { '"' + $FR.Replace('\', '\\') + '"' }), `"why`": `"`", `"items`": [`"skill:gerrit-review`", `"rule:gerrit-flow`", `"mcp:gerrit`"]}") }
+Check 'list --json: the folder with .agentkit, its items' { $out.Contains("`"folder`": {`"dir`": $(& { '"' + $FR.Replace('\', '\\') + '"' }), `"why`": `"`", `"items`": [`"skill:gerrit-review`", `"rule:gerrit-flow`", `"mcp:gerrit`"], `"agent`": null}") }
 if (-not $OnWindows) {
     $env:HOME = $H; $bash = (& /bin/sh -c "cd '$Repo' && HOME='$H' unix/kit list --json --dir '$FP/sub' 2>&1") -join "`n"
     Check 'list --json --dir with a folder of its own: unix/kit prints the same' { $bash -ceq $out }
@@ -818,6 +818,61 @@ Check 'rm --dir all: Codex config byte-identical, kit forgets the folder' { (Sam
 Kit add --dir $FP skill gerrit-review; Kit add --dir $FP mcp gerrit
 Kit uninstall
 Check 'uninstall: the folder and Codex config exactly as before' { (SameBytes "$T/fp.claude" "$FP/CLAUDE.md") -and (SameBytes "$T/fp.mcp" "$FP/.mcp.json") -and -not (Test-Path "$FP/.agentkit") -and (SameBytes "$T/codex5.orig" "$H/.codex/config.toml") }
+
+# ---------- kit place: an agent's own folder (a kit panel: drag an agent onto a space) ----------
+Set-Home (Join-Path $T 'home6')
+W "$H/.codex/config.toml" "model = `"gpt-5`"`n"; W "$H/.omp/agent/x" ''
+W "$TEAM/agents/helper.md" "---`nname: helper`ndescription: helps`nskills: [gerrit-review, not-there]`n---`n`nYou help.`n"
+$SP = Join-Path $T 'spaces'; [void](New-Item -ItemType Directory -Force -Path $SP)
+$SR = if ($OnWindows) { (Get-Item -LiteralPath $SP).FullName } else { "$(& /bin/sh -c 'cd "$1" && pwd -P' sh $SP)".Trim() }
+function JS([string]$s) { $s.Replace('\', '\\') }   # a path as kit writes it in JSON
+function Snap([string]$d) { (@(Get-ChildItem -LiteralPath $d -Recurse -Force -File | Sort-Object FullName | ForEach-Object { $_.FullName + ' ' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) })) -join "`n" }
+$OnlyW = 'Claude 的設定沒有「只開這些工具」：tools.only 改成把其他內建工具寫進 deny（Claude 之後新加的工具擋不到）'
+Kit init $TEAM
+$G = Join-Path $SP 'gerrit'; $GR = Join-Path $SR 'gerrit'
+KitJ place gerrit $G --json
+Check 'place --json: one line: dir, agent, tool, command, warnings' { $rc -eq 0 -and $out -ceq "{`"dir`": `"$(JS $GR)`", `"agent`": `"gerrit`", `"tool`": `"claude`", `"command`": [`"claude`"], `"warnings`": [`"$OnlyW`"]}" }
+Check 'place: .agentkit says which agent, lists its rules, skills, MCP' { $a = ReadT "$G/.agentkit"; $a.Contains("agent:gerrit`ntool:claude`n") -and $a.Contains("rule:gerrit-flow`n") -and $a.Contains("skill:gerrit-review`n") -and $a.Contains("mcp:gerrit`n") }
+Check 'place: CLAUDE.md imports the rule, then the prompt; AGENTS.md has both as text' { $c = ReadT "$G/CLAUDE.md"; $c.Contains('rules/gerrit-flow.md') -and $c.Contains("<!-- agent: gerrit -->`nYou are the Gerrit helper.`n") -and (ReadT "$G/AGENTS.md").Contains('Only comment, never submit.') -and (ReadT "$G/AGENTS.md").Contains('You are the Gerrit helper.') }
+Check 'place: skills, the MCP, Claude''s tool limits in settings.local.json' { (Test-Path "$G/.claude/skills/gerrit-review/SKILL.md") -and (Test-Path "$G/.agents/skills/gerrit-review/SKILL.md") -and (JGet "$G/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (Flat (JGet "$G/.claude/settings.local.json" 'permissions.deny')) -ceq '["mcp__gerrit__submit_change","Agent","Bash","Edit","MultiEdit","NotebookEdit","Task","TodoWrite","WebFetch","WebSearch","Write"]' -and -not (Test-Path "$G/.claude/settings.local.json.kit-backup") }
+Check 'place: Codex: the MCP tool deny as disabled_tools in the folder''s config' { (ReadT "$G/.codex/config.toml").Contains("[mcp_servers.gerrit]") -and (ReadT "$G/.codex/config.toml").Contains('disabled_tools = ["submit_change"]') }
+Check 'place: not the account' { -not (Test-Path "$H/.claude/skills/gerrit-review") -and -not ((ReadT "$H/.claude/CLAUDE.md").Contains('Gerrit helper')) }
+$s1 = Snap $G
+KitJ place gerrit "$G/" --json
+Check 'place again (same agent): fine, nothing changes' { $rc -eq 0 -and (Snap $G) -ceq $s1 }
+KitJ list --json --dir $G
+Check 'list --json --dir: here.folder.agent names the placed agent' { $out.Contains("`"items`": [`"rule:gerrit-flow`", `"skill:gerrit-review`", `"mcp:gerrit`"], `"agent`": `"gerrit`"}") }
+KitJ place helper $G --json
+Check 'place: refuses a folder that is another agent (other_agent), untouched' { $rc -ne 0 -and $out.Contains('"code": "other_agent"') -and (Snap $G) -ceq $s1 }
+W "$SP/busy/notes.txt" "mine`n"
+KitJ place helper (Join-Path $SP 'busy') --json
+Check 'place: refuses a folder with files and no marker (not_empty)' { $rc -ne 0 -and $out.Contains('"code": "not_empty"') -and -not (Test-Path "$SP/busy/.agentkit") }
+KitJ place helper (Join-Path (Join-Path $SP 'no') 'such') --json
+Check 'place: the parent must be there (no_parent), nothing made' { $rc -ne 0 -and $out.Contains('"code": "no_parent"') -and -not (Test-Path "$SP/no") }
+KitJ place nobody (Join-Path $SP 'x') --json
+Check 'place: an unknown agent (no_agent)' { $rc -ne 0 -and $out.Contains('"code": "no_agent"') -and -not (Test-Path "$SP/x") }
+KitJ place helper $H --json
+Check 'place: not the home folder (bad_dir)' { $rc -ne 0 -and $out.Contains('"code": "bad_dir"') -and -not (Test-Path "$H/.agentkit") }
+KitJ place gerrit (Join-Path $SP 'v') --tool vim --json
+Check 'place --tool: only claude, codex, omp (usage)' { $rc -ne 0 -and $out.Contains('"code": "usage"') -and -not (Test-Path "$SP/v") }
+$HP = Join-Path $SP 'helper'; [void](New-Item -ItemType Directory -Path $HP)
+KitJ place helper $HP --json
+Check 'place: a second agent in its own folder; a missing item is a warning' { $rc -eq 0 -and $out.Contains('"warnings": ["skill not-there 不在任何來源裡：沒有放進來"]') -and (ReadT "$HP/CLAUDE.md").Contains("You help.`n") -and -not (ReadT "$HP/CLAUDE.md").Contains('Gerrit') -and -not (ReadT "$G/CLAUDE.md").Contains('You help.') -and -not (Test-Path "$HP/.claude/settings.local.json") }
+Kit add --dir $HP rule coding-style
+Check 'add --dir after place: only that folder, the prompt stays after the rules' { $c = ReadT "$HP/CLAUDE.md"; $c.Contains('rules/coding-style.md') -and $c.EndsWith("You help.`n<!-- agentkit:end -->`n") -and -not (ReadT "$G/CLAUDE.md").Contains('coding-style') }
+Kit rm --dir $G skill gerrit-review
+Check 'rm --dir after place: only that folder' { -not (Test-Path "$G/.claude/skills/gerrit-review") -and (Test-Path "$HP/.claude/skills/gerrit-review/SKILL.md") }
+Kit rm --dir $G rule gerrit-flow; Kit rm --dir $G mcp gerrit; Kit sync
+Check 'rm --dir all after place: still that agent, still kept up to date' { (ReadT "$G/.agentkit").Contains("agent:gerrit`n") -and (ReadT "$G/CLAUDE.md").Contains('You are the Gerrit helper.') -and -not (Test-Path "$G/.mcp.json") -and (ReadT "$H/.config/agentkit/dirs").Contains($GR) }
+W "$TEAM/agents/helper.md" "---`nname: helper`ndescription: helps`nskills: [gerrit-review]`n---`nYou help, version 2.`n"; Kit sync
+Check 'sync: a changed prompt reaches the placed folder' { (ReadT "$HP/CLAUDE.md").Contains("You help, version 2.`n") -and -not (ReadT "$HP/CLAUDE.md").Contains("You help.`n") }
+KitJ place gerrit (Join-Path $SP 'gx') --tool codex --json
+Check 'place --tool codex: the command and what Codex cannot do' { $rc -eq 0 -and $out.Contains('"tool": "codex", "command": ["codex"], "warnings": ["Codex 不能只開某些內建工具：tools.only 不套用"]') -and (ReadT "$SP/gx/AGENTS.md").Contains('You are the Gerrit helper.') }
+KitJ place gerrit (Join-Path $SP 'go') --tool omp --json
+Check 'place --tool omp: what omp cannot do in a folder' { $rc -eq 0 -and $out.Contains('"command": ["omp"], "warnings": ["omp 只讀整個帳號的 MCP') -and $out.Contains('omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用"]') }
+Kit uninstall
+Check 'uninstall: the placed folders are empty again' { @(Get-ChildItem -LiteralPath $G -Force).Count -eq 0 -and @(Get-ChildItem -LiteralPath $HP -Force).Count -eq 0 -and @(Get-ChildItem -LiteralPath "$SP/gx" -Force).Count -eq 0 }
+Remove-Item -LiteralPath "$TEAM/agents/helper.md" -Force
 
 # ---------- the programs a skill needs (kit tools / install-tool, "needs" in list --json) ----------
 Set-Home (Join-Path $T 'home6')

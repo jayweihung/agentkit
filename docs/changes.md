@@ -32,7 +32,12 @@
 - 只讀這台已經有的：不連網、什麼都不寫、不拿鎖。畫面程式不能直接問的帳號（root）可以自己跑 `kit status --json > <檔案>`，畫面程式讀那個檔案。
 - Windows 版：一樣的指令、一樣的輸出，只是沒有核准紀錄：`approvals`、`approved` 一律是 `null`。
 
-**給程式讀的介面（1.3）**：`kit api` 印 `1.3`。新增 `kit status --json`、`kit new mcp … --config … --look` 和錯誤 code `bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`exists`；`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`。要用的程式先確認 minor 至少是 3。
+**一個資料夾就是一個 agent：`kit place`**
+- 新增 `kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]`：建好資料夾，放進 agent 的規則、skill、MCP（跟 `kit add --dir` 一樣），提示寫進資料夾的 `CLAUDE.md`／`AGENTS.md`，工具限制寫進資料夾的 `.claude/settings.local.json`。之後在那裡開的 `claude`、`codex`、`omp` 就是那個 agent；`kit add|rm --dir` 只改這個資料夾，`kit sync` 照 agent 檔更新。
+- 同一個 agent 再 place 一次只同步；別的 agent 的資料夾、或已經有別的東西的資料夾不動。Codex 不能只開某些工具、只能禁用 MCP 的工具，omp 在資料夾裡不能限制工具、只讀整個帳號的 MCP：做不到的會說。
+- `kit list --json --dir` 的 `here.folder` 多了 `agent`（`kit place` 放的 agent 的名字，不是就 `null`）。
+
+**給程式讀的介面（1.3）**：`kit api` 印 `1.3`。新增 `kit status --json`、`kit new mcp … --config … --look`、`kit place … --json` 和錯誤 code `bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`exists`、`no_agent`、`no_parent`、`other_agent`、`not_empty`、`bad_dir`；`here.folder.agent`；`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`。要用的程式先確認 minor 至少是 3。
 
 ## 0.4.1（2026-11-13）
 

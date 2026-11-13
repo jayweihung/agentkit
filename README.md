@@ -33,6 +33,7 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
     kit add --dir <資料夾> skill <名字>   只加到這個資料夾（在這裡和子資料夾開的 agent 才有）
     kit rm  --dir <資料夾> skill <名字>
     kit run <agent> [--tool codex|omp]   開一個做好的 agent（預設 Claude）
+    kit place <agent> <資料夾> [--tool codex|omp]   這個資料夾就是那個 agent（在那裡開的就是它）
     kit sync                      更新
     kit self-update               更新 kit 本身
     kit status --json             這個帳號用哪一版：kit 和每個來源的 commit、核准的 commit（給程式讀）
@@ -76,6 +77,26 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 | Claude | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Codex | ✅ | ✅（列在提示裡，用到時才讀） | ✅ | ✗ | 只限 MCP 工具 |
 | omp | ✅ | ✅ | ✗（要用 `kit add mcp` 加到全域） | ✅ | ✗ |
+
+### 一個資料夾就是一個 agent：`kit place`
+
+    kit place reviewer ~/work/reviewer             以後在 ~/work/reviewer 打 claude，開的就是 reviewer
+    kit place reviewer ~/work/reviewer --tool codex   打算用 Codex 開（提示也寫進 AGENTS.md）
+
+- 建好那個資料夾（上一層要已經在；kit 只建最後一層），把 agent 的規則、skill、MCP 加到這個資料夾（跟 `kit add --dir` 一樣），
+  提示寫進資料夾的 `CLAUDE.md`／`AGENTS.md` 的 kit 區塊，工具限制寫進資料夾的 `.claude/settings.local.json`。
+  資料夾的 `.agentkit` 記著它是哪個 agent；`kit sync` 會照 agent 檔現在的樣子更新（提示、工具限制、還有新加的規則等）。
+- 之後就是平常的 `claude`、`codex`、`omp`，不用 `kit run`。`kit add|rm --dir <資料夾> …` 只改這個資料夾。
+- 同一個 agent 再 place 一次：只同步，什麼都不會多。資料夾已經是別的 agent，或裡面已經有不是 kit place 放的東西：kit 不動它，直接說。
+- 好幾個 agent 就是好幾個資料夾。`kit uninstall` 會把每個資料夾放的東西拿掉（`.agentkit` 也拿掉）。
+
+工具做得到的不一樣（做不到的 kit 會說）：
+
+| | rule + 提示 | skill | MCP | tools.only | tools.deny |
+|---|---|---|---|---|---|
+| Claude | ✅ | ✅ | ✅ | 改成把其他內建工具寫進 deny | ✅ |
+| Codex | ✅ | ✅ | ✅ | ✗ | 只限 MCP 工具 |
+| omp | ✅ | ✅ | ✗（要用 `kit add mcp` 加到全域） | ✗ | ✗ |
 
 ## skill 需要的程式（node、python…）
 
@@ -275,7 +296,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
     kit api        →  1.3
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.3（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，要用的程式先確認 minor 至少是 3）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.3（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -314,6 +335,11 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
   | `no_name` | `new mcp --config`：設定裡沒有名字（只有一個 `{...}`），要寫名字 |
   | `bad_name` | `new mcp --config`：名字只能用小寫英文、數字和 `-` |
   | `exists` | `new mcp --config`（不加 `--look`）：已經有這個名字的 mcp |
+  | `no_agent` | `place`：來源裡沒有這個 agent |
+  | `no_parent` | `place`：資料夾的上一層不在（kit 只建最後一層） |
+  | `other_agent` | `place`：那個資料夾已經是別的 agent |
+  | `not_empty` | `place`：那個資料夾已經有東西，不是 `kit place` 放的 |
+  | `bad_dir` | `place`：不是資料夾，或不能放在那裡（例如家目錄） |
   | `error` | 其他 |
 
   之後可能加新的 code（minor 加一）：不認得的 code 當作 `error`。
@@ -339,7 +365,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - `needs`、`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。
 - mcp（1.3 起）一定有：`"type"`（`stdio`、`http`、`sse`）、`"vars": [{"name": "GITHUB_TOKEN", "set": false}]`（它要的環境變數，這台電腦有沒有設）、`"needs"`（同 skill）、`"packages"`：沒有套件是 `[]`，有的話一個
   `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
-- `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。
+- `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items", "agent"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。`here.folder.agent`（1.3 起）：那個資料夾是 `kit place` 放的 agent 時是它的名字，不是就 `null`。
 
 ### `kit agents --json`
 
@@ -388,6 +414,18 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - `warnings`：給人看的字（略過的設定等）。
 - 錯誤看上面的表（`bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`usage`、`not_init`、`no_source`）。`several_servers` 時讓人選一個，再帶名字跑一次。
 - 寫進去：同樣的指令拿掉 `--look`（動作類指令）。
+
+### `kit place <agent> <資料夾> [--tool claude|codex|omp] --json`（1.3 起）
+
+一行：
+
+    {"dir": "<資料夾>", "agent": "reviewer", "tool": "codex", "command": ["codex"],
+     "warnings": ["Codex 不能只開某些內建工具：tools.only 不套用"]}
+
+- `dir`：資料夾（解開捷徑後的實際路徑）。`command`：在 `dir` 裡跑這個，開的就是那個 agent（就是 `claude`、`codex` 或 `omp`）。
+- `warnings`：給人看的字（這個工具做不到的、找不到的規則等），也印在 stderr。
+- 錯誤看上面的表（`usage`、`not_init`、`busy`、`no_agent`、`no_parent`、`other_agent`、`not_empty`、`bad_dir`）。
+- 是動作類指令：會改檔案，跟 `kit add` 一樣要拿 kit 的鎖（`busy`）。
 
 ### `kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]`
 
@@ -459,6 +497,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
     kit new mcp [名字] --config <檔案|-> [--to 來源]
     kit sync
     kit run <agent> [--tool codex|omp]
+    kit place <agent> <資料夾> [--tool claude|codex|omp]   （要結果的話加 --json，見上面）
     kit install-tool <程式名> [--min 版本]
     kit install-deps <skill> [npm|pip]
     kit install-deps mcp <名字>
