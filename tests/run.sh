@@ -163,7 +163,28 @@ out=$(kit list --bad 2>&1); rc=$?
 check "list with a wrong option: usage" '[ $rc -ne 0 ] && echo "$out" | grep -qF "kit list [--json"'
 # changed: what kit push would send, per source (files) and per item (a skill: any file in its folder)
 git -C "$TEAM" init -q; git -C "$TEAM" add -A; git -C "$TEAM" -c user.name=t -c user.email=t@t commit -qm init
-echo more >> "$TEAM/skills/quote/SKILL.md"; echo x > "$TEAM/skills/gerrit-review/notes.md"; echo y >> "$TEAM/rules/security.md"; echo z > "$TEAM/README.md"
+# status --json (a panel: which kit, api and commits this account uses; read only): team is a git repo now, third-party not
+snap() { find "$1" -type f -print0 | xargs -0 cksum | LC_ALL=C sort; }   # snap DIR : every file and its checksum
+snap "$HOME" > "$T/st.snap"
+kit status --json > "$T/status.json" 2>"$T/status.err"; rc=$?
+check "status --json: exit 0, valid JSON, nothing on stderr" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/status.json" > /dev/null && [ ! -s "$T/status.err" ]'
+check "status --json: kit, api, user, at" '[ "$(jget "$T/status.json" kit)" = "\"$(cat "$HERE/../VERSION")\"" ] && [ "$(jget "$T/status.json" api)" = "\"$(kit api)\"" ] &&
+    [ "$(jget "$T/status.json" user)" = "\"$(id -un)\"" ] && grep -qE "^  \"at\": [0-9]{10},$" "$T/status.json"'
+check "status --json: no self (kit not installed from a clone), no approvals" 'grep -qxF "  \"self\": null," "$T/status.json" && grep -qxF "  \"approvals\": null," "$T/status.json"'
+check "status --json: a git source has its commit, a folder that is not git null" 'grep -qxF "    {\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\", \"commit\": \"$(git -C "$TEAM" rev-parse HEAD)\", \"approved\": null}," "$T/status.json" &&
+    grep -qxF "    {\"name\": \"third-party\", \"source\": \"$TP\", \"dir\": \"$TP\", \"commit\": null, \"approved\": null}" "$T/status.json" && [ "$(tail -n 2 "$T/status.json")" = "$(printf "  ]\n}")" ]'
+check "status --json writes nothing (state.tsv and the rest of HOME the same)" 'snap "$HOME" | cmp -s - "$T/st.snap"'
+out=$(AGENTKIT_CONFIG="$T/noconf" kit status --json 2>/dev/null); rc=$?
+check "status --json before kit init: exit 0, sources [], approvals null" '[ $rc -eq 0 ] && echo "$out" | grep -qxF "  \"sources\": []" && echo "$out" | grep -qxF "  \"approvals\": null," && [ ! -e "$T/noconf" ]'
+out=$(kit status 2>/dev/null); rc=$?
+check "status without --json: usage error as JSON" '[ $rc -ne 0 ] && [ "$out" = "{\"error\": {\"code\": \"usage\", \"message\": \"用法：kit status --json\"}}" ]'
+if [ -n "$PWSH" ]; then
+    at0() { sed -E 's/^  "at": [0-9]+,$/  "at": 0,/'; }
+    check "status --json: kit.ps1 prints the same" '[ "$(kps status --json 2>/dev/null | at0)" = "$(at0 < "$T/status.json")" ]'
+    check "status --json before kit init, without --json: kit.ps1 prints the same" '[ "$(AGENTKIT_CONFIG="$T/noconf" kps status --json 2>/dev/null | at0)" = "$(AGENTKIT_CONFIG="$T/noconf" kit status --json 2>/dev/null | at0)" ] &&
+        [ "$(kps status 2>/dev/null)" = "$out" ] && [ ! -e "$T/noconf" ]'
+fi
+echo more >>"$TEAM/skills/quote/SKILL.md"; echo x > "$TEAM/skills/gerrit-review/notes.md"; echo y >> "$TEAM/rules/security.md"; echo z > "$TEAM/README.md"
 kit list --json > "$T/list-chg.json" 2>/dev/null
 check "list --json: changed files of a source (only what kit push sends)" 'grep -qF "\"push\": \"pr\", \"changed\": [\"rules/security.md\", \"skills/quote/SKILL.md\", \"skills/gerrit-review/notes.md\"]}" "$T/list-chg.json"'
 check "list --json: changed items (a skill by any file in its folder), the rest not" 'grep -qF "\"name\": \"security\", \"status\": \"required\", \"new\": false, \"changed\": true," "$T/list-chg.json" &&
@@ -768,6 +789,8 @@ check "self-update pulls new version" '"$HOME/.local/bin/kit" --version | grep -
 check "self-update shows the commit" 'echo "$out" | grep -qF "已更新到 0.1.1（$(git -C "$R" rev-parse --short=12 HEAD)）"'
 out=$("$HOME/.local/bin/kit" self-update 2>&1)
 check "self-update with nothing new says so" 'echo "$out" | grep -q "已經是最新"'
+out=$("$HOME/.local/bin/kit" status --json 2>/dev/null)
+check "status --json: self is the clone kit was installed from (name from its origin) and its commit" 'echo "$out" | grep -qxF "  \"self\": {\"name\": \"clone\", \"commit\": \"$(git -C "$U" rev-parse HEAD)\", \"approved\": null},"'
 "$HOME/.local/bin/kit" uninstall --self >/dev/null 2>&1
 # a new Mac: zsh, no startup files at all
 H2="$T/home2"; mkdir -p "$H2"
@@ -1624,6 +1647,28 @@ echo "local edit" >> "$RH/agentkit/srcA/rules/ar.md"
 ( cd "$SA/appr-work" && git checkout -q HEAD~3 -- approved.txt approved.txt.sig && git commit -qm restore && git push -q origin HEAD 2>/dev/null )
 out=$(rk sync 2>&1)
 check "local edits in the clone are reset to the approved commit" '! grep -q "local edit" "$RH/agentkit/srcA/rules/ar.md"'
+# status --json with approvals: only the approvals clone that is here already (never pulled), nothing written
+v2=$(git -C "$SA/work/srcA" rev-parse HEAD)
+kit approve "$SA/appr-work" "$SA/work/srcA" --key "$SA/key" --yes >/dev/null 2>&1; git -C "$SA/appr-work" push -q origin HEAD 2>/dev/null   # serial 3, not pulled here
+snap "$RH" > "$T/rst.snap"
+out=$(rk status --json 2>/dev/null); rc=$?
+check "status --json with approvals: serial, used, valid; the approved commit next to the one in use" '[ $rc -eq 0 ] && echo "$out" | grep -qxF "  \"approvals\": {\"serial\": 2, \"used\": 2, \"valid\": true}," &&
+    echo "$out" | grep -qxF "    {\"name\": \"srcA\", \"source\": \"file://$SA/srcA.git\", \"dir\": \"$RH/agentkit/srcA\", \"commit\": \"$v2\", \"approved\": \"$v2\"}"'
+check "status --json with approvals: nothing fetched or written" 'snap "$RH" | cmp -s - "$T/rst.snap"'
+echo "srcB 0123456789012345678901234567890123456789" >> "$RH/agentkit/.approvals/approved.txt"
+out=$(rk status --json 2>/dev/null); rc=$?
+check "status --json: an edited approved.txt is not valid, no approved commits" '[ $rc -eq 0 ] && echo "$out" | grep -qxF "  \"approvals\": {\"serial\": 2, \"used\": 2, \"valid\": false}," &&
+    echo "$out" | grep -qxF "    {\"name\": \"srcA\", \"source\": \"file://$SA/srcA.git\", \"dir\": \"$RH/agentkit/srcA\", \"commit\": \"$v2\", \"approved\": null}"'
+git -C "$RH/agentkit/.approvals" checkout -q -- approved.txt
+NC="$T/noclone"; mkdir -p "$NC/conf"; cp "$RH/.config/agentkit/machine.yaml" "$NC/conf/"
+out=$(HOME="$RH" AGENTKIT_CONFIG="$NC/conf" AGENTKIT_SOURCES="$NC/src" "$KIT" status --json 2>/dev/null); rc=$?
+check "status --json: no approvals clone yet: not valid, none made" '[ $rc -eq 0 ] && echo "$out" | grep -qxF "  \"approvals\": {\"serial\": null, \"used\": null, \"valid\": false}," &&
+    echo "$out" | grep -qxF "    {\"name\": \"srcA\", \"source\": \"file://$SA/srcA.git\", \"dir\": \"$NC/src/srcA\", \"commit\": null, \"approved\": null}" && [ ! -e "$NC/src" ] && [ "$(ls "$NC/conf")" = machine.yaml ]'
+if [ -n "$PWSH" ]; then
+    out=$(HOME="$RH" AGENTKIT_CONFIG="$RH/.config/agentkit" AGENTKIT_SOURCES="$RH/agentkit" kps status --json 2>"$T/err"); rc=$?
+    check "status --json with approvals: kit.ps1 says it has none (null), on stderr why" '[ $rc -eq 0 ] && echo "$out" | grep -qxF "  \"approvals\": null," && grep -q "Windows 版的 kit 不支援" "$T/err" &&
+        echo "$out" | grep -qxF "    {\"name\": \"srcA\", \"source\": \"file://$SA/srcA.git\", \"dir\": \"$RH/agentkit/srcA\", \"commit\": \"$v2\", \"approved\": null}"'
+fi
 out=$(HOME="$RH" AGENTKIT_CONFIG="$RH/.config/agentkit" AGENTKIT_SOURCES="$RH/agentkit2" "$KIT" init "file://$SA/srcA.git" --approvals "$SA/nowhere" --signers "$SA/allowed_signers" 2>&1); rc=$?
 check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/agentkit2/srcA/rules" ]'
 

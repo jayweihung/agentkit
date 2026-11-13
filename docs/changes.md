@@ -27,7 +27,12 @@
 - `kit list` 的 `needs` 也列出 mcp 要的程式（node、uv、python、docker）。
 - `kit new mcp <名字>`（不貼）產生的範本兩種寫法都有（跑程式、連網址）。
 
-**給程式讀的介面（1.3）**：`kit api` 印 `1.3`。新增 `kit new mcp … --config … --look` 和錯誤 code `bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`exists`；`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`。要用的程式先確認 minor 至少是 3。
+**這個帳號用哪一版：`kit status --json`**
+- 新增 `kit status --json`：印 kit 的版本和 api、帳號名稱、時間、kit 本身和每個來源現在的 commit；用核准紀錄的帳號（例如 root）再加上核准紀錄的 serial、簽章對不對、每個的核准 commit。畫面程式（例如每台、每個帳號一格的面板）比 `commit` 和 `approved`，就知道是不是在用核准的那一版。欄位見 README 的「給程式讀的介面」。
+- 只讀這台已經有的：不連網、什麼都不寫、不拿鎖。畫面程式不能直接問的帳號（root）可以自己跑 `kit status --json > <檔案>`，畫面程式讀那個檔案。
+- Windows 版：一樣的指令、一樣的輸出，只是沒有核准紀錄：`approvals`、`approved` 一律是 `null`。
+
+**給程式讀的介面（1.3）**：`kit api` 印 `1.3`。新增 `kit status --json`、`kit new mcp … --config … --look` 和錯誤 code `bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`exists`；`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`。要用的程式先確認 minor 至少是 3。
 
 ## 0.4.1（2026-11-13）
 

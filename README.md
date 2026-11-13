@@ -35,6 +35,7 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
     kit run <agent> [--tool codex|omp]   開一個做好的 agent（預設 Claude）
     kit sync                      更新
     kit self-update               更新 kit 本身
+    kit status --json             這個帳號用哪一版：kit 和每個來源的 commit、核准的 commit（給程式讀）
     kit uninstall [--self]        移除
 
 團隊的 kit.yaml 可以寫 `kit_version: 0.2.0`：kit 比這個舊的人，`kit sync` / `kit list` 會提醒一次去 `kit self-update`。
@@ -275,6 +276,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
 畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.3（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，要用的程式先確認 minor 至少是 3）。
+`kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
 
@@ -416,6 +418,37 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - 找不到紀錄檔（或不認得那種 agent）不算失敗：`files` 是 `[]`（`--git` 的照樣有）、`turns` 是 `[]`、`log` 是 `""`，最後另外有 `"note"`（給人看的原因）。
 - 參數不對：exit 1，`{"error": {"code": "usage", ...}}`。
 
+### `kit status --json`（1.3 起）
+
+這個帳號用的是哪一版：kit 的版本和 api、kit 本身和每個來源現在在哪個 commit，用核准紀錄的帳號再加上核准的 commit。
+給畫面程式顯示「每台、每個帳號用哪一版，是不是核准的那一版」。
+
+    {
+      "kit": "0.4.1",
+      "api": "1.2",
+      "user": "alice",
+      "at": 1763000000,
+      "self": {"name": "agentkit", "commit": "<40 字的 commit>", "approved": "<40 字的 commit>"},
+      "approvals": {"serial": 7, "used": 7, "valid": true},
+      "sources": [
+        {"name": "team", "source": "<網址或資料夾>", "dir": "<clone 的資料夾>", "commit": "<40 字的 commit>", "approved": "<40 字的 commit>"}
+      ]
+    }
+
+- `kit`：kit 的版本（跟 `kit --version` 一樣）。`api`：`kit api` 印的（字串）。`user`：帳號名稱。`at`：印出來的時間（Unix 秒數，整數）：畫面程式讀的是存下來的檔案時，看它就知道有多舊。
+- `self`：kit 本身的 clone（安裝時記下、`kit self-update` 更新的那個）。`name`：它 origin 網址的 repo 名字（沒有 origin 就是資料夾的名字），也就是 `approved.txt` 裡用的名字。`commit`：它現在的 commit（完整 40 字），不是 git repo 就是 `null`。不知道 kit 從哪個 clone 裝的（沒用安裝程式裝）時，整個 `self` 是 `null`。
+- `approvals`：這個帳號沒用核准紀錄（`kit init` 沒給 `--approvals`）就是 `null`。有用的話：
+  - `serial`：本機那份 `approved.txt` 的 serial（沒有檔案或不是數字是 `null`）。
+  - `used`：kit 上次換版本時用的 serial（還沒換過是 `null`）。
+  - `valid`：`approved.txt` 的簽章是對的（用 signers 檔驗，跟 `kit sync` 一樣）。檔案不在、簽章不對都是 `false`。只看簽章：`serial` 比 `used` 小的清單 kit 也不會用，畫面程式要自己比。
+- `sources`：跟 `kit list --json` 的 `sources` 同樣順序，同樣的 `name`、`source`、`dir`；沒有來源時是 `[]`。`commit`：那個資料夾現在的 commit，不是 git repo（或還沒 clone）就是 `null`。
+- `approved`（`self` 和每個來源都有）：`approved.txt` 裡那個名字的 commit。只有 `valid` 是 `true` 才有；沒用核准紀錄、簽章不對、清單裡沒有這個名字都是 `null`。`commit` 和 `approved` 一樣＝在用核准的那一版。
+- 只讀這台已經有的：**不連網**（不 clone、不 pull、不 fetch；核准紀錄也只看上次 `kit sync` 拿到的那份，所以不一定是遠端最新的），**什麼都不寫**，也不等別的 kit 跑完（不拿鎖）。
+- 還沒 `kit init` 也能跑：`sources` 是 `[]`、`approvals` 是 `null`，exit 0。
+- 畫面程式不能直接問的帳號（例如 root）：讓那個帳號自己跑 `kit status --json > <檔案>`（例如定時跑），畫面程式讀那個檔案。輸出本身是完整的，不用再問別的。
+- Windows 版的 kit 沒有核准紀錄的功能：`approvals` 和每個 `approved` 一律是 `null`（machine.yaml 有設 `approvals` 時，stderr 會說）。
+- 參數不對（沒有 `--json` 也算）：exit 1，`{"error": {"code": "usage", ...}}`。
+
 ### 動作類指令
 
 這些印給人看的字（不要解析），程式只看 exit code（0＝成功），失敗時把 stdout、stderr 顯示給人看：
@@ -488,6 +521,8 @@ kit 只會用 `approved.txt` 裡寫的 commit，而且 `approved.txt` 要有對�
 
 它會列出每個來源從上次核准到現在改了什麼，問你要不要核准，再簽章、commit。
 （目前只有 Linux／Mac 版有這個功能。）
+
+看一個帳號現在用的是不是核准的版本（不連網、不改東西）：`kit status --json`，比每個 `commit` 和 `approved`（見「給程式讀的介面」）。
 
 ## 測試
 

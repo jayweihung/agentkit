@@ -186,6 +186,47 @@ Kit list --bad
 Check 'list with a wrong option: usage' { $rc -ne 0 -and $out.Contains('kit list [--json') }
 Remove-Item -Recurse -Force "$TEAM/skills/quote"
 
+# ---------- status --json (a panel: which kit, api and commits this account uses; read only) ----------
+& git -C $TEAM init -q; & git -C $TEAM add -A; & git -C $TEAM -c user.name=t -c user.email=t@t commit -qm init
+$teamHead = "$(& git -C $TEAM rev-parse HEAD)".Trim()
+$tpJ = (Resolve-Path -LiteralPath $TP).ProviderPath.Replace('\', '\\')
+function Snap([string]$d) { # every file (not PowerShell's own cache) with its size and time
+    (@(Get-ChildItem -LiteralPath $d -Recurse -Force -File | Where-Object { $_.FullName -notmatch '[\\/](\.cache|\.local)[\\/]' } | Sort-Object FullName |
+        ForEach-Object { "$($_.FullName) $($_.Length) $($_.LastWriteTimeUtc.Ticks)" })) -join "`n" }
+Kit api; $api = $out
+$snap0 = Snap $H
+KitJ status --json; $sj = $out; $sjrc = $rc
+W "$T/status.json" "$sj`n"
+Check 'status --json: exit 0, valid JSON' { $sjrc -eq 0 -and $null -ne (JGet "$T/status.json" 'kit') }
+Check 'status --json: kit, api, user, at' { (JGet "$T/status.json" 'kit') -eq ('"' + $KitVer + '"') -and (JGet "$T/status.json" 'api') -eq ('"' + $api + '"') -and
+    (JGet "$T/status.json" 'user') -eq ('"' + [Environment]::UserName + '"') -and $sj -match "`n  `"at`": [0-9]{10},`n" }
+Check 'status --json: no self (kit not installed from a clone), no approvals' { $sj.Contains("`n  `"self`": null,`n  `"approvals`": null,`n") }
+Check 'status --json: a git source has its commit, a folder that is not git null' {
+    $sj.EndsWith("`n    {`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`", `"commit`": `"$teamHead`", `"approved`": null},`n    {`"name`": `"third-party`", `"source`": `"$tpJ`", `"dir`": `"$tpJ`", `"commit`": null, `"approved`": null}`n  ]`n}") }
+Check 'status --json writes nothing' { (Snap $H) -ceq $snap0 }
+if (-not $OnWindows) {
+    $bash = (& /bin/sh -c "cd '$Repo' && HOME='$H' unix/kit status --json 2>/dev/null") -join "`n"
+    Check 'status --json: unix/kit prints the same' { ($bash -replace '"at": [0-9]+,', '"at": 0,') -ceq ($sj -replace '"at": [0-9]+,', '"at": 0,') }
+}
+$env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
+KitJ status --json
+Check 'status --json before kit init: exit 0, sources [], approvals null' { $rc -eq 0 -and $out.EndsWith("`n  `"approvals`": null,`n  `"sources`": []`n}") -and -not (Test-Path (Join-Path $T 'noconf')) }
+$AC = Join-Path $T 'apconf'; W "$AC/machine.yaml" ((ReadT "$H/.config/agentkit/machine.yaml") + "approvals: https://gitea.example/acme/approvals.git`nsigners: $T/allowed_signers`n")
+$env:AGENTKIT_CONFIG = $AC
+Kit status --json
+Check 'status --json with approvals: kit for Windows has none (null) and says so' { $rc -eq 0 -and $out.Contains('Windows 版的 kit 不支援') -and $out.Contains("`n  `"approvals`": null,`n") -and $out.Contains("`"commit`": `"$teamHead`", `"approved`": null}") }
+Remove-Item env:AGENTKIT_CONFIG
+KitJ status
+Check 'status without --json: usage error as JSON' { $rc -ne 0 -and $out -ceq '{"error": {"code": "usage", "message": "用法：kit status --json"}}' }
+# self: the clone kit was installed from (.repo next to kit.ps1), named after its origin
+$KL = Join-Path $T 'kitlib'; [void](New-Item -ItemType Directory -Force -Path $KL)
+Copy-Item -LiteralPath $Kit -Destination (Join-Path $KL 'kit.ps1'); Copy-Item -LiteralPath (Join-Path $Repo 'VERSION') -Destination (Join-Path $KL 'VERSION')
+W "$KL/.repo" "$TEAM`n"
+& git -C $TEAM remote add origin https://gitea.example/acme/agentkit.git
+$sj2 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $KL 'kit.ps1') status --json 2>$null | ForEach-Object { "$_" }) -join "`n"
+Check 'status --json: self is the clone kit was installed from (name from its origin) and its commit' { $sj2.Contains("`n  `"self`": {`"name`": `"agentkit`", `"commit`": `"$teamHead`", `"approved`": null},`n") }
+Remove-Item -Recurse -Force (Join-Path $TEAM '.git'), $KL
+
 # ---------- agent add|rm, here.agent (kit.ps1) ----------
 $gBak = ReadT "$TEAM/agents/gerrit.md"
 W "$TEAM/agents/gerrit.md" "---`nname: gerrit`ndescription: Gerrit helper`nskills:`n  - gerrit-review`n`n  # the team one`n  - team-build`n`n# next`nrules: [gerrit-flow]`n---`nbody`n"

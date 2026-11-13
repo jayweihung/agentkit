@@ -267,7 +267,7 @@ approvals_dir() { printf '%s/.approvals\n' "$KIT_SRC"; }
 read_approvals() { # sets APPROVED ("name sha" lines); returns 1 when there is no valid signed list
     [ -n "$APPROVED_READ" ] && { [ -n "$APPROVED" ]; return; }
     APPROVED_READ=1
-    local d f p serial old
+    local d f serial old
     d=$(approvals_dir)
     if is_url "$M_APPROVALS"; then
         check_host "$M_APPROVALS"
@@ -277,16 +277,18 @@ read_approvals() { # sets APPROVED ("name sha" lines); returns 1 when there is n
     f="$d/approved.txt"
     [ -f "$f" ] && [ -f "$f.sig" ] || { warn "核准紀錄裡沒有 approved.txt 和 approved.txt.sig"; return 1; }
     [ -f "$M_SIGNERS" ] || { warn "找不到 signers 檔：$M_SIGNERS"; return 1; }
-    p=$(ssh-keygen -Y find-principals -s "$f.sig" -f "$M_SIGNERS" 2>/dev/null | head -n 1)
-    if [ -z "$p" ] || ! ssh-keygen -Y verify -f "$M_SIGNERS" -I "$p" -n agentkit -s "$f.sig" < "$f" >/dev/null 2>&1; then
-        warn "核准紀錄的簽章不對，不換版本（有人改過 approved.txt？）"; return 1
-    fi
+    approvals_sig_ok "$f" || { warn "核准紀錄的簽章不對，不換版本（有人改過 approved.txt？）"; return 1; }
     serial=$(awk '$1 == "serial:" { print $2; exit }' "$f"); old=$(state_get approvals serial)
     case $serial in ""|*[!0-9]*) warn "核准紀錄沒有 serial"; return 1;; esac
     if [ -n "$old" ] && [ "$serial" -lt "$old" ]; then warn "核准紀錄比上次用的舊（serial ${serial} < ${old}），不換版本"; return 1; fi
     state_set approvals serial "$serial"
     APPROVED=$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:"' "$f")
     [ -n "$APPROVED" ]
+}
+approvals_sig_ok() { # approvals_sig_ok FILE : FILE.sig is a good signature of FILE by the signers file (only reads files)
+    local p
+    p=$(ssh-keygen -Y find-principals -s "$1.sig" -f "$M_SIGNERS" 2>/dev/null | head -n 1)
+    [ -n "$p" ] && ssh-keygen -Y verify -f "$M_SIGNERS" -I "$p" -n agentkit -s "$1.sig" < "$1" >/dev/null 2>&1
 }
 approved_sha() { # approved_sha NAME
     read_approvals || return 1
@@ -4172,6 +4174,42 @@ cmd_approve() { # kit approve <approvals repo> <source clone>... --key <ssh key>
     say "kit：已核准並簽章（serial ${serial}）。下一步：git -C $dir push"
 }
 
+# ---------- status --json: the kit, api and commits this account uses, for a panel (kit.ps1 prints the same) ----------
+# Read only: no network (no clone, pull or fetch), nothing written, no lock. An account a panel cannot ask (root)
+# runs kit status --json > FILE itself and the panel reads that file.
+head_sha() { [ -e "$1/.git" ] && git -C "$1" rev-parse -q --verify HEAD 2>/dev/null; }   # head_sha DIR : when DIR is a git clone
+json_uint() { case $1 in ""|*[!0-9]*) printf null;; *) printf '%s' "$1" | sed 's/^0*\(.\)/\1/';; esac; }   # a number, or null
+cmd_status() {
+    [ $# -eq 1 ] && [ "$1" = --json ] || die_c usage "用法：kit status --json"
+    local repo url name s d f ad appr="" valid=false first=1 self=null approvals=null
+    if [ -n "$M_APPROVALS" ]; then                           # only what is here already: the clone kit sync keeps, or the folder
+        if is_url "$M_APPROVALS"; then ad=$(approvals_dir); else ad=$M_APPROVALS; fi
+        f="$ad/approved.txt"
+        if [ -f "$f" ] && [ -f "$f.sig" ] && [ -f "$M_SIGNERS" ] && approvals_sig_ok "$f"; then
+            valid=true; appr=$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:"' "$f")
+        fi
+        approvals="{\"serial\": $(json_uint "$(awk '$1 == "serial:" { print $2; exit }' "$f" 2>/dev/null)"), \"used\": $(json_uint "$(state_get approvals serial)"), \"valid\": $valid}"
+    fi
+    repo=$(cat "$KIT_LIB/.repo" 2>/dev/null)                  # kit's own clone (the one kit self-update pulls)
+    if [ -n "$repo" ]; then
+        name=$(basename "$repo")
+        [ -e "$repo/.git" ] && url=$(git -C "$repo" remote get-url origin 2>/dev/null) && [ -n "$url" ] && name=$(src_name "$url")
+        self="{\"name\": $(json_s "$name"), \"commit\": $(json_or_null "$(head_sha "$repo")"), \"approved\": $(json_or_null "$(printf '%s\n' "$appr" | awk -v n="$name" '$1 == n { print $2; exit }')")}"
+    fi
+    printf '{\n  "kit": %s,\n  "api": %s,\n  "user": %s,\n  "at": %s,\n  "self": %s,\n  "approvals": %s,\n  "sources": [' \
+        "$(json_s "$KIT_VERSION")" "$(json_s "$KIT_API")" "$(json_s "$(id -un)")" "$(date +%s)" "$self" "$approvals"
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        [ $first = 1 ] || printf ','; first=0
+        d=$(src_dir "$s"); name=$(src_name "$s")
+        printf '\n    {"name": %s, "source": %s, "dir": %s, "commit": %s, "approved": %s}' "$(json_s "$name")" "$(json_s "$(url_safe "$s")")" "$(json_s "$d")" \
+            "$(json_or_null "$(head_sha "$d")")" "$(json_or_null "$(printf '%s\n' "$appr" | awk -v n="$name" '$1 == n { print $2; exit }')")"
+    done <<EOF
+$(m_sources)
+EOF
+    if [ $first = 1 ]; then printf ']\n}\n'; else printf '\n  ]\n}\n'; fi
+}
+
 # ---------- agents: the definitions (agents/<name>.md), for programs that show agents ----------
 json_arr() { # lines -> ["a", "b"]
     local first=1 v out="["
@@ -4301,16 +4339,19 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit approve <核准紀錄> <來源 clone>... --key <金鑰>   簽章核准這些版本（給 root 這類只用核准版本的帳號）
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
+  kit status --json                 這個帳號用的 kit 版本、api，kit 本身和每個來源的 commit、核准的 commit
+                                    （JSON 給程式讀；不連網、什麼都不寫：root 這類帳號可以自己存成檔案給畫面程式讀）
   kit --version
   kit api                           給程式讀的介面版本（major.minor，例如 1.2）：給畫面程式確認看得懂 kit 的輸出。
                                     不相容的改變 major 加一；新增欄位或指令 minor 加一（清單看 README 的「給程式讀的介面」）
 EOF
 }
 
-# programs read JSON: list/agents/push/files --json and collect/new --look print only JSON on stdout (errors too)
+# programs read JSON: list/agents/push/files --json, status, and collect/new --look print only JSON on stdout (errors too)
 case ${1:-} in
     list|ls|agents|push|files) for a in "$@"; do [ "$a" = --json ] && { json_mode; break; }; done;;
     collect|new) for a in "$@"; do [ "$a" = --look ] && { json_mode; break; }; done;;
+    status) json_mode;;
 esac
 # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook takes it itself)
 case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent|install-deps) [ "${2:-}" = --hook ] || take_lock;; esac
@@ -4343,6 +4384,7 @@ case ${1:-} in
     statusline) shift; cmd_statusline "$@";;
     collect)   shift; cmd_collect "$@";;
     outdated)  shift; cmd_outdated "$@";;
+    status)    shift; cmd_status "$@" >&3;;
     api)       echo "$KIT_API";;   # the version of what programs read (README: 給程式讀的介面)
     --version|version) echo "kit $KIT_VERSION";;
     ""|-h|--help|help) usage;;

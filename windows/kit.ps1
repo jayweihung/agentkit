@@ -5509,6 +5509,42 @@ function Cmd-Agent($rest) { # kit agent <name> add|rm rule|skill|mcp <item>
     if (@(YGet $Machine 'approvals' | Where-Object { $_ }).Count -gt 0) { Warn '這台只用簽過的版本（approvals）：改的要送出、合併、再簽過，這台才會用到' }
 }
 
+# ---------- status --json: the kit, api and commits this account uses, for a panel (unix/kit prints the same) ----------
+# Read only: no network (no clone, pull or fetch), nothing written, no lock. kit for Windows has no approvals:
+# "approvals" and every "approved" are null.
+function Head-Sha([string]$d) { # the commit of DIR when it is a git clone, else $null
+    if (-not $d -or -not (Test-Path -LiteralPath (Join-Path $d '.git'))) { return $null }
+    $h = "$(@(Git-Q -C $d rev-parse -q --verify HEAD) -join '')".Trim()
+    if ($LASTEXITCODE -eq 0 -and $h) { $h } else { $null }
+}
+function Cmd-Status($rest) {
+    $rest = @($rest | Where-Object { $null -ne $_ })
+    if ($rest.Count -ne 1 -or $rest[0] -cne '--json') { Die-C usage '用法：kit status --json' }
+    if (@(YGet $Machine 'approvals' | Where-Object { $_ }).Count -gt 0) { Warn '這台設了只用簽過的版本（approvals），但 Windows 版的 kit 不支援：approvals 和 approved 一律是 null' }
+    $self = 'null'
+    $rp = Join-Path $KitLib '.repo'                          # kit's own clone (the one kit self-update pulls)
+    $repo = if (Test-Path -LiteralPath $rp -PathType Leaf) { (Read-Text $rp).Trim() } else { '' }
+    if ($repo) {
+        $name = [IO.Path]::GetFileName($repo.TrimEnd('/', '\'))
+        if (Test-Path -LiteralPath (Join-Path $repo '.git')) {
+            $url = "$(@(Git-Q -C $repo remote get-url origin) -join '')".Trim()
+            if ($LASTEXITCODE -eq 0 -and $url) { $name = Src-Name $url }
+        }
+        $self = "{`"name`": $(Json-S $name), `"commit`": $(Json-OrNull (Head-Sha $repo)), `"approved`": null}"
+    }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"api`": $(Json-S $KitApi),`n  `"user`": $(Json-S ([Environment]::UserName)),`n  `"at`": $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),`n  `"self`": $self,`n  `"approvals`": null,`n  `"sources`": [")
+    $first = $true
+    foreach ($s in @(M-Sources)) {
+        if (-not $s) { continue }
+        if (-not $first) { [void]$sb.Append(',') }; $first = $false
+        $d = Src-Dir $s
+        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S (Url-Safe $s)), `"dir`": $(Json-S $d), `"commit`": $(Json-OrNull (Head-Sha $d)), `"approved`": null}")
+    }
+    if ($first) { [void]$sb.Append("]`n}") } else { [void]$sb.Append("`n  ]`n}") }
+    Out-Json $sb.ToString()
+}
+
 function Usage {
     Say @'
 kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
@@ -5561,6 +5597,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
+  kit status --json                 這個帳號用的 kit 版本、api，kit 本身和每個來源的 commit
+                                    （JSON 給程式讀；不連網、什麼都不寫。Windows 版沒有核准紀錄：approvals 一律是 null）
   kit --version
   kit api                           給程式讀的介面版本（major.minor，例如 1.2）：給畫面程式確認看得懂 kit 的輸出。
                                     不相容的改變 major 加一；新增欄位或指令 minor 加一（清單看 README 的「給程式讀的介面」）
@@ -5570,8 +5608,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 # ---------- main ----------
 $cmd = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
 $rest = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
-# programs read JSON: list/agents/push/files --json and collect/new --look print only JSON on stdout (errors too)
-if ((@('list', 'ls', 'agents', 'push', 'files') -ccontains $cmd -and @($rest) -ccontains '--json') -or (@('collect', 'new') -ccontains $cmd -and @($rest) -ccontains '--look')) { $script:JsonOut = $true }
+# programs read JSON: list/agents/push/files --json, status, and collect/new --look print only JSON on stdout (errors too)
+if ((@('list', 'ls', 'agents', 'push', 'files') -ccontains $cmd -and @($rest) -ccontains '--json') -or (@('collect', 'new') -ccontains $cmd -and @($rest) -ccontains '--look') -or $cmd -ceq 'status') { $script:JsonOut = $true }
 try {
     # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook / --bg take it themselves)
     if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent', 'install-deps') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
@@ -5601,6 +5639,7 @@ try {
         'check' { Cmd-Check $rest }
         'collect' { Cmd-Collect $rest }
         'outdated' { Cmd-Outdated $rest }
+        'status' { Cmd-Status $rest }
         'export-self' { Cmd-ExportSelf $rest }
         'ci-template' { Cmd-CiTemplate $rest }
         'push' { Cmd-Push $rest }
