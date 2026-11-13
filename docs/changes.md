@@ -4,6 +4,31 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.5.0（2026-11-13）
+
+更新後要做：`kit self-update`、`kit sync`。
+
+**貼上 MCP 設定**
+- 新增 `kit new mcp [名字] --config <檔案|->`：把別人給的 MCP 設定（`{"mcpServers": …}` 這種 JSON、`claude mcp add …`、`codex mcp add …`、Codex 的 `config.toml`）存成檔案交給 kit，kit 寫成來源裡的 `mcp/<名字>.yaml`。設定裡有好幾個時，kit 列出名字請你選。
+- `--look`：只看會寫成什麼，不寫（一行 JSON，給畫面程式用）。
+
+**密碼、token 不進來源**
+- 貼上時，像密碼或 token 的值（名字有 KEY、TOKEN、SECRET、PASSWORD、AUTH 這些的、`Authorization` header、`sk-`、`ghp_` 開頭的、網址裡的密碼……）自動換成 `${變數名}`，只告訴你變數名字，不印出值。
+- `kit check`（所以 `kit push`）看到 mcp 的 yaml 裡直接寫著像密碼或 token 的值，就不讓過。
+- `kit sync` 時這台電腦沒設的變數會提醒一次。
+
+**網址的 MCP**
+- mcp 的 yaml 可以寫 `type: http`（或 `sse`）、`url`、`headers`。Claude Code、omp 照寫；Codex 寫成 `url`、`bearer_token_env_var`、`env_http_headers`、`http_headers`。Codex 不能用 SSE，這種的不放進 Codex（說一次）。
+- Codex 不會代換 `${…}`：env 裡同名的 `${X}` 改用 `env_vars` 直接傳過去；其他照字面放並說一次。
+
+**MCP 的套件**
+- 貼上時把 `npx 套件`、`uvx 套件` 固定在現在最新的版本（只有這裡會連網查版本）。
+- 新增 `kit install-deps mcp <名字>`：把那個版本裝在 `~/.config/agentkit/mcp-deps/<名字>/`（跟 skill 的套件同樣的規則），之後每個工具直接跑裝好的那份，不用每次啟動時下載。沒裝的 `kit list` 會寫「每次啟動時下載」。
+- `kit list` 的 `needs` 也列出 mcp 要的程式（node、uv、python、docker）。
+- `kit new mcp <名字>`（不貼）產生的範本兩種寫法都有（跑程式、連網址）。
+
+**給程式讀的介面（1.3）**：`kit api` 印 `1.3`。新增 `kit new mcp … --config … --look` 和錯誤 code `bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`exists`；`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`。要用的程式先確認 minor 至少是 3。
+
 ## 0.4.1（2026-11-13）
 
 更新後要做：`kit self-update`。

@@ -227,7 +227,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.2)' { $rc -eq 0 -and $out -ceq '1.2' }
+Check 'api: one line, major.minor (1.3)' { $rc -eq 0 -and $out -ceq '1.3' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -1468,6 +1468,88 @@ s.serve_forever()
     Stop-Process -Id $httpd.Id -ErrorAction SilentlyContinue
 }
 Set-Home $oldH
+
+# ---------- MCP: a pasted setup, URL servers, secrets as ${VAR}, packages (kit new mcp --config, install-deps mcp) ----------
+Set-Home (Join-Path $T 'home-mcp')
+$MS = Join-Path $T 'mcpsrc'; W "$MS/kit.yaml" "name: msrc`n"
+[void](New-Item -ItemType Directory -Force -Path "$H/.codex", "$H/.omp/agent")
+Kit init $MS
+# secrets made here (not written out in this file): never in any output or file kit writes
+$S1 = 'ghp' + '_Zq7Lm2Xc9Vb4Nn8Kk3Jj6Hh1Gg5Ff0Dd2Ss4'; $S2 = 'tok' + 'Val-9f8e7d'; $S3 = 'Ab3' + 'dEf5GhIj7KlMn9PqRs1Tu'
+W "$T/m1.json" "{`"mcpServers`": {`"GitHub Server`": {`"command`": `"npx`", `"args`": [`"-y`", `"@modelcontextprotocol/server-github@1.2.3`"], `"env`": {`"GITHUB_PERSONAL_ACCESS_TOKEN`": `"$S1`", `"LOG_LEVEL`": `"info`"}},`n `"web`": {`"type`": `"http`", `"url`": `"https://mcp.example.com/mcp`", `"headers`": {`"Authorization`": `"Bearer $S2`", `"X-Api-Key`": `"$S3`", `"X-Plain`": `"v1`"}}}}`n"
+KitJ new mcp --config "$T/m1.json" --look
+Check 'mcp paste: several servers -> several_servers with their names' { $rc -ne 0 -and $out.Contains('"code": "several_servers"') -and $out.Contains('"servers": ["GitHub Server", "web"]') }
+KitJ new mcp nope --config "$T/m1.json" --look
+Check 'mcp paste: a name not in it -> not_found' { $rc -ne 0 -and $out.Contains('"code": "not_found"') }
+KitJ new mcp github-server --config "$T/m1.json" --look
+$lk = $out | ConvertFrom-Json
+Check 'mcp paste --look: one line; name, type, the secret by its variable, the package; nothing written' { $rc -eq 0 -and @($out -split "`n").Count -eq 1 -and $lk.name -eq 'github-server' -and $lk.type -eq 'stdio' -and $lk.secrets[0].var -eq 'GITHUB_PERSONAL_ACCESS_TOKEN' -and $lk.secrets[0].where -eq 'env.GITHUB_PERSONAL_ACCESS_TOKEN' -and $lk.packages[0].version -eq '1.2.3' -and @($lk.requires) -contains 'node' -and -not (Test-Path "$MS/mcp") }
+Kit new mcp github-server --config "$T/m1.json"
+Check 'mcp paste: writes the yaml with ${VAR}, says the variable' { $rc -eq 0 -and $out.Contains('${GITHUB_PERSONAL_ACCESS_TOKEN}') -and (ReadT "$MS/mcp/github-server.yaml").Contains("  GITHUB_PERSONAL_ACCESS_TOKEN: `${GITHUB_PERSONAL_ACCESS_TOKEN}`n") }
+Kit new mcp web --config "$T/m1.json"
+Check 'mcp paste http: type, secret headers as ${VAR}' { $y = ReadT "$MS/mcp/web.yaml"; $rc -eq 0 -and $y.Contains("type: http`n") -and $y.Contains("  Authorization: `"Bearer `${WEB_TOKEN}`"`n") -and $y.Contains("  X-Api-Key: `${WEB_API_KEY}`n") -and $y.Contains("  X-Plain: v1`n") }
+KitJ new mcp web --config "$T/m1.json" --look
+Check 'mcp paste --look: a name already there says exists' { $rc -eq 0 -and $out.Contains('"exists": true') }
+W "$T/m2.txt" "claude mcp add --transport sse -s user events https://events.example.com/sse ```n  -H `"X-Api-Key: $S3`"`n"
+Kit new mcp --config "$T/m2.txt"
+Check 'mcp paste claude mcp add (sse, -H, a PowerShell line continued with a backtick)' { $y = ReadT "$MS/mcp/events.yaml"; $rc -eq 0 -and $y.Contains("type: sse`n") -and $y.Contains("  X-Api-Key: `${EVENTS_API_KEY}`n") }
+W "$T/m3.txt" "codex mcp add docs --env DOCS_TOKEN=`$env:DOCS_TOKEN -- node C:\tools\docs.js`n"
+Kit new mcp --config "$T/m3.txt"
+Check 'mcp paste codex mcp add: $env:X becomes ${X}, a Windows path kept' { $y = ReadT "$MS/mcp/docs.yaml"; $rc -eq 0 -and $y.Contains("  DOCS_TOKEN: `${DOCS_TOKEN}`n") -and $y.Contains('C:\tools\docs.js') }
+W "$T/m4.toml" "# Codex`n[mcp_servers.remote]`nurl = `"https://r.example.com/mcp`"`nbearer_token_env_var = `"R_TOKEN`"`nhttp_headers = { `"X-Team`" = `"a`" }`n"
+Kit new mcp --config "$T/m4.toml"
+Check 'mcp paste Codex config.toml: bearer_token_env_var -> Authorization: Bearer ${VAR}' { $y = ReadT "$MS/mcp/remote.yaml"; $rc -eq 0 -and $y.Contains("  Authorization: `"Bearer `${R_TOKEN}`"`n") -and $y.Contains("  X-Team: a`n") }
+W "$T/m5.json" "{`"x`": {`"command`": `"a`","
+KitJ new mcp --config "$T/m5.json" --look
+Check 'mcp paste: not JSON -> bad_config' { $rc -ne 0 -and $out.Contains('"code": "bad_config"') }
+W "$T/m6.json" "{`"command`": `"docker`", `"args`": [`"run`", `"-i`", `"img`"]}`n"
+KitJ new mcp --config "$T/m6.json" --look
+Check 'mcp paste: a bare object without a name -> no_name' { $rc -ne 0 -and $out.Contains('"code": "no_name"') }
+Kit check $MS
+Check 'mcp check: the pasted ones pass' { $rc -eq 0 }
+W "$MS/mcp/leak.yaml" "command: x`nenv:`n  API_TOKEN: $S3`n"
+Kit check $MS
+Check 'mcp check: a literal secret fails, the value is not printed' { $rc -ne 0 -and $out.Contains('env.API_TOKEN 看起來是密碼或 token') -and -not $out.Contains($S3) }
+Remove-Item "$MS/mcp/leak.yaml"
+$addOut = ''; foreach ($n in 'github-server', 'web', 'events', 'docs', 'remote') { Kit add mcp $n; $addOut += $out + "`n" }
+$cj = ReadT "$H/.claude.json" | ConvertFrom-Json
+Check 'mcp Claude: stdio without type, env as ${VAR}' { $s = $cj.mcpServers.'github-server'; $s.command -eq 'npx' -and $s.env.GITHUB_PERSONAL_ACCESS_TOKEN -eq '${GITHUB_PERSONAL_ACCESS_TOKEN}' -and -not (@($s.PSObject.Properties.Name) -contains 'type') }
+Check 'mcp Claude: http and sse with type, url, headers' { $w = $cj.mcpServers.web; $w.type -eq 'http' -and $w.url -eq 'https://mcp.example.com/mcp' -and $w.headers.Authorization -eq 'Bearer ${WEB_TOKEN}' -and $cj.mcpServers.events.type -eq 'sse' }
+$om = ReadT "$H/.omp/agent/mcp.json" | ConvertFrom-Json
+Check 'mcp omp: the same' { $om.mcpServers.web.type -eq 'http' -and $om.mcpServers.web.headers.'X-Api-Key' -eq '${WEB_API_KEY}' -and $om.mcpServers.'github-server'.command -eq 'npx' }
+$ct = (ReadT "$H/.codex/config.toml").Replace("`r`n", "`n")
+Check 'mcp Codex http: url, bearer_token_env_var, env_http_headers, http_headers' { $ct.Contains("[mcp_servers.web]`nurl = `"https://mcp.example.com/mcp`"`nbearer_token_env_var = `"WEB_TOKEN`"`n") -and $ct.Contains('env_http_headers = { X-Api-Key = "WEB_API_KEY" }') -and $ct.Contains('http_headers = { X-Plain = "v1" }') }
+Check 'mcp Codex stdio: an env that is ${ITSELF} -> env_vars' { $ct.Contains('env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]') -and $ct.Contains('env_vars = ["DOCS_TOKEN"]') -and $ct.Contains('LOG_LEVEL = "info"') }
+Check 'mcp Codex: no SSE (left out, said once)' { -not $ct.Contains('mcp_servers.events') -and $addOut.Contains('Codex 不能用 SSE 的 MCP：events') }
+KitJ list --json
+$lj = $out | ConvertFrom-Json
+Check 'mcp list --json: type, vars, needs, packages (not installed)' { $g = @($lj.items | Where-Object { $_.kind -eq 'mcp' -and $_.name -eq 'github-server' })[0]; $w = @($lj.items | Where-Object { $_.kind -eq 'mcp' -and $_.name -eq 'web' })[0]; $g.type -eq 'stdio' -and $g.vars[0].name -eq 'GITHUB_PERSONAL_ACCESS_TOKEN' -and $g.needs[0].tool -eq 'node' -and $g.packages[0].package -eq '@modelcontextprotocol/server-github' -and $g.packages[0].version -eq '1.2.3' -and $g.packages[0].ok -eq $false -and $w.type -eq 'http' -and @($w.packages).Count -eq 0 }
+Kit list
+Check 'mcp list: downloaded at each start, says how to install it' { $out.Contains('mcp:github-server 每次啟動時下載 @modelcontextprotocol/server-github（先裝好：kit install-deps mcp github-server）') }
+Kit new mcp skel
+Check 'mcp skeleton: both forms, and it passes kit check' { $y = ReadT "$MS/mcp/skel.yaml"; $y.Contains('command: （啟動 MCP server 的程式，例如 npx 或 uvx）') -and $y.Contains('# type: http          # 或 sse') -and $(Kit check $MS; $rc -eq 0) }
+Remove-Item "$MS/mcp/skel.yaml"
+if (-not $OnWindows) {
+    # a fake npm: "view" says 9.8.7; "install" makes the package with a bin (no network)
+    $FB = Join-Path $T 'fakebin-mcp'; [void](New-Item -ItemType Directory -Force -Path $FB)
+    W "$FB/npm" ((@('#!/bin/sh', ('echo "$PWD $*" >> "' + "$T/npm-mcp.log" + '"'), 'case $1 in', 'view) echo 9.8.7;;',
+        'install) p=$(sed -n ''s/.*"dependencies": {"\([^"]*\)".*/\1/p'' package.json); mkdir -p "node_modules/$p/dist"',
+        '  printf ''{"name": "%s", "bin": {"x": "dist/cli.js"}}\n'' "$p" > "node_modules/$p/package.json"; echo x > "node_modules/$p/dist/cli.js";;', 'esac') -join "`n") + "`n")
+    & chmod +x "$FB/npm"
+    $savedP = $env:PATH; $env:PATH = "$FB" + [IO.Path]::PathSeparator + $env:PATH
+    W "$T/m7.json" "{`"pin`": {`"command`": `"npx`", `"args`": [`"-y`", `"left-pad-srv`", `"--x`"]}}`n"
+    KitJ new mcp --config "$T/m7.json" --look
+    Check 'mcp paste: an npx package without a version is pinned to what npm says' { $o = $out | ConvertFrom-Json; $rc -eq 0 -and $o.packages[0].version -eq '9.8.7' -and $o.yaml.Contains('left-pad-srv@9.8.7') }
+    Kit install-deps mcp github-server
+    $md = "$H/.config/agentkit/mcp-deps/github-server"
+    Check 'mcp install-deps (npm): the pinned version, --ignore-scripts, in mcp-deps' { $rc -eq 0 -and (ReadT "$T/npm-mcp.log").Contains('install --ignore-scripts') -and (ReadT "$md/.kit-src/package.json").Contains('"@modelcontextprotocol/server-github": "1.2.3"') }
+    $cj = ReadT "$H/.claude.json" | ConvertFrom-Json
+    Check 'mcp installed: Claude runs node with the installed bin' { $s = $cj.mcpServers.'github-server'; $s.command -eq 'node' -and @($s.args)[0] -eq "$md/node_modules/@modelcontextprotocol/server-github/dist/cli.js" }
+    KitJ list --json
+    Check 'mcp list --json: installed -> ok' { $g = @(($out | ConvertFrom-Json).items | Where-Object { $_.kind -eq 'mcp' -and $_.name -eq 'github-server' })[0]; $g.packages[0].ok -eq $true }
+    $env:PATH = $savedP
+}
+Check 'mcp: the secrets are in no file kit wrote' { @(Get-ChildItem -Recurse -File -Force $H, $MS | Where-Object { $c = [IO.File]::ReadAllText($_.FullName); $c.Contains($S1) -or $c.Contains($S2) -or $c.Contains($S3) }).Count -eq 0 }
 
 # ---------- the script files themselves ----------
 Check 'kit.ps1 and install.ps1 start with a UTF-8 BOM (needed by PowerShell 5.1)' {

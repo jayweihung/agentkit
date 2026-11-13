@@ -135,6 +135,83 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 - 有 venv 之後，kit 在帳號的 CLAUDE.md／AGENTS.md（Claude、Codex、omp）的 kit 區塊多寫一行，請 agent 用 skill 資料夾裡的 `.venv/bin/python`（Windows：`.venv\Scripts\python.exe`）執行那個 skill 的程式，不要自己再 pip install。只有帳號加了、kit 也幫它裝好 venv 的 skill 才會寫；資料夾自己的（`--dir`）CLAUDE.md／AGENTS.md 不寫這行，所以 `kit rm --dir`、`kit uninstall` 之後資料夾和原本一模一樣。`kit run` 的 agent 有這種 skill 時，提示裡也有這行。
 - Debian/Ubuntu 沒有 venv 時，要先裝 `python3-venv`（kit 會說）。
 
+## MCP
+
+一個 MCP 是來源裡的一個 `mcp/<名字>.yaml`。兩種寫法：
+
+    # 在這台電腦跑一個程式                  # 連到一個網址
+    command: npx                            type: http          # 或 sse
+    args:                                   url: https://mcp.example.com/mcp
+      - -y                                  headers:
+      - "@scope/server@1.2.3"                 Authorization: "Bearer ${MCP_TOKEN}"
+    env:
+      API_TOKEN: ${API_TOKEN}
+
+**密碼、token 不放在來源裡**：寫成 `${變數名}`，值放在每台電腦自己的環境變數。`kit check`（所以 `kit push` 也是）看到像密碼或 token 的值直接寫在 mcp 的 yaml 裡就不讓過（只說是哪一欄，不印出值）。
+`kit sync` 時這台電腦沒設的變數會提醒一次（說名字）。
+
+### 貼上設定
+
+別人給的 MCP 設定（README 上的 JSON、`claude mcp add …` 那一行）不用自己改寫：存成檔案，kit 幫你轉成上面的 yaml。
+
+    kit new mcp [名字] --config <檔案> [--to 來源]     （檔案寫 - 就從標準輸入讀）
+    kit new mcp [名字] --config <檔案> --look          只看會寫成什麼，不寫（JSON，見「給程式讀的介面」）
+
+看得懂的寫法：
+
+- JSON：`{"mcpServers": {"名字": {...}}}`、`{"名字": {...}}`，或只有一個 server 的 `{...}`（`command`、`args`、`env`、`type`、`url`、`headers`）。
+- `claude mcp add …`（`--transport stdio|http|sse`、`-e K=V`、`-H "K: V"`；`-s` 不管）、`codex mcp add 名字 [--env K=V] -- 程式 參數…`（`--url`、`--bearer-token-env-var` 也可以）。
+- Codex 的 `config.toml`（`[mcp_servers.名字]` 那幾段）。
+
+不寫名字時用設定裡的名字（改成小寫英文、數字和 `-`）。設定裡有好幾個 server 時，kit 列出它們的名字，請你寫要哪一個。
+
+例一：跑一個程式（`gh.json`）
+
+    {"mcpServers": {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+                               "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "（你的 token）"}}}}
+
+    $ kit new mcp --config gh.json
+    已建立 mcp/github.yaml（在 team）
+      env.GITHUB_PERSONAL_ACCESS_TOKEN 像是密碼或 token：檔案裡寫成 ${GITHUB_PERSONAL_ACCESS_TOKEN}（值沒有寫進去）
+      每台電腦要先設定環境變數：GITHUB_PERSONAL_ACCESS_TOKEN
+      套件 @modelcontextprotocol/server-github 固定在 2025.4.8 版。先裝好（不然每次啟動時下載）：kit install-deps mcp github
+
+例二：連到一個網址（`notion.txt`）
+
+    claude mcp add --transport http notion https://mcp.example.com/mcp -H "Authorization: Bearer xxxxxxxx"
+
+    $ kit new mcp --config notion.txt
+    已建立 mcp/notion.yaml（在 team）
+      headers.Authorization 像是密碼或 token：檔案裡寫成 ${NOTION_TOKEN}（值沒有寫進去）
+
+寫好後跟自己寫的一樣：`kit add mcp <名字>` 開始用，`kit push` 送出去。檔案裡的 token 換掉了，但貼上的原始檔案還在：用完記得刪掉。
+
+**哪些算密碼或 token**（換成 `${…}`，報告只說變數名字，不印出值）：
+
+- 名字裡有 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`PASSWD`、`AUTH`、`CREDENTIAL`、`COOKIE`、`SESSION`、`PAT` 的 env、header、網址參數、`--參數=`（值是空的、`${…}`、true/false、數字、路徑的不算）。
+- `Authorization`、`Cookie` header（`Bearer ` 這種開頭留著）。
+- 看起來就是 token 的值：`sk-`、`ghp_`、`github_pat_`、`xox…-`、`AKIA`、`glpat-` 這類開頭，或很長的亂碼（大小寫加數字，或 32 個以上的十六進位）。
+- 網址裡的密碼（`https://user:密碼@…`）、像 token 的路徑段。
+
+變數名字：env 就用原本的名字；其他的是「server 名字＋欄位」，例如 `NOTION_TOKEN`、`WEB_API_KEY`。
+
+**每個工具怎麼用**：
+
+| | 跑程式的 MCP | 網址的 MCP（http） | sse | `${變數}` |
+|---|---|---|---|---|
+| Claude Code | `command`、`args`、`env` | `type`、`url`、`headers` | ✅ | Claude 自己代換 |
+| omp | 同上 | 同上 | ✅ | omp 自己代換 |
+| Codex | `command`、`args`、`env` | `url`、`http_headers` | ✗（不放進 Codex，說一次） | 只有整個值：env 同名 → `env_vars`（直接傳過去）；`Authorization: Bearer ${X}` → `bearer_token_env_var`；header `${X}` → `env_http_headers`。其他地方的 `${…}` Codex 不會代換：照字面放進去並說一次（header 這樣的就不放）；網址裡有 `${…}` 的整個不放 |
+
+### MCP 的套件（npx、uvx）
+
+`npx 套件`、`uvx 套件` 每次啟動都可能下載最新版。所以：
+
+- **貼上時固定版本**：沒寫版本的，kit 查現在最新的版本寫進去（npm：`npm view`；Python：PyPI 的 JSON，`KIT_PYPI_URL` 可以換）。這是 `kit new mcp --config` 唯一會連網的地方；查不到就不固定，提醒你。
+- 它要的程式（`npx`→node、`uvx`→uv、`python`→python、`docker`→docker）列在 `kit list` 的 `needs`，跟 skill 一樣（node、python、git 以外的要有 `tools/<名字>.yaml`）。
+- **你按了才裝**：`kit install-deps mcp <名字>` 把那個版本裝在 kit 自己的資料夾 `~/.config/agentkit/mcp-deps/<名字>/`（npm：`--ignore-scripts`，只能是 registry 上的套件；Python：自己的 venv、只裝 wheel，規則跟 skill 的套件一樣）。裝好後 `kit sync` 把每個工具的設定改成直接跑裝好的那份（npm：`node <套件的 bin>`；Python：venv 裡的程式），不再每次下載。
+- 沒裝的照樣用 `npx`／`uvx`，`kit list` 會寫「每次啟動時下載」。`uvx --index-url …` 這種 kit 認不得的寫法不幫它裝。改了版本要再裝一次。
+
 ## agent 的 context 用了多少
 
     kit context --pid <agent 的 pid> [--tool claude|codex|omp] [--dir 資料夾]
@@ -194,10 +271,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.2
+    kit api        →  1.3
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.2（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.3（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，要用的程式先確認 minor 至少是 3）。
 
 ### 共同規則
 
@@ -229,6 +306,12 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
   | `not_allowed` | `collect`：作者不在 `collect_sources` |
   | `download_failed` | `collect`：下載失敗 |
   | `no_skill` | `collect`：找不到 `SKILL.md` |
+  | `bad_config` | `new mcp --config`：看不懂貼上的設定（或有 kit 不收的東西，`message` 說是什麼） |
+  | `several_servers` | `new mcp --config`：設定裡有好幾個 server，要寫名字；錯誤裡多一個 `"servers": ["名字", …]` |
+  | `not_found` | `new mcp --config`：寫的名字不在設定裡；一樣有 `"servers"` |
+  | `no_name` | `new mcp --config`：設定裡沒有名字（只有一個 `{...}`），要寫名字 |
+  | `bad_name` | `new mcp --config`：名字只能用小寫英文、數字和 `-` |
+  | `exists` | `new mcp --config`（不加 `--look`）：已經有這個名字的 mcp |
   | `error` | 其他 |
 
   之後可能加新的 code（minor 加一）：不認得的 code 當作 `error`。
@@ -251,7 +334,9 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 - `sources[].push`：`pr`（送出要開 PR）或 `direct`（直接推）。`sources[].changed`：`kit push --to <name>` 會送的檔案（相對來源資料夾，`/` 分隔；改過的 rule、skill、mcp、agent、`third_party.lock`，加上只改了 `collect_sources` 的 `kit.yaml`）；沒有就是 `[]`，不是 git repo 也是 `[]`。
 - `items[].kind`：`rule`、`skill`、`mcp`、`agent`。`status`：`required`（團隊必備）、`used`、`unused`、`agent`。`new`：還沒在 `kit list` 看過。`changed`：`kit push` 會送它（skill：它資料夾裡任何一個檔案）。
-- `needs`、`packages` 只有 skill 有（`packages` 沒有要裝的就不出現），見「skill 需要的程式」。
+- `needs`、`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。
+- mcp（1.3 起）一定有：`"type"`（`stdio`、`http`、`sse`）、`"vars": [{"name": "GITHUB_TOKEN", "set": false}]`（它要的環境變數，這台電腦有沒有設）、`"needs"`（同 skill）、`"packages"`：沒有套件是 `[]`，有的話一個
+  `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
 - `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。
 
 ### `kit agents --json`
@@ -282,6 +367,25 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
      "skills": [{"path", "name", "valid", "description", "license", "scripts", "skipped", "exists", "dest"}]}
 
 只下載來看、什麼都不寫。`allowed`：作者在 `collect_sources`；`can_allow`：不在，但自己的來源可以用 `--allow` 加。`exists`：`collected`（之前收過）、`own`（自己寫的同名 skill）、`""`。
+
+### `kit new mcp [名字] --config <檔案|-> [--to 來源] --look`（1.3 起）
+
+一行：
+
+    {"name": "github", "source": "team", "path": "<會寫的檔案>", "exists": false, "type": "stdio",
+     "yaml": "# 用 kit new mcp --config …\ncommand: npx\n…",
+     "secrets": [{"where": "env.GITHUB_PERSONAL_ACCESS_TOKEN", "var": "GITHUB_PERSONAL_ACCESS_TOKEN"}],
+     "vars": ["GITHUB_PERSONAL_ACCESS_TOKEN"], "requires": ["node"],
+     "packages": [{"kind": "npm", "package": "@modelcontextprotocol/server-github", "version": "2025.4.8", "bad": ""}],
+     "warnings": []}
+
+- 什麼都不寫。貼上的內容放在檔案裡給 kit（`-`：從標準輸入讀），kit 不會印出、不會存下任何值，只有變數名字。
+- `yaml`：會寫進 `path` 的內容（整個檔案）。`exists`：已經有這個名字的 mcp（`path` 就是它）；這時不加 `--look` 會失敗（`exists`）。
+- `secrets`：換成 `${var}` 的值在哪裡（`env.名字`、`headers.名字`、`url`、`args[第幾個，從 1 算]`）。`vars`：它要的環境變數（`${名字}`，有 `:-預設` 的不算）。`requires`：它要的程式（`node`、`uv`、`python`、`docker`）。
+- `packages`：`version` 是空的表示沒固定（查不到最新版本，`warnings` 會說）；`bad` 不是空的就是 kit 不幫它裝的原因。
+- `warnings`：給人看的字（略過的設定等）。
+- 錯誤看上面的表（`bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`usage`、`not_init`、`no_source`）。`several_servers` 時讓人選一個，再帶名字跑一次。
+- 寫進去：同樣的指令拿掉 `--look`（動作類指令）。
 
 ### `kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]`
 
@@ -319,10 +423,12 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
     kit add|rm [--dir 資料夾] rule|skill|mcp <名字>
     kit agent <名字> add|rm rule|skill|mcp <東西>
     kit new rule|skill|mcp|agent <名字> [--to 來源]
+    kit new mcp [名字] --config <檔案|-> [--to 來源]
     kit sync
     kit run <agent> [--tool codex|omp]
     kit install-tool <程式名> [--min 版本]
     kit install-deps <skill> [npm|pip]
+    kit install-deps mcp <名字>
     kit collect <網址> --to 來源 [--path 資料夾] [--allow]
     kit push --to 來源                    （要結果的話加 --json，見上面）
 

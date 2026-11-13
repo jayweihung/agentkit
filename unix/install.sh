@@ -20,7 +20,7 @@ if [ "$(uname)" = Darwin ] && ! xcode-select -p >/dev/null 2>&1 && [ "$(command 
 fi
 
 mkdir -p "$DEST" "$BIN"
-for f in kit json.awk yaml.awk; do cp "$REPO/unix/$f" "$DEST/$f.new" && mv "$DEST/$f.new" "$DEST/$f"; done
+for f in kit json.awk yaml.awk mcp.awk; do cp "$REPO/unix/$f" "$DEST/$f.new" && mv "$DEST/$f.new" "$DEST/$f"; done
 cp "$REPO/VERSION" "$DEST/VERSION"
 mkdir -p "$DEST/templates"
 for f in "$REPO"/templates/*; do cp "$f" "$DEST/templates/"; done

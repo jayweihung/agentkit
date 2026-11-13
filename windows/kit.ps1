@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.2'
+$script:KitApi = '1.3'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -53,6 +53,7 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 # With --json (list, agents, push, files) or collect --look, stdout carries only JSON: kit's words go to stderr, and a stop is
 # also told on stdout as {"error": {"code": CODE, "message": the same words}} (unix/kit prints the same).
 $script:JsonOut = $false
+$script:DieExtra = ''   # more of the error for programs (kit new mcp: the servers in the paste)
 function Say([string]$msg) {
     if ($script:Quiet) { return }
     if ($script:LogPath) { [IO.File]::AppendAllText($script:LogPath, "$msg`n", $Utf8) }
@@ -65,7 +66,7 @@ function Warn([string]$msg) {
 }
 function Die([string]$msg, [string]$code = 'error') {
     Warn $msg
-    if ($script:JsonOut) { [Console]::Out.WriteLine('{"error": {"code": ' + (Json-S $code) + ', "message": ' + (Json-S $msg) + '}}') }
+    if ($script:JsonOut) { [Console]::Out.WriteLine('{"error": {"code": ' + (Json-S $code) + ', "message": ' + (Json-S $msg) + $script:DieExtra + '}}') }
     exit 1
 }
 function Die-C([string]$code, [string]$msg) { Die $msg $code }   # the code programs read (README: 給程式讀的介面)
@@ -591,11 +592,601 @@ function Wanted { # required + added - removed
 }
 function Of-Kind($items, [string]$kind) { @(foreach ($i in $items) { if ($i.StartsWith("${kind}:")) { $i.Substring($kind.Length + 1) } }) }
 
-# ---------- MCP yaml -> JSON / TOML ----------
+# ---------- MCP: read a pasted setup, take the secrets out, write kit's yaml; find the package ----------
+# The same as unix/mcp.awk, line for line (read that for what each part does and for the lines it prints):
+# Mcp-Read MODE LINES [NAME] [PIN] -> the lines mcp.awk prints (E L N T Y X V W R P). MODE: json (LINES: Json-Leaves
+# joined by TAB), cmd, toml, yaml (LINES: Yaml-Lines of an MCP yaml kit has).
+function Mr-New { New-Object System.Collections.Hashtable ([StringComparer]::Ordinal) }
+function Mr-Fail([string]$c, [string]$m) { if (-not $script:Mr.errc) { $script:Mr.errc = $c; $script:Mr.errm = $m } }
+function Mr-Emit([string]$s) { [void]$script:Mr.out.Append($s).Append("`n") }
+function Mr-Norm([string]$s) { ([regex]::Replace($s.ToLowerInvariant(), '[^a-z0-9]+', '-')).Trim('-') }
+function Mr-Srv([string]$nm) {
+    if ($script:Mr.si.ContainsKey($nm)) { return $script:Mr.si[$nm] }
+    $j = @{ name = $nm; f = (Mr-New); a = (Mr-New); an = 0; ca = (Mr-New); cn = 0; ek = (New-Object System.Collections.Generic.List[string]); ev = (New-Object System.Collections.Generic.List[string])
+            hk = (New-Object System.Collections.Generic.List[string]); hv = (New-Object System.Collections.Generic.List[string]); wl = (New-Object System.Collections.Generic.List[string]); ws = (Mr-New) }
+    $script:Mr.si[$nm] = $j; $script:Mr.list.Add($j); $j
+}
+function Mr-F($j, [string]$k) { $v = $j.f[$k]; if ($null -eq $v) { '' } else { [string]$v } }
+function Mr-A($j, [int]$i) { $v = $j.a["$i"]; if ($null -eq $v) { '' } else { [string]$v } }
+function Mr-AddArg($j, [string]$v) { $j.an++; $j.a["$($j.an)"] = $v }
+function Mr-Wn($j, [string]$w) { if (-not $j.ws.ContainsKey($w)) { $j.ws[$w] = 1; $j.wl.Add($w) } }
+function Mr-SetEnv($j, [string]$k, [string]$v) {
+    if ($k -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Mr-Wn $j "env 的 $k 不是環境變數的名字，略過"; return }
+    for ($i = 0; $i -lt $j.ek.Count; $i++) { if ($j.ek[$i] -ceq $k) { $j.ev[$i] = $v; return } }
+    $j.ek.Add($k); $j.ev.Add($v)
+}
+function Mr-SetHdr($j, [string]$k, [string]$v) {
+    $v = $v.Trim(" `t".ToCharArray())
+    if ($k -cnotmatch '^[A-Za-z0-9_-]+$') { Mr-Wn $j "header $k 的名字 kit 寫不下，略過"; return }
+    for ($i = 0; $i -lt $j.hk.Count; $i++) { if ($j.hk[$i].ToLowerInvariant() -ceq $k.ToLowerInvariant()) { $j.hv[$i] = $v; return } }
+    $j.hk.Add($k); $j.hv.Add($v)
+}
+function Mr-SetType($j, [string]$t) {
+    $l = $t.ToLowerInvariant()
+    if (@('stdio', 'http', 'sse') -ccontains $l) { $j.f['type'] = $l }
+    elseif (@('streamable-http', 'streamable_http', 'streamablehttp', 'https') -ccontains $l) { $j.f['type'] = 'http' }
+    else { Mr-Fail 'bad_config' "不認得的 type：$t（只能是 stdio、http、sse）" }
+}
+function Mr-Ctl([string]$s) { if ($s -cmatch '[\x01-\x1F\x7F]') { Mr-Fail 'bad_config' '值裡有控制字元（換行、TAB 這些），kit 不收' }; $s }
+function Mr-Hex([string]$s) { $n = 0; foreach ($c in $s.ToLowerInvariant().ToCharArray()) { $n = $n * 16 + '0123456789abcdef'.IndexOf($c) }; $n }
+function Mr-Chr([int]$n) { if ($n -ge 0x10000) { [char]::ConvertFromUtf32($n) } else { [string][char]$n } }
+
+# JSON
+function Mr-LoadJson($lines) {
+    $form = ''
+    foreach ($l in $lines) {
+        $K = $l.Split("`t"); if ($K.Count -lt 2) { continue }
+        if (@('mcpServers', 'servers', 'mcp_servers') -ccontains $K[0]) { $form = 'wrap' }
+        elseif ($form -eq '' -and $K[0] -cmatch '^(command|url|type|args|env|headers|serverUrl|httpUrl|transport)$') { $form = 'bare' }
+    }
+    if ($form -eq '') { $form = 'map' }
+    foreach ($l in $lines) {
+        $K = @('') + $l.Split("`t"); $n = $K.Count - 1; if ($n -lt 2) { continue }
+        if ($form -eq 'wrap') { if ($K[1] -cnotmatch '^(mcpServers|servers|mcp_servers)$' -or $n -lt 4) { continue }; $nm = $K[2]; $p = 3 }
+        elseif ($form -eq 'map') { if ($n -lt 3) { continue }; $nm = $K[1]; $p = 2 }
+        else { $nm = ''; $p = 1 }
+        Mr-JField (Mr-Srv $nm) $K $p $n
+    }
+}
+function Mr-JField($j, $K, [int]$p, [int]$n) {
+    $f = $K[$p]; $raw = $K[$n]; $d = $n - $p
+    if ($raw -cmatch '^[\[{]') { if ($f -cnotmatch '^(args|env|headers|command)$') { Mr-Wn $j "略過 $f（kit 不帶這個設定）" }; return }
+    $v = Mr-JVal $raw
+    if ($f -ceq 'type' -or $f -ceq 'transport') { if ($d -eq 1) { Mr-SetType $j $v } }
+    elseif ($f -ceq 'command') {
+        if ($d -eq 1) { $j.f['command'] = $v }
+        elseif ($d -eq 2) { $i = Mr-Num $K[$p + 1]; $j.ca["$i"] = $v; if ($i -gt $j.cn) { $j.cn = $i } }
+    }
+    elseif ($f -ceq 'args') { if ($d -eq 2) { $i = Mr-Num $K[$p + 1]; $j.a["$i"] = $v; if ($i -gt $j.an) { $j.an = $i } } }
+    elseif ($f -ceq 'env') { if ($d -eq 2) { Mr-SetEnv $j $K[$p + 1] $v } }
+    elseif ($f -ceq 'headers') { if ($d -eq 2) { Mr-SetHdr $j $K[$p + 1] $v } }
+    elseif (@('url', 'serverUrl', 'httpUrl') -ccontains $f) { if ($d -eq 1) { $j.f['url'] = $v } }
+    elseif ($f -ceq 'description') { if ($d -eq 1) { $j.f['description'] = $v } }
+    elseif ($f -ceq 'disabled' -and $v -ceq 'true') { Mr-Wn $j '原本是停用的（disabled），kit 照樣帶進來' }
+    else { Mr-Wn $j "略過 $f（kit 不帶這個設定）" }
+}
+function Mr-Num([string]$s) { $m = [regex]::Match($s, '^[0-9]+'); if ($m.Success) { [int]$m.Value } else { 0 } }
+function Mr-JVal([string]$raw) {
+    if (-not $raw.StartsWith('"')) { if ($raw -ceq 'null') { return '' }; return $raw }
+    Mr-Ctl (Mr-JUnq $raw.Substring(1, $raw.Length - 2))
+}
+function Mr-JUnq([string]$s) {
+    $o = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $s.Length; $i++) {
+        $c = $s[$i]
+        if ($c -ne '\') { [void]$o.Append($c); continue }
+        $i++; $c = if ($i -lt $s.Length) { $s[$i] } else { '' }
+        if ($c -ceq 'u') {
+            $n = Mr-Hex (Mr-Sub $s ($i + 1) 4); $i += 4
+            if ($n -ge 55296 -and $n -lt 56320 -and (Mr-Sub $s ($i + 1) 2) -eq '\u') { $lo = Mr-Hex (Mr-Sub $s ($i + 3) 4); $n = 65536 + ($n - 55296) * 1024 + ($lo - 56320); $i += 6 }
+            if ($n -lt 32) { [void]$o.Append([char]1) } else { try { [void]$o.Append((Mr-Chr $n)) } catch { [void]$o.Append([char]1) } }
+        } elseif ('nrtbf'.IndexOf([string]$c) -ge 0 -and "$c" -ne '') { [void]$o.Append([char]1) }
+        else { [void]$o.Append($c) }
+    }
+    $o.ToString()
+}
+function Mr-Sub([string]$s, [int]$i, [int]$n) { if ($i -ge $s.Length) { return '' }; if ($i + $n -gt $s.Length) { $n = $s.Length - $i }; $s.Substring($i, $n) }
+
+# claude mcp add / codex mcp add lines
+function Mr-LoadCmd($lines) {
+    $l = ''
+    foreach ($e0 in $lines) {
+        $e = $e0 -replace '[ \t]+$', ''
+        if ($e -cmatch '(\\|`|\^)$') { $l += $e.Substring(0, $e.Length - 1) + ' '; continue }
+        $l += $e
+        if ($l -cmatch '^[ \t]*(#.*)?$' -or $l -cmatch '^[ \t]*(\$|>|PS[^>]*>)[ \t]*$') { $l = ''; continue }
+        Mr-CmdLine $l; $l = ''
+        if ($script:Mr.errc) { return }
+    }
+    if ($l -ne '') { Mr-CmdLine $l }
+}
+function Mr-Dollar([string]$s, [int]$i) { # at a $ (index I): @(what it means, where to go on)
+    $r = $s.Substring($i)
+    if ($r.StartsWith('$(')) { Mr-Fail 'bad_config' '不接受 $( ) 指令替換'; return @('', $s.Length) }
+    $m = [regex]::Match($r, '^\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}'); if ($m.Success) { return @($m.Value, ($i + $m.Length)) }
+    $m = [regex]::Match($r, '^\$env:[A-Za-z_][A-Za-z0-9_]*'); if ($m.Success) { return @(('${' + $m.Value.Substring(5) + '}'), ($i + $m.Length)) }
+    $m = [regex]::Match($r, '^\$[A-Za-z_][A-Za-z0-9_]*'); if ($m.Success) { return @(('${' + $m.Value.Substring(1) + '}'), ($i + $m.Length)) }
+    @('$', ($i + 1))
+}
+function Mr-Tokenize([string]$s) {
+    $T = New-Object System.Collections.Generic.List[string]
+    $w = New-Object System.Text.StringBuilder; $inw = $false; $n = $s.Length; $i = 0
+    while ($i -lt $n) {
+        $c = $s[$i]
+        if ($c -eq ' ' -or $c -eq "`t") { if ($inw) { $T.Add($w.ToString()); [void]$w.Clear(); $inw = $false }; $i++; continue }
+        $inw = $true
+        $nx = if ($i + 1 -lt $n) { [string]$s[$i + 1] } else { '' }
+        if ($c -eq "'") {
+            $j = $s.IndexOf("'", $i + 1); if ($j -lt 0) { Mr-Fail 'bad_config' '引號沒有關好'; return , $T }
+            [void]$w.Append($s.Substring($i + 1, $j - $i - 1)); $i = $j + 1; continue
+        }
+        if ($c -eq '"') {
+            $i++
+            while ($i -lt $n -and $s[$i] -ne '"') {
+                $c = $s[$i]; $nx = if ($i + 1 -lt $n) { [string]$s[$i + 1] } else { '' }
+                if ($c -eq '\' -and $nx -ne '' -and '"\$`'.IndexOf($nx) -ge 0) { [void]$w.Append($nx); $i += 2; continue }
+                if ($c -eq '`') { Mr-Fail 'bad_config' '不接受 ` 指令替換'; return , $T }
+                if ($c -eq '$') { $d = Mr-Dollar $s $i; [void]$w.Append($d[0]); $i = $d[1]; continue }
+                [void]$w.Append($c); $i++
+            }
+            if ($i -ge $n) { Mr-Fail 'bad_config' '引號沒有關好'; return , $T }
+            $i++; continue
+        }
+        if ($c -eq '\' -and $nx -ne '' -and " `"'\`$".IndexOf($nx) -ge 0) { [void]$w.Append($nx); $i += 2; continue }
+        if ($c -eq '`') { Mr-Fail 'bad_config' '不接受 ` 指令替換'; return , $T }
+        if ($c -eq '$') { $d = Mr-Dollar $s $i; [void]$w.Append($d[0]); $i = $d[1]; continue }
+        if ($c -eq '%') { $m = [regex]::Match($s.Substring($i), '^%[A-Za-z_][A-Za-z0-9_]*%'); if ($m.Success) { [void]$w.Append('${' + $m.Value.Substring(1, $m.Length - 2) + '}'); $i += $m.Length; continue } }
+        if (';&|<>()'.IndexOf($c) -ge 0) { Mr-Fail 'bad_config' '只接受 claude mcp add 或 codex mcp add（不接受 ; & | < > 這些）'; return , $T }
+        [void]$w.Append($c); $i++
+    }
+    if ($inw) { $T.Add($w.ToString()) }
+    , $T
+}
+function Mr-Opt([string]$t) { # @(option, value, has a value)
+    $m = [regex]::Match($t, '^--[^=]*='); if ($m.Success) { return @($t.Substring(0, $m.Length - 1), $t.Substring($m.Length), $true) }
+    @($t, '', $false)
+}
+function Mr-T($T, [int]$p) { if ($p -ge 1 -and $p -le $T.Count) { $T[$p - 1] } else { '' } }
+function Mr-KvEnv($j, [string]$s) { $e = $s.IndexOf('='); if ($e -lt 0) { Mr-Fail 'bad_config' '--env 要寫成 名字=值'; return }; Mr-SetEnv $j $s.Substring(0, $e) $s.Substring($e + 1) }
+function Mr-KvHdr($j, [string]$s) { $e = $s.IndexOf(':'); if ($e -lt 0) { Mr-Fail 'bad_config' '--header 要寫成 "名字: 值"'; return }; Mr-SetHdr $j $s.Substring(0, $e) $s.Substring($e + 1) }
+function Mr-CmdLine([string]$s) {
+    $tk = Mr-Tokenize $s; if ($script:Mr.errc -or $tk.Count -eq 0) { return }
+    $p = 1
+    if ((Mr-T $tk $p) -cmatch '^(\$|>)$') { $p++ }
+    $prog = (Mr-T $tk $p) -replace '^.*[/\\]', '' -replace '\.(exe|cmd)$', ''
+    if (($prog -cne 'claude' -and $prog -cne 'codex') -or (Mr-T $tk ($p + 1)) -cne 'mcp') { Mr-Fail 'bad_config' '看不懂貼上的內容：只接受 JSON、Codex 的 config.toml、claude mcp add 或 codex mcp add'; return }
+    if ((Mr-T $tk ($p + 2)) -ceq 'add-json') { Mr-Fail 'bad_config' 'claude mcp add-json：請直接貼它的 JSON（存成檔案）'; return }
+    if ((Mr-T $tk ($p + 2)) -cne 'add') { Mr-Fail 'bad_config' "只接受 $prog mcp add"; return }
+    if ($prog -ceq 'claude') { Mr-ClaudeAdd $tk ($p + 3) } else { Mr-CodexAdd $tk ($p + 3) }
+}
+function Mr-ClaudeAdd($tk, [int]$p) {
+    $pos = New-Object System.Collections.Generic.List[string]; $tr = ''; $PE = @(); $PH = @(); $pw = ''; $TN = $tk.Count
+    for (; $p -le $TN; $p++) {
+        $t = Mr-T $tk $p
+        if ($t -ceq '--') { $p++; break }
+        $o = @('', '', $false); if ($t.StartsWith('-')) { $o = Mr-Opt $t }
+        if ($t.StartsWith('-') -and ($pos.Count -lt 2 -or $o[0] -cmatch '^(-t|--transport|-s|--scope|-e|--env|-H|--header)$')) {
+            switch -CaseSensitive ($o[0]) {
+                { $_ -eq '-t' -or $_ -eq '--transport' } { if ($o[2]) { $tr = $o[1] } else { $p++; $tr = Mr-T $tk $p }; break }
+                { $_ -eq '-s' -or $_ -eq '--scope' } { if (-not $o[2]) { $p++ }; break }
+                { $_ -eq '-e' -or $_ -eq '--env' } { if ($o[2]) { $PE += $o[1] } else { while ($p -lt $TN -and (Mr-T $tk ($p + 1)) -cmatch '^[A-Za-z_][A-Za-z0-9_]*=') { $p++; $PE += (Mr-T $tk $p) } }; break }
+                { $_ -eq '-H' -or $_ -eq '--header' } { if ($o[2]) { $PH += $o[1] } else { while ($p -lt $TN -and (Mr-T $tk ($p + 1)) -cmatch '^[A-Za-z0-9_-]+:') { $p++; $PH += (Mr-T $tk $p) } }; break }
+                { $_ -eq '--client-id' -or $_ -eq '--callback-port' } { if (-not $o[2]) { $p++ }; $pw += $o[0] + ' '; break }
+                '--client-secret' { $pw += $o[0] + ' '; break }
+                default { Mr-Fail 'bad_config' "claude mcp add 的 $($o[0]) kit 不認得"; return }
+            }
+            continue
+        }
+        $pos.Add($t)
+    }
+    $L = New-Object System.Collections.Generic.List[string]
+    for ($i = 1; $i -lt $pos.Count; $i++) { $L.Add($pos[$i]) }
+    for (; $p -le $TN; $p++) { $L.Add((Mr-T $tk $p)) }
+    if ($pos.Count -lt 1 -or $L.Count -lt 1) { Mr-Fail 'bad_config' 'claude mcp add 要有名字和要跑的程式（或網址）'; return }
+    $j = Mr-Srv $pos[0]
+    foreach ($e in $PE) { Mr-KvEnv $j $e }
+    foreach ($h in $PH) { Mr-KvHdr $j $h }
+    if ($pw) { Mr-Wn $j "略過 $pw（OAuth 的設定 kit 不帶，第一次連線時 Claude 會自己問）" }
+    if ($tr) { Mr-SetType $j $tr } elseif ($L[0] -cmatch '^https?://') { $j.f['type'] = 'http' }
+    $ty = Mr-F $j 'type'
+    if ($ty -ceq 'http' -or $ty -ceq 'sse') { $j.f['url'] = $L[0]; if ($L.Count -gt 1) { Mr-Wn $j '網址後面多的參數略過' } }
+    else { $j.f['command'] = $L[0]; for ($i = 1; $i -lt $L.Count; $i++) { Mr-AddArg $j $L[$i] } }
+}
+function Mr-CodexAdd($tk, [int]$p) {
+    $nm = ''; $url = ''; $bv = ''; $E3 = @(); $TN = $tk.Count
+    for (; $p -le $TN; $p++) {
+        $t = Mr-T $tk $p
+        if ($t -ceq '--') { $p++; break }
+        if ($t.StartsWith('-')) {
+            $o = Mr-Opt $t
+            if ($o[0] -ceq '--env') { if ($o[2]) { $E3 += $o[1] } else { $p++; $E3 += (Mr-T $tk $p) } }
+            elseif ($o[0] -ceq '--url') { if ($o[2]) { $url = $o[1] } else { $p++; $url = Mr-T $tk $p } }
+            elseif ($o[0] -ceq '--bearer-token-env-var') { if ($o[2]) { $bv = $o[1] } else { $p++; $bv = Mr-T $tk $p } }
+            else { Mr-Fail 'bad_config' "codex mcp add 的 $($o[0]) kit 不認得"; return }
+            continue
+        }
+        if ($nm -eq '') { $nm = $t; continue }
+        break
+    }
+    if ($nm -eq '') { Mr-Fail 'bad_config' 'codex mcp add 要有名字'; return }
+    $j = Mr-Srv $nm
+    foreach ($e in $E3) { Mr-KvEnv $j $e }
+    if ($url -ne '') {
+        $j.f['type'] = 'http'; $j.f['url'] = $url
+        if ($bv -ne '') { Mr-SetHdr $j 'Authorization' ('Bearer ${' + $bv + '}') }
+        if ($p -le $TN) { Mr-Wn $j '網址後面多的參數略過' }
+        return
+    }
+    if ($p -gt $TN) { Mr-Fail 'bad_config' 'codex mcp add 要有 -- 後面要跑的程式（或 --url）'; return }
+    $j.f['command'] = Mr-T $tk $p; $p++
+    for (; $p -le $TN; $p++) { Mr-AddArg $j (Mr-T $tk $p) }
+}
+
+# Codex config.toml (a cursor $script:Mr.p over the text $script:Mr.s, from 0)
+function Mr-C { $m = $script:Mr; if ($m.p -lt $m.s.Length) { [string]$m.s[$m.p] } else { '' } }
+function Mr-LoadToml($lines) {
+    $m = $script:Mr; $m.s = (@($lines) -join "`n") + "`n"; $m.p = 0; $tn = 0; $TK = @()
+    while ($m.p -lt $m.s.Length) {
+        Mr-Tws; if ($m.p -ge $m.s.Length) { break }
+        $c = Mr-C
+        if ($c -eq "`n") { $m.p++; continue }
+        if ($c -eq '#') { Mr-Teol; continue }
+        if ($c -eq '[') {
+            $m.p++; if ((Mr-C) -eq '[') { Mr-Fail 'bad_config' 'config.toml 的 [[ ]] kit 看不懂'; return }
+            $TK = @(Mr-TKeys); $tn = $TK.Count; Mr-Tws; if ((Mr-C) -ne ']') { Mr-Fail 'bad_config' 'config.toml 的 [ ] 沒寫好'; return }
+            $m.p++; Mr-Teol; continue
+        }
+        $K = @(Mr-TKeys); Mr-Tws
+        if ((Mr-C) -ne '=') { Mr-Fail 'bad_config' 'config.toml 看不懂（要是 名字 = 值）'; return }
+        $m.p++; Mr-Tws; Mr-TVal; if ($m.errc) { return }
+        Mr-TAssign (@($TK | Select-Object -First $tn) + $K)
+        Mr-Teol
+    }
+}
+function Mr-Tws { $m = $script:Mr; while ($m.p -lt $m.s.Length -and " `t`r".IndexOf($m.s[$m.p]) -ge 0) { $m.p++ } }
+function Mr-Teol { $m = $script:Mr; while ($m.p -lt $m.s.Length -and $m.s[$m.p] -ne "`n") { $m.p++ } }
+function Mr-Tgap { $m = $script:Mr; while ($m.p -lt $m.s.Length) { if (" `t`r`n,".IndexOf($m.s[$m.p]) -ge 0) { $m.p++ } elseif ($m.s[$m.p] -eq '#') { Mr-Teol } else { break } } }
+function Mr-TKeys {
+    $m = $script:Mr; $K = New-Object System.Collections.Generic.List[string]
+    while ($true) {
+        Mr-Tws; $c = Mr-C
+        if ($c -eq '"' -or $c -eq "'") { $K.Add((Mr-TStr)) }
+        else { $x = [regex]::Match($m.s.Substring($m.p), '^[A-Za-z0-9_-]+'); if (-not $x.Success) { return $K.ToArray() }; $K.Add($x.Value); $m.p += $x.Length }
+        Mr-Tws; if ((Mr-C) -ne '.') { return $K.ToArray() }
+        $m.p++
+    }
+}
+function Mr-TStr {
+    $m = $script:Mr; $q = Mr-C; $m.p++; $o = New-Object System.Text.StringBuilder
+    if ((Mr-Sub $m.s $m.p 2) -eq "$q$q") { Mr-Fail 'bad_config' 'config.toml 的多行字串 kit 看不懂'; return '' }
+    while ($m.p -lt $m.s.Length) {
+        $c = Mr-C
+        if ($c -eq $q) { $m.p++; return (Mr-Ctl $o.ToString()) }
+        if ($c -eq "`n") { break }
+        if ($q -eq '"' -and $c -eq '\') {
+            $m.p++; $c = Mr-C
+            if ($c -ceq 'u' -or $c -ceq 'U') { $n = if ($c -ceq 'u') { 4 } else { 8 }; try { [void]$o.Append((Mr-Chr (Mr-Hex (Mr-Sub $m.s ($m.p + 1) $n)))) } catch { [void]$o.Append([char]1) }; $m.p += $n + 1; continue }
+            if ($c -ne '' -and 'nrtbf'.IndexOf($c) -ge 0) { [void]$o.Append([char]1) } else { [void]$o.Append($c) }
+            $m.p++; continue
+        }
+        [void]$o.Append($c); $m.p++
+    }
+    Mr-Fail 'bad_config' 'config.toml 的引號沒有關好'; ''
+}
+function Mr-TScalar {
+    $m = $script:Mr; $c = Mr-C
+    if ($c -eq '"' -or $c -eq "'") { return (Mr-TStr) }
+    $x = [regex]::Match($m.s.Substring($m.p), '^[A-Za-z0-9_.:+-]+'); if ($x.Success) { $m.p += $x.Length; return $x.Value }
+    Mr-Fail 'bad_config' 'config.toml 有 kit 看不懂的值'; ''
+}
+function Mr-TVal { # $script:Mr.vt: s (vs), a (vi), t (vk, vv)
+    $m = $script:Mr; $c = Mr-C; $m.vi = New-Object System.Collections.Generic.List[string]; $m.vk = New-Object System.Collections.Generic.List[string]; $m.vv = New-Object System.Collections.Generic.List[string]
+    if ($c -eq '[') {
+        $m.vt = 'a'; $m.p++
+        while ($true) { Mr-Tgap; if ((Mr-C) -eq ']') { $m.p++; return }; if ($m.p -ge $m.s.Length -or $m.errc) { Mr-Fail 'bad_config' 'config.toml 的 [ ] 沒寫好'; return }; $m.vi.Add((Mr-TScalar)) }
+    }
+    if ($c -eq '{') {
+        $m.vt = 't'; $m.p++
+        while ($true) {
+            Mr-Tgap; if ((Mr-C) -eq '}') { $m.p++; return }
+            if ($m.p -ge $m.s.Length -or $m.errc) { Mr-Fail 'bad_config' 'config.toml 的 { } 沒寫好'; return }
+            $k = @(Mr-TKeys); Mr-Tws; if ((Mr-C) -ne '=') { Mr-Fail 'bad_config' 'config.toml 的 { } 沒寫好'; return }
+            $m.p++; Mr-Tws; $m.vk.Add($(if ($k.Count) { $k[0] } else { '' })); $m.vv.Add((Mr-TScalar))
+        }
+    }
+    $m.vt = 's'; $m.vs = Mr-TScalar
+}
+function Mr-TAssign($K) {
+    $m = $script:Mr; $n = @($K).Count
+    if ($n -lt 3 -or $K[0] -cne 'mcp_servers') { return }
+    $j = Mr-Srv $K[1]; $f = $K[2]
+    if ($n -eq 4 -and $m.vt -eq 's') {
+        if ($f -ceq 'env') { Mr-SetEnv $j $K[3] $m.vs } elseif ($f -ceq 'http_headers') { Mr-SetHdr $j $K[3] $m.vs }
+        elseif ($f -ceq 'env_http_headers') { Mr-SetHdr $j $K[3] ('${' + $m.vs + '}') } else { Mr-Wn $j "略過 $f（kit 不帶這個設定）" }
+        return
+    }
+    if ($n -ne 3) { return }
+    if ($f -ceq 'command' -and $m.vt -eq 's') { $j.f['command'] = $m.vs }
+    elseif ($f -ceq 'args' -and $m.vt -eq 'a') { foreach ($v in $m.vi) { Mr-AddArg $j $v } }
+    elseif ($f -ceq 'url' -and $m.vt -eq 's') { $j.f['url'] = $m.vs }
+    elseif ($f -ceq 'env' -and $m.vt -eq 't') { for ($i = 0; $i -lt $m.vk.Count; $i++) { Mr-SetEnv $j $m.vk[$i] $m.vv[$i] } }
+    elseif ($f -ceq 'env_vars' -and $m.vt -eq 'a') { foreach ($v in $m.vi) { Mr-SetEnv $j $v ('${' + $v + '}') } }
+    elseif ($f -ceq 'http_headers' -and $m.vt -eq 't') { for ($i = 0; $i -lt $m.vk.Count; $i++) { Mr-SetHdr $j $m.vk[$i] $m.vv[$i] } }
+    elseif ($f -ceq 'env_http_headers' -and $m.vt -eq 't') { for ($i = 0; $i -lt $m.vk.Count; $i++) { Mr-SetHdr $j $m.vk[$i] ('${' + $m.vv[$i] + '}') } }
+    elseif ($f -ceq 'bearer_token_env_var' -and $m.vt -eq 's') { Mr-SetHdr $j 'Authorization' ('Bearer ${' + $m.vs + '}') }
+    elseif ($f -ceq 'enabled' -and $m.vt -eq 's' -and $m.vs -ceq 'false') { Mr-Wn $j '原本是停用的（enabled = false），kit 照樣帶進來' }
+    else { Mr-Wn $j "略過 $f（kit 不帶這個設定）" }
+}
+
+# a yaml kit has
+function Mr-LoadYaml($lines, [string]$name) {
+    $j = Mr-Srv $name
+    foreach ($l in $lines) {
+        $e = $l.IndexOf("`t"); if ($e -lt 0) { continue }
+        $k = $l.Substring(0, $e); $v = $l.Substring($e + 1)
+        if ($k -ceq 'args[]') { Mr-AddArg $j $v }
+        elseif ($k.StartsWith('env.')) { $j.ek.Add($k.Substring(4)); $j.ev.Add($v) }
+        elseif ($k.StartsWith('headers.')) { $j.hk.Add($k.Substring(8)); $j.hv.Add($v) }
+        elseif ($k -ceq 'type') { $j.f['type'] = $v }
+        elseif (@('command', 'url', 'description') -ccontains $k) { $j.f[$k] = $v }
+    }
+}
+
+# secrets
+function Mr-SecName([string]$k) {
+    $s = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $k.Length; $i++) { $c = [string]$k[$i]; if ($c -cmatch '[A-Z]' -and $i -gt 0 -and ([string]$k[$i - 1]) -cmatch '[a-z0-9]') { [void]$s.Append('_') }; [void]$s.Append($c) }
+    foreach ($p in [regex]::Split($s.ToString().ToUpperInvariant(), '[^A-Z0-9]+')) {
+        if ($p -cmatch 'KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|SESSION' -or $p -ceq 'PAT') { return $true }
+        if ($p -cmatch 'AUTH' -and $p -cne 'AUTHOR' -and $p -cne 'AUTHORS') { return $true }
+    }
+    $false
+}
+function Mr-SecPlain([string]$v) {
+    $v -eq '' -or $v.Contains('${') -or $v.ToLowerInvariant() -cmatch '^(true|false|yes|no|on|off|null|none)$' -or $v -cmatch '^[0-9][0-9.]*$' -or $v -cmatch '^(/|~/|\./|\.\./|[A-Za-z]:[\\/])' -or $v -cmatch '^[A-Za-z][A-Za-z0-9+.-]*://'
+}
+function Mr-SecToken([string]$v) {
+    if ($v.Contains('${') -or $v -cnotmatch '^[A-Za-z0-9_+=/.-]+$') { return $false }
+    $n = $v.Length
+    $m = [regex]::Match($v, '^(sk-|sk_live_|sk_test_|rk_live_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abprs]-|AKIA|ASIA|AIza|eyJ)')
+    if ($m.Success -and $n - $m.Length -ge 8) { return $true }
+    if ($n -ge 20 -and -not $v.StartsWith('/') -and $v -cmatch '[A-Z]' -and $v -cmatch '[a-z]' -and $v -cmatch '[0-9]') { if ([regex]::Matches($v, '[._/-]').Count -le 3) { return $true } }
+    if ($n -ge 32 -and $v -cmatch '^[0-9A-Fa-f]+$' -and $v -cmatch '[0-9]' -and $v -cmatch '[A-Fa-f]') { return $true }
+    $false
+}
+function Mr-VName([string]$k) { ([regex]::Replace(($k -replace '^-+', '').ToUpperInvariant(), '[^A-Z0-9]+', '_')).Trim('_') }
+function Mr-NewVar([string]$base) { $v = $base; $i = 2; while ($script:Mr.used.ContainsKey($v)) { $v = "${base}_$i"; $i++ }; $script:Mr.used[$v] = 1; $v }
+function Mr-Secret([string]$where, [string]$base) { $v = Mr-NewVar $base; Mr-Emit "X`t$where`t$v"; $v }
+function Mr-UsedVars([string]$s) { foreach ($x in [regex]::Matches($s, '\$\{([A-Za-z_][A-Za-z0-9_]*)')) { $script:Mr.used[$x.Groups[1].Value] = 1 } }
+function Mr-UrlStrip([string]$u, [string]$where) {
+    $m = [regex]::Match($u, '^[A-Za-z][A-Za-z0-9+.-]*://'); if (-not $m.Success) { return $u }
+    $sv = $script:Mr.sv
+    $sch = $m.Value; $rest = $u.Substring($m.Length)
+    $frag = ''; $i = $rest.IndexOf('#'); if ($i -ge 0) { $frag = $rest.Substring($i); $rest = $rest.Substring(0, $i) }
+    $q = ''; $hq = $false; $i = $rest.IndexOf('?'); if ($i -ge 0) { $q = $rest.Substring($i + 1); $rest = $rest.Substring(0, $i); $hq = $true }
+    $i = $rest.IndexOf('/'); if ($i -ge 0) { $auth = $rest.Substring(0, $i); $path = $rest.Substring($i) } else { $auth = $rest; $path = '' }
+    $at = $auth.LastIndexOf('@')
+    if ($at -ge 0) {
+        $ui = $auth.Substring(0, $at); $c = $ui.IndexOf(':')
+        if ($c -ge 0) { $pw = $ui.Substring($c + 1); if ($pw -ne '' -and -not $pw.Contains('${')) { $ui = $ui.Substring(0, $c + 1) + '${' + (Mr-Secret $where "${sv}_PASSWORD") + '}' } }
+        elseif (Mr-SecToken $ui) { $ui = '${' + (Mr-Secret $where "${sv}_TOKEN") + '}' }
+        $auth = $ui + $auth.Substring($at)
+    }
+    $parts = $path.Split('/'); if ($path -eq '') { $parts = @() }
+    for ($i = 0; $i -lt $parts.Count; $i++) { if (Mr-SecToken $parts[$i]) { $parts[$i] = '${' + (Mr-Secret $where "${sv}_SECRET") + '}' } }
+    $path = $parts -join '/'
+    if ($hq) {
+        $qs = $q.Split('&'); if ($q -eq '') { $qs = @() }
+        for ($i = 0; $i -lt $qs.Count; $i++) {
+            $c = $qs[$i].IndexOf('=')
+            if ($c -ge 0) { $k = $qs[$i].Substring(0, $c); $v = $qs[$i].Substring($c + 1); if ($v -ne '' -and -not $v.Contains('${') -and ((Mr-SecName $k) -or (Mr-SecToken $v))) { $qs[$i] = $k + '=${' + (Mr-Secret $where "${sv}_$(Mr-VName $k)") + '}' } }
+        }
+        $q = '?' + ($qs -join '&')
+    }
+    $sch + $auth + $path + $q + $frag
+}
+function Mr-Strip($j) {
+    $sv = $script:Mr.sv
+    for ($i = 0; $i -lt $j.ek.Count; $i++) {
+        $k = $j.ek[$i]; $v = $j.ev[$i]; $w = "env.$k"
+        if ($v.Contains('${')) { continue }
+        if ($v -cmatch '^[A-Za-z][A-Za-z0-9+.-]*://') { $j.ev[$i] = Mr-UrlStrip $v $w }
+        elseif (((Mr-SecName $k) -and -not (Mr-SecPlain $v)) -or (Mr-SecToken $v)) { $j.ev[$i] = '${' + (Mr-Secret $w $k) + '}' }
+    }
+    for ($i = 0; $i -lt $j.hk.Count; $i++) {
+        $k = $j.hk[$i]; $v = $j.hv[$i]; $w = "headers.$k"; $lk = $k.ToLowerInvariant()
+        if ($v.Contains('${') -or $v -eq '') { continue }
+        if ($lk -ceq 'authorization' -or $lk -ceq 'proxy-authorization') {
+            $m = [regex]::Match($v, '^(Bearer|Basic|Token|Bot|bearer|basic|token) +')
+            if ($m.Success) { $j.hv[$i] = $m.Value + '${' + (Mr-Secret $w "${sv}_TOKEN") + '}' } else { $j.hv[$i] = '${' + (Mr-Secret $w "${sv}_TOKEN") + '}' }
+        } elseif ($lk -ceq 'cookie') { $j.hv[$i] = '${' + (Mr-Secret $w "${sv}_COOKIE") + '}' }
+        elseif (((Mr-SecName $k) -and -not (Mr-SecPlain $v)) -or (Mr-SecToken $v)) { $k = (Mr-VName $k) -replace '^X_', ''; $j.hv[$i] = '${' + (Mr-Secret $w "${sv}_$k") + '}' }
+    }
+    if ((Mr-F $j 'url') -ne '') { $j.f['url'] = Mr-UrlStrip (Mr-F $j 'url') 'url' }
+    $prev = ''
+    for ($i = 1; $i -le $j.an; $i++) {
+        $v = Mr-A $j $i; $w = "args[$i]"
+        if ($v.Contains('${')) { $prev = $v; continue }
+        if ($v -cmatch '^[A-Za-z][A-Za-z0-9+.-]*://') { $j.a["$i"] = Mr-UrlStrip $v $w }
+        elseif ($v -cmatch '^--?[A-Za-z0-9][A-Za-z0-9_-]*=' -or $v -cmatch '^[A-Za-z_][A-Za-z0-9_]*=') {
+            $e = $v.IndexOf('='); $k = $v.Substring(0, $e); $v = $v.Substring($e + 1)
+            if ($v -cmatch '^[A-Za-z][A-Za-z0-9+.-]*://') { $j.a["$i"] = $k + '=' + (Mr-UrlStrip $v $w) }
+            elseif (((Mr-SecName $k) -and -not (Mr-SecPlain $v)) -or (Mr-SecToken $v)) { $b = if ($k.StartsWith('-')) { "${sv}_$(Mr-VName $k)" } else { $k }; $j.a["$i"] = $k + '=${' + (Mr-Secret $w $b) + '}' }
+        }
+        elseif ($prev -cmatch '^--?[A-Za-z]' -and -not $prev.Contains('=') -and -not $v.StartsWith('-') -and (Mr-SecName $prev) -and -not (Mr-SecPlain $v)) { $j.a["$i"] = '${' + (Mr-Secret $w "${sv}_$(Mr-VName $prev)") + '}' }
+        elseif (Mr-SecToken $v) { $j.a["$i"] = '${' + (Mr-Secret $w "${sv}_SECRET") + '}' }
+        $prev = Mr-A $j $i
+    }
+}
+
+# the package (npx, uvx)
+function Mr-Need([string]$t) { if (-not $script:Mr.rq.ContainsKey($t)) { $script:Mr.rq[$t] = 1; Mr-Emit "R`t$t" } }
+function Mr-Pkg($j, [string]$pin) {
+    $c = ((Mr-F $j 'command') -replace '^.*[/\\]', '').ToLowerInvariant() -replace '\.(exe|cmd|bat)$', ''
+    if (@('npx', 'node', 'npm') -ccontains $c) { Mr-Need 'node' }
+    elseif ($c -ceq 'uvx' -or $c -ceq 'uv') { Mr-Need 'uv' }
+    elseif ($c -cmatch '^python(3(\.[0-9]+)?)?$' -or $c -ceq 'py') { Mr-Need 'python' }
+    elseif ($c -ceq 'docker') { Mr-Need 'docker' }
+    $bad = ''; $nm = ''; $ver = ''; $bin = ''; $pre = ''; $argno = 0; $fi = 0; $ex = ''; $fno = 0; $fpre = ''
+    if ($c -ceq 'npx') {
+        $kind = 'npm'; $spec = ''
+        for ($i = 1; $i -le $j.an; $i++) {
+            $a = Mr-A $j $i
+            if (@('-y', '--yes', '-q', '--quiet') -ccontains $a) { continue }
+            if ($a -ceq '-p' -or $a -ceq '--package') { $i++; $spec = Mr-A $j $i; $argno = $i; continue }
+            if ($a.StartsWith('--package=')) { $spec = $a.Substring(10); $argno = $i; $pre = '--package='; continue }
+            if ($a.StartsWith('-')) { $bad = "npx 的 $a kit 不認得"; break }
+            if ($spec -eq '') { $spec = $a; $argno = $i } else { $bin = $a }
+            $fi = $i + 1; break
+        }
+        if ($bad -eq '' -and $spec -eq '') { return }
+        if ($spec -ne '') {
+            $at = $spec.LastIndexOf('@')
+            if ($at -gt 0) { $nm = $spec.Substring(0, $at); $ver = $spec.Substring($at + 1) } else { $nm = $spec }
+            if ($bad -eq '' -and $nm -cnotmatch '^(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$') { $bad = "套件 $nm 不是 npm registry 上的名字" }
+        }
+        if ($ver -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$') { $ver = '' }
+    } elseif ($c -ceq 'uvx' -or ($c -ceq 'uv' -and (Mr-A $j 1) -ceq 'tool' -and (Mr-A $j 2) -ceq 'run')) {
+        $kind = 'pip'; $spec = ''
+        for ($i = $(if ($c -ceq 'uv') { 3 } else { 1 }); $i -le $j.an; $i++) {
+            $a = Mr-A $j $i
+            if ($a -ceq '-q' -or $a -ceq '--quiet') { continue }
+            if ($a -ceq '--from') { $i++; $spec = Mr-A $j $i; $fno = $i; $fpre = ''; continue }
+            if ($a.StartsWith('--from=')) { $spec = $a.Substring(7); $fno = $i; $fpre = '--from='; continue }
+            if ($a -ceq '--python' -or $a -ceq '-p') { $i++; continue }
+            if ($a.StartsWith('--python=')) { continue }
+            if ($a.StartsWith('-')) { $bad = "uvx 的 $a kit 不幫它裝（照樣在啟動時下載）"; break }
+            $bin = $a; $argno = $i; $fi = $i + 1; break
+        }
+        if ($bad -eq '' -and $bin -eq '') { return }
+        if ($fno) { $argno = $fno; $pre = $fpre; $bin = $bin -replace '@.*$', '' } else { $spec = $bin; $bin = '' }
+        if ($spec -ne '') {
+            $x = $spec.IndexOf('==')
+            if ($x -ge 0) { $nm = $spec.Substring(0, $x); $ver = $spec.Substring($x + 2) }
+            elseif (($x = $spec.IndexOf('@')) -ge 0) { $nm = $spec.Substring(0, $x); $ver = $spec.Substring($x + 1) }
+            else { $nm = $spec }
+            $m = [regex]::Match($nm, '\[[A-Za-z0-9._,-]*\]$'); if ($m.Success) { $ex = $m.Value; $nm = $nm.Substring(0, $m.Index) }
+            if ($bad -eq '' -and $nm -cnotmatch '^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$') { $bad = "套件 $nm 不是 PyPI 上的名字" }
+            if ($ver -cnotmatch '^[0-9][0-9A-Za-z.!+]*$') { $ver = '' }
+            if ($bin -eq '') { $bin = $nm }
+        }
+    } else { return }
+    if ($pin -ne '' -and $bad -eq '' -and $ver -eq '' -and $argno) {
+        $ver = $pin
+        $j.a["$argno"] = $pre + $nm + $(if ($kind -eq 'pip') { $ex } else { '' }) + $(if ($kind -eq 'pip' -and $fno) { '==' } else { '@' }) + $ver
+    }
+    $pk = $nm + $(if ($kind -eq 'pip') { $ex } else { '' })
+    Mr-Emit "P`t$kind`t$pk`t$ver`t$argno`t$bin`t$fi`t$bad"
+}
+
+# the yaml
+function Mr-Yq([string]$v) {
+    if ($v -cmatch '^[A-Za-z0-9_$./=+-][A-Za-z0-9_$./=+:{}@%~,-]*$' -and $v -cne '-' -and -not $v.EndsWith(':') -and $v.ToLowerInvariant() -cnotmatch '^(true|false|yes|no|on|off|null|none|y|n)$' -and $v -cnotmatch '^[-+.]?[0-9]') { return $v }
+    if ($v -cnotmatch '["\\]') { return '"' + $v + '"' }
+    if (-not $v.Contains("'")) { return "'" + $v + "'" }
+    Mr-Fail 'bad_config' '有個值同時有 '' 和 " 或 \，kit 的 yaml 寫不下'; ''
+}
+function Mr-VList([string]$s) {
+    $l = New-Object System.Collections.Generic.List[string]
+    foreach ($x in [regex]::Matches($s, '\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}')) {
+        $r = $x.Value.Substring(2, $x.Length - 3)
+        if ($r.Contains(':-')) { continue }
+        if (-not $script:Mr.vseen.ContainsKey($r)) { $script:Mr.vseen[$r] = 1; Mr-Emit "V`t$r"; $l.Add($r) }
+    }
+    $l -join '、'
+}
+function Mr-Finish($j, [string]$mode, [string]$N, [string]$pin) {
+    if ($j.cn -gt 0) {
+        $A = Mr-New
+        for ($i = 2; $i -le $j.cn; $i++) { $v = $j.ca["$i"]; $A["$($i - 1)"] = $(if ($null -eq $v) { '' } else { $v }) }
+        for ($i = 1; $i -le $j.an; $i++) { $A["$($i + $j.cn - 1)"] = Mr-A $j $i }
+        $j.a = $A; $j.an += $j.cn - 1; $v = $j.ca['1']; $j.f['command'] = $(if ($null -eq $v) { '' } else { $v })
+    }
+    $t = Mr-F $j 'type'
+    if ($t -eq '') { $t = if ((Mr-F $j 'url') -ne '' -and (Mr-F $j 'command') -eq '') { 'http' } else { 'stdio' } }
+    if ($mode -eq 'yaml') {
+        Mr-Emit "T`t$t"
+        foreach ($v in $j.ev) { Mr-UsedVars $v }; foreach ($v in $j.hv) { Mr-UsedVars $v }
+        for ($i = 1; $i -le $j.an; $i++) { Mr-UsedVars (Mr-A $j $i) }
+        Mr-UsedVars (Mr-F $j 'url')
+        Mr-Strip $j; if ($t -eq 'stdio') { Mr-Pkg $j $pin }
+        $vars = ''; foreach ($v in $j.ev) { $vars += " $v" }; foreach ($v in $j.hv) { $vars += " $v" }
+        for ($i = 1; $i -le $j.an; $i++) { $vars += ' ' + (Mr-A $j $i) }
+        [void](Mr-VList ($vars + ' ' + (Mr-F $j 'url') + ' ' + (Mr-F $j 'command')))
+        return
+    }
+    if ($t -eq 'stdio') {
+        if ((Mr-F $j 'command') -eq '') { Mr-Fail 'bad_config' '少了要跑的程式（command）'; return }
+        if ((Mr-F $j 'url') -ne '') { Mr-Wn $j '有 command 也有 url：kit 只帶 command' }
+        if ($j.hk.Count -gt 0) { Mr-Wn $j '要跑程式的 MCP 不用 headers，略過'; $j.hk.Clear(); $j.hv.Clear() }
+    } else {
+        if ((Mr-F $j 'url') -eq '') { Mr-Fail 'bad_config' '少了網址（url）'; return }
+        if ((Mr-F $j 'command') -ne '') { Mr-Wn $j '有 url 也有 command：kit 只帶 url' }
+        if ($j.ek.Count -gt 0) { Mr-Wn $j '網址的 MCP 不用 env，略過'; $j.ek.Clear(); $j.ev.Clear() }
+        $j.an = 0; $j.f['command'] = ''
+    }
+    foreach ($v in $j.ev) { [void](Mr-Ctl $v); Mr-UsedVars $v }
+    foreach ($v in $j.hv) { [void](Mr-Ctl $v); Mr-UsedVars $v }
+    for ($i = 1; $i -le $j.an; $i++) { [void](Mr-Ctl (Mr-A $j $i)); Mr-UsedVars (Mr-A $j $i) }
+    foreach ($k in 'url', 'command', 'description') { [void](Mr-Ctl (Mr-F $j $k)) }; Mr-UsedVars (Mr-F $j 'url')
+    if ($script:Mr.errc) { return }
+    Mr-Emit "N`t$N"; Mr-Emit "T`t$t"
+    if ($t -eq 'stdio') { Mr-Pkg $j $pin }
+    Mr-Strip $j
+    $y = New-Object System.Text.StringBuilder
+    if ((Mr-F $j 'description') -ne '') { [void]$y.Append('description: ' + (Mr-Yq (Mr-F $j 'description')) + "`n") }
+    if ($t -ne 'stdio') {
+        [void]$y.Append("type: $t`nurl: " + (Mr-Yq (Mr-F $j 'url')) + "`n")
+        if ($j.hk.Count -gt 0) { [void]$y.Append("headers:`n"); for ($i = 0; $i -lt $j.hk.Count; $i++) { [void]$y.Append('  ' + $j.hk[$i] + ': ' + (Mr-Yq $j.hv[$i]) + "`n") } }
+    } else {
+        [void]$y.Append('command: ' + (Mr-Yq (Mr-F $j 'command')) + "`n")
+        if ($j.an -eq 0) { [void]$y.Append("args: []`n") }
+        else { [void]$y.Append("args:`n"); for ($i = 1; $i -le $j.an; $i++) { [void]$y.Append('  - ' + (Mr-Yq (Mr-A $j $i)) + "`n") } }
+        if ($j.ek.Count -gt 0) { [void]$y.Append("env:`n"); for ($i = 0; $i -lt $j.ek.Count; $i++) { [void]$y.Append('  ' + $j.ek[$i] + ': ' + (Mr-Yq $j.ev[$i]) + "`n") } }
+    }
+    $nv = Mr-VList $y.ToString()
+    $s = '# 用 kit new mcp --config 從貼上的設定建立。${名字} 是環境變數：值不放在這裡，每台電腦自己設定。' + "`n"
+    if ($nv -ne '') { $s += "# 要先設定的環境變數：$nv`n" }
+    foreach ($l in ($s + $y.ToString()).TrimEnd("`n").Split("`n")) { Mr-Emit "Y`t$l" }
+    foreach ($w in $j.wl) { Mr-Emit "W`t$w" }
+}
+function Mcp-Read([string]$mode, $lines, [string]$name = '', [string]$pin = '') {
+    $script:Mr = @{ si = (Mr-New); list = (New-Object System.Collections.Generic.List[object]); errc = ''; errm = ''; out = (New-Object System.Text.StringBuilder); used = (Mr-New); vseen = (Mr-New); rq = (Mr-New); sv = ''; s = ''; p = 0; vt = ''; vs = '' }
+    $lines = @(foreach ($l in @($lines)) { ([string]$l) -replace "`r$", '' })
+    switch ($mode) { 'json' { Mr-LoadJson $lines } 'cmd' { Mr-LoadCmd $lines } 'toml' { Mr-LoadToml $lines } 'yaml' { Mr-LoadYaml $lines $name } }
+    $m = $script:Mr; $ns = $m.list.Count
+    $lst = @(foreach ($j in $m.list) { "L`t$($j.name)" })
+    if ($m.errc) { return @("E`t$($m.errc)`t$($m.errm)") }
+    if ($ns -eq 0) { Mr-Fail 'bad_config' '貼上的內容裡找不到 MCP server 的設定' }
+    $pick = $null
+    if ($ns -gt 1) {
+        if ($name -eq '') { return @("E`tseveral_servers`t貼上的設定有 $ns 個 MCP server，請在 kit new mcp 後面寫要哪一個的名字") + $lst }
+        foreach ($j in $m.list) { if ($j.name -ceq $name -or (Mr-Norm $j.name) -ceq $name) { $pick = $j } }
+        if (-not $pick) { return @("E`tnot_found`t貼上的設定裡沒有 $name") + $lst }
+    } elseif ($ns -eq 1) { $pick = $m.list[0] }
+    $N = $name; if ($N -eq '' -and $pick) { $N = Mr-Norm $pick.name }
+    if ($N -eq '') { Mr-Fail 'no_name' '這個設定沒有名字：請寫成 kit new mcp <名字> --config …' }
+    if ($N -cnotmatch '^[a-z0-9][a-z0-9-]*$') { Mr-Fail 'bad_name' "名字只能用小寫英文、數字和 -：$N" }
+    if ($m.errc) { return @("E`t$($m.errc)`t$($m.errm)") }
+    $m.sv = [regex]::Replace($N.ToUpperInvariant(), '[^A-Z0-9]+', '_')
+    Mr-Finish $pick $mode $N $pin
+    if ($m.errc) { return @("E`t$($m.errc)`t$($m.errm)") }
+    $o = $m.out.ToString(); if ($o -eq '') { return @() }
+    $o.TrimEnd("`n").Split("`n")
+}
+# ---------- MCP yaml -> what the tools read (the same as unix/kit: read its notes) ----------
 function Mcp-Env($lines) { foreach ($l in $lines) { if ($l.StartsWith('env.')) { $t = $l.IndexOf("`t"); , @($l.Substring(4, $t - 4), $l.Substring($t + 1)) } } }   # pairs; callers wrap in @()
+function Mcp-Map($lines, [string]$key) { $p = "$key."; foreach ($l in $lines) { if ($l.StartsWith($p)) { $t = $l.IndexOf("`t"); , @($l.Substring($p.Length, $t - $p.Length), $l.Substring($t + 1)) } } }
+function Mcp-MapJson($lines, [string]$key) { # ,"KEY":{..} when the yaml has that map
+    $m = @(Mcp-Map $lines $key); if ($m.Count -eq 0) { return '' }
+    ",`"$key`":{" + ((@($m) | ForEach-Object { (Json-Str $_[0]) + ':' + (Json-Str $_[1]) }) -join ',') + '}'
+}
 function Mcp-Argv($y) { # command + args of an MCP yaml; on Windows a .cmd / .bat (npx, npm, pnpm, yarn ...) runs through cmd /c
     $cmd = @(YGet-From $y 'command'); if ($cmd.Count -eq 0 -or -not $cmd[0]) { return $null }
-    $c = [string]$cmd[0]; $a = @(YGet-From $y 'args')
+    Mcp-Shim (@([string]$cmd[0]) + @(YGet-From $y 'args'))
+}
+function Mcp-Shim($argv) {
+    $c = [string]$argv[0]; $a = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] })
     if ($script:OnWindows -and $c -notmatch '^(cmd|cmd\.exe)$' -and -not [IO.Path]::GetExtension($c)) {
         $shim = @('npx', 'npm', 'pnpm', 'pnpx', 'yarn', 'bunx') -contains $c.ToLowerInvariant()
         if (-not $shim) { $g = Get-Command $c -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($g -and $g.Path -match '\.(cmd|bat)$') { $shim = $true } }
@@ -603,21 +1194,119 @@ function Mcp-Argv($y) { # command + args of an MCP yaml; on Windows a .cmd / .ba
     }
     , (@($c) + $a)
 }
-function Mcp-Json([string]$f) { # {"command":..,"args":[..],"env":{..}}
-    $y = Yaml-Lines $f
-    $argv = Mcp-Argv $y
+function Mcp-Name([string]$f) { [IO.Path]::GetFileNameWithoutExtension($f) }
+function Mcp-Info([string]$f) { $y = @(); try { $y = @(Yaml-Lines $f) } catch { }; @(Mcp-Read 'yaml' $y (Mcp-Name $f)) }   # Mcp-Read's T X V R P lines
+function Mcp-Lines($out, [string]$t) { @(foreach ($l in @($out)) { if ($l.StartsWith("$t`t")) { $l.Substring($t.Length + 1) } }) }
+function Mcp-Type([string]$f) { $t = @(YGet $f 'type'); if ($t.Count -gt 0 -and $t[0]) { [string]$t[0] } else { 'stdio' } }
+function Mcp-Store([string]$n) { Join-Path (Join-Path $KitConf 'mcp-deps') $n }
+function Mcp-Pkg($info) { $p = @(Mcp-Lines $info 'P'); if ($p.Count -eq 0) { return $null }; , ($p[0].Split("`t")) }   # kind package version argno bin first bad
+function Mcp-PkgJson([string]$n, [string]$pkg, [string]$ver) { "{`"name`": `"kit-mcp-$n`", `"private`": true, `"dependencies`": {$(Json-Str $pkg): $(Json-Str $ver)}}`n" }
+function Venv-Bin([string]$venv, [string]$b) { if ($OnWindows) { Join-Path (Join-Path $venv 'Scripts') "$b.exe" } else { Join-Path (Join-Path $venv 'bin') $b } }
+function Mcp-NpmBin([string]$d, [string]$want) { # the file its package.json "bin" names (WANT, or its own name, or the only one)
+    $lv = Json-LeavesOf (Join-Path $d 'package.json'); if ($null -eq $lv) { return $null }
+    $s = ''; $ks = @(); $vs = @(); $own = Split-Path -Leaf $d
+    foreach ($x in $lv) { if ($x[0] -ceq 'bin' -and $x.Count -eq 2) { $s = $x[1] } elseif ($x[0] -ceq 'bin' -and $x.Count -eq 3) { $ks += $x[1]; $vs += $x[2] } }
+    if ($s -eq '') {
+        for ($i = 0; $i -lt $ks.Count; $i++) { if ($ks[$i] -ceq $want -or ($want -eq '' -and $ks[$i] -ceq $own)) { $s = $vs[$i] } }
+        if ($s -eq '' -and $ks.Count -eq 1 -and $want -eq '') { $s = $vs[0] }
+    }
+    if ($s -cnotmatch '^"[^"\\]+"$') { return $null }
+    $s = $s.Substring(1, $s.Length - 2) -replace '^\./', ''
+    if ($s -cmatch '(^|/)\.\.(/|$)' -or $s.StartsWith('/')) { return $null }
+    $p = Join-Path $d $s; if (Test-Path -LiteralPath $p -PathType Leaf) { $p } else { $null }
+}
+function Mcp-Installed([string]$n, $pk) { # the program to run, when kit installed exactly this package ($null: it did not)
+    if (-not $pk -or -not $pk[2]) { return $null }
+    $s = Mcp-Store $n; $src = Join-Path $s '.kit-src'
+    if ($pk[0] -eq 'npm') {
+        if (-not (Test-Path -LiteralPath (Join-Path $s 'node_modules') -PathType Container)) { return $null }
+        $f = Join-Path $src 'package.json'; if (-not (Test-Path -LiteralPath $f -PathType Leaf) -or (Read-Text $f) -cne (Mcp-PkgJson $n $pk[1] $pk[2])) { return $null }
+        return (Mcp-NpmBin (Join-Path (Join-Path $s 'node_modules') $pk[1]) $pk[4])
+    }
+    if ($pk[0] -eq 'pip') {
+        if (-not (Test-Path -LiteralPath (Venv-Python (Join-Path $s 'venv')) -PathType Leaf)) { return $null }
+        $f = Join-Path $src 'requirements.txt'; if (-not (Test-Path -LiteralPath $f -PathType Leaf) -or (Read-Text $f) -cne "$($pk[1])==$($pk[2])`n") { return $null }
+        $b = Venv-Bin (Join-Path $s 'venv') $pk[4]; if (Test-Path -LiteralPath $b -PathType Leaf) { return $b }
+    }
+    $null
+}
+function Mcp-Run([string]$f, $y) { # command + args (the package kit installed, when it did); $null without a command
+    $pk = Mcp-Pkg (Mcp-Info $f)
+    $x = Mcp-Installed (Mcp-Name $f) $pk
+    if ($x) {
+        $a = @(YGet-From $y 'args'); $first = [int]$pk[5]
+        $rest = @(for ($i = $first; $i -le $a.Count; $i++) { $a[$i - 1] })
+        if ($pk[0] -eq 'npm') { return , (@('node', $x) + $rest) }
+        return , (@($x) + $rest)
+    }
+    Mcp-Argv $y
+}
+function Mcp-Json([string]$f) { # {"command":..,"args":[..],"env":{..}} or {"type":"http","url":..,"headers":{..}} (Claude Code, omp)
+    $y = Yaml-Lines $f; $t = Mcp-Type $f
+    if ($t -eq 'http' -or $t -eq 'sse') {
+        $u = @(YGet-From $y 'url'); if ($u.Count -eq 0 -or -not $u[0]) { Warn "$f has no url"; return $null }
+        return "{`"type`":`"$t`",`"url`":$(Json-Str $u[0])$(Mcp-MapJson $y 'headers')}"
+    }
+    if ($t -ne 'stdio') { Warn "${f}：type 只能是 stdio、http 或 sse"; return $null }
+    $argv = Mcp-Run $f $y
     if (-not $argv) { Warn "$f has no command"; return $null }
     $rest = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] })
-    $out = '{"command":' + (Json-Str $argv[0]) + ',"args":[' + ((@($rest) | ForEach-Object { Json-Str $_ }) -join ',') + ']'
-    $envs = @(Mcp-Env $y)
-    if ($envs.Count -gt 0) { $out += ',"env":{' + ((@($envs) | ForEach-Object { (Json-Str $_[0]) + ':' + (Json-Str $_[1]) }) -join ',') + '}' }
-    $out + '}'
+    '{"command":' + (Json-Str $argv[0]) + ',"args":[' + ((@($rest) | ForEach-Object { Json-Str $_ }) -join ',') + ']' + (Mcp-MapJson $y 'env') + '}'
+}
+function Mcp-VarsWarn($names) { # tell once about each ${VAR} the wanted MCP need that this machine has not set
+    foreach ($n in @($names | Where-Object { $_ })) {
+        $p = Find-Item 'mcp' $n; if (-not $p) { continue }
+        foreach ($v in @(Mcp-Lines (Mcp-Info $p) 'V')) {
+            if ([Environment]::GetEnvironmentVariable($v)) { if ($null -ne (State-Get 'told' "var:$v")) { State-Del 'told' "var:$v" } }
+            elseif ($null -eq (State-Get 'told' "var:$v")) { Warn "MCP $n 要用環境變數 ${v}，這台電腦還沒設定：設定好再重開 agent（只提醒這一次）"; State-Set 'told' "var:$v" 1 }
+        }
+    }
 }
 function Toml-Key([string]$k) { if ($k -match '^[A-Za-z0-9_-]+$') { $k } else { Json-Str $k } }
 function Toml-User([string]$cfg) { # FILE without kit's blocks (what the user wrote), as lines
     if (-not (Test-Path -LiteralPath $cfg)) { return @() }
     $in = $false
     @(foreach ($l in (Read-Text $cfg) -split "`n") { $l = $l.TrimEnd("`r"); if ($l -eq $TomlBegin -or $l -eq $TopBegin) { $in = $true }; if (-not $in) { $l }; if ($l -eq $TomlEnd -or $l -eq $TopEnd) { $in = $false } })
+}
+function Codex-Told([string]$k, [string]$msg) { if ($null -eq (State-Get 'told' "codex-mcp:$k")) { Warn "$msg（只提醒這一次）"; State-Set 'told' "codex-mcp:$k" 1 } }
+function Codex-Mcp-Fields([string]$f, [string]$n, [scriptblock]$q, [scriptblock]$kq, [string]$eq, [string]$cm) { # Codex's fields: @(key, value) (env.K: its env); $null: Codex cannot use it
+    # (the same as codex_mcp_fields in unix/kit; Q quotes a string, KQ a key; EQ and CM: " = " and ", " in config.toml)
+    $y = Yaml-Lines $f; $t = Mcp-Type $f
+    $out = New-Object System.Collections.Generic.List[object]
+    $ob = if ($eq -eq ' = ') { '{ ' } else { '{' }; $cb = if ($eq -eq ' = ') { ' }' } else { '}' }
+    if ($t -eq 'sse') { Codex-Told "${n}:sse" "Codex 不能用 SSE 的 MCP：$n 不放進 Codex（Claude Code 和 omp 照樣有）"; return $null }
+    if ($t -eq 'http') {
+        $u = @(YGet-From $y 'url'); if ($u.Count -eq 0 -or -not $u[0]) { Warn "$f has no url"; return $null }
+        if ($u[0].Contains('${')) { Codex-Told "${n}:url" "Codex 的網址不能用 `${…}：$n 不放進 Codex"; return $null }
+        $out.Add(@('url', (& $q $u[0])))
+        $bear = ''; $lit = @(); $envh = @()
+        foreach ($h in @(Mcp-Map $y 'headers')) {
+            $k = $h[0]; $v = $h[1]
+            if ($k.ToLowerInvariant() -eq 'authorization' -and $v -cmatch '^Bearer \$\{([A-Za-z_][A-Za-z0-9_]*)\}$') { $bear = $Matches[1] }
+            elseif ($v -cmatch '^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$') { $envh += (& $kq $k) + $eq + (& $q $Matches[1]) }
+            elseif ($v.Contains('${')) { Codex-Told "${n}:header:$k" "Codex 的 header 只能整個是 `${變數}：$n 的 $k 不放進 Codex" }
+            else { $lit += (& $kq $k) + $eq + (& $q $v) }
+        }
+        if ($bear) { $out.Add(@('bearer_token_env_var', (& $q $bear))) }
+        if ($lit.Count -gt 0) { $out.Add(@('http_headers', ($ob + ($lit -join $cm) + $cb))) }
+        if ($envh.Count -gt 0) { $out.Add(@('env_http_headers', ($ob + ($envh -join $cm) + $cb))) }
+        return , $out
+    }
+    if ($t -ne 'stdio') { Warn "${f}：type 只能是 stdio、http 或 sse"; return $null }
+    $argv = Mcp-Run $f $y; if (-not $argv) { Warn "$f has no command"; return $null }
+    $out.Add(@('command', (& $q $argv[0])))
+    $rest = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] })
+    if ($rest.Count -gt 0) { $out.Add(@('args', ('[' + ((@($rest) | ForEach-Object { & $q $_ }) -join $cm) + ']'))) }
+    if (@($rest | Where-Object { "$_".Contains('${') }).Count -gt 0) { Codex-Told "${n}:args" "Codex 不會展開參數裡的 `${…}：$n 的參數照字面放進 Codex" }
+    $vars = @(); $envs = @()
+    foreach ($e in @(Mcp-Map $y 'env')) {
+        if ($e[1] -ceq ('${' + $e[0] + '}')) { $vars += (& $q $e[0]); continue }
+        if ($e[1].Contains('${')) { Codex-Told "${n}:env:$($e[0])" "Codex 不會展開 env 裡的 `${…}：$n 的 $($e[0]) 照字面放進 Codex" }
+        $envs += , @("env.$($e[0])", (& $q $e[1]))
+    }
+    if ($vars.Count -gt 0) { $out.Add(@('env_vars', ('[' + ($vars -join $cm) + ']'))) }
+    foreach ($e in $envs) { $out.Add($e) }
+    , $out
 }
 function Codex-Mcp-Toml($names, [string]$cfg = '') { # [mcp_servers.x] tables for Codex (CFG: whose config.toml to check for the user's own)
     if (-not $cfg) { $cfg = Join-Path $CodexDir 'config.toml' }
@@ -626,23 +1315,153 @@ function Codex-Mcp-Toml($names, [string]$cfg = '') { # [mcp_servers.x] tables fo
     $sb = New-Object System.Text.StringBuilder
     foreach ($n in @($names | Where-Object { $_ })) {
         $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found in any source"; continue }
-        $y = Yaml-Lines $p; $argv = Mcp-Argv $y
-        if (-not $argv) { Warn "$p has no command"; continue }
         $pat = '^\s*\[mcp_servers\."?' + [regex]::Escape($n) + '"?[\]. ]'
         if (@($user | Where-Object { $_ -match $pat }).Count -gt 0) { Warn "Codex 的 config.toml 已經有自己的 mcp_servers.${n}，kit 不動它"; continue }
-        [void]$sb.Append("[mcp_servers.$(Toml-Key $n)]`ncommand = $(Json-Str $argv[0])`n")
-        $args2 = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] }); if ($args2.Count -gt 0) { [void]$sb.Append('args = [' + (($args2 | ForEach-Object { Json-Str $_ }) -join ', ') + "]`n") }
+        $fl = Codex-Mcp-Fields $p $n ${function:Json-Str} ${function:Toml-Key} ' = ' ', '
+        if ($null -eq $fl) { continue }
+        [void]$sb.Append("[mcp_servers.$(Toml-Key $n)]`n")
+        $envs = @()
+        foreach ($x in $fl) { if ($x[0].StartsWith('env.')) { $envs += , $x } else { [void]$sb.Append("$($x[0]) = $($x[1])`n") } }
         # team deny rules for this server's tools (mcp__<server>__<tool>) become disabled_tools
         $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Json-Str $d.Substring("mcp__${n}__".Length) } })
         if ($tools.Count -gt 0) { [void]$sb.Append('disabled_tools = [' + ($tools -join ', ') + "]`n") }
-        $envs = @(Mcp-Env $y)
         if ($envs.Count -gt 0) {
             [void]$sb.Append("`n[mcp_servers.$(Toml-Key $n).env]`n")
-            foreach ($e in $envs) { [void]$sb.Append("$(Toml-Key $e[0]) = $(Json-Str $e[1])`n") }
+            foreach ($e in $envs) { [void]$sb.Append("$(Toml-Key $e[0].Substring(4)) = $($e[1])`n") }
         }
         [void]$sb.Append("`n")
     }
     $sb.ToString()
+}
+function Mcp-ListJson([string]$f, [string]$n) { # ', "type": .., "vars": [..], "needs": [..], "packages": [..]' (the same as unix/kit)
+    Tool-Cache
+    $info = Mcp-Info $f; $t = @(Mcp-Lines $info 'T'); $t = if ($t.Count -gt 0 -and $t[0]) { $t[0] } else { 'stdio' }
+    $vars = @(foreach ($v in @(Mcp-Lines $info 'V')) { "{`"name`": $(Json-S $v), `"set`": $(if ([Environment]::GetEnvironmentVariable($v)) { 'true' } else { 'false' })}" })
+    $needs = New-Object System.Collections.Generic.List[object]; $seen = @{}
+    foreach ($r in @(Mcp-Lines $info 'R')) { if (-not $seen.ContainsKey($r)) { $seen[$r] = 1; $needs.Add(@($r, '')) } }
+    foreach ($r in @(YGet $f 'requires')) {
+        $x = "$r".Split(@('>='), 2, [StringSplitOptions]::None); $nm = $x[0] -replace '[ \t]', ''; $mn = if ($x.Count -gt 1) { $x[1] -replace '[ \t]', '' } else { '' }
+        if ($nm -cmatch '^[a-z0-9][a-z0-9-]*$' -and -not $seen.ContainsKey($nm)) { $seen[$nm] = 1; $needs.Add(@($nm, $mn)) }
+    }
+    $nj = @(foreach ($x in $needs) {
+        $nm = $x[0]; $m = $x[1]; $c = $script:ToolCache[$nm]
+        $h = if ($c) { $c.have } else { '' }; $tt = if ($c) { $c.title } else { $nm }
+        $ok = [bool]$h -and (-not $m -or (Ver-Ge $h $m))
+        $i = if ($ok -or -not $c) { '' } elseif ($h) { $c.upgrade } else { $c.install }
+        "{`"tool`": $(Json-S $nm), `"title`": $(Json-S $tt), `"min`": $(Json-S $m), `"have`": $(Json-S $h), `"ok`": $(if ($ok) { 'true' } else { 'false' }), `"install`": $(Json-S $i)}"
+    })
+    $pj = ''
+    $pk = Mcp-Pkg $info
+    if ($pk) {
+        $s = Mcp-Store $n
+        $ok = if (Mcp-Installed $n $pk) { 'true' } else { 'false' }
+        $had = if ((Test-Path -LiteralPath (Join-Path $s 'node_modules') -PathType Container) -or (Test-Path -LiteralPath (Join-Path $s 'venv') -PathType Container)) { 'true' } else { 'false' }
+        $bad = $pk[6]; if (-not $bad -and -not $pk[2]) { $bad = "沒有固定版本：kit 只裝固定的版本（寫成 $($pk[1])@版本）" }
+        if ($pk[0] -eq 'npm') { $c = if (Npm-Path) { 'npm install --ignore-scripts --omit=dev --no-audit --no-fund' } else { '' } }
+        else {
+            $vp = if ($OnWindows) { 'venv\Scripts\python.exe' } else { 'venv/bin/python' }; $pn = if ($OnWindows) { 'python' } else { 'python3' }
+            $c = if (Py-Path) { "$pn -m venv venv; $vp $($PipArgs -join ' ')" } else { '' }
+        }
+        $pj = "{`"kind`": $(Json-S $pk[0]), `"package`": $(Json-S $pk[1]), `"version`": $(Json-S $pk[2]), `"ok`": $ok, `"had`": $had, `"install`": $(Json-S $c), `"bad`": $(Json-S $bad)}"
+    }
+    ", `"type`": $(Json-S $t), `"vars`": [$($vars -join ', ')], `"needs`": [$($nj -join ', ')], `"packages`": [$pj]"
+}
+function Mcp-Install([string]$n) { # kit install-deps mcp <name> : its npm or Python package, the pinned version, in kit's mcp-deps\<name>
+    $p = Find-Item 'mcp' $n; if (-not $p) { Die "找不到 mcp ${n}（打 kit list 看有哪些）" }
+    $pk = Mcp-Pkg (Mcp-Info $p)
+    if (-not $pk) { Say "kit：mcp $n 不用另外裝套件"; return }
+    if ($pk[6]) { Die "kit 不幫 mcp $n 裝套件：$($pk[6])（它照樣在啟動時下載）" }
+    if (-not $pk[2]) { Die "mcp $n 的套件 $($pk[1]) 沒有固定版本：kit 只裝固定的版本（在 mcp/$n.yaml 寫成 $($pk[1])@版本）" }
+    $s = Mcp-Store $n
+    if (Mcp-Installed $n $pk) { Say "kit：mcp $n 的套件已經裝好了（$($pk[1]) $($pk[2])）" }
+    else {
+        $stage = New-TempDir 'kit-mcp.'
+        try {
+            if ($pk[0] -eq 'npm') { Write-Text (Join-Path $stage 'package.json') (Mcp-PkgJson $n $pk[1] $pk[2]); Install-Npm $stage $s }
+            else { Write-Text (Join-Path $stage 'requirements.txt') "$($pk[1])==$($pk[2])`n"; Install-Pip $stage $s }
+        } finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($env:KIT_DRY_RUN) { return }
+        if (-not (Mcp-Installed $n $pk)) { Die "裝好了，但找不到 $($pk[1]) 要跑的程式（$(if ($pk[4]) { $pk[4] } else { 'package.json 的 bin' })）：照樣在啟動時下載" }
+        Say "kit：mcp $n 的套件裝好了（$($pk[1]) $($pk[2])）"
+    }
+    if (-not (Test-Path -LiteralPath $Machine)) { return }
+    Apply-Dirs; Apply-All
+}
+function Mcp-Latest([string]$kind, [string]$pkg, [string]$tmp) { # its newest version (npm view; PyPI's JSON API), '' when kit cannot tell
+    $v = ''
+    if ($kind -eq 'npm') {
+        $npm = Npm-Path; if (-not $npm) { return '' }
+        if ($OnWindows) { $o = Tool-Version $env:ComSpec ('/d /s /c ""' + $npm + '" view ' + $pkg + ' version"') 30000 $tmp } else { $o = Tool-Version $npm "view $pkg version" 30000 $tmp }
+        foreach ($l in "$o" -split "`n") { $l = $l.Trim(); if ($l -cmatch '^[0-9][0-9A-Za-z.+!-]*$') { $v = $l } }
+    } else {
+        $u = if ($env:KIT_PYPI_URL) { $env:KIT_PYPI_URL } else { 'https://pypi.org/pypi' }; $u = $u.TrimEnd('/') + '/' + ($pkg -replace '\[.*$', '') + '/json'
+        $h = Url-Host $u; $hosts = @(Allowed-Hosts)
+        if ($hosts.Count -gt 0 -and $hosts -notcontains $h) { Warn "$h 不在 allowed_hosts：不查最新版本"; return '' }
+        try {
+            $f = Join-Path $tmp 'pypi.json'
+            Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 20 -OutFile $f -ErrorAction Stop
+            $v = "$(Json-Get $f 'info.version')".Trim('"')
+        } catch { return '' }
+    }
+    if ($v -cmatch '^[0-9][0-9A-Za-z.+!-]*$') { $v } else { '' }
+}
+function Mcp-PasteErr($out) { # Mcp-Read stopped (an E line): stop kit with its code (the servers' names too)
+    $o = @($out); if ($o.Count -eq 0 -or -not $o[0].StartsWith("E`t")) { return }
+    $x = $o[0].Split("`t", 3); $msg = $x[2]
+    $names = @(Mcp-Lines $o 'L')
+    if ($names.Count -gt 0) { $script:DieExtra = ', "servers": ' + (Json-Arr $names); $msg = "${msg}：" + ($names -join '、') }
+    Die-C $x[1] $msg
+}
+function Mcp-NewConfig($o) { # kit new mcp [NAME] --config FILE|- [--to SOURCE] [--look] : a pasted setup -> mcp/<name>.yaml, secrets as ${VAR}
+    if ($o.Name -and -not (Valid-Name $o.Name)) { Die-C bad_name "名字只能用小寫英文、數字和 -：$($o.Name)" }
+    # the paste may hold secrets: it is read here, never written anywhere or printed
+    if ($o.Config -eq '-') { $text = [Console]::In.ReadToEnd() }
+    else { if (-not (Test-Path -LiteralPath $o.Config -PathType Leaf)) { Die-C usage "找不到 $($o.Config)" }; $text = Read-Text $o.Config }
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+    $lines = @($text -split "`n"); if ($text.EndsWith("`n")) { $lines = @($lines | Select-Object -First ($lines.Count - 1)) }
+    $c = ((@($lines | Where-Object { $_ -notmatch '^[ \t\r]*#' }) -join '') -replace '[ \t\r\n]', ''); $c = if ($c.Length -gt 0) { $c.Substring(0, 1) } else { '' }
+    if ($c -eq '') { Die-C bad_config '貼上的內容是空的' }
+    elseif ($c -eq '{') {
+        $form = 'json'
+        $lv = New-Object System.Collections.Generic.List[object]
+        try { Json-Leaves (Json-Parse $text) @() $lv } catch { Die-C bad_config 'JSON 讀不懂（是不是少了括號、逗號或引號？）' }
+        $in = @(foreach ($x in $lv) { $x -join "`t" })
+    } elseif ($c -eq '[') { $form = 'toml'; $in = $lines } else { $form = 'cmd'; $in = $lines }
+    $out = @(Mcp-Read $form $in $o.Name); Mcp-PasteErr $out
+    $tmp = New-TempDir 'kit-mcp.'; $notes = ''
+    try {
+        $pk = Mcp-Pkg $out
+        if ($pk -and $pk[1] -and -not $pk[2] -and -not $pk[6]) {
+            $v = Mcp-Latest $pk[0] $pk[1] $tmp
+            if ($v) { $out = @(Mcp-Read $form $in $o.Name $v); Mcp-PasteErr $out }
+            else { $notes = "查不到 $($pk[1]) 的最新版本（沒網路，或沒有 $(if ($pk[0] -eq 'npm') { 'npm' } else { 'curl' })？）：先不固定版本，每次啟動時下載最新的" }
+        }
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    $n = @(Mcp-Lines $out 'N')[0]; $t = @(Mcp-Lines $out 'T')[0]
+    $dir = Target-Dir $o.To; $dst = Item-Path $dir 'mcp' $n
+    $exists = Test-Path -LiteralPath $dst
+    if (Test-Path -LiteralPath $Machine) { $f = Find-Item 'mcp' $n; if ($f) { $exists = $true; $dst = $f } }
+    $yaml = (@(Mcp-Lines $out 'Y') -join "`n") + "`n"
+    if ($o.Look) {
+        $sec = @(foreach ($x in @(Mcp-Lines $out 'X')) { $p = $x.Split("`t"); "{`"where`": $(Json-S $p[0]), `"var`": $(Json-S $p[1])}" })
+        $pks = @(foreach ($x in @(Mcp-Lines $out 'P')) { $p = $x.Split("`t"); "{`"kind`": $(Json-S $p[0]), `"package`": $(Json-S $p[1]), `"version`": $(Json-S $p[2]), `"bad`": $(Json-S $p[6])}" })
+        $warn = @(Mcp-Lines $out 'W'); if ($notes) { $warn += $notes }
+        Out-Json ("{`"name`": $(Json-S $n), `"source`": $(Json-S (Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $dst)))), `"path`": $(Json-S $dst), `"exists`": $(if ($exists) { 'true' } else { 'false' }), `"type`": $(Json-S $t), `"yaml`": $(Json-S $yaml), " +
+            "`"secrets`": [$($sec -join ', ')], `"vars`": $(Json-Arr (Mcp-Lines $out 'V')), `"requires`": $(Json-Arr (Mcp-Lines $out 'R')), `"packages`": [$($pks -join ', ')], `"warnings`": $(Json-Arr $warn)}")
+        return
+    }
+    if ($exists) { Die-C exists "已經有 mcp:${n}（${dst}）：換個名字（kit new mcp 新名字 --config …），或先刪掉它" }
+    Ensure-Dir (Split-Path -Parent $dst); Write-Text $dst $yaml
+    Say "已建立 $(Rel-Path $dir $dst)（在 $(Split-Path -Leaf $dir)）"
+    foreach ($x in @(Mcp-Lines $out 'X')) { $p = $x.Split("`t"); Say "  $($p[0]) 像是密碼或 token：檔案裡寫成 `${$($p[1])}（值沒有寫進去）" }
+    $v = @(Mcp-Lines $out 'V'); if ($v.Count -gt 0) { Say "  每台電腦要先設定環境變數：$($v -join '、')" }
+    foreach ($w in @(Mcp-Lines $out 'W')) { Warn $w }
+    if ($notes) { Warn $notes }
+    $pk = Mcp-Pkg $out
+    if ($pk -and $pk[2] -and -not $pk[6]) { Say "  套件 $($pk[1]) 固定在 $($pk[2]) 版。先裝好（不然每次啟動時下載）：kit install-deps mcp $n" }
+    Say "要用它：kit add mcp $n"
+    $script:Quiet2 = $true
+    if (-not (Check-Dirs @($dir) $false)) { Warn 'kit check 有問題，送出前請先打  kit check  看看' }
 }
 
 # ---------- write into Claude Code, Codex, omp ----------
@@ -772,13 +1591,13 @@ function Apply-All {
     # Claude: rules as @imports (Codex and omp: AGENTS.md gets the rule text itself), skills, MCP in ~/.claude.json
     Apply-Rules $want
     Sync-Skills (Join-Path $ClaudeDir 'skills') 'skill' $skills
-    Sync-McpJson $ClaudeJson 'mcp' $mcps
+    Sync-McpJson $ClaudeJson 'mcp' $mcps; Mcp-VarsWarn $mcps
 
     # Codex and omp share ~/.agents/skills
     $codex = Has-Codex; $omp = Has-Omp
     if ($codex -or $omp) { Sync-Skills $AgentsSkills 'skill.agents' $skills }
     if ($codex) {
-        [void](Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd ((Codex-Mcp-Toml $mcps) + (Codex-Trust)))
+        [void](Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd ((Codex-Mcp-Toml $mcps) + (Codex-Trust)).TrimEnd("`n"))
         [void](Replace-TopBlock (Join-Path $CodexDir 'config.toml') $TopBegin $TopEnd (Codex-Top))
     }
     if ($omp) {
@@ -940,7 +1759,7 @@ function Apply-Dir([string]$dir) { # the folder's .agentkit -> the tools' files 
     Set-Rules (Join-Path $dir 'CLAUDE.md') $rules 'import'
     Sync-Skills (Join-Path (Join-Path $dir '.claude') 'skills') (Dir-Kind $dir 'skill') $skills
     if (-not (Test-Path -LiteralPath $mj) -and @($mcps).Count -gt 0) { State-Set 'made' $mj 1 }
-    Sync-McpJson $mj (Dir-Kind $dir 'mcp') $mcps
+    Sync-McpJson $mj (Dir-Kind $dir 'mcp') $mcps; Mcp-VarsWarn $mcps
     Drop-Made $mj
     Dir-ClaudeAllow $dir $mcps
     # kit's backups of the user's own files go when kit has nothing left in them
@@ -952,7 +1771,7 @@ function Apply-Dir([string]$dir) { # the folder's .agentkit -> the tools' files 
         Sync-Skills (Join-Path (Join-Path $dir '.agents') 'skills') (Dir-Kind $dir 'skill.agents') $skills
     }
     $ct = Join-Path (Join-Path $dir '.codex') 'config.toml'
-    if ((Has-Codex) -or (Test-Path -LiteralPath $ct)) { [void](Replace-Block $ct $TomlBegin $TomlEnd (Codex-Mcp-Toml $mcps $ct)) }
+    if ((Has-Codex) -or (Test-Path -LiteralPath $ct)) { [void](Replace-Block $ct $TomlBegin $TomlEnd (Codex-Mcp-Toml $mcps $ct).TrimEnd("`n")) }
     if (@($mcps).Count -gt 0 -and (Has-Omp) -and $null -eq (State-Get 'told' 'omp-mcp')) {
         Warn 'omp 只讀整個帳號的 MCP：資料夾自己的 MCP 只有 Claude Code 和 Codex 會用'; State-Set 'told' 'omp-mcp' 1
     }
@@ -1050,10 +1869,12 @@ function Tool-Names { # every program kit has a recipe for
     @(Uniq $all | Where-Object { Tool-OkName $_ })
 }
 function Tool-Title([string]$n) { $f = Tool-File $n; if ($f) { $t = @(YGet $f 'title'); if ($t.Count -gt 0 -and $t[0]) { return [string]$t[0] } }; $n }
-function Tool-Version([string]$exe) { # what EXE --version says: at most 4 KB, given up after KIT_PROBE_WAIT seconds
-    $ms = 5000; if ("$env:KIT_PROBE_WAIT" -match '^[0-9]+$') { $ms = 1000 * [int]$env:KIT_PROBE_WAIT }
+function Tool-Version([string]$exe, [string]$argline = '--version', [int]$ms = 0, [string]$cwd = '') { # what EXE --version says: at most 4 KB, given up after KIT_PROBE_WAIT seconds
+    # (ARGLINE, MS and CWD: another command line, how long to wait, the folder it runs in)
+    if ($ms -le 0) { $ms = 5000; if ("$env:KIT_PROBE_WAIT" -match '^[0-9]+$') { $ms = 1000 * [int]$env:KIT_PROBE_WAIT } }
     $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $exe; $psi.Arguments = '--version'; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.FileName = $exe; $psi.Arguments = $argline; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    if ($cwd) { $psi.WorkingDirectory = $cwd }
     $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.RedirectStandardInput = $true
     try { $p = [Diagnostics.Process]::Start($psi) } catch { return '' }
     try {
@@ -1516,6 +2337,9 @@ function Link-Copies([string]$n) { # every copy of skill N kit put (the account,
 function Cmd-InstallDeps($rest) { # kit install-deps <skill> [npm|pip] : the skill's own packages, in kit's folders, no package scripts
     # (it holds kit's lock the whole time: one install at a time, and no sync in between)
     $use = '用法：kit install-deps <skill 名字> [npm|pip]'
+    $rest = @($rest | Where-Object { $null -ne $_ })
+    if ($rest.Count -eq 2 -and $rest[0] -eq 'mcp' -and $rest[1] -ne 'npm' -and $rest[1] -ne 'pip') { Mcp-Install ([string]$rest[1]); return }
+    if ($rest.Count -ge 2 -and $rest[0] -eq 'skill') { $rest = @($rest[1..($rest.Count - 1)]) }
     $n = ''; $only = ''
     foreach ($a in @($rest)) {
         $a = [string]$a
@@ -3357,7 +4181,7 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
         if ($k -eq 'skill') { if (@($sf | Where-Object { $_.StartsWith("skills/$n/", [StringComparison]::Ordinal) }).Count -gt 0) { $changed = 'true' } }
         else { $rel = @{ rule = "rules/$n.md"; mcp = "mcp/$n.yaml"; agent = "agents/$n.md" }[$k]; if ($sf -ccontains $rel) { $changed = 'true' } }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
-        $nj = if ($k -eq 'skill') { ', "needs": ' + (Needs-Json (Split-Path -Parent $p) $dir) + (Packages-Json (Split-Path -Parent $p) $n) } else { '' }
+        $nj = if ($k -eq 'skill') { ', "needs": ' + (Needs-Json (Split-Path -Parent $p) $dir) + (Packages-Json (Split-Path -Parent $p) $n) } elseif ($k -eq 'mcp') { Mcp-ListJson $p $n } else { '' }
         [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"changed`": $changed, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p)), `"path`": $(Json-S $p)$nj}")
     }
     [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))")
@@ -3388,6 +4212,14 @@ function Cmd-List($rest) {
         if ($i.StartsWith('agent:')) { $mark = '  ' }
         if ($null -eq (State-Get 'seen' $i)) { $mark = $mark.Substring(0, 1) + 'N' }
         Say "$mark $i"
+    }
+    # an MCP in use whose package is downloaded at each start (kit can install it once)
+    foreach ($n in (Of-Kind $want 'mcp')) {
+        $p = Find-Item 'mcp' $n; if (-not $p) { continue }
+        $pk = Mcp-Pkg (Mcp-Info $p)
+        if (-not $pk -or (Mcp-Installed $n $pk)) { continue }
+        if ($pk[2] -and -not $pk[6]) { Say "   mcp:$n 每次啟動時下載 $($pk[1])（先裝好：kit install-deps mcp ${n}）" }
+        else { Say "   mcp:$n 每次啟動時下載 $(if ($pk[1]) { $pk[1] } else { '它的套件' })" }
     }
     Say ''
     Say '* 在用   R 團隊必備   N 新的   agent 用  kit run <名字>  開'
@@ -3501,11 +4333,12 @@ function Cmd-Run($rest) {
                 $a.Add('-c'); $a.Add('developer_instructions=' + (Arg-TomlStr $prompt))
                 foreach ($n in $mcpNames) {
                     $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
-                    $y = Yaml-Lines $p; $cmd = @(YGet-From $y 'command')
-                    if ($cmd.Count -eq 0 -or -not $cmd[0]) { Warn "$p has no command"; continue }
-                    $v = '{command=' + (Arg-TomlStr $cmd[0])
-                    $args2 = @(YGet-From $y 'args'); if ($args2.Count -gt 0) { $v += ',args=[' + ((@($args2) | ForEach-Object { Arg-TomlStr $_ }) -join ',') + ']' }
-                    $envs = @(Mcp-Env $y); if ($envs.Count -gt 0) { $v += ',env={' + ((@($envs) | ForEach-Object { (Arg-TomlKey $_[0]) + '=' + (Arg-TomlStr $_[1]) }) -join ',') + '}' }
+                    $fl = Codex-Mcp-Fields $p $n ${function:Arg-TomlStr} ${function:Arg-TomlKey} '=' ','
+                    if ($null -eq $fl) { continue }
+                    $parts = @(); $envs = @()
+                    foreach ($x in $fl) { if ($x[0].StartsWith('env.')) { $envs += (Arg-TomlKey $x[0].Substring(4)) + '=' + $x[1] } else { $parts += $x[0] + '=' + $x[1] } }
+                    $v = '{' + ($parts -join ',')
+                    if ($envs.Count -gt 0) { $v += ',env={' + ($envs -join ',') + '}' }
                     $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Arg-TomlStr $d.Substring("mcp__${n}__".Length) } })
                     if ($tools.Count -gt 0) { $v += ',disabled_tools=[' + ($tools -join ',') + ']' }
                     $a.Add('-c'); $a.Add("mcp_servers.$(Arg-TomlKey $n)=$v}")
@@ -3567,7 +4400,7 @@ function Cmd-Uninstall($rest) {
     if ($ops.Count -gt 0) { Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny }
     if ($left) { Die '有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall' }
     foreach ($f in @($State, $Machine)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
-    foreach ($x in 'deps', 'pydeps', 'ctx') { $deps = Join-Path $KitConf $x; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force } }
+    foreach ($x in 'deps', 'pydeps', 'mcp-deps', 'ctx') { $deps = Join-Path $KitConf $x; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force } }
     Say 'kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）'
     Say "     來源的 clone 還留在 $KitSrc"
     if ($self) {
@@ -3674,16 +4507,33 @@ function Put-Item([string]$kind, [string]$name, [string]$staged, [string]$dir) {
     } else { Ensure-Dir (Split-Path -Parent $dst); Copy-Item -LiteralPath $staged -Destination $dst -Force }
     $dst
 }
+$script:McpSkeleton = @'
+# 一個 MCP server。兩種寫法選一種，另一種刪掉。
+# 密碼、token 不要寫在這裡：寫成 ${變數名}，值放在每台電腦自己的環境變數。
+# 別人給的設定（JSON、claude mcp add …）：存成檔案，用  kit new mcp --config 檔案  帶進來比較快。
+
+# 1. 在這台電腦跑一個程式：
+command: （啟動 MCP server 的程式，例如 npx 或 uvx）
+args: []
+# env:
+#   API_TOKEN: ${API_TOKEN}
+
+# 2. 連到一個網址（把上面的 command、args、env 刪掉，打開下面幾行）：
+# type: http          # 或 sse
+# url: https://mcp.example.com/mcp
+# headers:
+#   Authorization: Bearer ${API_TOKEN}
+'@ -replace "`r", ''
 function Skeleton([string]$kind, [string]$name) {
     switch ($kind) {
         'rule' { "# $name`n`n（在這裡寫規則，一條一行。）`n" }
         'skill' { "---`nname: $name`ndescription: （什麼時候用這個 skill，一句話）`n---`n`n（在這裡寫步驟。）`n" }
-        'mcp' { "command: （啟動 MCP server 的程式，例如 uvx）`nargs: []`n# env:`n#   KEY: value      # 不要放密碼`n" }
+        'mcp' { $McpSkeleton + "`n" }
         'agent' { "---`nname: $name`ndescription: （這個 agent 做什麼）`nrules: []`nskills: []`nmcp: []`n# tools:`n#   only: [Read, Grep, Glob]`n#   deny: []`n---`n（在這裡寫 agent 的角色和做法。）`n" }
     }
 }
 function Parse-ItemArgs($rest) {
-    $o = @{ Kind = ''; Name = ''; From = ''; To = ''; Force = $false }
+    $o = @{ Kind = ''; Name = ''; From = ''; To = ''; Force = $false; Config = ''; Look = $false }
     $rest = @($rest)
     for ($i = 0; $i -lt $rest.Count; $i++) {
         $a = [string]$rest[$i]
@@ -3691,10 +4541,12 @@ function Parse-ItemArgs($rest) {
             '--from' { if ($i + 1 -ge $rest.Count) { Die '--from 後面要接資料夾' }; $i++; $o.From = [string]$rest[$i] }
             '--to' { if ($i + 1 -ge $rest.Count) { Die '--to 後面要接來源' }; $i++; $o.To = [string]$rest[$i] }
             '--force' { $o.Force = $true }
+            '--config' { if ($i + 1 -ge $rest.Count) { Die-C usage '--config 後面要接檔案（或 - 從標準輸入讀）' }; $i++; $o.Config = [string]$rest[$i] }
+            '--look' { $o.Look = $true }
             default {
                 if (-not $o.Name -and -not $o.Kind -and ($Kinds -ccontains $a)) { $o.Kind = $a }
                 elseif (-not $o.Name) { $o.Name = $a }
-                else { Die "多了一個參數：$a" }
+                else { Die-C usage "多了一個參數：$a" }
             }
         }
     }
@@ -3710,6 +4562,11 @@ function New-TempDir([string]$prefix) { $t = Join-Path ([IO.Path]::GetTempPath()
 
 function Cmd-New($rest) {
     $o = Parse-ItemArgs $rest
+    if ($o.Config) {
+        if ($o.Kind -ne 'mcp' -or $o.From) { Die-C usage '用法：kit new mcp [名字] --config 檔案|- [--to 來源] [--look]' }
+        Mcp-NewConfig $o; return
+    }
+    if ($o.Look) { Die-C usage '--look 要和 --config 一起用：kit new mcp [名字] --config 檔案 --look' }
     if (-not $o.Kind -or -not $o.Name) { Die '用法：kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]' }
     if (-not (Valid-Name $o.Name)) { Die "名字只能用小寫英文、數字和 -：$($o.Name)" }
     $dir = Target-Dir $o.To
@@ -3819,7 +4676,16 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
             $rel = "mcp/$n.yaml"; $f = Join-Path $d $rel
             if (-not (Valid-Name $n)) { Problem "${rel}: 名字只能用小寫英文、數字和 -" }
             $cmd = @(YGet $f 'command')
-            if ($cmd.Count -eq 0 -or -not $cmd[0]) { Problem "${rel}: 少了 command" }
+            switch -CaseSensitive (Mcp-Type $f) {
+                'stdio' { if ($cmd.Count -eq 0 -or -not $cmd[0]) { Problem "${rel}: 少了 command" } }
+                { $_ -eq 'http' -or $_ -eq 'sse' } {
+                    $u = @(YGet $f 'url'); if ($u.Count -eq 0 -or -not $u[0]) { Problem "${rel}: 少了 url" }
+                    if ($cmd.Count -gt 0 -and $cmd[0]) { Problem "${rel}: 有 type: http 或 sse（網址的 MCP）就不要 command" }
+                }
+                default { Problem "${rel}: type 只能是 stdio、http 或 sse" }
+            }
+            # a secret written in the source (the value is never printed): it goes in an environment variable
+            foreach ($x in @(Mcp-Lines (Mcp-Info $f) 'X')) { $q = $x.Split("`t"); Problem "${rel}: $($q[0]) 看起來是密碼或 token，不能寫在來源裡：改成 `${$($q[1])}，值放在每台電腦自己的環境變數" }
             $mh = @(YGet $kitYaml 'allowed_hosts') + @(YGet $kitYaml 'content_hosts')
             if (Test-Path -LiteralPath $Machine) { foreach ($sd in Src-Dirs) { $mh += @(YGet (Join-Path $sd 'kit.yaml') 'allowed_hosts') + @(YGet (Join-Path $sd 'kit.yaml') 'content_hosts') } }
             $mh = @($mh | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() })
@@ -4662,6 +5528,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit install-tool <程式名> [--min 版本]
                                     用 kit 的裝法裝，太舊就升級（畫面程式的「安裝」按鈕也是用這個）
   kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
+  kit install-deps mcp <名字>       裝 MCP 的套件（固定的版本），之後不用每次啟動時下載
   kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]
                                   那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
   kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
@@ -4671,6 +5538,9 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
 寫內容的人用（只吃本機資料夾，不連網）：
   kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]
+  kit new mcp [名字] --config 檔案|- [--to 來源] [--look]
+                                    從貼上的 MCP 設定建立（JSON、claude mcp add、codex mcp add、config.toml）；
+                                    密碼和 token 換成 ${變數}，套件固定版本（只有這個會連網：查最新版本）；--look 只看不寫（JSON）
   kit diff   [種類] <名字> --from 本機資料夾   比較
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
@@ -4700,8 +5570,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 # ---------- main ----------
 $cmd = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
 $rest = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
-# programs read JSON: list/agents/push/files --json and collect --look print only JSON on stdout (errors too)
-if ((@('list', 'ls', 'agents', 'push', 'files') -ccontains $cmd -and @($rest) -ccontains '--json') -or ($cmd -ceq 'collect' -and @($rest) -ccontains '--look')) { $script:JsonOut = $true }
+# programs read JSON: list/agents/push/files --json and collect/new --look print only JSON on stdout (errors too)
+if ((@('list', 'ls', 'agents', 'push', 'files') -ccontains $cmd -and @($rest) -ccontains '--json') -or (@('collect', 'new') -ccontains $cmd -and @($rest) -ccontains '--look')) { $script:JsonOut = $true }
 try {
     # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook / --bg take it themselves)
     if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent', 'install-deps') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }

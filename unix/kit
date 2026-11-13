@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.2
+KIT_API=1.3
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -43,7 +43,7 @@ JSON_OUT=""; DIE_CODE=""
 json_mode() { JSON_OUT=1; exec 3>&1 1>&2; }      # the JSON goes to fd 3 (stdout); everything else to stderr
 die()  {
     printf 'kit: %s\n' "$*" >&2
-    [ -z "$JSON_OUT" ] || printf '{"error": {"code": %s, "message": %s}}\n' "$(json_s "${DIE_CODE:-error}")" "$(json_s "$*")" >&3
+    [ -z "$JSON_OUT" ] || printf '{"error": {"code": %s, "message": %s%s}}\n' "$(json_s "${DIE_CODE:-error}")" "$(json_s "$*")" "${DIE_EXTRA:-}" >&3
     exit 1
 }
 die_c() { DIE_CODE=$1; shift; die "$@"; }       # die_c CODE MESSAGE : the code programs read (README: 給程式讀的介面)
@@ -51,6 +51,7 @@ die_c() { DIE_CODE=$1; shift; die "$@"; }       # die_c CODE MESSAGE : the code 
 # folder and marker, the venv a stopped pip install had replaced, and the lock if this kit took it
 on_exit() {
     [ -z "${KIT_TMPDIR:-}" ] || rm -rf "$KIT_TMPDIR"
+    [ -z "${KIT_STAGE:-}" ] || rm -rf "$KIT_STAGE"
     [ -z "${KIT_RUN_TMP:-}" ] || { rm -rf "$KIT_RUN_TMP"; rm -f "$KIT_CONF/run/$$"; }
     [ -z "${KIT_PIP_STORE:-}" ] || pip_back "$KIT_PIP_STORE"
     [ -z "${KIT_LOCK_MINE:-}" ] || rmdir "$KIT_CONF/sync.lock" 2>/dev/null
@@ -373,10 +374,80 @@ wanted() { # required + added - removed(non-required)
     { required_items; m_added | grep -vxF -f <(m_removed; echo '##none##'); } | awk 'NF && !seen[$0]++'
 }
 
-# ---------- MCP yaml -> JSON ----------
-mcp_json() { # mcp_json FILE -> {"command":..,"args":[..],"env":{..}}
-    local f=$1 out cmd first a
-    cmd=$(yget "$f" command)
+# ---------- MCP yaml -> what the tools read ----------
+# An MCP yaml runs a program (command, args, env) or names a URL (type: http or sse, url, headers). ${VAR} in it is an
+# environment variable each machine sets itself (never the secret in the source): Claude Code and omp fill it in
+# themselves; Codex takes it only as a whole value (env_vars, bearer_token_env_var, env_http_headers: codex_mcp_fields).
+# mcp.awk reads it (mode yaml): the type, values that look like secrets, the variables, the package (npx, uvx).
+# A package kit installed (kit install-deps mcp <name>: $KIT_CONF/mcp-deps/<name>) runs from there, else npx/uvx
+# downloads it when the agent starts the server.
+mcp_awk() { LC_ALL=C awk -f "$KIT_LIB/mcp.awk" "$@"; }
+mcp_name() { local n=${1##*/}; printf '%s\n' "${n%.yaml}"; }
+mcp_info() { yaml "$1" | mcp_awk -v mode=yaml -v name="$(mcp_name "$1")"; }   # mcp.awk's T X V R P lines for a yaml kit has
+mcp_type() { local t; t=$(yget "$1" type | head -n 1); printf '%s\n' "${t:-stdio}"; }
+mcp_store() { printf '%s\n' "$KIT_CONF/mcp-deps/$1"; }
+mcp_pkg() { # mcp_pkg FILE -> its package: kind, package, version, argno, bin, first, bad, joined by $US (empty fields kept)
+    mcp_info "$1" | awk -F'\t' '$1 == "P" { sub(/^P\t/, ""); print; exit }' | tr '\t' "$US"
+}
+US=$(printf '\037')
+mcp_pkgjson() { printf '{"name": "kit-mcp-%s", "private": true, "dependencies": {%s: %s}}\n' "$1" "$(json_str "$2")" "$(json_str "$3")"; }
+mcp_npm_bin() { # mcp_npm_bin PKGDIR [BIN] -> the file its package.json "bin" names (BIN, or its own name, or the only one)
+    local s
+    s=$(LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$1/package.json" 2>/dev/null | LC_ALL=C awk -F'\t' -v want="$2" -v own="${1##*/}" '
+        $1 == "bin" && NF == 2 { s = $2 } $1 == "bin" && NF == 3 { n++; k[n] = $2; v[n] = $3 }
+        END { if (s == "") { for (i = 1; i <= n; i++) if (k[i] == want || (want == "" && k[i] == own)) s = v[i]; if (s == "" && n == 1 && want == "") s = v[1] }
+              if (s !~ /^"[^"\\]+"$/) exit 1; s = substr(s, 2, length(s) - 2); sub(/^\.\//, "", s)
+              if (s ~ /(^|\/)\.\.(\/|$)/ || s ~ /^\//) exit 1; print s }') || return 1
+    [ -f "$1/$s" ] && printf '%s\n' "$1/$s"
+}
+mcp_installed() { # mcp_installed NAME KIND PACKAGE VERSION BIN -> the program to run, when kit installed exactly this
+    local s; s=$(mcp_store "$1")
+    [ -n "$4" ] || return 1
+    case $2 in
+        npm) [ -d "$s/node_modules" ] && [ "$(cat "$s/.kit-src/package.json" 2>/dev/null)" = "$(mcp_pkgjson "$1" "$3" "$4")" ] &&
+                 mcp_npm_bin "$s/node_modules/$3" "$5";;
+        pip) [ -x "$s/venv/bin/python" ] && [ "$(cat "$s/.kit-src/requirements.txt" 2>/dev/null)" = "$3==$4" ] &&
+                 [ -x "$s/venv/bin/$5" ] && printf '%s\n' "$s/venv/bin/$5";;
+        *) return 1;;
+    esac
+}
+mcp_run() { # mcp_run FILE -> the program, then its arguments, one per line (the package kit installed, when it did)
+    local f=$1 kind pkg ver argno bin first bad x i a
+    IFS=$US read -r kind pkg ver argno bin first bad <<EOF
+$(mcp_pkg "$f")
+EOF
+    if [ -n "$kind" ] && x=$(mcp_installed "$(mcp_name "$f")" "$kind" "$pkg" "$ver" "$bin"); then
+        [ "$kind" = npm ] && printf 'node\n'
+        printf '%s\n' "$x"
+        i=0
+        while IFS= read -r a; do i=$((i + 1)); [ $i -lt "$first" ] || printf '%s\n' "$a"; done <<EOF
+$(yget "$f" args)
+EOF
+        return 0
+    fi
+    yget "$f" command | head -n 1; yget "$f" args
+}
+mcp_map() { yaml "$1" | awk -F'\t' -v p="$2." 'index($1, p) == 1 { k = substr($1, length(p) + 1); sub(/^[^\t]*\t/, ""); print k "\t" $0 }'; }   # mcp_map FILE env|headers -> KEY<TAB>VALUE
+mcp_map_json() { # mcp_map_json FILE KEY -> ,"KEY":{..} when the yaml has that map
+    local m k v first=1 out
+    m=$(mcp_map "$1" "$2"); [ -n "$m" ] || return 0
+    out=",\"$2\":{"
+    while IFS="$TAB" read -r k v; do [ $first = 1 ] || out="$out,"; first=0; out="$out$(json_str "$k"):$(json_str "$v")"; done <<EOF
+$m
+EOF
+    printf '%s}' "$out"
+}
+mcp_json() { # mcp_json FILE -> {"command":..,"args":[..],"env":{..}} or {"type":"http","url":..,"headers":{..}} (Claude Code, omp)
+    local f=$1 t out first a cmd run
+    t=$(mcp_type "$f")
+    case $t in
+        http|sse)
+            a=$(yget "$f" url | head -n 1); [ -n "$a" ] || { warn "$f has no url"; return 1; }
+            printf '{"type":"%s","url":%s%s}\n' "$t" "$(json_str "$a")" "$(mcp_map_json "$f" headers)"; return 0;;
+        stdio) ;;
+        *) warn "${f}：type 只能是 stdio、http 或 sse"; return 1;;
+    esac
+    run=$(mcp_run "$f"); cmd=${run%%"$LF"*}
     [ -n "$cmd" ] || { warn "$f has no command"; return 1; }
     out="{\"command\":$(json_str "$cmd"),\"args\":["
     first=1
@@ -384,21 +455,22 @@ mcp_json() { # mcp_json FILE -> {"command":..,"args":[..],"env":{..}}
         [ -n "$a" ] || continue
         [ $first = 1 ] || out="$out,"; first=0; out="$out$(json_str "$a")"
     done <<EOF
-$(yget "$f" args)
+$(printf '%s\n' "$run" | sed 1d)
 EOF
-    out="$out]"
-    local envs
-    envs=$(yaml "$f" | awk -F'\t' '$1 ~ /^env\./ { k = substr($1, 5); sub(/^[^\t]*\t/, ""); print k "\t" $0 }')
-    if [ -n "$envs" ]; then
-        out="$out,\"env\":{"; first=1
-        while IFS="$TAB" read -r k v; do
-            [ $first = 1 ] || out="$out,"; first=0; out="$out$(json_str "$k"):$(json_str "$v")"
-        done <<EOF
-$envs
-EOF
-        out="$out}"
-    fi
-    printf '%s}\n' "$out"
+    printf '%s]%s}\n' "$out" "$(mcp_map_json "$f" env)"
+}
+mcp_vars_warn() { # wanted MCP names on stdin: tell once about each ${VAR} they need that this machine has not set
+    local n p v
+    for n in $(cat); do
+        p=$(find_item mcp "$n") || continue
+        for v in $(mcp_info "$p" | awk -F'\t' '$1 == "V" { print $2 }'); do
+            if [ -n "$(printenv "$v" 2>/dev/null)" ]; then
+                [ -z "$(state_get told "var:$v")" ] || state_del told "var:$v"
+            elif [ -z "$(state_get told "var:$v")" ]; then
+                warn "MCP $n 要用環境變數 ${v}，這台電腦還沒設定：設定好再重開 agent（只提醒這一次）"; state_set told "var:$v" 1
+            fi
+        done
+    done
 }
 
 # ---------- apply to Claude Code ----------
@@ -534,33 +606,84 @@ toml_user() { # toml_user FILE : FILE without kit's blocks (what the user wrote)
 }
 toml_key() { case $1 in *[!A-Za-z0-9_-]*|"") json_str "$1";; *) printf '%s' "$1";; esac; }
 
+codex_told() { [ -n "$(state_get told "codex-mcp:$1")" ] || { warn "$2（只提醒這一次）"; state_set told "codex-mcp:$1" 1; }; }
+codex_mcp_fields() { # codex_mcp_fields FILE NAME QUOTE -> Codex's fields for it, KEY<TAB>VALUE (env.K: its env), strings quoted by QUOTE
+    # Returns 1 when Codex cannot use it (SSE; a URL with ${VAR}). Codex never fills in ${VAR} itself: a whole ${VAR} goes
+    # as env_vars (an env of the same name, passed through), bearer_token_env_var (Authorization: Bearer ${VAR}) or
+    # env_http_headers; ${VAR} inside other values stays as it is (told once); a header like that is left out.
+    local f=$1 n=$2 q=$3 t run a first out k v bear="" lit="" envh="" vars=""
+    t=$(mcp_type "$f")
+    case $t in
+    sse) codex_told "$n:sse" "Codex 不能用 SSE 的 MCP：$n 不放進 Codex（Claude Code 和 omp 照樣有）"; return 1;;
+    http)
+        a=$(yget "$f" url | head -n 1); [ -n "$a" ] || { warn "$f has no url"; return 1; }
+        case $a in *'${'*) codex_told "$n:url" "Codex 的網址不能用 \${…}：$n 不放進 Codex"; return 1;; esac
+        printf 'url\t%s\n' "$($q "$a")"
+        while IFS="$TAB" read -r k v; do
+            [ -n "$k" ] || continue
+            if [ "$(printf '%s' "$k" | tr 'A-Z' 'a-z')" = authorization ] && printf '%s' "$v" | grep -qE '^Bearer \$\{[A-Za-z_][A-Za-z0-9_]*\}$'; then
+                v=${v#'Bearer ${'}; bear=${v%\}}
+            elif printf '%s' "$v" | grep -qE '^\$\{[A-Za-z_][A-Za-z0-9_]*\}$'; then
+                v=${v#'${'}; envh="${envh:+$envh, }$(toml_key "$k") = $($q "${v%\}}")"
+            else
+                case $v in
+                    *'${'*) codex_told "$n:header:$k" "Codex 的 header 只能整個是 \${變數}：$n 的 $k 不放進 Codex";;
+                    *) lit="${lit:+$lit, }$(toml_key "$k") = $($q "$v")";;
+                esac
+            fi
+        done <<EOF
+$(mcp_map "$f" headers)
+EOF
+        [ -z "$bear" ] || printf 'bearer_token_env_var\t%s\n' "$($q "$bear")"
+        [ -z "$lit" ] || printf 'http_headers\t{ %s }\n' "$lit"
+        [ -z "$envh" ] || printf 'env_http_headers\t{ %s }\n' "$envh"
+        return 0;;
+    stdio) ;;
+    *) warn "${f}：type 只能是 stdio、http 或 sse"; return 1;;
+    esac
+    run=$(mcp_run "$f"); a=${run%%"$LF"*}
+    [ -n "$a" ] || { warn "$f has no command"; return 1; }
+    printf 'command\t%s\n' "$($q "$a")"
+    out=""; first=1
+    while IFS= read -r a; do [ -n "$a" ] || continue; [ $first = 1 ] || out="$out, "; first=0; out="$out$($q "$a")"; done <<EOF
+$(printf '%s\n' "$run" | sed 1d)
+EOF
+    [ -z "$out" ] || printf 'args\t[%s]\n' "$out"
+    case $out in *'${'*) codex_told "$n:args" "Codex 不會展開參數裡的 \${…}：$n 的參數照字面放進 Codex";; esac
+    out=""
+    while IFS="$TAB" read -r k v; do
+        [ -n "$k" ] || continue
+        if [ "$v" = "\${$k}" ]; then vars="${vars:+$vars, }$($q "$k")"; continue; fi
+        case $v in *'${'*) codex_told "$n:env:$k" "Codex 不會展開 env 裡的 \${…}：$n 的 $k 照字面放進 Codex";; esac
+        out="${out}env.$k$TAB$($q "$v")$LF"
+    done <<EOF
+$(mcp_map "$f" env)
+EOF
+    [ -z "$vars" ] || printf 'env_vars\t[%s]\n' "$vars"
+    printf '%s' "$out"
+}
 codex_mcp_toml() { # wanted MCP names on stdin -> [mcp_servers.x] tables for Codex
-    local names n p cmd a first out tools t user
+    local names n p fields tools t first user k v envs
     names=$(cat)
     user=$(toml_user "${CODEX_USER_TOML:-$CODEX_DIR/config.toml}")
     for n in $names; do
         p=$(find_item mcp "$n") || { warn "mcp $n not found in any source"; continue; }
-        cmd=$(yget "$p" command); [ -n "$cmd" ] || { warn "$p has no command"; continue; }
         if printf '%s\n' "$user" | grep -qE "^[[:space:]]*\[mcp_servers\.\"?$n\"?[]. ]"; then
             warn "Codex 的 config.toml 已經有自己的 mcp_servers.${n}，kit 不動它"; continue
         fi
-        printf '[mcp_servers.%s]\ncommand = %s\n' "$(toml_key "$n")" "$(json_str "$cmd")"
-        out=""; first=1
-        while IFS= read -r a; do [ -n "$a" ] || continue; [ $first = 1 ] || out="$out, "; first=0; out="$out$(json_str "$a")"; done <<EOF
-$(yget "$p" args)
+        fields=$(codex_mcp_fields "$p" "$n" json_str) || continue
+        printf '[mcp_servers.%s]\n' "$(toml_key "$n")"
+        envs=""
+        while IFS="$TAB" read -r k v; do
+            case $k in "") ;; env.*) envs="$envs$(toml_key "${k#env.}") = $v$LF";; *) printf '%s = %s\n' "$k" "$v";; esac
+        done <<EOF
+$fields
 EOF
-        [ -n "$out" ] && printf 'args = [%s]\n' "$out"
         # team deny rules for this server's tools (mcp__<server>__<tool>) become disabled_tools
         tools=""; first=1
         for t in $(required_deny | sed -n "s/^mcp__${n}__//p"); do [ $first = 1 ] || tools="$tools, "; first=0; tools="$tools$(json_str "$t")"; done
         [ -n "$tools" ] && printf 'disabled_tools = [%s]\n' "$tools"
-        local envs; envs=$(yaml "$p" | awk -F'\t' '$1 ~ /^env\./ { k = substr($1, 5); sub(/^[^\t]*\t/, ""); print k "\t" $0 }')
-        if [ -n "$envs" ]; then
-            printf '\n[mcp_servers.%s.env]\n' "$(toml_key "$n")"
-            while IFS="$TAB" read -r k v; do printf '%s = %s\n' "$(toml_key "$k")" "$(json_str "$v")"; done <<EOF
-$envs
-EOF
-        fi
+        [ -z "$envs" ] || printf '\n[mcp_servers.%s.env]\n%s' "$(toml_key "$n")" "$envs"
         echo
     done
 }
@@ -576,12 +699,12 @@ apply_claude() {
     # Claude: rules as @imports (Codex and omp: AGENTS.md gets the rule text itself), skills, MCP in ~/.claude.json
     apply_rules "$want"
     sync_skills "$CLAUDE_DIR/skills" skill <<< "$skills"
-    sync_mcp_json "$CLAUDE_JSON" mcp <<< "$mcps"
+    sync_mcp_json "$CLAUDE_JSON" mcp <<< "$mcps"; mcp_vars_warn <<< "$mcps"
 
     # Codex and omp share ~/.agents/skills
     if has_codex || has_omp; then sync_skills "$AGENTS_SKILLS" skill.agents <<< "$skills"; fi
     if has_codex; then
-        KIT_BLOCK="$(codex_mcp_toml <<< "$mcps")$(codex_trust)" replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END"
+        KIT_BLOCK="$(codex_mcp_toml <<< "$mcps"; codex_trust)" replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END"
         KIT_BLOCK=$(codex_top) replace_top_block "$CODEX_DIR/config.toml" "$TOP_BEGIN" "$TOP_END"
     fi
     if has_omp; then
@@ -806,7 +929,7 @@ apply_dir() { # apply_dir DIR : the folder's .agentkit -> the tools' files in it
     set_rules "$dir/CLAUDE.md" import <<< "$rules"
     sync_skills "$dir/.claude/skills" "$(dir_kind "$dir" skill)" <<< "$skills"
     [ -f "$dir/.mcp.json" ] || [ -z "$mcps" ] || state_set made "$dir/.mcp.json" 1
-    sync_mcp_json "$dir/.mcp.json" "$(dir_kind "$dir" mcp)" <<< "$mcps"
+    sync_mcp_json "$dir/.mcp.json" "$(dir_kind "$dir" mcp)" <<< "$mcps"; mcp_vars_warn <<< "$mcps"
     drop_made "$dir/.mcp.json"
     dir_claude_allow "$dir" <<< "$mcps"
     # kit's backups of the user's own files go when kit has nothing left in them
@@ -1004,9 +1127,36 @@ needs_json() { # needs_json SKILLDIR SOURCEDIR -> [{"tool", "title", "min", "hav
         printf '{"tool": %s, "title": %s, "min": %s, "have": %s, "ok": %s, "install": %s}' "$(json_s "$n")" "$(json_s "$t")" \
             "$(json_s "$m")" "$(json_s "$h")" "$ok" "$(json_s "$i")"
     done <<EOF
-$(skill_needs "$1" "$2")
+$(if [ "$1" = - ]; then cat; else skill_needs "$1" "$2"; fi)
 EOF
     printf ']'
+}
+mcp_list_json() { # mcp_list_json FILE NAME -> ', "type": .., "vars": [..], "needs": [..], "packages": [..]' (after tool_cache)
+    local f=$1 n=$2 info t v kind pkg ver argno bin first bad s ok had c out=""
+    info=$(mcp_info "$f"); t=$(mcp_lines "$info" T | head -n 1)
+    printf ', "type": %s, "vars": [' "$(json_s "${t:-stdio}")"
+    first=1
+    for v in $(mcp_lines "$info" V); do
+        [ $first = 1 ] || printf ', '; first=0
+        ok=false; [ -z "$(printenv "$v" 2>/dev/null)" ] || ok=true
+        printf '{"name": %s, "set": %s}' "$(json_s "$v")" "$ok"
+    done
+    printf '], "needs": %s' "$( { mcp_lines "$info" R | sed "s/\$/$TAB/"; yget "$f" requires | awk -F'>=' '{ n = $1; gsub(/[ \t]/, "", n); m = $2; gsub(/[ \t]/, "", m); print n "\t" m }'; } |
+        awk -F'\t' '$1 ~ /^[a-z0-9][a-z0-9-]*$/ && !seen[$1]++' | needs_json -)"
+    IFS=$US read -r kind pkg ver argno bin first bad <<EOF
+$(mcp_lines "$info" P | head -n 1 | tr '\t' "$US")
+EOF
+    if [ -n "$kind" ]; then
+        s=$(mcp_store "$n"); ok=false; had=false; c=""
+        mcp_installed "$n" "$kind" "$pkg" "$ver" "$bin" >/dev/null && ok=true
+        [ -d "$s/node_modules" ] || [ -d "$s/venv" ] && had=true
+        [ -n "$bad" ] || [ -n "$ver" ] || bad="沒有固定版本：kit 只裝固定的版本（寫成 $pkg@版本）"
+        if [ "$kind" = npm ]; then command -v npm >/dev/null 2>&1 && c="npm install --ignore-scripts --omit=dev --no-audit --no-fund"
+        else prog_path python3 >/dev/null && c="python3 -m venv venv; venv/bin/python $PIP_ARGS"; fi
+        out=$(printf '{"kind": %s, "package": %s, "version": %s, "ok": %s, "had": %s, "install": %s, "bad": %s}' "$(json_s "$kind")" "$(json_s "$pkg")" \
+            "$(json_s "$ver")" "$ok" "$had" "$(json_s "$c")" "$(json_s "$bad")")
+    fi
+    printf ', "packages": [%s]' "$out"
 }
 cmd_tools() { # kit tools : the programs kit knows how to install, what this machine has
     local n h c
@@ -1258,8 +1408,37 @@ link_copies() { # link_copies NAME : every copy of skill NAME kit put (the accou
 $(dirs_registered)
 EOF
 }
-cmd_install_deps() { # kit install-deps <skill> [npm|pip] : the skill's own packages, in kit's folders, no package scripts
+mcp_install() { # kit install-deps mcp <name> : its npm or Python package, the pinned version, in $KIT_CONF/mcp-deps/<name>
+    # (the same rules as a skill's: npm --ignore-scripts from the registry, pip wheels only in a venv of its own); then
+    # every tool's MCP setup runs it from there instead of npx/uvx downloading it at each start
+    local n=$1 p kind pkg ver argno bin first bad s stage
+    p=$(find_item mcp "$n") || die "找不到 mcp ${n}（打 kit list 看有哪些）"
+    IFS=$US read -r kind pkg ver argno bin first bad <<EOF
+$(mcp_pkg "$p")
+EOF
+    [ -n "$kind" ] || { say "kit：mcp $n 不用另外裝套件"; return 0; }
+    [ -z "$bad" ] || die "kit 不幫 mcp $n 裝套件：${bad}（它照樣在啟動時下載）"
+    [ -n "$ver" ] || die "mcp $n 的套件 $pkg 沒有固定版本：kit 只裝固定的版本（在 mcp/$n.yaml 寫成 $pkg@版本）"
+    s=$(mcp_store "$n")
+    if mcp_installed "$n" "$kind" "$pkg" "$ver" "$bin" >/dev/null; then say "kit：mcp $n 的套件已經裝好了（$pkg ${ver}）"
+    else
+        stage=$(mktemp -d "${TMPDIR:-/tmp}/kit-mcp.XXXXXX") || die "沒辦法建立暫存資料夾"; KIT_STAGE=$stage
+        if [ "$kind" = npm ]; then mcp_pkgjson "$n" "$pkg" "$ver" > "$stage/package.json"; install_npm "$stage" "$s"
+        else printf '%s==%s\n' "$pkg" "$ver" > "$stage/requirements.txt"; install_pip "$stage" "$s"; fi
+        rm -rf "$stage"; KIT_STAGE=
+        [ -z "${KIT_DRY_RUN:-}" ] || return 0
+        mcp_installed "$n" "$kind" "$pkg" "$ver" "$bin" >/dev/null || die "裝好了，但找不到 $pkg 要跑的程式（${bin:-package.json 的 bin}）：照樣在啟動時下載"
+        say "kit：mcp $n 的套件裝好了（$pkg ${ver}）"
+    fi
+    [ -f "$MACHINE" ] || return 0
+    apply_dirs; apply_claude
+}
+cmd_install_deps() { # kit install-deps [skill] <skill> [npm|pip] | mcp <name> : packages in kit's folders, no package scripts
     # (it holds kit's lock the whole time: one install at a time, and no sync in between)
+    case ${1:-} in
+        mcp) if [ $# = 2 ] && [ "$2" != npm ] && [ "$2" != pip ]; then mcp_install "$2"; return; fi;;
+        skill) [ $# -lt 2 ] || shift;;
+    esac
     local n="" only="" p d did=0 a
     for a in "$@"; do
         case $a in
@@ -2672,7 +2851,8 @@ EOF
         [ $first = 1 ] || printf ','; first=0
         printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "changed": %s, "source": %s, "description": %s, "path": %s%s}' \
             "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$changed" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")" "$(json_s "$p")" \
-            "$( [ "$k" = skill ] && printf ', "needs": %s%s' "$(needs_json "$(dirname "$p")" "${d%/}")" "$(packages_json "$(dirname "$p")" "$n")")"
+            "$(case $k in (skill) printf ', "needs": %s%s' "$(needs_json "$(dirname "$p")" "${d%/}")" "$(packages_json "$(dirname "$p")" "$n")";;
+                         (mcp) mcp_list_json "$p" "$n";; esac)"
     done
     printf '\n  ],\n  "kit_version_wanted": %s' "$(json_s "$(wanted_version)")"
     [ -n "${HERE_DIR:-}" ] && here_json "$HERE_DIR" "${HERE_PID:-}"
@@ -2706,6 +2886,17 @@ cmd_list() {
         case $i in agent:*) mark="  ";; esac
         [ -n "$(state_get seen "$i")" ] || mark="${mark%% }N"
         printf '%s %s\n' "$mark" "$i"
+    done
+    # an MCP in use whose package is downloaded at each start (kit can install it once)
+    local n p kind pkg ver argno bin first bad
+    for n in $(printf '%s\n' "$want" | sed -n 's/^mcp://p'); do
+        p=$(find_item mcp "$n") || continue
+        IFS=$US read -r kind pkg ver argno bin first bad <<EOF
+$(mcp_pkg "$p")
+EOF
+        [ -n "$kind" ] && ! mcp_installed "$n" "$kind" "$pkg" "$ver" "$bin" >/dev/null || continue
+        if [ -n "$ver" ] && [ -z "$bad" ]; then say "   mcp:$n 每次啟動時下載 ${pkg}（先裝好：kit install-deps mcp ${n}）"
+        else say "   mcp:$n 每次啟動時下載 ${pkg:-它的套件}"; fi
     done
     say ""
     say "* 在用   R 團隊必備   N 新的   agent 用  kit run <名字>  開"
@@ -2765,21 +2956,16 @@ toml_str() { # quote a string for TOML (a basic string; newlines escaped)
     printf '"%s"' "$s"
 }
 
-mcp_toml_inline() { # mcp_toml_inline FILE NAME -> {command="..", args=[..], env={..}, disabled_tools=[..]}
-    local f=$1 n=$2 cmd out a first t k v
-    cmd=$(yget "$f" command); [ -n "$cmd" ] || { warn "$f has no command"; return 1; }
-    out="{command=$(toml_str "$cmd")"
-    first=1; a=""
-    while IFS= read -r v; do [ -n "$v" ] || continue; [ $first = 1 ] || a="$a, "; first=0; a="$a$(toml_str "$v")"; done <<EOF
-$(yget "$f" args)
+mcp_toml_inline() { # mcp_toml_inline FILE NAME -> {command="..", args=[..], env={..}} or {url="..", ...} (kit run --tool codex)
+    local f=$1 n=$2 fields out="" env="" k v
+    fields=$(codex_mcp_fields "$f" "$n" toml_str) || return 1
+    while IFS="$TAB" read -r k v; do
+        case $k in "") ;; env.*) env="${env:+$env, }$(toml_key "${k#env.}")=$v";; *) out="${out:+$out, }$k=$v";; esac
+    done <<EOF
+$fields
 EOF
-    [ -n "$a" ] && out="$out, args=[$a]"
-    first=1; a=""
-    while IFS="$TAB" read -r k v; do [ -n "$k" ] || continue; [ $first = 1 ] || a="$a, "; first=0; a="$a$(toml_key "$k")=$(toml_str "$v")"; done <<EOF
-$(yaml "$f" | awk -F'\t' '$1 ~ /^env\./ { k = substr($1, 5); sub(/^[^\t]*\t/, ""); print k "\t" $0 }')
-EOF
-    [ -n "$a" ] && out="$out, env={$a}"
-    printf '%s}' "$out"
+    [ -n "$env" ] && out="$out, env={$env}"
+    printf '{%s}' "$out"
 }
 
 cmd_run() {
@@ -2912,7 +3098,7 @@ EOF
     [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
     rm -f "$ops"
     [ $left = 0 ] || die "有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall"
-    rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps" "$CTX_DIR"
+    rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps" "$KIT_CONF/mcp-deps" "$CTX_DIR"
     say "kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）"
     say "     來源的 clone 還留在 $KIT_SRC"
     if [ $self = 1 ]; then
@@ -2998,22 +3184,39 @@ put_item() { # put_item KIND NAME STAGED_FILE TARGET_DIR : replace the item in t
     if [ "$1" = skill ]; then rm -rf "$(dirname "$dst")"; cp -R "$(dirname "$3")" "$(dirname "$dst")"; else cp "$3" "$dst"; fi
     printf '%s\n' "$dst"
 }
+MCP_SKELETON='# 一個 MCP server。兩種寫法選一種，另一種刪掉。
+# 密碼、token 不要寫在這裡：寫成 ${變數名}，值放在每台電腦自己的環境變數。
+# 別人給的設定（JSON、claude mcp add …）：存成檔案，用  kit new mcp --config 檔案  帶進來比較快。
+
+# 1. 在這台電腦跑一個程式：
+command: （啟動 MCP server 的程式，例如 npx 或 uvx）
+args: []
+# env:
+#   API_TOKEN: ${API_TOKEN}
+
+# 2. 連到一個網址（把上面的 command、args、env 刪掉，打開下面幾行）：
+# type: http          # 或 sse
+# url: https://mcp.example.com/mcp
+# headers:
+#   Authorization: Bearer ${API_TOKEN}'
 skeleton() { # skeleton KIND NAME FILE
     case $1 in
     rule)  printf '# %s\n\n（在這裡寫規則，一條一行。）\n' "$2";;
     skill) printf -- '---\nname: %s\ndescription: （什麼時候用這個 skill，一句話）\n---\n\n（在這裡寫步驟。）\n' "$2";;
-    mcp)   printf 'command: （啟動 MCP server 的程式，例如 uvx）\nargs: []\n# env:\n#   KEY: value      # 不要放密碼\n';;
+    mcp)   printf '%s\n' "$MCP_SKELETON";;
     agent) printf -- '---\nname: %s\ndescription: （這個 agent 做什麼）\nrules: []\nskills: []\nmcp: []\n# tools:\n#   only: [Read, Grep, Glob]\n#   deny: []\n---\n（在這裡寫 agent 的角色和做法。）\n' "$2";;
     esac > "$3"
 }
 parse_item_args() { # sets KIND NAME FROM TO FORCE_IT from: [KIND] NAME [--from P] [--to T] [--force]
-    KIND=; NAME=; FROM=; TO=; FORCE_IT=
+    KIND=; NAME=; FROM=; TO=; FORCE_IT=; CONFIG=; LOOK=
     while [ $# -gt 0 ]; do
         case $1 in
             --from) FROM=${2:-}; shift 2 || die "--from 後面要接資料夾";;
+            --config) [ $# -ge 2 ] || die_c usage "--config 後面要接檔案（或 - 從標準輸入讀）"; CONFIG=$2; shift 2;;
+            --look) LOOK=1; shift;;
             --to)   TO=${2:-}; shift 2 || die "--to 後面要接來源";;
             --force) FORCE_IT=1; shift;;
-            *) if [ -z "$NAME" ] && [ -z "$KIND" ] && printf '%s\n' $KINDS | grep -qxF "$1"; then KIND=$1; elif [ -z "$NAME" ]; then NAME=$1; else die "多了一個參數：$1"; fi; shift;;
+            *) if [ -z "$NAME" ] && [ -z "$KIND" ] && printf '%s\n' $KINDS | grep -qxF "$1"; then KIND=$1; elif [ -z "$NAME" ]; then NAME=$1; else die_c usage "多了一個參數：$1"; fi; shift;;
         esac
     done
 }
@@ -3025,8 +3228,94 @@ guess_kind() { # guess_kind DIR NAME
     printf '%s\n' "$1"
 }
 
+mcp_latest() { # mcp_latest npm|pip PACKAGE -> its newest version (npm view; PyPI's JSON API), empty when kit cannot tell
+    local v="" u h hosts
+    case $1 in
+    npm) command -v npm >/dev/null 2>&1 || return 0
+         v=$(cd "$KIT_STAGE" && ctx_capped 30 npm view "$2" version 2>/dev/null | tail -n 1);;   # (not in a project: its .npmrc)
+    pip) command -v curl >/dev/null 2>&1 || return 0
+         u=${KIT_PYPI_URL:-https://pypi.org/pypi}; u="${u%/}/${2%%\[*}/json"; h=$(url_host "$u")
+         hosts=$(allowed_hosts)
+         if [ -n "$hosts" ] && ! printf '%s\n' "$hosts" | grep -qxF "$h"; then warn "$h 不在 allowed_hosts：不查最新版本"; return 0; fi
+         curl -fsSL --max-time 20 "$u" > "$KIT_STAGE/pypi.json" 2>/dev/null && v=$(json_get "$KIT_STAGE/pypi.json" info.version | tr -d '"');;
+    esac
+    printf '%s\n' "$v" | grep -E '^[0-9][0-9A-Za-z.+!-]*$' | head -n 1
+}
+mcp_paste_err() { # mcp_paste_err OUT : mcp.awk stopped (an E line): stop kit with its code (the servers' names too)
+    local code msg names
+    case $1 in E"$TAB"*) ;; *) return 0;; esac
+    code=$(printf '%s\n' "$1" | awk -F'\t' 'NR == 1 { print $2 }'); msg=$(printf '%s\n' "$1" | awk -F'\t' 'NR == 1 { sub(/^E\t[^\t]*\t/, ""); print }')
+    names=$(printf '%s\n' "$1" | awk -F'\t' '$1 == "L" { print $2 }')
+    if [ -n "$names" ]; then DIE_EXTRA=", \"servers\": $(printf '%s\n' "$names" | json_arr)"; msg="${msg}：$(printf '%s\n' "$names" | paste -sd'|' - | sed 's/|/、/g')"; fi
+    die_c "$code" "$msg"
+}
+mcp_lines() { printf '%s\n' "$1" | awk -F'\t' -v t="$2" '$1 == t { sub(/^[^\t]*\t/, ""); print }'; }   # mcp_lines OUT TYPE -> those lines, without the type
+mcp_new_config() { # kit new mcp [NAME] --config FILE|- [--to SOURCE] [--look] : a pasted setup -> mcp/<name>.yaml, secrets as ${VAR}
+    local tmp form out n t dir dst f kind pkg ver argno bin first bad v exists=false notes="" w x
+    [ -z "$NAME" ] || valid_name "$NAME" || die_c bad_name "名字只能用小寫英文、數字和 -：$NAME"
+    # the paste may hold secrets: a folder only you can read, gone when kit ends (also on Ctrl-C); never printed
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-mcp.XXXXXX") && chmod 700 "$tmp" || die "沒辦法建立暫存資料夾"; KIT_STAGE=$tmp
+    if [ "$CONFIG" = - ]; then LC_ALL=C awk 'NR == 1 { sub(/^\357\273\277/, "") } { print }' > "$tmp/paste"
+    else
+        [ -f "$CONFIG" ] || die_c usage "找不到 $CONFIG"
+        LC_ALL=C awk 'NR == 1 { sub(/^\357\273\277/, "") } { print }' "$CONFIG" > "$tmp/paste"
+    fi
+    case $(LC_ALL=C awk '/^[ \t\r]*#/ { next } { gsub(/[ \t\r]/, ""); printf "%s", $0 }' "$tmp/paste" | head -c 1) in   # (# lines: comments)
+        "") die_c bad_config "貼上的內容是空的";;
+        "{") form=json
+             LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$tmp/paste" > "$tmp/in" 2>/dev/null || die_c bad_config "JSON 讀不懂（是不是少了括號、逗號或引號？）";;
+        "[") form=toml; cp "$tmp/paste" "$tmp/in";;
+        *) form=cmd; cp "$tmp/paste" "$tmp/in";;
+    esac
+    out=$(mcp_awk -v mode=$form -v name="$NAME" "$tmp/in"); mcp_paste_err "$out"
+    # a package without a version: pinned to today's newest (the same version on every machine, until you change it)
+    IFS=$US read -r kind pkg ver argno bin first bad <<EOF
+$(mcp_lines "$out" P | head -n 1 | tr '\t' "$US")
+EOF
+    if [ -n "$kind" ] && [ -n "$pkg" ] && [ -z "$ver" ] && [ -z "$bad" ]; then
+        v=$(mcp_latest "$kind" "$pkg")
+        if [ -n "$v" ]; then out=$(mcp_awk -v mode=$form -v name="$NAME" -v pin="$v" "$tmp/in"); mcp_paste_err "$out"
+        else notes="查不到 $pkg 的最新版本（沒網路，或沒有 $( [ "$kind" = npm ] && echo npm || echo curl )？）：先不固定版本，每次啟動時下載最新的"; fi
+    fi
+    n=$(mcp_lines "$out" N | head -n 1); t=$(mcp_lines "$out" T | head -n 1)
+    dir=$(target_dir "$TO"); dst=$(item_path "$dir" mcp "$n")
+    [ -e "$dst" ] && exists=true
+    if [ -f "$MACHINE" ] && f=$(find_item mcp "$n"); then exists=true; dst=$f; fi
+    if [ -n "$LOOK" ]; then
+        printf '{"name": %s, "source": %s, "path": %s, "exists": %s, "type": %s, "yaml": %s, "secrets": [%s], "vars": %s, "requires": %s, "packages": [%s], "warnings": %s}\n' \
+            "$(json_s "$n")" "$(json_s "$(basename "$(dirname "$(dirname "$dst")")")")" "$(json_s "$dst")" "$exists" "$(json_s "$t")" \
+            "$(json_s "$(mcp_lines "$out" Y)$LF")" \
+            "$(mcp_lines "$out" X | while IFS="$TAB" read -r w x; do printf '%s{"where": %s, "var": %s}' "${sep:-}" "$(json_s "$w")" "$(json_s "$x")"; sep=", "; done)" \
+            "$(mcp_lines "$out" V | json_arr)" "$(mcp_lines "$out" R | json_arr)" \
+            "$(mcp_lines "$out" P | tr '\t' "$US" | while IFS=$US read -r kind pkg ver argno bin first bad; do printf '{"kind": %s, "package": %s, "version": %s, "bad": %s}' "$(json_s "$kind")" "$(json_s "$pkg")" "$(json_s "$ver")" "$(json_s "$bad")"; done)" \
+            "$( { mcp_lines "$out" W; [ -z "$notes" ] || printf '%s\n' "$notes"; } | json_arr)" >&3
+        return 0
+    fi
+    [ $exists = false ] || die_c exists "已經有 mcp:${n}（${dst}）：換個名字（kit new mcp 新名字 --config …），或先刪掉它"
+    mkdir -p "$(dirname "$dst")"; mcp_lines "$out" Y > "$dst"
+    say "已建立 ${dst#"$dir"/}（在 $(basename "$dir")）"
+    mcp_lines "$out" X | while IFS="$TAB" read -r w x; do say "  $w 像是密碼或 token：檔案裡寫成 \${$x}（值沒有寫進去）"; done
+    v=$(mcp_lines "$out" V | paste -sd'|' - | sed 's/|/、/g')
+    [ -z "$v" ] || say "  每台電腦要先設定環境變數：$v"
+    mcp_lines "$out" W | while IFS= read -r w; do warn "$w"; done
+    [ -z "$notes" ] || warn "$notes"
+    IFS=$US read -r kind pkg ver argno bin first bad <<EOF
+$(mcp_lines "$out" P | head -n 1 | tr '\t' "$US")
+EOF
+    if [ -n "$kind" ] && [ -n "$ver" ] && [ -z "$bad" ]; then
+        say "  套件 $pkg 固定在 $ver 版。先裝好（不然每次啟動時下載）：kit install-deps mcp $n"
+    fi
+    say "要用它：kit add mcp $n"
+    check_dirs "$dir" >/dev/null 2>&1 || warn "kit check 有問題，送出前請先打  kit check  看看"
+    return 0
+}
 cmd_new() {
     parse_item_args "$@"
+    if [ -n "$CONFIG" ]; then
+        [ "$KIND" = mcp ] && [ -z "$FROM" ] || die_c usage "用法：kit new mcp [名字] --config 檔案|- [--to 來源] [--look]"
+        mcp_new_config; return
+    fi
+    [ -z "$LOOK" ] || die_c usage "--look 要和 --config 一起用：kit new mcp [名字] --config 檔案 --look"
     [ -n "$KIND" ] && [ -n "$NAME" ] || die "用法：kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]"
     valid_name "$NAME" || die "名字只能用小寫英文、數字和 -：$NAME"
     local dir dst tmp f; dir=$(target_dir "$TO")
@@ -3132,7 +3421,16 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
         for f in "$d"/mcp/*.yaml; do
             [ -f "$f" ] || continue; rel=${f#"$d"/}
             valid_name "$(basename "$f" .yaml)" || problem "$rel: 名字只能用小寫英文、數字和 -"
-            [ -n "$(yget "$f" command)" ] || problem "$rel: 少了 command"
+            case $(mcp_type "$f") in
+                stdio) [ -n "$(yget "$f" command)" ] || problem "$rel: 少了 command";;
+                http|sse) [ -n "$(yget "$f" url)" ] || problem "$rel: 少了 url"
+                    [ -z "$(yget "$f" command)" ] || problem "$rel: 有 type: http 或 sse（網址的 MCP）就不要 command";;
+                *) problem "$rel: type 只能是 stdio、http 或 sse";;
+            esac
+            # a secret written in the source (the value is never printed): it goes in an environment variable
+            mcp_info "$f" 2>/dev/null | awk -F'\t' '$1 == "X" { print $2 "\t" $3 }' | while IFS="$TAB" read -r w v; do
+                problem "$rel: $w 看起來是密碼或 token，不能寫在來源裡：改成 \${$v}，值放在每台電腦自己的環境變數"
+            done
             for v in $(yget "$f" command) $(yget "$f" args); do
                 case $v in
                     git+*|github:*|git@*) problem "$rel: MCP 只能從公司允許的套件來源裝，不能用 $v 這種寫法";;
@@ -3969,6 +4267,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit install-tool <程式名> [--min 版本]
                                     用 kit 的裝法裝，太舊就升級（畫面程式的「安裝」按鈕也是用這個）
   kit install-deps <skill> [npm|pip] 裝 skill 自己的套件（在 kit 的資料夾，不跑套件的安裝程式）
+  kit install-deps mcp <名字>       裝 MCP 的套件（固定的版本），之後不用每次啟動時下載
   kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]
                                   那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
   kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
@@ -3978,7 +4277,10 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
 寫內容的人用（只吃本機資料夾，不連網）：
   kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]
-  kit diff   [種類] <名字> --from 本機資料夾   比較
+  kit new mcp [名字] --config 檔案|- [--to 來源] [--look]
+                                    從貼上的 MCP 設定建立（JSON、claude mcp add、codex mcp add、config.toml）；
+                                    密碼和 token 換成 ${變數}，套件固定版本（只有這個會連網：查最新版本）；--look 只看不寫（JSON）
+  kit diff  [種類] <名字> --from 本機資料夾   比較
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
 
@@ -4005,10 +4307,10 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 EOF
 }
 
-# programs read JSON: list/agents/push/files --json and collect --look print only JSON on stdout (errors too)
+# programs read JSON: list/agents/push/files --json and collect/new --look print only JSON on stdout (errors too)
 case ${1:-} in
     list|ls|agents|push|files) for a in "$@"; do [ "$a" = --json ] && { json_mode; break; }; done;;
-    collect) for a in "$@"; do [ "$a" = --look ] && { json_mode; break; }; done;;
+    collect|new) for a in "$@"; do [ "$a" = --look ] && { json_mode; break; }; done;;
 esac
 # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook takes it itself)
 case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent|install-deps) [ "${2:-}" = --hook ] || take_lock;; esac
