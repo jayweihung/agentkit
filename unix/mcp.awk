@@ -17,11 +17,15 @@
 #   V var               an environment variable it needs (${var} without a default)
 #   W message           a warning
 #   R tool              a program it needs (node, uv, python, docker)
+#   G spec              (before P, npm) the range or tag the paste asked for (^1, next): kit looks up the newest
+#                       version that matches it (npm view "package@spec" version) and pins that
 #   P kind package version argno bin first bad
 #                       its package: kind npm (npx) or pip (uvx, the package with its [extras]); version empty: not
 #                       pinned; argno: the argument
 #                       naming it; bin: the program to run (empty: the package's own); first: the server's own
 #                       arguments start there; bad: why kit does not install it (it is still downloaded at start)
+# An MCP yaml kit has (mode yaml) may name, in a top-level not_secret: [args[2], url], fields that are not secrets
+# (where, as the X lines name them): kit leaves them as they are and gives no X line for them (kit check passes).
 
 BEGIN { NS = 0; ERRC = ""; NL = 0 }
 { sub(/\r$/, ""); LN[++NL] = $0 }
@@ -43,7 +47,7 @@ END {
     if (N == "") fail("no_name", "這個設定沒有名字：請寫成 kit new mcp <名字> --config …")
     if (N !~ /^[a-z0-9][a-z0-9-]*$/) fail("bad_name", "名字只能用小寫英文、數字和 -：" N)
     if (ERRC != "") { print "E\t" ERRC "\t" ERRM; exit }
-    SV = toupper(N); gsub(/[^A-Z0-9]+/, "_", SV)
+    SV = toupper(N); gsub(/[^A-Z0-9]+/, "_", SV); if (SV ~ /^[0-9]/) SV = "MCP_" SV   # (a variable never starts with a digit)
     finish(J)
     if (ERRC != "") { print "E\t" ERRC "\t" ERRM; exit }
     printf "%s", OUT
@@ -368,17 +372,18 @@ function load_yaml(   i, e, k, v, j) {
         else if (k ~ /^headers\./) { HN[j]++; HK[j, HN[j]] = substr(k, 9); HV[j, HN[j]] = v }
         else if (k == "type") F[j, "type"] = v
         else if (k == "command" || k == "url" || k == "description") F[j, k] = v
+        else if (k == "not_secret[]" || k == "not_secret") NOTSEC[v] = 1
     }
 }
 
 # ---------- secrets ----------
-function sec_name(k,   s, i, c, n, Q, p) {   # a name that holds a secret: API_KEY, apiKey, X-Auth-Token, PAT ...
+function sec_name(k,   s, i, c, n, Q, p) {   # a name that holds a secret: API_KEY, apiKey, X-Auth-Token, PAT, DB_PASS ...
     s = ""
     for (i = 1; i <= length(k); i++) { c = substr(k, i, 1); if (c ~ /[A-Z]/ && i > 1 && substr(k, i - 1, 1) ~ /[a-z0-9]/) s = s "_"; s = s c }
     n = split(toupper(s), Q, /[^A-Z0-9]+/)
     for (i = 1; i <= n; i++) {
         p = Q[i]
-        if (p ~ /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|SESSION/ || p == "PAT") return 1
+        if (p ~ /KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|COOKIE|SESSION/ || p ~ /^(PAT|PASS|PWD|PW)$/) return 1
         if (p ~ /AUTH/ && p != "AUTHOR" && p != "AUTHORS") return 1
     }
     return 0
@@ -390,9 +395,19 @@ function sec_token(v,   n, t) {   # a value that looks like a token by itself
     if (index(v, "${") || v !~ /^[A-Za-z0-9_+=\/.-]+$/) return 0
     n = length(v)
     if (match(v, /^(sk-|sk_live_|sk_test_|rk_live_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abprs]-|AKIA|ASIA|AIza|eyJ)/) && n - RLENGTH >= 8) return 1
-    if (n >= 20 && substr(v, 1, 1) != "/" && v ~ /[A-Z]/ && v ~ /[a-z]/ && v ~ /[0-9]/) { t = v; if (gsub(/[._\/-]/, "", t) <= 3) return 1 }
+    # long and random: upper and lower case and digits, mixed up (words are not: AcmeCorpProduction2024 is 7 runs in 22)
+    if (n >= 20 && substr(v, 1, 1) != "/" && v ~ /[A-Z]/ && v ~ /[a-z]/ && v ~ /[0-9]/ && runs(v) * 5 >= n * 2) { t = v; if (gsub(/[._\/-]/, "", t) <= 3) return 1 }
     if (n >= 32 && v ~ /^[0-9A-Fa-f]+$/ && v ~ /[0-9]/ && v ~ /[A-Fa-f]/) return 1
     return 0
+}
+function runs(v,   i, c, k, p, r) {   # how many runs of one kind of character (upper, lower, digit, other) v has
+    r = 0; p = ""
+    for (i = 1; i <= length(v); i++) {
+        c = substr(v, i, 1); k = (c ~ /[A-Z]/) ? "u" : (c ~ /[a-z]/) ? "l" : (c ~ /[0-9]/) ? "d" : "o"
+        if (k != p) r++
+        p = k
+    }
+    return r
 }
 function vname(k) { sub(/^-+/, "", k); k = toupper(k); gsub(/[^A-Z0-9]+/, "_", k); gsub(/^_+|_+$/, "", k); return k }
 function newvar(base,   v, i) {
@@ -400,7 +415,19 @@ function newvar(base,   v, i) {
     while (v in USED) v = base "_" i++
     USED[v] = 1; return v
 }
-function secret(where, base,   v) { v = newvar(base); emit("X\t" where "\t" v); NX++; return v }
+function secret(where, base,   v) { v = newvar(base); if (!(where in NOTSEC)) emit("X\t" where "\t" v); return v }
+function defaults(v, where,   o, r, e, nm, d) {   # ${VAR:-default} with a secret as the default -> ${VAR} (an X line)
+    o = ""
+    while (match(v, /\$\{[A-Za-z_][A-Za-z0-9_]*:-[^}]*\}/)) {
+        r = substr(v, RSTART, RLENGTH); o = o substr(v, 1, RSTART - 1); v = substr(v, RSTART + RLENGTH)
+        e = index(r, ":-"); nm = substr(r, 3, e - 3); d = substr(r, e + 2, length(r) - e - 2)
+        if ((sec_name(nm) && !sec_plain(d)) || sec_token(d)) {
+            r = "${" nm "}"; if (!(where in NOTSEC)) emit("X\t" where "\t" nm)
+        }
+        o = o r
+    }
+    return o v
+}
 function used_vars(s,   r) {
     while (match(s, /\$\{[A-Za-z_][A-Za-z0-9_]*/)) { r = substr(s, RSTART + 2, RLENGTH - 2); USED[r] = 1; s = substr(s, RSTART + RLENGTH) }
 }
@@ -431,7 +458,12 @@ function url_strip(u, where,   sch, rest, i, q, hq, frag, auth, path, at, ui, c,
     }
     return sch auth path q frag
 }
-function strip(j,   i, k, v, w, e, prev, lk) {
+function strip(j,   i, k, v, w, e, prev, lk, B) {
+    # first a secret as the default of a ${VAR:-…}; a field the yaml calls not_secret is put back as it was at the end
+    for (i = 1; i <= EN[j]; i++) { B["env." EK[j, i]] = EV[j, i]; EV[j, i] = defaults(EV[j, i], "env." EK[j, i]) }
+    for (i = 1; i <= HN[j]; i++) { B["headers." HK[j, i]] = HV[j, i]; HV[j, i] = defaults(HV[j, i], "headers." HK[j, i]) }
+    for (i = 1; i <= AN[j]; i++) { B["args[" i "]"] = A[j, i]; A[j, i] = defaults(A[j, i], "args[" i "]") }
+    B["url"] = F[j, "url"]; F[j, "url"] = defaults(F[j, "url"], "url")
     for (i = 1; i <= EN[j]; i++) {
         k = EK[j, i]; v = EV[j, i]; w = "env." k
         if (index(v, "${")) continue
@@ -462,11 +494,15 @@ function strip(j,   i, k, v, w, e, prev, lk) {
         else if (sec_token(v)) A[j, i] = "${" secret(w, SV "_SECRET") "}"
         prev = A[j, i]
     }
+    for (i = 1; i <= EN[j]; i++) if (("env." EK[j, i]) in NOTSEC) EV[j, i] = B["env." EK[j, i]]
+    for (i = 1; i <= HN[j]; i++) if (("headers." HK[j, i]) in NOTSEC) HV[j, i] = B["headers." HK[j, i]]
+    for (i = 1; i <= AN[j]; i++) if (("args[" i "]") in NOTSEC) A[j, i] = B["args[" i "]"]
+    if ("url" in NOTSEC) F[j, "url"] = B["url"]
 }
 
 # ---------- the package (npx, uvx) ----------
 function need(t) { if (!(t in RQ)) { RQ[t] = 1; emit("R\t" t) } }
-function pkg(j,   c, i, a, spec, nm, ver, bad, argno, pre, bin, kind, at, ex, fno, fpre, fi) {
+function pkg(j,   c, i, a, spec, nm, ver, bad, argno, pre, bin, kind, at, ex, fno, fpre, fi, raw, rng) {
     c = F[j, "command"]; sub(/^.*[\/\\]/, "", c); c = tolower(c); sub(/\.(exe|cmd|bat)$/, "", c)
     if (c == "npx" || c == "node" || c == "npm") need("node")
     else if (c == "uvx" || c == "uv") need("uv")
@@ -490,7 +526,11 @@ function pkg(j,   c, i, a, spec, nm, ver, bad, argno, pre, bin, kind, at, ex, fn
             if (at) { nm = substr(spec, 1, at - 1); ver = substr(spec, at + 1) } else nm = spec
             if (bad == "" && nm !~ /^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/) bad = "套件 " nm " 不是 npm registry 上的名字"
         }
-        if (ver !~ /^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$/) ver = ""
+        # a range or tag (^1, ~1.2, next): kit pins the newest version that matches it (a G line says what to look up)
+        if (ver !~ /^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$/) {
+            raw = ver; ver = ""
+            if (raw ~ /^[0-9A-Za-z.^~<>=*+ |-]+$/ && bad == "") { rng = 1; emit("G\t" raw) }
+        }
     } else if (c == "uvx" || (c == "uv" && A[j, 1] == "tool" && A[j, 2] == "run")) {
         kind = "pip"; spec = ""; fno = 0
         for (i = (c == "uv") ? 3 : 1; i <= AN[j]; i++) {
@@ -518,6 +558,8 @@ function pkg(j,   c, i, a, spec, nm, ver, bad, argno, pre, bin, kind, at, ex, fn
     if (pin != "" && bad == "" && ver == "" && argno) {
         ver = pin
         A[j, argno] = pre nm (kind == "pip" ? ex : "") ((kind == "pip" && fno) ? "==" : "@") ver
+        if (rng) wn(j, "套件 " nm " 原本寫 @" raw "：固定在 " pin " 版（符合 " raw " 的最新版本）")
+        else if (raw != "") wn(j, "套件 " nm " 原本寫 @" raw "（kit 看不懂這種寫法）：改成固定在 " pin " 版（現在最新的版本）")
     }
     emit("P\t" kind "\t" nm (kind == "pip" ? ex : "") "\t" ver "\t" argno "\t" bin "\t" (fi ? fi : 0) "\t" bad)
 }

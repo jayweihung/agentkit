@@ -311,6 +311,12 @@ function Json-Text($root, [string]$orig) { # keep a trailing newline only if the
     if ($orig.Contains("`r`n")) { $s = $s.Replace("`n", "`r`n") }
     $s
 }
+function Json-Strs([string]$file, [string]$path) { # the strings in the array at PATH, as JSON text ("..."): Json-Str NAME is one
+    if (-not (Test-Path -LiteralPath $file)) { return @() }
+    $a = $null; try { $a = Json-Find (Json-Parse (Read-Text $file)) $path } catch { }
+    if ($null -eq $a -or $a.t -ne 'a') { return @() }
+    @(foreach ($x in $a.v) { if ($x.t -eq 'v' -and $x.raw.StartsWith('"')) { $x.raw } })
+}
 function Json-Get([string]$file, [string]$path) {
     if (-not (Test-Path -LiteralPath $file)) { return $null }
     $n = Json-Find (Json-Parse (Read-Text $file)) $path
@@ -599,7 +605,10 @@ function Of-Kind($items, [string]$kind) { @(foreach ($i in $items) { if ($i.Star
 function Mr-New { New-Object System.Collections.Hashtable ([StringComparer]::Ordinal) }
 function Mr-Fail([string]$c, [string]$m) { if (-not $script:Mr.errc) { $script:Mr.errc = $c; $script:Mr.errm = $m } }
 function Mr-Emit([string]$s) { [void]$script:Mr.out.Append($s).Append("`n") }
-function Mr-Norm([string]$s) { ([regex]::Replace($s.ToLowerInvariant(), '[^a-z0-9]+', '-')).Trim('-') }
+# upper/lower case of A-Z only, as awk does with LC_ALL=C (ToLowerInvariant would also make the Kelvin sign a k)
+function Mr-Lc([string]$s) { [regex]::Replace($s, '[A-Z]+', { param($m) $m.Value.ToLowerInvariant() }) }
+function Mr-Uc([string]$s) { [regex]::Replace($s, '[a-z]+', { param($m) $m.Value.ToUpperInvariant() }) }
+function Mr-Norm([string]$s) { ([regex]::Replace((Mr-Lc $s), '[^a-z0-9]+', '-')).Trim('-') }
 function Mr-Srv([string]$nm) {
     if ($script:Mr.si.ContainsKey($nm)) { return $script:Mr.si[$nm] }
     $j = @{ name = $nm; f = (Mr-New); a = (Mr-New); an = 0; ca = (Mr-New); cn = 0; ek = (New-Object System.Collections.Generic.List[string]); ev = (New-Object System.Collections.Generic.List[string])
@@ -622,7 +631,7 @@ function Mr-SetHdr($j, [string]$k, [string]$v) {
     $j.hk.Add($k); $j.hv.Add($v)
 }
 function Mr-SetType($j, [string]$t) {
-    $l = $t.ToLowerInvariant()
+    $l = Mr-Lc $t
     if (@('stdio', 'http', 'sse') -ccontains $l) { $j.f['type'] = $l }
     elseif (@('streamable-http', 'streamable_http', 'streamablehttp', 'https') -ccontains $l) { $j.f['type'] = 'http' }
     else { Mr-Fail 'bad_config' "不認得的 type：$t（只能是 stdio、http、sse）" }
@@ -929,6 +938,7 @@ function Mr-LoadYaml($lines, [string]$name) {
         elseif ($k.StartsWith('headers.')) { $j.hk.Add($k.Substring(8)); $j.hv.Add($v) }
         elseif ($k -ceq 'type') { $j.f['type'] = $v }
         elseif (@('command', 'url', 'description') -ccontains $k) { $j.f[$k] = $v }
+        elseif ($k -ceq 'not_secret[]' -or $k -ceq 'not_secret') { $script:Mr.notsec[$v] = 1 }
     }
 }
 
@@ -936,27 +946,40 @@ function Mr-LoadYaml($lines, [string]$name) {
 function Mr-SecName([string]$k) {
     $s = New-Object System.Text.StringBuilder
     for ($i = 0; $i -lt $k.Length; $i++) { $c = [string]$k[$i]; if ($c -cmatch '[A-Z]' -and $i -gt 0 -and ([string]$k[$i - 1]) -cmatch '[a-z0-9]') { [void]$s.Append('_') }; [void]$s.Append($c) }
-    foreach ($p in [regex]::Split($s.ToString().ToUpperInvariant(), '[^A-Z0-9]+')) {
-        if ($p -cmatch 'KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|SESSION' -or $p -ceq 'PAT') { return $true }
+    foreach ($p in [regex]::Split((Mr-Uc $s.ToString()), '[^A-Z0-9]+')) {
+        if ($p -cmatch 'KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|COOKIE|SESSION' -or $p -cmatch '^(PAT|PASS|PWD|PW)$') { return $true }
         if ($p -cmatch 'AUTH' -and $p -cne 'AUTHOR' -and $p -cne 'AUTHORS') { return $true }
     }
     $false
 }
 function Mr-SecPlain([string]$v) {
-    $v -eq '' -or $v.Contains('${') -or $v.ToLowerInvariant() -cmatch '^(true|false|yes|no|on|off|null|none)$' -or $v -cmatch '^[0-9][0-9.]*$' -or $v -cmatch '^(/|~/|\./|\.\./|[A-Za-z]:[\\/])' -or $v -cmatch '^[A-Za-z][A-Za-z0-9+.-]*://'
+    $v -eq '' -or $v.Contains('${') -or (Mr-Lc $v) -cmatch '^(true|false|yes|no|on|off|null|none)$' -or $v -cmatch '^[0-9][0-9.]*$' -or $v -cmatch '^(/|~/|\./|\.\./|[A-Za-z]:[\\/])' -or $v -cmatch '^[A-Za-z][A-Za-z0-9+.-]*://'
 }
 function Mr-SecToken([string]$v) {
     if ($v.Contains('${') -or $v -cnotmatch '^[A-Za-z0-9_+=/.-]+$') { return $false }
     $n = $v.Length
     $m = [regex]::Match($v, '^(sk-|sk_live_|sk_test_|rk_live_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abprs]-|AKIA|ASIA|AIza|eyJ)')
     if ($m.Success -and $n - $m.Length -ge 8) { return $true }
-    if ($n -ge 20 -and -not $v.StartsWith('/') -and $v -cmatch '[A-Z]' -and $v -cmatch '[a-z]' -and $v -cmatch '[0-9]') { if ([regex]::Matches($v, '[._/-]').Count -le 3) { return $true } }
+    # long and random: upper and lower case and digits, mixed up (words are not: AcmeCorpProduction2024 is 7 runs in 22)
+    if ($n -ge 20 -and -not $v.StartsWith('/') -and $v -cmatch '[A-Z]' -and $v -cmatch '[a-z]' -and $v -cmatch '[0-9]' -and [regex]::Matches($v, '[A-Z]+|[a-z]+|[0-9]+|[^A-Za-z0-9]+').Count * 5 -ge $n * 2) { if ([regex]::Matches($v, '[._/-]').Count -le 3) { return $true } }
     if ($n -ge 32 -and $v -cmatch '^[0-9A-Fa-f]+$' -and $v -cmatch '[0-9]' -and $v -cmatch '[A-Fa-f]') { return $true }
     $false
 }
-function Mr-VName([string]$k) { ([regex]::Replace(($k -replace '^-+', '').ToUpperInvariant(), '[^A-Z0-9]+', '_')).Trim('_') }
+function Mr-VName([string]$k) { ([regex]::Replace((Mr-Uc ($k -replace '^-+', '')), '[^A-Z0-9]+', '_')).Trim('_') }
 function Mr-NewVar([string]$base) { $v = $base; $i = 2; while ($script:Mr.used.ContainsKey($v)) { $v = "${base}_$i"; $i++ }; $script:Mr.used[$v] = 1; $v }
-function Mr-Secret([string]$where, [string]$base) { $v = Mr-NewVar $base; Mr-Emit "X`t$where`t$v"; $v }
+function Mr-Secret([string]$where, [string]$base) { $v = Mr-NewVar $base; if (-not $script:Mr.notsec.ContainsKey($where)) { Mr-Emit "X`t$where`t$v" }; $v }
+function Mr-Defaults([string]$v, [string]$where) { # ${VAR:-default} with a secret as the default -> ${VAR} (an X line)
+    $o = New-Object System.Text.StringBuilder
+    while (($m = [regex]::Match($v, '\$\{[A-Za-z_][A-Za-z0-9_]*:-[^}]*\}')).Success) {
+        $r = $m.Value; [void]$o.Append($v.Substring(0, $m.Index)); $v = $v.Substring($m.Index + $m.Length)
+        $e = $r.IndexOf(':-'); $nm = $r.Substring(2, $e - 2); $d = $r.Substring($e + 2, $r.Length - $e - 3)
+        if (((Mr-SecName $nm) -and -not (Mr-SecPlain $d)) -or (Mr-SecToken $d)) {
+            $r = '${' + $nm + '}'; if (-not $script:Mr.notsec.ContainsKey($where)) { Mr-Emit "X`t$where`t$nm" }
+        }
+        [void]$o.Append($r)
+    }
+    $o.ToString() + $v
+}
 function Mr-UsedVars([string]$s) { foreach ($x in [regex]::Matches($s, '\$\{([A-Za-z_][A-Za-z0-9_]*)')) { $script:Mr.used[$x.Groups[1].Value] = 1 } }
 function Mr-UrlStrip([string]$u, [string]$where) {
     $m = [regex]::Match($u, '^[A-Za-z][A-Za-z0-9+.-]*://'); if (-not $m.Success) { return $u }
@@ -986,7 +1009,12 @@ function Mr-UrlStrip([string]$u, [string]$where) {
     $sch + $auth + $path + $q + $frag
 }
 function Mr-Strip($j) {
-    $sv = $script:Mr.sv
+    $sv = $script:Mr.sv; $ns = $script:Mr.notsec; $B = Mr-New
+    # first a secret as the default of a ${VAR:-…}; a field the yaml calls not_secret is put back as it was at the end
+    for ($i = 0; $i -lt $j.ek.Count; $i++) { $B["env.$($j.ek[$i])"] = $j.ev[$i]; $j.ev[$i] = Mr-Defaults $j.ev[$i] "env.$($j.ek[$i])" }
+    for ($i = 0; $i -lt $j.hk.Count; $i++) { $B["headers.$($j.hk[$i])"] = $j.hv[$i]; $j.hv[$i] = Mr-Defaults $j.hv[$i] "headers.$($j.hk[$i])" }
+    for ($i = 1; $i -le $j.an; $i++) { $B["args[$i]"] = Mr-A $j $i; $j.a["$i"] = Mr-Defaults (Mr-A $j $i) "args[$i]" }
+    $B['url'] = Mr-F $j 'url'; $j.f['url'] = Mr-Defaults (Mr-F $j 'url') 'url'
     for ($i = 0; $i -lt $j.ek.Count; $i++) {
         $k = $j.ek[$i]; $v = $j.ev[$i]; $w = "env.$k"
         if ($v.Contains('${')) { continue }
@@ -994,7 +1022,7 @@ function Mr-Strip($j) {
         elseif (((Mr-SecName $k) -and -not (Mr-SecPlain $v)) -or (Mr-SecToken $v)) { $j.ev[$i] = '${' + (Mr-Secret $w $k) + '}' }
     }
     for ($i = 0; $i -lt $j.hk.Count; $i++) {
-        $k = $j.hk[$i]; $v = $j.hv[$i]; $w = "headers.$k"; $lk = $k.ToLowerInvariant()
+        $k = $j.hk[$i]; $v = $j.hv[$i]; $w = "headers.$k"; $lk = Mr-Lc $k
         if ($v.Contains('${') -or $v -eq '') { continue }
         if ($lk -ceq 'authorization' -or $lk -ceq 'proxy-authorization') {
             $m = [regex]::Match($v, '^(Bearer|Basic|Token|Bot|bearer|basic|token) +')
@@ -1017,17 +1045,21 @@ function Mr-Strip($j) {
         elseif (Mr-SecToken $v) { $j.a["$i"] = '${' + (Mr-Secret $w "${sv}_SECRET") + '}' }
         $prev = Mr-A $j $i
     }
+    for ($i = 0; $i -lt $j.ek.Count; $i++) { if ($ns.ContainsKey("env.$($j.ek[$i])")) { $j.ev[$i] = $B["env.$($j.ek[$i])"] } }
+    for ($i = 0; $i -lt $j.hk.Count; $i++) { if ($ns.ContainsKey("headers.$($j.hk[$i])")) { $j.hv[$i] = $B["headers.$($j.hk[$i])"] } }
+    for ($i = 1; $i -le $j.an; $i++) { if ($ns.ContainsKey("args[$i]")) { $j.a["$i"] = $B["args[$i]"] } }
+    if ($ns.ContainsKey('url')) { $j.f['url'] = $B['url'] }
 }
 
 # the package (npx, uvx)
 function Mr-Need([string]$t) { if (-not $script:Mr.rq.ContainsKey($t)) { $script:Mr.rq[$t] = 1; Mr-Emit "R`t$t" } }
 function Mr-Pkg($j, [string]$pin) {
-    $c = ((Mr-F $j 'command') -replace '^.*[/\\]', '').ToLowerInvariant() -replace '\.(exe|cmd|bat)$', ''
+    $c = (Mr-Lc ((Mr-F $j 'command') -replace '^.*[/\\]', '')) -replace '\.(exe|cmd|bat)$', ''
     if (@('npx', 'node', 'npm') -ccontains $c) { Mr-Need 'node' }
     elseif ($c -ceq 'uvx' -or $c -ceq 'uv') { Mr-Need 'uv' }
     elseif ($c -cmatch '^python(3(\.[0-9]+)?)?$' -or $c -ceq 'py') { Mr-Need 'python' }
     elseif ($c -ceq 'docker') { Mr-Need 'docker' }
-    $bad = ''; $nm = ''; $ver = ''; $bin = ''; $pre = ''; $argno = 0; $fi = 0; $ex = ''; $fno = 0; $fpre = ''
+    $bad = ''; $nm = ''; $ver = ''; $bin = ''; $pre = ''; $argno = 0; $fi = 0; $ex = ''; $fno = 0; $fpre = ''; $raw = ''; $rng = $false
     if ($c -ceq 'npx') {
         $kind = 'npm'; $spec = ''
         for ($i = 1; $i -le $j.an; $i++) {
@@ -1045,7 +1077,11 @@ function Mr-Pkg($j, [string]$pin) {
             if ($at -gt 0) { $nm = $spec.Substring(0, $at); $ver = $spec.Substring($at + 1) } else { $nm = $spec }
             if ($bad -eq '' -and $nm -cnotmatch '^(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$') { $bad = "套件 $nm 不是 npm registry 上的名字" }
         }
-        if ($ver -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$') { $ver = '' }
+        # a range or tag (^1, ~1.2, next): kit pins the newest version that matches it (a G line says what to look up)
+        if ($ver -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$') {
+            $raw = $ver; $ver = ''
+            if ($raw -cmatch '^[0-9A-Za-z.^~<>=*+ |-]+$' -and $bad -eq '') { $rng = $true; Mr-Emit "G`t$raw" }
+        }
     } elseif ($c -ceq 'uvx' -or ($c -ceq 'uv' -and (Mr-A $j 1) -ceq 'tool' -and (Mr-A $j 2) -ceq 'run')) {
         $kind = 'pip'; $spec = ''
         for ($i = $(if ($c -ceq 'uv') { 3 } else { 1 }); $i -le $j.an; $i++) {
@@ -1074,6 +1110,8 @@ function Mr-Pkg($j, [string]$pin) {
     if ($pin -ne '' -and $bad -eq '' -and $ver -eq '' -and $argno) {
         $ver = $pin
         $j.a["$argno"] = $pre + $nm + $(if ($kind -eq 'pip') { $ex } else { '' }) + $(if ($kind -eq 'pip' -and $fno) { '==' } else { '@' }) + $ver
+        if ($rng) { Mr-Wn $j "套件 $nm 原本寫 @${raw}：固定在 $pin 版（符合 $raw 的最新版本）" }
+        elseif ($raw -ne '') { Mr-Wn $j "套件 $nm 原本寫 @${raw}（kit 看不懂這種寫法）：改成固定在 $pin 版（現在最新的版本）" }
     }
     $pk = $nm + $(if ($kind -eq 'pip') { $ex } else { '' })
     Mr-Emit "P`t$kind`t$pk`t$ver`t$argno`t$bin`t$fi`t$bad"
@@ -1081,7 +1119,7 @@ function Mr-Pkg($j, [string]$pin) {
 
 # the yaml
 function Mr-Yq([string]$v) {
-    if ($v -cmatch '^[A-Za-z0-9_$./=+-][A-Za-z0-9_$./=+:{}@%~,-]*$' -and $v -cne '-' -and -not $v.EndsWith(':') -and $v.ToLowerInvariant() -cnotmatch '^(true|false|yes|no|on|off|null|none|y|n)$' -and $v -cnotmatch '^[-+.]?[0-9]') { return $v }
+    if ($v -cmatch '^[A-Za-z0-9_$./=+-][A-Za-z0-9_$./=+:{}@%~,-]*$' -and $v -cne '-' -and -not $v.EndsWith(':') -and (Mr-Lc $v) -cnotmatch '^(true|false|yes|no|on|off|null|none|y|n)$' -and $v -cnotmatch '^[-+.]?[0-9]') { return $v }
     if ($v -cnotmatch '["\\]') { return '"' + $v + '"' }
     if (-not $v.Contains("'")) { return "'" + $v + "'" }
     Mr-Fail 'bad_config' '有個值同時有 '' 和 " 或 \，kit 的 yaml 寫不下'; ''
@@ -1151,7 +1189,7 @@ function Mr-Finish($j, [string]$mode, [string]$N, [string]$pin) {
     foreach ($w in $j.wl) { Mr-Emit "W`t$w" }
 }
 function Mcp-Read([string]$mode, $lines, [string]$name = '', [string]$pin = '') {
-    $script:Mr = @{ si = (Mr-New); list = (New-Object System.Collections.Generic.List[object]); errc = ''; errm = ''; out = (New-Object System.Text.StringBuilder); used = (Mr-New); vseen = (Mr-New); rq = (Mr-New); sv = ''; s = ''; p = 0; vt = ''; vs = '' }
+    $script:Mr = @{ si = (Mr-New); list = (New-Object System.Collections.Generic.List[object]); errc = ''; errm = ''; out = (New-Object System.Text.StringBuilder); used = (Mr-New); vseen = (Mr-New); rq = (Mr-New); notsec = (Mr-New); sv = ''; s = ''; p = 0; vt = ''; vs = '' }
     $lines = @(foreach ($l in @($lines)) { ([string]$l) -replace "`r$", '' })
     switch ($mode) { 'json' { Mr-LoadJson $lines } 'cmd' { Mr-LoadCmd $lines } 'toml' { Mr-LoadToml $lines } 'yaml' { Mr-LoadYaml $lines $name } }
     $m = $script:Mr; $ns = $m.list.Count
@@ -1168,7 +1206,7 @@ function Mcp-Read([string]$mode, $lines, [string]$name = '', [string]$pin = '') 
     if ($N -eq '') { Mr-Fail 'no_name' '這個設定沒有名字：請寫成 kit new mcp <名字> --config …' }
     if ($N -cnotmatch '^[a-z0-9][a-z0-9-]*$') { Mr-Fail 'bad_name' "名字只能用小寫英文、數字和 -：$N" }
     if ($m.errc) { return @("E`t$($m.errc)`t$($m.errm)") }
-    $m.sv = [regex]::Replace($N.ToUpperInvariant(), '[^A-Z0-9]+', '_')
+    $m.sv = [regex]::Replace($N.ToUpperInvariant(), '[^A-Z0-9]+', '_'); if ($m.sv -cmatch '^[0-9]') { $m.sv = 'MCP_' + $m.sv }   # (a variable never starts with a digit)
     Mr-Finish $pick $mode $N $pin
     if ($m.errc) { return @("E`t$($m.errc)`t$($m.errm)") }
     $o = $m.out.ToString(); if ($o -eq '') { return @() }
@@ -1387,18 +1425,31 @@ function Mcp-Install([string]$n) { # kit install-deps mcp <name> : its npm or Py
     if (-not (Test-Path -LiteralPath $Machine)) { return }
     Apply-Dirs; Apply-All
 }
-function Mcp-Latest([string]$kind, [string]$pkg, [string]$tmp) { # its newest version (npm view; PyPI's JSON API), '' when kit cannot tell
+function Ver-Top($lines) { # version lines (1.2.3, or pkg@1.2.3 '1.2.3') -> the highest (a release before its pre-releases)
+    $top = ''; $best = ''
+    foreach ($l in @($lines)) {
+        $v = (@(([string]$l).Trim() -split '\s+')[-1]).Replace("'", '')
+        if ($v -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+') { continue }
+        $k = $v; $p = ''; $m = [regex]::Match($k, '[-+]'); if ($m.Success) { $p = $k.Substring($m.Index); $k = $k.Substring(0, $m.Index) }
+        $n = $k.Split('.'); $key = '{0:D9}.{1:D9}.{2:D9}.{3}' -f [long]$n[0], [long]$n[1], [long]$n[2], $(if ($p.StartsWith('-')) { '0' + $p } else { '1' })
+        if ($top -eq '' -or [string]::CompareOrdinal($key, $top) -gt 0) { $top = $key; $best = $v }
+    }
+    $best
+}
+function Mcp-Latest([string]$kind, [string]$pkg, [string]$tmp) { # its newest version (that matches a range: PACKAGE@RANGE; npm view; PyPI's JSON API), '' when kit cannot tell
     $v = ''
     if ($kind -eq 'npm') {
         $npm = Npm-Path; if (-not $npm) { return '' }
-        if ($OnWindows) { $o = Tool-Version $env:ComSpec ('/d /s /c ""' + $npm + '" view ' + $pkg + ' version"') 30000 $tmp } else { $o = Tool-Version $npm "view $pkg version" 30000 $tmp }
-        foreach ($l in "$o" -split "`n") { $l = $l.Trim(); if ($l -cmatch '^[0-9][0-9A-Za-z.+!-]*$') { $v = $l } }
+        # (a range that matches several prints "pkg@1.2.3 '1.2.3'" lines: the highest one; the range has no " or %: quoted it is safe for cmd)
+        if ($OnWindows) { $o = Tool-Version $env:ComSpec ('/d /s /c ""' + $npm + '" view "' + $pkg + '" version"') 30000 $tmp 1048576 } else { $o = Tool-Version $npm "view `"$pkg`" version" 30000 $tmp 1048576 }
+        $v = Ver-Top ("$o" -split "`n")
     } else {
         $u = if ($env:KIT_PYPI_URL) { $env:KIT_PYPI_URL } else { 'https://pypi.org/pypi' }; $u = $u.TrimEnd('/') + '/' + ($pkg -replace '\[.*$', '') + '/json'
         $h = Url-Host $u; $hosts = @(Allowed-Hosts)
         if ($hosts.Count -gt 0 -and $hosts -notcontains $h) { Warn "$h 不在 allowed_hosts：不查最新版本"; return '' }
         try {
             $f = Join-Path $tmp 'pypi.json'
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
             Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 20 -OutFile $f -ErrorAction Stop
             $v = "$(Json-Get $f 'info.version')".Trim('"')
         } catch { return '' }
@@ -1415,7 +1466,10 @@ function Mcp-PasteErr($out) { # Mcp-Read stopped (an E line): stop kit with its 
 function Mcp-NewConfig($o) { # kit new mcp [NAME] --config FILE|- [--to SOURCE] [--look] : a pasted setup -> mcp/<name>.yaml, secrets as ${VAR}
     if ($o.Name -and -not (Valid-Name $o.Name)) { Die-C bad_name "名字只能用小寫英文、數字和 -：$($o.Name)" }
     # the paste may hold secrets: it is read here, never written anywhere or printed
-    if ($o.Config -eq '-') { $text = [Console]::In.ReadToEnd() }
+    if ($o.Config -eq '-') {   # (as UTF-8, a BOM or not: Windows PowerShell 5.1's [Console]::In would read the console's code page)
+        $sr = New-Object IO.StreamReader ([Console]::OpenStandardInput()), (New-Object Text.UTF8Encoding $false), $true
+        try { $text = $sr.ReadToEnd() } finally { $sr.Dispose() }
+    }
     else { if (-not (Test-Path -LiteralPath $o.Config -PathType Leaf)) { Die-C usage "找不到 $($o.Config)" }; $text = Read-Text $o.Config }
     if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
     $lines = @($text -split "`n"); if ($text.EndsWith("`n")) { $lines = @($lines | Select-Object -First ($lines.Count - 1)) }
@@ -1430,10 +1484,13 @@ function Mcp-NewConfig($o) { # kit new mcp [NAME] --config FILE|- [--to SOURCE] 
     $out = @(Mcp-Read $form $in $o.Name); Mcp-PasteErr $out
     $tmp = New-TempDir 'kit-mcp.'; $notes = ''
     try {
+        # (a range or tag: the newest that matches it; Mcp-Read says what it was pinned from)
         $pk = Mcp-Pkg $out
         if ($pk -and $pk[1] -and -not $pk[2] -and -not $pk[6]) {
-            $v = Mcp-Latest $pk[0] $pk[1] $tmp
+            $w = @(Mcp-Lines $out 'G'); $w = if ($w.Count -gt 0) { $w[0] } else { '' }
+            $v = Mcp-Latest $pk[0] ($pk[1] + $(if ($w) { "@$w" } else { '' })) $tmp
             if ($v) { $out = @(Mcp-Read $form $in $o.Name $v); Mcp-PasteErr $out }
+            elseif ($w) { $notes = "查不到 $($pk[1]) 符合 $w 的版本（沒網路，或沒有 npm？）：先不固定版本，照原本寫的 @$w 在每次啟動時下載" }
             else { $notes = "查不到 $($pk[1]) 的最新版本（沒網路，或沒有 $(if ($pk[0] -eq 'npm') { 'npm' } else { 'curl' })？）：先不固定版本，每次啟動時下載最新的" }
         }
     } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1451,7 +1508,7 @@ function Mcp-NewConfig($o) { # kit new mcp [NAME] --config FILE|- [--to SOURCE] 
         return
     }
     if ($exists) { Die-C exists "已經有 mcp:${n}（${dst}）：換個名字（kit new mcp 新名字 --config …），或先刪掉它" }
-    Ensure-Dir (Split-Path -Parent $dst); Write-Text $dst $yaml
+    try { Ensure-Dir (Split-Path -Parent $dst); Write-Text $dst $yaml } catch { Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue; Die "沒辦法寫 $dst" }
     Say "已建立 $(Rel-Path $dir $dst)（在 $(Split-Path -Leaf $dir)）"
     foreach ($x in @(Mcp-Lines $out 'X')) { $p = $x.Split("`t"); Say "  $($p[0]) 像是密碼或 token：檔案裡寫成 `${$($p[1])}（值沒有寫進去）" }
     $v = @(Mcp-Lines $out 'V'); if ($v.Count -gt 0) { Say "  每台電腦要先設定環境變數：$($v -join '、')" }
@@ -1607,9 +1664,11 @@ function Apply-All {
     # tool deny rules and the auto-sync hook -> ~/.claude/settings.json
     # (state.tsv only after settings.json was written)
     $ops = New-Object System.Collections.Generic.List[object]
-    $deny = Required-Deny; $add = @(); $del = @()
+    # (one you already have is yours: kit does not count it as its own, so never takes it out)
+    $deny = Required-Deny; $add = @(); $del = @(); $have = @(Json-Strs (Join-Path $ClaudeDir 'settings.json') 'permissions.deny')
     foreach ($n in $deny) {
         if ($null -ne (State-Get 'deny' $n)) { continue }
+        if ($have -ccontains (Json-Str $n)) { continue }
         $ops.Add(@('addstr', 'permissions.deny', $n)); $add += $n; Say "  deny $n"
     }
     foreach ($n in State-List 'deny') {
@@ -1703,10 +1762,34 @@ function Dir-Root([string]$d) { # the folder kit uses for D: the nearest one at 
     }
     $d
 }
-function Dir-Items([string]$d) {
+# A placed folder (kit place) gets its agent's rules, skills and MCP from the agent file each time (kit sync), so a
+# change to the agent reaches it. .agentkit keeps only what you changed: kind:name you added (kit add --dir), and
+# not:kind:name, one of the agent's you took out (kit rm --dir; it stays out until you kit add --dir it again).
+# Kit keeps a copy of the agent file ($KitConf/placed/): when the agent cannot be found or read (renamed, its source
+# gone), the folder stays as it was, the prompt and tool limits too. (unix/kit does the same.)
+function Dir-Lines([string]$d) {
     $f = Join-Path $d $DirFile
     if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return @() }
-    Uniq @(foreach ($l in (Read-Text $f) -split "`n") { $l = $l.TrimEnd("`r"); if ($l -match '^(rule|skill|mcp):[^ ]+$') { $l } })
+    Uniq @(foreach ($l in (Read-Text $f) -split "`n") { $l = $l.TrimEnd("`r"); if ($l -cmatch '^(not:)?(rule|skill|mcp):[^ ]+$') { $l } })
+}
+function Dir-Own([string]$d) { @(Dir-Lines $d | Where-Object { -not $_.StartsWith('not:') }) }                     # what you added
+function Dir-Nots([string]$d) { @(foreach ($l in @(Dir-Lines $d)) { if ($l.StartsWith('not:')) { $l.Substring(4) } }) }   # the agent's you took out
+function Placed-Copy([string]$d) { Join-Path (Join-Path $KitConf 'placed') ((Text-Hash $d) + '.md') }
+function Placed-File([string]$d) { # @(FILE, 0): the agent file of a placed folder; @(FILE, 2): kit's copy (the agent cannot be read now); $null: none
+    $a = Dir-Mark $d 'agent'; if (-not $a) { return $null }
+    $f = Find-Item 'agent' $a
+    if ($f) { $ok = $true; try { [void](Yaml-Lines $f -Frontmatter) } catch { $ok = $false }; if ($ok) { return , @($f, 0) } }
+    $c = Placed-Copy $d; if (Test-Path -LiteralPath $c -PathType Leaf) { return , @($c, 2) }
+    $null
+}
+function Agent-Items([string]$f) { # the agent's rules, skills and MCP that a source has, kind:name
+    $fm = @(); try { $fm = @(Yaml-Lines $f -Frontmatter) } catch { }
+    @(foreach ($kk in @(@('rule', 'rules'), @('skill', 'skills'), @('mcp', 'mcp'))) { foreach ($n in @(YGet-From $fm $kk[1])) { if ($n -and (Find-Item $kk[0] $n)) { "$($kk[0]):$n" } } })
+}
+function Dir-AgentItems([string]$d) { $p = Placed-File $d; if ($null -eq $p) { @() } else { @(Agent-Items $p[0]) } }
+function Dir-Items([string]$d) { # what the folder has: the placed agent's (less the ones you took out), then what you added
+    $nots = @(Dir-Nots $d)
+    Uniq (@(Dir-AgentItems $d | Where-Object { $nots -cnotcontains $_ }) + @(Dir-Own $d))
 }
 function Dir-Marks([string]$d) { # kit place's lines (agent:NAME, tool:TOOL)
     $f = Join-Path $d $DirFile
@@ -1717,6 +1800,7 @@ function Dir-Mark([string]$d, [string]$k) { foreach ($l in @(Dir-Marks $d)) { if
 function Dir-Kind([string]$d, [string]$k) { "dir:${d}:$k" }   # state.tsv kind for a folder's own (kit keeps it with the rest)
 function Dirs-Registered { if (Test-Path -LiteralPath $DirsList) { Uniq @((Read-Text $DirsList) -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ }) } else { @() } }
 function Dirs-Set([string]$d, [string]$how) { # the list of folders kit has to keep up to date
+    if ($how -ne 'add') { $c = Placed-Copy $d; if (Test-Path -LiteralPath $c) { Remove-Item -LiteralPath $c -Force } }
     $rows = @(Dirs-Registered | Where-Object { $_ -ne $d }); if ($how -eq 'add') { $rows += $d }
     if ($rows.Count -eq 0) { if (Test-Path -LiteralPath $DirsList) { Remove-Item -LiteralPath $DirsList -Force }; return }
     Ensure-Dir $KitConf; $t = Temp-Next $DirsList
@@ -1728,7 +1812,11 @@ function Dir-Write([string]$d, $items, $marks = $null) { # the folder's .agentki
     if ($items.Count -eq 0 -and $marks.Count -eq 0) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }; return }
     $t = "# kit：這個資料夾自己的規則、skill、MCP。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。`n"
     $t += "# 用  kit add --dir <資料夾> 種類 名字  /  kit rm --dir …  改。`n"
-    if ($marks.Count -gt 0) { $t += "# kit place：這個資料夾就是下面這個 agent（在這裡開的 claude、codex、omp 都是它）。`n" + (($marks | ForEach-Object { "$_`n" }) -join '') }
+    if ($marks.Count -gt 0) {
+        $t += "# kit place：這個資料夾就是下面這個 agent（在這裡開的 claude、codex、omp 都是它）。`n"
+        $t += "# agent 的規則、skill、MCP 每次 kit sync 照 agent 檔放；下面的 種類:名字 是你另外加的，not:種類:名字 是你拿掉的 agent 的。`n"
+        $t += (($marks | ForEach-Object { "$_`n" }) -join '')
+    }
     Write-Text $f ($t + (($items | ForEach-Object { "$_`n" }) -join ''))
 }
 function Drop-Made([string]$f) { # a JSON file kit made that is empty again goes away
@@ -1761,11 +1849,13 @@ function Dir-ClaudeAllow([string]$dir, $names) { # MCP names -> .claude/settings
     Drop-Made $f
 }
 function Dir-ClaudeDeny([string]$dir, $names) { # deny rules -> .claude/settings.local.json permissions.deny (kit place)
+    # (one the file already has is yours: kit does not count it as its own, so never takes it out)
     $f = Join-Path (Join-Path $dir '.claude') 'settings.local.json'
-    $kd = Dir-Kind $dir 'deny'
+    $kd = Dir-Kind $dir 'deny'; $have = @(Json-Strs $f 'permissions.deny')
     $names = @($names | Where-Object { $_ }); $ops = New-Object System.Collections.Generic.List[object]; $add = @(); $del = @()
     foreach ($n in $names) {
         if ($null -ne (State-Get $kd $n)) { continue }
+        if ($have -ccontains (Json-Str $n)) { continue }
         $ops.Add(@('addstr', 'permissions.deny', $n)); $add += $n
     }
     foreach ($n in State-List $kd) {
@@ -1802,20 +1892,33 @@ function Place-More([string]$name, [string]$f, [bool]$rules) { # the agent's pro
     $pre = ''; if ($rules) { $pre = "`n" }
     $pre + "<!-- agent: $name -->`n$b`n"
 }
-function Apply-Dir([string]$dir) { # the folder's .agentkit -> the tools' files in it
+function Apply-Dir([string]$dir) { # the folder's .agentkit (and its agent) -> the tools' files in it
+    # kit place: the agent's rules, skills, MCP, its prompt after the rules, its tool limits into the tools' settings
+    # (read from the agent each time, so kit sync brings a change). An agent kit cannot read: kit's copy from the last
+    # time (the folder stays as it was), said once; no copy either: kit leaves the folder alone.
+    $agent = Dir-Mark $dir 'agent'; $tool = Dir-Mark $dir 'tool'; $more = ''; $deny = @(); $cdeny = @(); $af = ''
+    if ($agent) {
+        $pf = Placed-File $dir; $c = Placed-Copy $dir
+        if ($null -ne $pf -and $pf[1] -eq 0) {
+            $af = $pf[0]
+            if (-not ((Test-Path -LiteralPath $c -PathType Leaf) -and (Same-Bytes $af $c))) { Ensure-Dir (Split-Path -Parent $c); Copy-Item -LiteralPath $af -Destination $c -Force }
+            State-Del 'told' "placed:$dir"
+        } else {
+            if ($null -eq (State-Get 'told' "placed:$dir")) {
+                Warn "agent $agent 找不到或讀不懂（改了名字、來源不在、或核准的版本沒有它）：${dir} 先照上次的樣子不動，修好後 kit sync（只提醒這一次）"
+                State-Set 'told' "placed:$dir" 1
+            }
+            if ($null -eq $pf) { return }
+            $af = $pf[0]
+        }
+    }
     $want = @(Dir-Items $dir)
     $rules = Of-Kind $want 'rule'; $skills = Of-Kind $want 'skill'; $mcps = Of-Kind $want 'mcp'
     $mj = Join-Path $dir '.mcp.json'
-    # kit place: the agent's prompt goes after the rules, its tool limits into the tools' settings (read from the agent
-    # each time, so kit sync brings a changed prompt)
-    $agent = Dir-Mark $dir 'agent'; $tool = Dir-Mark $dir 'tool'; $more = ''; $deny = @(); $cdeny = @()
-    if ($agent) {
-        $af = Find-Item 'agent' $agent
-        if ($af) {
-            $fm = @(); try { $fm = Yaml-Lines $af -Frontmatter } catch { }
-            $more = Place-More $agent $af (@($rules).Count -gt 0)
-            $deny = @(YGet-From $fm 'tools.deny'); $cdeny = @(Place-Deny @(YGet-From $fm 'tools.only') $deny)
-        } else { Warn "agent $agent 不在任何來源裡：${dir} 先不放它的提示和工具限制" }
+    if ($af) {
+        $fm = @(); try { $fm = Yaml-Lines $af -Frontmatter } catch { }
+        $more = Place-More $agent $af (@($rules).Count -gt 0)
+        $deny = @(YGet-From $fm 'tools.deny'); $cdeny = @(Place-Deny @(YGet-From $fm 'tools.only') $deny)
     }
     Set-Rules (Join-Path $dir 'CLAUDE.md') $rules 'import' $more
     Sync-Skills (Join-Path (Join-Path $dir '.claude') 'skills') (Dir-Kind $dir 'skill') $skills
@@ -1870,19 +1973,23 @@ function Codex-Top { # project_root_markers with .agentkit, so Codex started in 
     "project_root_markers = [`".git`", `"$DirFile`"]`n"
 }
 function Dir-AddRm([string]$verb, [string]$dir, [string]$k, [string]$n) { # only that folder (and below it) gets it, or no longer
+    # (a placed folder: taking out one of its agent's is kept as not:KIND:NAME, adding it again takes that away)
     $i = "${k}:$n"
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { Die "找不到資料夾 $dir" }
     $root = Dir-Root $dir
     $why = Dir-WhyNot $root; if ($why) { Die "${root}：$why" }
-    $items = @(Dir-Items $root)
+    $own = @(Dir-Own $root); $nots = @(Dir-Nots $root); $ag = @(Dir-AgentItems $root); $have = @(Dir-Items $root)
     if ($verb -eq 'add') {
         if (-not (Find-Item $k $n)) { Die "找不到 ${i}（打 kit list 看有哪些）" }
-        if ($items -contains $i) { Say "kit：$root 已經有 $i"; return }
-        $items += $i
+        if ($have -ccontains $i) { Say "kit：$root 已經有 $i"; return }
+        $nots = @($nots | Where-Object { $_ -cne $i })
+        if ($ag -cnotcontains $i) { $own += $i }
     } else {
-        if ($items -notcontains $i) { Die "$root 沒有加 ${i}（這個資料夾自己加的才拿得掉）" }
-        $items = @($items | Where-Object { $_ -ne $i })
+        if ($have -cnotcontains $i) { Die "$root 沒有加 ${i}（這個資料夾自己加的才拿得掉）" }
+        $own = @($own | Where-Object { $_ -cne $i })
+        if ($ag -ccontains $i) { $nots += $i }
     }
+    $items = @(@($own) + @($nots | ForEach-Object { "not:$_" }) | Where-Object { $_ })
     Dir-Write $root $items
     if ($items.Count -gt 0 -or (Dir-Mark $root 'agent')) { Dirs-Set $root 'add' } else { Dirs-Set $root 'rm' }
     Apply-Dir $root
@@ -1934,8 +2041,8 @@ function Tool-Names { # every program kit has a recipe for
     @(Uniq $all | Where-Object { Tool-OkName $_ })
 }
 function Tool-Title([string]$n) { $f = Tool-File $n; if ($f) { $t = @(YGet $f 'title'); if ($t.Count -gt 0 -and $t[0]) { return [string]$t[0] } }; $n }
-function Tool-Version([string]$exe, [string]$argline = '--version', [int]$ms = 0, [string]$cwd = '') { # what EXE --version says: at most 4 KB, given up after KIT_PROBE_WAIT seconds
-    # (ARGLINE, MS and CWD: another command line, how long to wait, the folder it runs in)
+function Tool-Version([string]$exe, [string]$argline = '--version', [int]$ms = 0, [string]$cwd = '', [int]$max = 4096) { # what EXE --version says: at most 4 KB, given up after KIT_PROBE_WAIT seconds
+    # (ARGLINE, MS, CWD and MAX: another command line, how long to wait, the folder it runs in, how much to read)
     if ($ms -le 0) { $ms = 5000; if ("$env:KIT_PROBE_WAIT" -match '^[0-9]+$') { $ms = 1000 * [int]$env:KIT_PROBE_WAIT } }
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = $exe; $psi.Arguments = $argline; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
@@ -1944,8 +2051,8 @@ function Tool-Version([string]$exe, [string]$argline = '--version', [int]$ms = 0
     try { $p = [Diagnostics.Process]::Start($psi) } catch { return '' }
     try {
         $p.StandardInput.Close()
-        $bo = New-Object char[] 4096; $be = New-Object char[] 4096
-        $to = $p.StandardOutput.ReadBlockAsync($bo, 0, 4096); $te = $p.StandardError.ReadBlockAsync($be, 0, 4096)
+        $bo = New-Object char[] $max; $be = New-Object char[] 4096
+        $to = $p.StandardOutput.ReadBlockAsync($bo, 0, $max); $te = $p.StandardError.ReadBlockAsync($be, 0, 4096)
         [void]$to.Wait($ms)
         if (-not $p.HasExited) { try { $p.Kill($true) } catch { try { $p.Kill() } catch { } } }   # it waits, or never stops talking (like yes); with what it started (PowerShell 7)
         [void]$to.Wait(1000); [void]$te.Wait(1000)
@@ -4471,13 +4578,10 @@ function Cmd-Place($rest) { # kit place <agent> <dir> [--tool claude|codex|omp] 
         try { [void](New-Item -ItemType Directory -Path $d -ErrorAction Stop) } catch { Die "沒辦法建立資料夾 $d" }
     }
     $fm = $null; try { $fm = Yaml-Lines $f -Frontmatter } catch { Die "bad header in $f" }
-    # the folder's items: what it has (again: kit place adds back what the agent has now, keeps what you added) + the agent's
-    $items = @(Dir-Items $d); $warns = @()
+    # .agentkit: which agent, and what you changed there before (placed again); the agent's own come from it each time
+    $items = @(Dir-Lines $d); $warns = @()
     foreach ($kk in @(@('rule', 'rules'), @('skill', 'skills'), @('mcp', 'mcp'))) {
-        foreach ($n in @(YGet-From $fm $kk[1])) {
-            if (-not $n) { continue }
-            if (Find-Item $kk[0] $n) { $items = @(Uniq (@($items) + "$($kk[0]):$n")) } else { $warns += "$($kk[0]) $n 不在任何來源裡：沒有放進來" }
-        }
+        foreach ($n in @(YGet-From $fm $kk[1])) { if ($n -and -not (Find-Item $kk[0] $n)) { $warns += "$($kk[0]) $n 不在任何來源裡：沒有放進來" } }
     }
     Dir-Write $d $items @("agent:$name", "tool:$tool")
     Dirs-Set $d 'add'
@@ -4529,7 +4633,7 @@ function Cmd-Uninstall($rest) {
     if ($ops.Count -gt 0) { Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny }
     if ($left) { Die '有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall' }
     foreach ($f in @($State, $Machine)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
-    foreach ($x in 'deps', 'pydeps', 'mcp-deps', 'ctx') { $deps = Join-Path $KitConf $x; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force } }
+    foreach ($x in 'deps', 'pydeps', 'mcp-deps', 'placed', 'ctx') { $deps = Join-Path $KitConf $x; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force } }
     Say 'kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）'
     Say "     來源的 clone 還留在 $KitSrc"
     if ($self) {
@@ -4710,7 +4814,7 @@ function Cmd-New($rest) {
         Say "已從 $($o.From) 帶進 $(Rel-Path $dir $dst)（在 $(Split-Path -Leaf $dir)）"
         Say "記得刪掉暫存的資料夾：$($o.From)"
     } else {
-        Ensure-Dir (Split-Path -Parent $dst); Write-Text $dst (Skeleton $o.Kind $o.Name)
+        try { Ensure-Dir (Split-Path -Parent $dst); Write-Text $dst (Skeleton $o.Kind $o.Name) } catch { Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue; Die "沒辦法寫 $dst" }
         Say "已建立 $(Rel-Path $dir $dst)（在 $(Split-Path -Leaf $dir)），打開它寫內容"
     }
     $script:Quiet2 = $true

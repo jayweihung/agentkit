@@ -85,8 +85,13 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 
 - 建好那個資料夾（上一層要已經在；kit 只建最後一層），把 agent 的規則、skill、MCP 加到這個資料夾（跟 `kit add --dir` 一樣），
   提示寫進資料夾的 `CLAUDE.md`／`AGENTS.md` 的 kit 區塊，工具限制寫進資料夾的 `.claude/settings.local.json`。
-  資料夾的 `.agentkit` 記著它是哪個 agent；`kit sync` 會照 agent 檔現在的樣子更新（提示、工具限制、還有新加的規則等）。
-- 之後就是平常的 `claude`、`codex`、`omp`，不用 `kit run`。`kit add|rm --dir <資料夾> …` 只改這個資料夾。
+  資料夾的 `.agentkit` 記著它是哪個 agent；`kit sync` 會照 agent 檔現在的樣子更新：提示、工具限制，
+  還有 agent 的規則、skill、MCP（agent 檔新加的會放進來，拿掉的會拿掉）。
+- 之後就是平常的 `claude`、`codex`、`omp`，不用 `kit run`。`kit add|rm --dir <資料夾> …` 只改這個資料夾，
+  而且 `kit sync` 不會蓋掉：`.agentkit` 只記你改過的，`種類:名字` 是你另外加的，`not:種類:名字` 是你用 `kit rm --dir` 拿掉的 agent 的
+  （agent 檔還有它也不會放回來，要再 `kit add --dir` 才回來）。agent 本身的規則、skill、MCP 不寫在 `.agentkit`，每次照 agent 檔放。
+- agent 檔找不到或讀不懂（改了名字、來源不在、只用核准的版本時那一版沒有它、檔頭寫錯）：那個資料夾照上次的樣子不動
+  （提示、工具限制、規則、skill、MCP 都留著；kit 留著上次 agent 檔的一份在 `~/.config/agentkit/placed/`），說一次，修好後 `kit sync` 就照常。
 - 同一個 agent 再 place 一次：只同步，什麼都不會多。資料夾已經是別的 agent，或裡面已經有不是 kit place 放的東西：kit 不動它，直接說。
 - 好幾個 agent 就是好幾個資料夾。`kit uninstall` 會把每個資料夾放的東西拿掉（`.agentkit` 也拿掉）。
 
@@ -170,6 +175,13 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
       API_TOKEN: ${API_TOKEN}
 
 **密碼、token 不放在來源裡**：寫成 `${變數名}`，值放在每台電腦自己的環境變數。`kit check`（所以 `kit push` 也是）看到像密碼或 token 的值直接寫在 mcp 的 yaml 裡就不讓過（只說是哪一欄，不印出值）。
+`${變數名:-預設}` 的預設也算：預設像密碼或 token 也不讓過（貼上時換成 `${變數名}`）。
+
+kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最上層寫 `not_secret`，列出是哪一欄（寫法跟 `kit check` 說的一樣），`kit check` 就不管那幾欄：
+
+    command: npx
+    args: [-y, "@acme/server@1.2.3", --workspace=Ab3dEf5GhIj7KlMn9PqRs1Tu]
+    not_secret: ["args[3]"]          # env.名字、headers.名字、url、args[第幾個，從 1 算]
 `kit sync` 時這台電腦沒設的變數會提醒一次（說名字）。
 
 ### 貼上設定
@@ -210,12 +222,14 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 
 **哪些算密碼或 token**（換成 `${…}`，報告只說變數名字，不印出值）：
 
-- 名字裡有 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`PASSWD`、`AUTH`、`CREDENTIAL`、`COOKIE`、`SESSION`、`PAT` 的 env、header、網址參數、`--參數=`（值是空的、`${…}`、true/false、數字、路徑的不算）。
+- 名字裡有 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`PASSWD`、`PASSPHRASE`、`AUTH`、`CREDENTIAL`、`COOKIE`、`SESSION`，或有一段（`_`、`-` 隔開或大寫開頭的一段）就是 `PAT`、`PASS`、`PWD`、`PW` 的 env、header、網址參數、`--參數=`（例如 `DB_PASS`、`MYSQL_PWD`；值是空的、`${…}`、true/false、數字、路徑的不算）。
+- `${變數名:-預設}` 的預設：變數名字像上面那樣，或預設本身像 token（換成 `${變數名}`）。
 - `Authorization`、`Cookie` header（`Bearer ` 這種開頭留著）。
-- 看起來就是 token 的值：`sk-`、`ghp_`、`github_pat_`、`xox…-`、`AKIA`、`glpat-` 這類開頭，或很長的亂碼（大小寫加數字，或 32 個以上的十六進位）。
+- 看起來就是 token 的值：`sk-`、`ghp_`、`github_pat_`、`xox…-`、`AKIA`、`glpat-` 這類開頭，或很長的亂碼（20 個字以上、大小寫加數字而且混得很亂，或 32 個以上的十六進位）。
+  英文字接起來的（像 `AcmeCorpProduction2024`）不算亂碼。
 - 網址裡的密碼（`https://user:密碼@…`）、像 token 的路徑段。
 
-變數名字：env 就用原本的名字；其他的是「server 名字＋欄位」，例如 `NOTION_TOKEN`、`WEB_API_KEY`。
+變數名字：env 就用原本的名字；其他的是「server 名字＋欄位」，例如 `NOTION_TOKEN`、`WEB_API_KEY`（server 名字是數字開頭的，前面加 `MCP_`，例如 `MCP_1PASSWORD_TOKEN`）。
 
 **每個工具怎麼用**：
 
@@ -230,6 +244,7 @@ Python 的做法一樣，只是裝在每個 skill 自己的 venv（`~/.config/ag
 `npx 套件`、`uvx 套件` 每次啟動都可能下載最新版。所以：
 
 - **貼上時固定版本**：沒寫版本的，kit 查現在最新的版本寫進去（npm：`npm view`；Python：PyPI 的 JSON，`KIT_PYPI_URL` 可以換）。這是 `kit new mcp --config` 唯一會連網的地方；查不到就不固定，提醒你。
+  npm 寫了範圍或標籤的（`套件@^1`、`套件@next`）：固定在符合它的最新版本（`npm view "套件@^1" version`），並提醒你原本寫什麼、固定在哪一版；寫了確切版本的（`套件@1.2.3`）照寫的。
 - 它要的程式（`npx`→node、`uvx`→uv、`python`→python、`docker`→docker）列在 `kit list` 的 `needs`，跟 skill 一樣（node、python、git 以外的要有 `tools/<名字>.yaml`）。
 - **你按了才裝**：`kit install-deps mcp <名字>` 把那個版本裝在 kit 自己的資料夾 `~/.config/agentkit/mcp-deps/<名字>/`（npm：`--ignore-scripts`，只能是 registry 上的套件；Python：自己的 venv、只裝 wheel，規則跟 skill 的套件一樣）。裝好後 `kit sync` 把每個工具的設定改成直接跑裝好的那份（npm：`node <套件的 bin>`；Python：venv 裡的程式），不再每次下載。
 - 沒裝的照樣用 `npx`／`uvx`，`kit list` 會寫「每次啟動時下載」。`uvx --index-url …` 這種 kit 認不得的寫法不幫它裝。改了版本要再裝一次。
@@ -365,7 +380,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - `needs`、`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。
 - mcp（1.3 起）一定有：`"type"`（`stdio`、`http`、`sse`）、`"vars": [{"name": "GITHUB_TOKEN", "set": false}]`（它要的環境變數，這台電腦有沒有設）、`"needs"`（同 skill）、`"packages"`：沒有套件是 `[]`，有的話一個
   `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
-- `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items", "agent"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。`here.folder.agent`（1.3 起）：那個資料夾是 `kit place` 放的 agent 時是它的名字，不是就 `null`。
+- `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items", "agent"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。`here.folder.agent`（1.3 起）：那個資料夾是 `kit place` 放的 agent 時是它的名字，不是就 `null`；這時 `here.folder.items` 是 agent 的規則、skill、MCP（不含用 `kit rm --dir` 拿掉的）再加上另外加的。
 
 ### `kit agents --json`
 
@@ -411,7 +426,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - `yaml`：會寫進 `path` 的內容（整個檔案）。`exists`：已經有這個名字的 mcp（`path` 就是它）；這時不加 `--look` 會失敗（`exists`）。
 - `secrets`：換成 `${var}` 的值在哪裡（`env.名字`、`headers.名字`、`url`、`args[第幾個，從 1 算]`）。`vars`：它要的環境變數（`${名字}`，有 `:-預設` 的不算）。`requires`：它要的程式（`node`、`uv`、`python`、`docker`）。
 - `packages`：`version` 是空的表示沒固定（查不到最新版本，`warnings` 會說）；`bad` 不是空的就是 kit 不幫它裝的原因。
-- `warnings`：給人看的字（略過的設定等）。
+- `warnings`：給人看的字（略過的設定、npm 的範圍或標籤固定在哪一版等）。
 - 錯誤看上面的表（`bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`usage`、`not_init`、`no_source`）。`several_servers` 時讓人選一個，再帶名字跑一次。
 - 寫進去：同樣的指令拿掉 `--look`（動作類指令）。
 

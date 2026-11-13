@@ -905,11 +905,14 @@ snap() { (cd "$1" && find . -type f -exec cksum {} + | LC_ALL=C sort -k3); }
 ONLY_W="Claude 的設定沒有「只開這些工具」：tools.only 改成把其他內建工具寫進 deny（Claude 之後新加的工具擋不到）"
 (
 export HOME="$H6"
+# a deny rule kit wants that you had already: yours (kit uninstall leaves it)
+mkdir -p "$H6/.claude"; printf '{"permissions": {"deny": ["mcp__gerrit__submit_change"]}}\n' > "$H6/.claude/settings.json"
 kit init "$TEAM" >/dev/null 2>&1
+check "deny you had already: not counted as kit's" '! grep -q "^deny[[:space:]]" "$H6/.config/agentkit/state.tsv" && [ "$(jget "$H6/.claude/settings.json" permissions.deny | tr -d " \n")" = "[\"mcp__gerrit__submit_change\"]" ]'
 G="$W/gerrit"
 out=$(kit place gerrit "$G" --json 2>/dev/null); rc=$?
 check "place --json: one line: dir, agent, tool, command, warnings" '[ $rc -eq 0 ] && [ "$out" = "{\"dir\": \"$G\", \"agent\": \"gerrit\", \"tool\": \"claude\", \"command\": [\"claude\"], \"warnings\": [\"$ONLY_W\"]}" ]'
-check "place: .agentkit says which agent, lists its rules, skills, MCP" 'grep -qx "agent:gerrit" "$G/.agentkit" && grep -qx "tool:claude" "$G/.agentkit" && grep -qx "rule:gerrit-flow" "$G/.agentkit" && grep -qx "skill:gerrit-review" "$G/.agentkit" && grep -qx "mcp:gerrit" "$G/.agentkit"'
+check "place: .agentkit says which agent; the agent's rules, skills, MCP come from the agent file (not listed)" 'grep -qx "agent:gerrit" "$G/.agentkit" && grep -qx "tool:claude" "$G/.agentkit" && ! grep -q "^rule:\|^skill:\|^mcp:" "$G/.agentkit"'
 check "place: CLAUDE.md imports the rule, then the agent's prompt" 'grep -q "^@.*rules/gerrit-flow.md" "$G/CLAUDE.md" && grep -qx "<!-- agent: gerrit -->" "$G/CLAUDE.md" && grep -qx "You are the Gerrit helper." "$G/CLAUDE.md"'
 check "place: AGENTS.md (Codex, omp): the rule text and the prompt" 'grep -q "Only comment, never submit." "$G/AGENTS.md" && grep -qx "You are the Gerrit helper." "$G/AGENTS.md"'
 check "place: skills for Claude and Codex/omp, the MCP in .mcp.json" '[ -f "$G/.claude/skills/gerrit-review/SKILL.md" ] && [ -f "$G/.agents/skills/gerrit-review/SKILL.md" ] && [ "$(jget "$G/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ]'
@@ -921,7 +924,7 @@ snap "$G" > "$T/place1"
 out=$(kit place gerrit "$G/" --json 2>/dev/null); rc=$?
 check "place again (same agent): fine, nothing changes" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"dir\": \"$G\"" && snap "$G" | cmp -s - "$T/place1"'
 kit list --json --dir "$G" > "$T/place.json" 2>/dev/null
-check "list --json --dir: here.folder.agent names the placed agent" 'python3 -c "import json,sys;f=json.load(open(sys.argv[1]))[\"here\"][\"folder\"];assert f[\"agent\"]==\"gerrit\" and f[\"dir\"]==sys.argv[2]" "$T/place.json" "$G"'
+check "list --json --dir: here.folder.agent names the placed agent, items has the agent's" 'python3 -c "import json,sys;f=json.load(open(sys.argv[1]))[\"here\"][\"folder\"];assert f[\"agent\"]==\"gerrit\" and f[\"dir\"]==sys.argv[2] and f[\"items\"]==[\"rule:gerrit-flow\",\"skill:gerrit-review\",\"mcp:gerrit\"]" "$T/place.json" "$G"'
 kit list --json --dir "$W" > "$T/place0.json" 2>/dev/null
 check "list --json --dir: a folder without one: agent null" 'python3 -c "import json,sys;assert json.load(open(sys.argv[1]))[\"here\"][\"folder\"][\"agent\"] is None" "$T/place0.json"'
 # refusals: nothing written
@@ -947,10 +950,36 @@ kit add --dir "$HP" rule coding-style >/dev/null 2>&1
 check "add --dir after place: only that folder, the prompt stays after the rules" 'grep -q "^@.*rules/coding-style.md" "$HP/CLAUDE.md" && ! grep -q "coding-style" "$G/CLAUDE.md" && [ "$(tail -2 "$HP/CLAUDE.md" | head -1)" = "You help." ] && grep -qx "agent:helper" "$HP/.agentkit"'
 kit rm --dir "$G" skill gerrit-review >/dev/null 2>&1
 check "rm --dir after place: only that folder" '[ ! -e "$G/.claude/skills/gerrit-review" ] && [ -f "$HP/.claude/skills/gerrit-review/SKILL.md" ]'
+check "rm --dir of the agent's: kept in .agentkit as not:" 'grep -qx "not:skill:gerrit-review" "$G/.agentkit"'
 kit rm --dir "$G" rule gerrit-flow >/dev/null 2>&1; kit rm --dir "$G" mcp gerrit >/dev/null 2>&1; kit sync >/dev/null 2>&1
 check "rm --dir all after place: still that agent (marker, prompt, tool limits), still kept up to date" 'grep -qx "agent:gerrit" "$G/.agentkit" && grep -qx "You are the Gerrit helper." "$G/CLAUDE.md" && jget "$G/.claude/settings.local.json" permissions.deny | grep -q "\"Bash\"" && [ ! -e "$G/.mcp.json" ] && grep -qxF "$G" "$HOME/.config/agentkit/dirs"'
-printf -- '---\nname: helper\ndescription: helps\nskills: [gerrit-review]\n---\nYou help, version 2.\n' > "$TEAM/agents/helper.md"; kit sync >/dev/null 2>&1
+check "rm --dir of the agent's: stays out after kit sync" '[ ! -e "$G/.claude/skills/gerrit-review" ] && ! grep -q "gerrit-flow" "$G/CLAUDE.md"'
+kit add --dir "$G" mcp gerrit >/dev/null 2>&1
+check "add --dir of the agent's again: the not: line goes, it is the agent's again (no line of yours)" '! grep -q "mcp:gerrit" "$G/.agentkit" && [ "$(jget "$G/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ]'
+out=$(kit rm --dir "$G" skill gerrit-review 2>&1); rc=$?
+check "rm --dir of one already out: refused" '[ $rc -ne 0 ]'
+# the agent file changes: kit sync brings its new rules, skills, MCP and takes out the ones it dropped; yours stay
+printf -- '---\nname: helper\ndescription: helps\nmcp: [gerrit]\n---\nYou help, version 2.\n' > "$TEAM/agents/helper.md"; kit sync >/dev/null 2>&1
 check "sync: a changed prompt reaches the placed folder" 'grep -qx "You help, version 2." "$HP/CLAUDE.md" && ! grep -qx "You help." "$HP/CLAUDE.md"'
+check "sync: the agent's new MCP is added, the skill it dropped taken out, the rule you added kept" '[ "$(jget "$HP/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && [ ! -e "$HP/.claude/skills/gerrit-review" ] && grep -q "^@.*rules/coding-style.md" "$HP/CLAUDE.md" && grep -qx "rule:coding-style" "$HP/.agentkit"'
+# a deny rule kit wants in the folder that you had put there already: yours, left when the agent drops it
+python3 -c "import json,sys;f=sys.argv[1];d=json.load(open(f));d.setdefault('permissions',{})['deny']=['Bash'];json.dump(d,open(f,'w'))" "$HP/.claude/settings.local.json"
+printf -- '---\nname: helper\ndescription: helps\nmcp: [gerrit]\ntools:\n  deny: [Bash, WebFetch]\n---\nYou help, version 2.\n' > "$TEAM/agents/helper.md"; kit sync >/dev/null 2>&1
+check "place deny: kit adds the agent's, not the one you had" '[ "$(jget "$HP/.claude/settings.local.json" permissions.deny | tr -d " \n")" = "[\"Bash\",\"WebFetch\"]" ] && ! grep -q "helper:deny[[:space:]]Bash" "$HOME/.config/agentkit/state.tsv"'
+printf -- '---\nname: helper\ndescription: helps\nmcp: [gerrit]\n---\nYou help, version 2.\n' > "$TEAM/agents/helper.md"; kit sync >/dev/null 2>&1
+check "place deny: the agent drops them: kit's goes, yours stays" '[ "$(jget "$HP/.claude/settings.local.json" permissions.deny | tr -d " \n")" = "[\"Bash\"]" ]'
+# the agent cannot be read (renamed, its source gone): the folder stays as it was (prompt, tool limits, MCP), said once
+snap "$G" > "$T/place2"
+mv "$TEAM/agents/gerrit.md" "$T/gerrit.md.away"
+out=$(kit sync 2>&1); out2=$(kit sync 2>&1)
+check "agent gone: the placed folder is left as it was (deny, prompt, MCP)" 'snap "$G" | cmp -s - "$T/place2" && jget "$G/.claude/settings.local.json" permissions.deny | grep -q "\"Bash\""'
+check "agent gone: said once" 'echo "$out" | grep -qF "agent gerrit 找不到或讀不懂" && ! echo "$out2" | grep -qF "agent gerrit 找不到或讀不懂"'
+kit list --json --dir "$G" > "$T/place3.json" 2>/dev/null
+check "agent gone: list --json --dir still has the agent's (kit's copy)" 'python3 -c "import json,sys;f=json.load(open(sys.argv[1]))[\"here\"][\"folder\"];assert f[\"items\"]==[\"mcp:gerrit\"]" "$T/place3.json"'
+printf -- '---\nname: gerrit\nthis is not yaml\n---\nbroken\n' > "$TEAM/agents/gerrit.md"; kit sync >/dev/null 2>&1
+check "agent unreadable (bad header): the folder is left as it was" 'snap "$G" | cmp -s - "$T/place2"'
+mv "$T/gerrit.md.away" "$TEAM/agents/gerrit.md"; out=$(kit sync 2>&1)
+check "agent back: kit sync as before, nothing to say" 'snap "$G" | cmp -s - "$T/place2" && ! echo "$out" | grep -qF "找不到或讀不懂"'
 out=$(kit place gerrit "$W/gx" --tool codex --json 2>/dev/null); rc=$?
 check "place --tool codex: the command and what Codex cannot do" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"tool\": \"codex\", \"command\": [\"codex\"], \"warnings\": [\"Codex 不能只開某些內建工具：tools.only 不套用\"]" && grep -qx "tool:codex" "$W/gx/.agentkit" && grep -qx "You are the Gerrit helper." "$W/gx/AGENTS.md"'
 out=$(kit place gerrit "$W/go" --tool omp --json 2>/dev/null); rc=$?
@@ -963,6 +992,7 @@ if [ -n "$PWSH" ]; then
     export HOME="$w/home"; mkdir -p "$HOME/.codex" "$HOME/.omp/agent" "$w/s"; "$@" init "$TEAM" >/dev/null 2>&1
     for a in "gerrit $w/s/g --tool claude" "gerrit $w/s/g" "gerrit $w/s/c --tool codex" "gerrit $w/s/o --tool omp" "helper $w/s/g" "nobody $w/s/n" "helper $w/s/no/such"; do
       "$@" place $a --json 2>/dev/null; echo "rc=$?"; done
+    "$@" rm --dir "$w/s/c" skill gerrit-review >/dev/null 2>&1; "$@" add --dir "$w/s/c" rule coding-style >/dev/null 2>&1
     "$@" list --json --dir "$w/s/g" 2>/dev/null | grep -F '"folder"' | sed 's/, "items": \[$//'
     (cd "$w/s" && for f in $(find . -type f | LC_ALL=C sort); do echo "== $f"; cat "$f"; done); }
   mkdir -p "$T/pl1" "$T/pl2"; P1=$(cd "$T/pl1" && pwd -P); P2=$(cd "$T/pl2" && pwd -P)
@@ -971,7 +1001,8 @@ if [ -n "$PWSH" ]; then
   [ "$a" = "$b" ] || diff <(echo "$a") <(echo "$b") | head -20
 fi
 kit uninstall >/dev/null 2>&1
-check "uninstall: the placed folders are empty again (kit's files out)" '[ -z "$(ls -A "$G")" ] && [ -z "$(ls -A "$HP")" ] && [ -z "$(ls -A "$W/gx")" ]'
+check "uninstall: the placed folders are empty again (kit's files out; the deny you put in one stays), kit's copies of the agents gone" '[ -z "$(ls -A "$G")" ] && [ "$(ls -A "$HP")" = .claude ] && [ "$(jget "$HP/.claude/settings.local.json" permissions.deny | tr -d " \n")" = "[\"Bash\"]" ] && [ -z "$(ls -A "$W/gx")" ] && [ ! -e "$HOME/.config/agentkit/placed" ]'
+check "uninstall: the deny you had already stays" '[ "$(jget "$H6/.claude/settings.json" permissions.deny | tr -d " \n")" = "[\"mcp__gerrit__submit_change\"]" ]'
 echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"
@@ -1881,7 +1912,11 @@ cat > "$MB/npm" <<EOF
 #!/bin/sh
 echo "\$PWD \$*" >> "$MT/npm.log"
 case \$1 in
-view) echo 9.8.7;;
+view) case \$2 in
+      *@^1) printf '%s\\n' "rng-srv@1.2.0 '1.2.0'" "rng-srv@1.10.1 '1.10.1'" "rng-srv@1.10.1-rc.1 '1.10.1-rc.1'" "rng-srv@1.9.0 '1.9.0'";;
+      *@next) echo 2.0.0-rc.1;;
+      *) echo 9.8.7;;
+      esac;;
 install) p=\$(sed -n 's/.*"dependencies": {"\\([^"]*\\)".*/\\1/p' package.json); mkdir -p "node_modules/\$p/dist"
          printf '{"name": "%s", "bin": {"gh-srv": "dist/cli.js"}}\\n' "\$p" > "node_modules/\$p/package.json"; echo x > "node_modules/\$p/dist/cli.js";;
 esac
@@ -1986,11 +2021,60 @@ out=$(mk new mcp --config "$MT/c7.txt" --look 2>/dev/null); rc=$?
 check "paste: \$( ) is refused" '[ $rc -ne 0 ] && echo "$out" | grep -q "\"code\": \"bad_config\""'
 out=$(printf '%s\n' "claude mcp add piped -e K=v -- uvx piped-srv@2.0.0" | mk new mcp --config - --look 2>/dev/null)
 check "paste from stdin (--config -)" 'mj /dev/stdin "assert d[\"name\"]==\"piped\" and d[\"packages\"][0][\"version\"]==\"2.0.0\"" <<< "$out"'
+# more secrets: a name with PASS / PWD in it, a secret as the default of ${VAR:-…}; words are not secrets
+printf '{"1Password": {"command": "npx", "args": ["-y", "rng-srv@^1", "--workspace=AcmeCorpProduction2024", "https://h.example.com/WorkspaceAcme2024Main/mcp", "--key=%s"], "env": {"DB_PASS": "%s", "MYSQL_PWD": "x%s", "API_TOKEN": "${API_TOKEN:-%s}", "LOG": "${LOG_LEVEL:-info}"}}}\n' "$S3" "$S4" "$S4" "$S1" > "$MT/c9.json"
+out=$(mk new mcp --config "$MT/c9.json" --look 2>/dev/null); rc=$?; echo "$out" > "$MT/look9.json"
+check "paste: DB_PASS, MYSQL_PWD and a secret default \${VAR:-…} become \${VAR}; a name starting with a digit gets MCP_" '[ $rc -eq 0 ] && mj "$MT/look9.json" "assert d[\"name\"]==\"1password\" and d[\"secrets\"]==[{\"where\":\"env.API_TOKEN\",\"var\":\"API_TOKEN\"},{\"where\":\"env.DB_PASS\",\"var\":\"DB_PASS\"},{\"where\":\"env.MYSQL_PWD\",\"var\":\"MYSQL_PWD\"},{\"where\":\"args[5]\",\"var\":\"MCP_1PASSWORD_KEY\"}], d[\"secrets\"]; y=d[\"yaml\"].split(chr(10)); assert \"  API_TOKEN: \${API_TOKEN}\" in y and \"  LOG: \${LOG_LEVEL:-info}\" in y and \"  - --key=\${MCP_1PASSWORD_KEY}\" in y, y"'
+check "paste: words and a URL path of words are not secrets" 'mj "$MT/look9.json" "y=d[\"yaml\"].split(chr(10)); assert \"  - --workspace=AcmeCorpProduction2024\" in y and \"  - https://h.example.com/WorkspaceAcme2024Main/mcp\" in y, y"'
+check "paste: an npm range is pinned to the highest version that matches it (asked with the range), and says so" 'mj "$MT/look9.json" "assert d[\"packages\"][0][\"version\"]==\"1.10.1\" and \"  - rng-srv@1.10.1\" in d[\"yaml\"].split(chr(10)) and d[\"warnings\"]==[\"套件 rng-srv 原本寫 @^1：固定在 1.10.1 版（符合 ^1 的最新版本）\"], d" && grep -q "view rng-srv@^1 version" "$MT/npm.log"'
+printf '{"nx": {"command": "npx", "args": ["tag-srv@next", "--x"]}}\n' > "$MT/c10.json"
+out=$(mk new mcp --config "$MT/c10.json" --look 2>/dev/null)
+check "paste: an npm tag is pinned to its version, and says so" 'mj /dev/stdin "assert d[\"packages\"][0][\"version\"]==\"2.0.0-rc.1\" and \"tag-srv@2.0.0-rc.1\" in d[\"yaml\"] and \"原本寫 @next：固定在 2.0.0-rc.1 版\" in d[\"warnings\"][0]" <<< "$out"'
+printf '{"mcpServers": {"\342\204\252ube": {"command": "x"}}}\n' > "$MT/c11.json"
+out=$(mk new mcp --config "$MT/c11.json" --look 2>/dev/null)
+check "paste: the name is made from A-Z, a-z, 0-9 only (the Kelvin sign is not a k)" 'mj /dev/stdin "assert d[\"name\"]==\"ube\"" <<< "$out"'
+printf '%s\n' "claude mcp add --transport http 1pw https://pw.example.com/mcp -H \"Authorization: Bearer $S2\"" > "$MT/c12.txt"
+out=$(mk new mcp --config "$MT/c12.txt" --look 2>/dev/null)
+check "paste: a header secret of a server named 1pw -> \${MCP_1PW_TOKEN}" 'mj /dev/stdin "assert d[\"secrets\"]==[{\"where\":\"headers.Authorization\",\"var\":\"MCP_1PW_TOKEN\"}]" <<< "$out"'
+# kit new: a failure is a failure (the error JSON only, exit not 0, nothing said to be made)
+out=$(mk new mcp dock --config "$MT/c5.json" --to nosuch --look 2>/dev/null); rc=$?
+check "new mcp --look --to nosuch: only the error JSON, exit 1" '[ $rc -ne 0 ] && [ "$(echo "$out" | wc -l | tr -d " ")" = 1 ] && echo "$out" | grep -qF "\"code\": \"no_source\""'
+out=$(mk new mcp dock --config "$MT/c5.json" --to nosuch 2>&1); rc=$?
+check "new mcp --to nosuch: exit 1, nothing made" '[ $rc -ne 0 ] && ! echo "$out" | grep -q "已建立" && [ ! -e "$MS/mcp/dock.yaml" ]'
+out=$(mk new rule zz --to nosuch 2>&1); rc=$?
+check "new rule --to nosuch: exit 1, nothing made" '[ $rc -ne 0 ] && ! echo "$out" | grep -q "已建立"'
+chmod 555 "$MS/mcp"
+out=$(mk new mcp dock --config "$MT/c5.json" 2>&1); rc=$?
+check "new mcp: a file kit cannot write is an error" '[ $rc -ne 0 ] && echo "$out" | grep -qF "沒辦法寫" && ! echo "$out" | grep -q "已建立"'
+out=$(mk new mcp dock2 2>&1); rc=$?
+check "new mcp (skeleton): a file kit cannot write is an error" '[ $rc -ne 0 ] && echo "$out" | grep -qF "沒辦法寫" && ! echo "$out" | grep -q "已建立"'
+chmod 755 "$MS/mcp"
 check "check: the pasted ones pass" 'mk check "$MS" >/dev/null 2>&1'
 # kit check refuses a secret written in the source, without printing it
 printf 'command: x\nenv:\n  API_TOKEN: %s\n' "$S4" > "$MS/mcp/leak.yaml"
 out=$(mk check "$MS" 2>&1); rc=$?
 check "check: a literal secret in an MCP yaml fails, the value is not printed" '[ $rc -ne 0 ] && echo "$out" | grep -qF "mcp/leak.yaml: env.API_TOKEN 看起來是密碼或 token" && ! echo "$out" | grep -qF "$S4"'
+rm -f "$MS/mcp/leak.yaml"
+printf 'command: x\nenv:\n  DB_PASS: %s\n' "$S4" > "$MS/mcp/leak.yaml"
+out=$(mk check "$MS" 2>&1); rc=$?
+check "check: DB_PASS written in the yaml fails" '[ $rc -ne 0 ] && echo "$out" | grep -qF "env.DB_PASS 看起來是密碼或 token" && ! echo "$out" | grep -qF "$S4"'
+printf 'command: x\nenv:\n  API_TOKEN: ${API_TOKEN:-%s}\n  LOG: ${LOG:-info}\n' "$S4" > "$MS/mcp/leak.yaml"
+out=$(mk check "$MS" 2>&1); rc=$?
+check "check: a secret as the default of \${VAR:-…} fails (a plain default does not)" '[ $rc -ne 0 ] && echo "$out" | grep -qF "env.API_TOKEN 看起來是密碼或 token" && ! echo "$out" | grep -q "env.LOG" && ! echo "$out" | grep -qF "$S4"'
+printf 'command: x\nargs: [--workspace=AcmeCorpProduction2024, "--id=%s", --path=WorkspaceAcme2024Main]\n' "$S3" > "$MS/mcp/leak.yaml"
+out=$(mk check "$MS" 2>&1); rc=$?
+check "check: a long random value fails, words do not" '[ $rc -ne 0 ] && echo "$out" | grep -qF "args[2] 看起來是密碼或 token" && ! echo "$out" | grep -qF "args[1]" && ! echo "$out" | grep -qF "args[3]"'
+printf 'not_secret: ["args[2]"]\n' >> "$MS/mcp/leak.yaml"
+out=$(mk check "$MS" 2>&1); rc=$?
+check "check: not_secret: [args[2]] lets it pass" '[ $rc -eq 0 ]'
+mk list --json > "$MT/list-ns.json" 2>/dev/null
+check "list --json: a not_secret field is no variable" 'mj "$MT/list-ns.json" "i={x[\"name\"]:x for x in d[\"items\"]};assert i[\"leak\"][\"vars\"]==[]"'
+if [ -n "$PWSH" ]; then
+  out=$(mkp check "$MS" 2>&1); rc=$?
+  check "kit.ps1 check: not_secret honoured too" '[ $rc -eq 0 ]'
+  a=$(mk list --json 2>/dev/null); b=$(mkp list --json 2>/dev/null)
+  check "kit.ps1: the same list --json with not_secret" '[ "$a" = "$b" ]'
+fi
 rm -f "$MS/mcp/leak.yaml"
 printf 'type: ftp\nurl: x\n' > "$MS/mcp/badtype.yaml"
 out=$(mk check "$MS" 2>&1); rc=$?
@@ -2037,13 +2121,17 @@ check "the secrets are in no file kit wrote" '! grep -rqF -e "$S1" -e "$S2" -e "
 check "the skeleton shows both forms" 'mk new mcp skel >/dev/null 2>&1 && grep -qx "command: （啟動 MCP server 的程式，例如 npx 或 uvx）" "$MS/mcp/skel.yaml" && grep -qx "# type: http          # 或 sse" "$MS/mcp/skel.yaml" && mk check "$MS" >/dev/null 2>&1'
 rm -f "$MS/mcp/skel.yaml"
 if [ -n "$PWSH" ]; then
-  for f in two.json c1.txt c2.txt c3.txt c4.toml c5.json c6.json c8.json; do
+  for f in two.json c1.txt c2.txt c3.txt c4.toml c5.json c6.json c8.json c9.json c10.json c11.json c12.txt; do
     for nm in "" github-server web st remote; do
       a=$(mk new mcp $nm --config "$MT/$f" --look 2>/dev/null); b=$(mkp new mcp $nm --config "$MT/$f" --look 2>/dev/null)
       [ "$a" = "$b" ] || { echo "parity --look $f $nm:"; echo "$a"; echo "$b"; PDIFF=1; }
     done
   done
   check "kit.ps1: the same --look JSON for every paste (and the same errors)" '[ -z "${PDIFF:-}" ]'
+  a=$(mk new mcp dock --config "$MT/c5.json" --to nosuch --look 2>/dev/null; echo "rc=$?"); b=$(mkp new mcp dock --config "$MT/c5.json" --to nosuch --look 2>/dev/null; echo "rc=$?")
+  check "kit.ps1: new mcp --look --to nosuch: the same error JSON, exit 1" '[ "$a" = "$b" ] && echo "$a" | grep -qx "rc=1"'
+  out=$(printf '%s\n' "claude mcp add u8 -e NOTE=é漢 -- uvx u8-srv@2.0.0" | mkp new mcp --config - --look 2>/dev/null)
+  check "kit.ps1: --config - reads UTF-8" 'mj /dev/stdin "assert \"é漢\" in d[\"yaml\"]" <<< "$out"'
   a=$(mk list --json 2>/dev/null); b=$(mkp list --json 2>/dev/null)
   check "kit.ps1: the same list --json with MCP packages, installed and not" '[ "$a" = "$b" ]'
   mkp sync >/dev/null 2>&1

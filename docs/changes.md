@@ -13,8 +13,11 @@
 - `--look`：只看會寫成什麼，不寫（一行 JSON，給畫面程式用）。
 
 **密碼、token 不進來源**
-- 貼上時，像密碼或 token 的值（名字有 KEY、TOKEN、SECRET、PASSWORD、AUTH 這些的、`Authorization` header、`sk-`、`ghp_` 開頭的、網址裡的密碼……）自動換成 `${變數名}`，只告訴你變數名字，不印出值。
+- 貼上時，像密碼或 token 的值（名字有 KEY、TOKEN、SECRET、PASSWORD、PASSPHRASE、AUTH 這些的，或有一段是 PASS、PWD、PW 的（`DB_PASS`、`MYSQL_PWD`）、`Authorization` header、`sk-`、`ghp_` 開頭的、網址裡的密碼……）自動換成 `${變數名}`，只告訴你變數名字，不印出值。
+- `${變數名:-預設}` 的預設像密碼或 token 也算：貼上時換成 `${變數名}`，`kit check` 不讓過。
+- server 名字是數字開頭的（`1password`），變數名字前面加 `MCP_`（`MCP_1PASSWORD_TOKEN`），不會是不能用的變數名字。
 - `kit check`（所以 `kit push`）看到 mcp 的 yaml 裡直接寫著像密碼或 token 的值，就不讓過。
+- 「很長的亂碼」要大小寫和數字混得很亂才算：`--workspace=AcmeCorpProduction2024` 這種英文字接起來的不算。kit 還是看錯時，在 yaml 最上層寫 `not_secret: ["args[3]"]`（列出那幾欄），`kit check` 就不管那幾欄（見 README 的「MCP」）。
 - `kit sync` 時這台電腦沒設的變數會提醒一次。
 
 **網址的 MCP**
@@ -22,7 +25,7 @@
 - Codex 不會代換 `${…}`：env 裡同名的 `${X}` 改用 `env_vars` 直接傳過去；其他照字面放並說一次。
 
 **MCP 的套件**
-- 貼上時把 `npx 套件`、`uvx 套件` 固定在現在最新的版本（只有這裡會連網查版本）。
+- 貼上時把 `npx 套件`、`uvx 套件` 固定在現在最新的版本（只有這裡會連網查版本）。npm 寫了範圍或標籤的（`套件@^1`、`套件@next`）固定在符合它的最新版本，並提醒你原本寫什麼、固定在哪一版；確切的版本照寫的。
 - 新增 `kit install-deps mcp <名字>`：把那個版本裝在 `~/.config/agentkit/mcp-deps/<名字>/`（跟 skill 的套件同樣的規則），之後每個工具直接跑裝好的那份，不用每次啟動時下載。沒裝的 `kit list` 會寫「每次啟動時下載」。
 - `kit list` 的 `needs` 也列出 mcp 要的程式（node、uv、python、docker）。
 - `kit new mcp <名字>`（不貼）產生的範本兩種寫法都有（跑程式、連網址）。
@@ -34,8 +37,15 @@
 
 **一個資料夾就是一個 agent：`kit place`**
 - 新增 `kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]`：建好資料夾，放進 agent 的規則、skill、MCP（跟 `kit add --dir` 一樣），提示寫進資料夾的 `CLAUDE.md`／`AGENTS.md`，工具限制寫進資料夾的 `.claude/settings.local.json`。之後在那裡開的 `claude`、`codex`、`omp` 就是那個 agent；`kit add|rm --dir` 只改這個資料夾，`kit sync` 照 agent 檔更新。
+- `kit sync` 照 agent 檔放它的規則、skill、MCP：agent 檔新加的放進來，拿掉的拿掉。`.agentkit` 只記你改過的：`種類:名字` 是你另外加的，`not:種類:名字` 是你用 `kit rm --dir` 拿掉的 agent 的（不會被放回來，再 `kit add --dir` 才回來）。
+- agent 檔找不到或讀不懂（改了名字、來源不在、核准的版本沒有它）：資料夾照上次的樣子不動（提示、工具限制、MCP 都留著），說一次。
+- 你自己已經有的 deny（帳號的 `settings.json`、資料夾的 `settings.local.json`）kit 不算成它的，之後也不會拿掉。
 - 同一個 agent 再 place 一次只同步；別的 agent 的資料夾、或已經有別的東西的資料夾不動。Codex 不能只開某些工具、只能禁用 MCP 的工具，omp 在資料夾裡不能限制工具、只讀整個帳號的 MCP：做不到的會說。
-- `kit list --json --dir` 的 `here.folder` 多了 `agent`（`kit place` 放的 agent 的名字，不是就 `null`）。
+- `kit list --json --dir` 的 `here.folder` 多了 `agent`（`kit place` 放的 agent 的名字，不是就 `null`）；這種資料夾的 `here.folder.items` 也列出 agent 的規則、skill、MCP（不含你拿掉的）。
+
+**其他**
+- `kit new` 失敗就是失敗：`--to` 找不到、檔案寫不進去時 exit 不是 0，`--look` 時 stdout 只有錯誤的 JSON（之前會再印一行，或說「已建立」）。
+- Windows：`kit new mcp --config -` 用 UTF-8 讀標準輸入（Windows PowerShell 5.1 之前用主控台的字碼頁，中文會壞）；查 PyPI 前先開 TLS 1.2；名字只把 A-Z 變小寫（跟 Mac／Linux 一樣）。
 
 **給程式讀的介面（1.3）**：`kit api` 印 `1.3`。新增 `kit status --json`、`kit new mcp … --config … --look`、`kit place … --json` 和錯誤 code `bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`exists`、`no_agent`、`no_parent`、`other_agent`、`not_empty`、`bad_dir`；`here.folder.agent`；`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`。要用的程式先確認 minor 至少是 3。
 

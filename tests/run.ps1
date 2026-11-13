@@ -828,11 +828,14 @@ $SR = if ($OnWindows) { (Get-Item -LiteralPath $SP).FullName } else { "$(& /bin/
 function JS([string]$s) { $s.Replace('\', '\\') }   # a path as kit writes it in JSON
 function Snap([string]$d) { (@(Get-ChildItem -LiteralPath $d -Recurse -Force -File | Sort-Object FullName | ForEach-Object { $_.FullName + ' ' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) })) -join "`n" }
 $OnlyW = 'Claude 的設定沒有「只開這些工具」：tools.only 改成把其他內建工具寫進 deny（Claude 之後新加的工具擋不到）'
+# a deny rule kit wants that you had already: yours (kit uninstall leaves it)
+W "$H/.claude/settings.json" "{`"permissions`": {`"deny`": [`"mcp__gerrit__submit_change`"]}}`n"
 Kit init $TEAM
+Check 'deny you had already: not counted as kit''s' { -not ((ReadT "$H/.config/agentkit/state.tsv") -match "(?m)^deny`t") -and (Flat (JGet "$H/.claude/settings.json" 'permissions.deny')) -ceq '["mcp__gerrit__submit_change"]' }
 $G = Join-Path $SP 'gerrit'; $GR = Join-Path $SR 'gerrit'
 KitJ place gerrit $G --json
 Check 'place --json: one line: dir, agent, tool, command, warnings' { $rc -eq 0 -and $out -ceq "{`"dir`": `"$(JS $GR)`", `"agent`": `"gerrit`", `"tool`": `"claude`", `"command`": [`"claude`"], `"warnings`": [`"$OnlyW`"]}" }
-Check 'place: .agentkit says which agent, lists its rules, skills, MCP' { $a = ReadT "$G/.agentkit"; $a.Contains("agent:gerrit`ntool:claude`n") -and $a.Contains("rule:gerrit-flow`n") -and $a.Contains("skill:gerrit-review`n") -and $a.Contains("mcp:gerrit`n") }
+Check 'place: .agentkit says which agent; the agent''s rules, skills, MCP come from the agent file (not listed)' { $a = ReadT "$G/.agentkit"; $a.Contains("agent:gerrit`ntool:claude`n") -and -not ($a -cmatch '(?m)^(rule|skill|mcp):') }
 Check 'place: CLAUDE.md imports the rule, then the prompt; AGENTS.md has both as text' { $c = ReadT "$G/CLAUDE.md"; $c.Contains('rules/gerrit-flow.md') -and $c.Contains("<!-- agent: gerrit -->`nYou are the Gerrit helper.`n") -and (ReadT "$G/AGENTS.md").Contains('Only comment, never submit.') -and (ReadT "$G/AGENTS.md").Contains('You are the Gerrit helper.') }
 Check 'place: skills, the MCP, Claude''s tool limits in settings.local.json' { (Test-Path "$G/.claude/skills/gerrit-review/SKILL.md") -and (Test-Path "$G/.agents/skills/gerrit-review/SKILL.md") -and (JGet "$G/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (Flat (JGet "$G/.claude/settings.local.json" 'permissions.deny')) -ceq '["mcp__gerrit__submit_change","Agent","Bash","Edit","MultiEdit","NotebookEdit","Task","TodoWrite","WebFetch","WebSearch","Write"]' -and -not (Test-Path "$G/.claude/settings.local.json.kit-backup") }
 Check 'place: Codex: the MCP tool deny as disabled_tools in the folder''s config' { (ReadT "$G/.codex/config.toml").Contains("[mcp_servers.gerrit]") -and (ReadT "$G/.codex/config.toml").Contains('disabled_tools = ["submit_change"]') }
@@ -862,16 +865,43 @@ Kit add --dir $HP rule coding-style
 Check 'add --dir after place: only that folder, the prompt stays after the rules' { $c = ReadT "$HP/CLAUDE.md"; $c.Contains('rules/coding-style.md') -and $c.EndsWith("You help.`n<!-- agentkit:end -->`n") -and -not (ReadT "$G/CLAUDE.md").Contains('coding-style') }
 Kit rm --dir $G skill gerrit-review
 Check 'rm --dir after place: only that folder' { -not (Test-Path "$G/.claude/skills/gerrit-review") -and (Test-Path "$HP/.claude/skills/gerrit-review/SKILL.md") }
+Check 'rm --dir of the agent''s: kept in .agentkit as not:' { (ReadT "$G/.agentkit").Contains("not:skill:gerrit-review`n") }
 Kit rm --dir $G rule gerrit-flow; Kit rm --dir $G mcp gerrit; Kit sync
 Check 'rm --dir all after place: still that agent, still kept up to date' { (ReadT "$G/.agentkit").Contains("agent:gerrit`n") -and (ReadT "$G/CLAUDE.md").Contains('You are the Gerrit helper.') -and -not (Test-Path "$G/.mcp.json") -and (ReadT "$H/.config/agentkit/dirs").Contains($GR) }
-W "$TEAM/agents/helper.md" "---`nname: helper`ndescription: helps`nskills: [gerrit-review]`n---`nYou help, version 2.`n"; Kit sync
+Check 'rm --dir of the agent''s: stays out after kit sync' { -not (Test-Path "$G/.claude/skills/gerrit-review") -and -not (ReadT "$G/CLAUDE.md").Contains('gerrit-flow') }
+Kit add --dir $G mcp gerrit
+Check 'add --dir of the agent''s again: the not: line goes, it is the agent''s again' { -not (ReadT "$G/.agentkit").Contains('mcp:gerrit') -and (JGet "$G/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' }
+Kit rm --dir $G skill gerrit-review
+Check 'rm --dir of one already out: refused' { $rc -ne 0 }
+# the agent file changes: kit sync brings its new rules, skills, MCP and takes out the ones it dropped; yours stay
+W "$TEAM/agents/helper.md" "---`nname: helper`ndescription: helps`nmcp: [gerrit]`n---`nYou help, version 2.`n"; Kit sync
 Check 'sync: a changed prompt reaches the placed folder' { (ReadT "$HP/CLAUDE.md").Contains("You help, version 2.`n") -and -not (ReadT "$HP/CLAUDE.md").Contains("You help.`n") }
+Check 'sync: the agent''s new MCP is added, the skill it dropped taken out, the rule you added kept' { (JGet "$HP/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and -not (Test-Path "$HP/.claude/skills/gerrit-review") -and (ReadT "$HP/CLAUDE.md").Contains('rules/coding-style.md') -and (ReadT "$HP/.agentkit").Contains("rule:coding-style`n") }
+# a deny rule kit wants in the folder that you had put there already: yours, left when the agent drops it
+$sl = "$HP/.claude/settings.local.json"; W $sl ((ReadT $sl).TrimEnd("`n").TrimEnd('}').TrimEnd() + ",`n  `"permissions`": {`"deny`": [`"Bash`"]}`n}`n")
+W "$TEAM/agents/helper.md" "---`nname: helper`ndescription: helps`nmcp: [gerrit]`ntools:`n  deny: [Bash, WebFetch]`n---`nYou help, version 2.`n"; Kit sync
+Check 'place deny: kit adds the agent''s, not the one you had' { (Flat (JGet $sl 'permissions.deny')) -ceq '["Bash","WebFetch"]' -and -not ((ReadT "$H/.config/agentkit/state.tsv").Contains("helper:deny`tBash`t")) }
+W "$TEAM/agents/helper.md" "---`nname: helper`ndescription: helps`nmcp: [gerrit]`n---`nYou help, version 2.`n"; Kit sync
+Check 'place deny: the agent drops them: kit''s goes, yours stays' { (Flat (JGet $sl 'permissions.deny')) -ceq '["Bash"]' }
+# the agent cannot be read (renamed, its source gone): the folder stays as it was (prompt, tool limits, MCP), said once
+$s2 = Snap $G
+Move-Item -LiteralPath "$TEAM/agents/gerrit.md" -Destination "$T/gerrit.md.away"
+Kit sync; $o1 = $out; Kit sync; $o2 = $out
+Check 'agent gone: the placed folder is left as it was (deny, prompt, MCP)' { (Snap $G) -ceq $s2 -and (JGet "$G/.claude/settings.local.json" 'permissions.deny').Contains('"Bash"') }
+Check 'agent gone: said once' { $o1.Contains('agent gerrit 找不到或讀不懂') -and -not $o2.Contains('agent gerrit 找不到或讀不懂') }
+KitJ list --json --dir $G
+Check 'agent gone: list --json --dir still has the agent''s (kit''s copy)' { $out.Contains('"items": ["mcp:gerrit"], "agent": "gerrit"}') }
+W "$TEAM/agents/gerrit.md" "---`nname: gerrit`nthis is not yaml`n---`nbroken`n"; Kit sync
+Check 'agent unreadable (bad header): the folder is left as it was' { (Snap $G) -ceq $s2 }
+Move-Item -LiteralPath "$T/gerrit.md.away" -Destination "$TEAM/agents/gerrit.md" -Force; Kit sync
+Check 'agent back: kit sync as before, nothing to say' { (Snap $G) -ceq $s2 -and -not $out.Contains('找不到或讀不懂') }
 KitJ place gerrit (Join-Path $SP 'gx') --tool codex --json
 Check 'place --tool codex: the command and what Codex cannot do' { $rc -eq 0 -and $out.Contains('"tool": "codex", "command": ["codex"], "warnings": ["Codex 不能只開某些內建工具：tools.only 不套用"]') -and (ReadT "$SP/gx/AGENTS.md").Contains('You are the Gerrit helper.') }
 KitJ place gerrit (Join-Path $SP 'go') --tool omp --json
 Check 'place --tool omp: what omp cannot do in a folder' { $rc -eq 0 -and $out.Contains('"command": ["omp"], "warnings": ["omp 只讀整個帳號的 MCP') -and $out.Contains('omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用"]') }
 Kit uninstall
-Check 'uninstall: the placed folders are empty again' { @(Get-ChildItem -LiteralPath $G -Force).Count -eq 0 -and @(Get-ChildItem -LiteralPath $HP -Force).Count -eq 0 -and @(Get-ChildItem -LiteralPath "$SP/gx" -Force).Count -eq 0 }
+Check 'uninstall: the placed folders are empty again (the deny you put in one stays), kit''s copies of the agents gone' { @(Get-ChildItem -LiteralPath $G -Force).Count -eq 0 -and (@(Get-ChildItem -LiteralPath $HP -Force | ForEach-Object { $_.Name }) -join ' ') -ceq '.claude' -and (Flat (JGet $sl 'permissions.deny')) -ceq '["Bash"]' -and @(Get-ChildItem -LiteralPath "$SP/gx" -Force).Count -eq 0 -and -not (Test-Path "$H/.config/agentkit/placed") }
+Check 'uninstall: the deny you had already stays' { (Flat (JGet "$H/.claude/settings.json" 'permissions.deny')) -ceq '["mcp__gerrit__submit_change"]' }
 Remove-Item -LiteralPath "$TEAM/agents/helper.md" -Force
 
 # ---------- the programs a skill needs (kit tools / install-tool, "needs" in list --json) ----------
@@ -1606,7 +1636,43 @@ Check 'mcp check: the pasted ones pass' { $rc -eq 0 }
 W "$MS/mcp/leak.yaml" "command: x`nenv:`n  API_TOKEN: $S3`n"
 Kit check $MS
 Check 'mcp check: a literal secret fails, the value is not printed' { $rc -ne 0 -and $out.Contains('env.API_TOKEN 看起來是密碼或 token') -and -not $out.Contains($S3) }
+W "$MS/mcp/leak.yaml" "command: x`nenv:`n  DB_PASS: $S3`n  MYSQL_PWD: x$S3`n"
+Kit check $MS
+Check 'mcp check: DB_PASS, MYSQL_PWD written in the yaml fail' { $rc -ne 0 -and $out.Contains('env.DB_PASS 看起來是密碼或 token') -and $out.Contains('env.MYSQL_PWD 看起來是密碼或 token') -and -not $out.Contains($S3) }
+W "$MS/mcp/leak.yaml" "command: x`nenv:`n  API_TOKEN: `${API_TOKEN:-$S3}`n  LOG: `${LOG:-info}`n"
+Kit check $MS
+Check 'mcp check: a secret as the default of ${VAR:-…} fails (a plain default does not)' { $rc -ne 0 -and $out.Contains('env.API_TOKEN 看起來是密碼或 token') -and -not $out.Contains('env.LOG') -and -not $out.Contains($S3) }
+W "$MS/mcp/leak.yaml" "command: x`nargs: [--workspace=AcmeCorpProduction2024, `"--id=$S3`", --path=WorkspaceAcme2024Main]`n"
+Kit check $MS
+Check 'mcp check: a long random value fails, words do not' { $rc -ne 0 -and $out.Contains('args[2] 看起來是密碼或 token') -and -not $out.Contains('args[1]') -and -not $out.Contains('args[3]') }
+W "$MS/mcp/leak.yaml" "command: x`nargs: [--workspace=AcmeCorpProduction2024, `"--id=$S3`", --path=WorkspaceAcme2024Main]`nnot_secret: [`"args[2]`"]`n"
+Kit check $MS
+Check 'mcp check: not_secret: [args[2]] lets it pass' { $rc -eq 0 }
 Remove-Item "$MS/mcp/leak.yaml"
+W "$T/m8.json" "{`"1Password`": {`"command`": `"x`", `"env`": {`"DB_PASS`": `"$S3`", `"API_TOKEN`": `"`${API_TOKEN:-$S1}`", `"LOG`": `"`${LOG_LEVEL:-info}`"}, `"args`": [`"--workspace=AcmeCorpProduction2024`", `"--key=$S3`"]}}`n"
+KitJ new mcp --config "$T/m8.json" --look
+$lk = $out | ConvertFrom-Json
+Check 'mcp paste: DB_PASS and a secret default ${VAR:-…} become ${VAR}; a name starting with a digit gets MCP_; words stay' { $rc -eq 0 -and $lk.name -eq '1password' -and (@($lk.secrets | ForEach-Object { "$($_.where)=$($_.var)" }) -join ' ') -ceq 'env.API_TOKEN=API_TOKEN env.DB_PASS=DB_PASS args[2]=MCP_1PASSWORD_KEY' -and $lk.yaml.Contains("  LOG: `${LOG_LEVEL:-info}`n") -and $lk.yaml.Contains("  - --workspace=AcmeCorpProduction2024`n") -and -not $lk.yaml.Contains($S1) }
+W "$T/m9.json" "{`"mcpServers`": {`"$([char]0x212A)ube`": {`"command`": `"x`"}}}`n"
+KitJ new mcp --config "$T/m9.json" --look
+Check 'mcp paste: the name is made from A-Z, a-z, 0-9 only (the Kelvin sign is not a k)' { $rc -eq 0 -and ($out | ConvertFrom-Json).name -ceq 'ube' }
+# stdin is read as UTF-8 (Windows PowerShell 5.1 would read it in the console's code page)
+$oe = $OutputEncoding; $OutputEncoding = New-Object System.Text.UTF8Encoding $false
+$o = ("claude mcp add u8 -e NOTE=é漢 -- uvx u8-srv@2.0.0`n" | & $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit new mcp --config - --look 2>$null | ForEach-Object { "$_" }) -join "`n"
+$OutputEncoding = $oe
+Check 'mcp paste --config -: read as UTF-8' { ($o | ConvertFrom-Json).yaml.Contains('é漢') }
+# kit new: a failure is a failure (the error JSON only, exit not 0, nothing said to be made)
+KitJ new mcp dock --config "$T/m6.json" --to nosuch --look
+Check 'mcp new --look --to nosuch: only the error JSON, exit 1' { $rc -ne 0 -and @($out -split "`n").Count -eq 1 -and $out.Contains('"code": "no_source"') }
+Kit new mcp dock --config "$T/m6.json" --to nosuch
+Check 'mcp new --to nosuch: exit 1, nothing made' { $rc -ne 0 -and -not $out.Contains('已建立') -and -not (Test-Path "$MS/mcp/dock.yaml") }
+if (-not $OnWindows) {
+    & chmod 555 "$MS/mcp"
+    Kit new mcp dock --config "$T/m6.json"; $o1 = $out; $r1 = $rc
+    Kit new mcp dock2; $o2 = $out; $r2 = $rc
+    & chmod 755 "$MS/mcp"
+    Check 'mcp new: a file kit cannot write is an error' { $r1 -ne 0 -and $o1.Contains('沒辦法寫') -and -not $o1.Contains('已建立') -and $r2 -ne 0 -and $o2.Contains('沒辦法寫') -and -not $o2.Contains('已建立') }
+}
 $addOut = ''; foreach ($n in 'github-server', 'web', 'events', 'docs', 'remote') { Kit add mcp $n; $addOut += $out + "`n" }
 $cj = ReadT "$H/.claude.json" | ConvertFrom-Json
 Check 'mcp Claude: stdio without type, env as ${VAR}' { $s = $cj.mcpServers.'github-server'; $s.command -eq 'npx' -and $s.env.GITHUB_PERSONAL_ACCESS_TOKEN -eq '${GITHUB_PERSONAL_ACCESS_TOKEN}' -and -not (@($s.PSObject.Properties.Name) -contains 'type') }
@@ -1628,7 +1694,8 @@ Remove-Item "$MS/mcp/skel.yaml"
 if (-not $OnWindows) {
     # a fake npm: "view" says 9.8.7; "install" makes the package with a bin (no network)
     $FB = Join-Path $T 'fakebin-mcp'; [void](New-Item -ItemType Directory -Force -Path $FB)
-    W "$FB/npm" ((@('#!/bin/sh', ('echo "$PWD $*" >> "' + "$T/npm-mcp.log" + '"'), 'case $1 in', 'view) echo 9.8.7;;',
+    W "$FB/npm" ((@('#!/bin/sh', ('echo "$PWD $*" >> "' + "$T/npm-mcp.log" + '"'), 'case $1 in',
+        'view) case $2 in *@^1) printf ''%s\n'' "rng-srv@1.2.0 ''1.2.0''" "rng-srv@1.10.1 ''1.10.1''" "rng-srv@1.9.0 ''1.9.0''";; *@next) echo 2.0.0-rc.1;; *) echo 9.8.7;; esac;;',
         'install) p=$(sed -n ''s/.*"dependencies": {"\([^"]*\)".*/\1/p'' package.json); mkdir -p "node_modules/$p/dist"',
         '  printf ''{"name": "%s", "bin": {"x": "dist/cli.js"}}\n'' "$p" > "node_modules/$p/package.json"; echo x > "node_modules/$p/dist/cli.js";;', 'esac') -join "`n") + "`n")
     & chmod +x "$FB/npm"
@@ -1636,6 +1703,11 @@ if (-not $OnWindows) {
     W "$T/m7.json" "{`"pin`": {`"command`": `"npx`", `"args`": [`"-y`", `"left-pad-srv`", `"--x`"]}}`n"
     KitJ new mcp --config "$T/m7.json" --look
     Check 'mcp paste: an npx package without a version is pinned to what npm says' { $o = $out | ConvertFrom-Json; $rc -eq 0 -and $o.packages[0].version -eq '9.8.7' -and $o.yaml.Contains('left-pad-srv@9.8.7') }
+    W "$T/m10.json" "{`"rng`": {`"command`": `"npx`", `"args`": [`"-y`", `"rng-srv@^1`"]}, `"nx`": {`"command`": `"npx`", `"args`": [`"tag-srv@next`"]}}`n"
+    KitJ new mcp rng --config "$T/m10.json" --look
+    Check 'mcp paste: an npm range is pinned to the highest that matches it (asked with the range), and says so' { $o = $out | ConvertFrom-Json; $rc -eq 0 -and $o.packages[0].version -eq '1.10.1' -and $o.yaml.Contains('rng-srv@1.10.1') -and @($o.warnings)[0] -ceq '套件 rng-srv 原本寫 @^1：固定在 1.10.1 版（符合 ^1 的最新版本）' -and (ReadT "$T/npm-mcp.log").Contains('view rng-srv@^1 version') }
+    KitJ new mcp nx --config "$T/m10.json" --look
+    Check 'mcp paste: an npm tag is pinned to its version, and says so' { $o = $out | ConvertFrom-Json; $rc -eq 0 -and $o.packages[0].version -eq '2.0.0-rc.1' -and @($o.warnings)[0].Contains('原本寫 @next：固定在 2.0.0-rc.1 版') }
     Kit install-deps mcp github-server
     $md = "$H/.config/agentkit/mcp-deps/github-server"
     Check 'mcp install-deps (npm): the pinned version, --ignore-scripts, in mcp-deps' { $rc -eq 0 -and (ReadT "$T/npm-mcp.log").Contains('install --ignore-scripts') -and (ReadT "$md/.kit-src/package.json").Contains('"@modelcontextprotocol/server-github": "1.2.3"') }

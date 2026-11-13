@@ -122,6 +122,11 @@ prune_empty() { # prune_empty FILE PATH... : delete each PATH whose value is [] 
 prune_deny() { prune_empty "$CLAUDE_DIR/settings.json" permissions.deny permissions hooks.SessionStart hooks; }
 
 json_get() { LC_ALL=C awk -f "$KIT_LIB/json.awk" -v get="$2" "$1" 2>/dev/null; }
+json_strs() { # json_strs FILE A.B : the strings in the array at A.B, as JSON text ("..."), one per line (json_str NAME is one)
+    [ -f "$1" ] || return 0
+    LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$1" 2>/dev/null | awk -F'\t' -v p="$2" '
+        BEGIN { n = split(p, K, ".") } NF == n + 2 { for (i = 1; i <= n; i++) if ($i != K[i]) next; if ($NF ~ /^"/) print $NF }'
+}
 
 json_str() { # quote a string for JSON
     local s=$1
@@ -715,10 +720,12 @@ apply_claude() {
 
     ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
     # tool deny rules -> ~/.claude/settings.json
-    local deny add="" del=""; deny=$(required_deny)
+    # (one you already have is yours: kit does not count it as its own, so never takes it out)
+    local deny add="" del="" have; deny=$(required_deny); have=$(json_strs "$CLAUDE_DIR/settings.json" permissions.deny)
     while IFS= read -r n; do
         [ -n "$n" ] || continue
         [ -n "$(state_get deny "$n")" ] && continue
+        printf '%s\n' "$have" | grep -qxF -- "$(json_str "$n")" && continue
         printf 'addstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; add="$add$n
 "; say "  deny $n"
     done <<EOF
@@ -881,13 +888,40 @@ dir_root() { # dir_root DIR : the folder kit uses for DIR: the nearest one at or
     done
     printf '%s\n' "$d"
 }
-dir_items() { [ -f "$1/$DIR_FILE" ] && awk '{ sub(/\r$/, "") } /^(rule|skill|mcp):[^ ]+$/' "$1/$DIR_FILE" | awk '!seen[$0]++'; }
+# A placed folder (kit place) gets its agent's rules, skills and MCP from the agent file each time (kit sync), so a
+# change to the agent reaches it. .agentkit keeps only what you changed: kind:name you added (kit add --dir), and
+# not:kind:name, one of the agent's you took out (kit rm --dir; it stays out until you kit add --dir it again).
+# Kit keeps a copy of the agent file ($KIT_CONF/placed/): when the agent cannot be found or read (renamed, its source
+# gone, an approved commit without it), the folder stays as it was, the prompt and tool limits too.
+dir_lines() { [ -f "$1/$DIR_FILE" ] && awk '{ sub(/\r$/, "") } /^(not:)?(rule|skill|mcp):[^ ]+$/' "$1/$DIR_FILE" | awk '!seen[$0]++'; }
+dir_own() { dir_lines "$1" | grep -v '^not:'; }            # dir_own DIR : what you added
+dir_nots() { dir_lines "$1" | sed -n 's/^not://p'; }       # dir_nots DIR : the agent's you took out
+placed_copy() { printf '%s/placed/%s.md\n' "$KIT_CONF" "$(printf '%s' "$1" | cksum | awk '{ print $1 }')"; }
+placed_file() { # placed_file DIR : the agent file of a placed folder; return 2: kit's copy (the agent cannot be read now), 1: none
+    local a f c; a=$(dir_mark "$1" agent); [ -n "$a" ] || return 1
+    if f=$(find_item agent "$a") && fm_of "$f" >/dev/null; then printf '%s\n' "$f"; return 0; fi
+    c=$(placed_copy "$1"); [ -f "$c" ] || return 1
+    printf '%s\n' "$c"; return 2
+}
+agent_items() { # agent_items FILE : the agent's rules, skills and MCP that a source has, kind:name
+    local fm a n; fm=$(fm_of "$1")
+    for a in rule:rules skill:skills mcp:mcp; do
+        for n in $(fm_val "$fm" "${a#*:}"); do find_item "${a%%:*}" "$n" >/dev/null && printf '%s:%s\n' "${a%%:*}" "$n"; done
+    done
+    return 0
+}
+dir_agent_items() { local f; f=$(placed_file "$1"); [ $? = 1 ] || agent_items "$f"; }   # dir_agent_items DIR : the placed agent's
+dir_items() { # dir_items DIR : what the folder has: the placed agent's (less the ones you took out), then what you added
+    local nots; nots=$(dir_nots "$1")
+    { dir_agent_items "$1" | grep -vxF -- "${nots:-$LF}"; dir_own "$1"; } | awk 'NF && !seen[$0]++'
+}
 dir_marks() { [ -f "$1/$DIR_FILE" ] && awk '{ sub(/\r$/, "") } /^(agent|tool):[^ ]+$/' "$1/$DIR_FILE"; return 0; }   # kit place's lines
 dir_mark() { dir_marks "$1" | sed -n "s/^$2://p" | head -n 1; }   # dir_mark DIR agent|tool : the agent kit place put there, its tool
 dir_kind() { printf 'dir:%s:%s' "$1" "$2"; }       # dir_kind DIR KIND : state.tsv kind for a folder's own (kit keeps it with the rest)
 dirs_registered() { [ -f "$DIRS_LIST" ] && awk 'NF && !seen[$0]++' "$DIRS_LIST"; }
 dirs_set() { # dirs_set DIR add|rm : the list of folders kit has to keep up to date
     local t; mkdir -p "$KIT_CONF"; touch "$DIRS_LIST"
+    [ "$2" = add ] || rm -f "$(placed_copy "$1")"
     t=$(mktemp "$DIRS_LIST.XXXXXX") || die "沒辦法寫 $DIRS_LIST"
     { grep -vxF -- "$1" "$DIRS_LIST"; [ "$2" = add ] && printf '%s\n' "$1"; } > "$t"
     if [ -s "$t" ]; then mv -f "$t" "$DIRS_LIST"; else rm -f "$t" "$DIRS_LIST"; fi
@@ -897,7 +931,9 @@ dir_write() { # dir_write DIR ITEMS [MARKS] : the folder's .agentkit (gone when 
     if [ -z "$2" ] && [ -z "$marks" ]; then rm -f "$1/$DIR_FILE"; return; fi
     { printf '# kit：這個資料夾自己的規則、skill、MCP。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。\n'
       printf '# 用  kit add --dir <資料夾> 種類 名字  /  kit rm --dir …  改。\n'
-      [ -z "$marks" ] || { printf '# kit place：這個資料夾就是下面這個 agent（在這裡開的 claude、codex、omp 都是它）。\n'; printf '%s\n' "$marks"; }
+      [ -z "$marks" ] || { printf '# kit place：這個資料夾就是下面這個 agent（在這裡開的 claude、codex、omp 都是它）。\n'
+                           printf '# agent 的規則、skill、MCP 每次 kit sync 照 agent 檔放；下面的 種類:名字 是你另外加的，not:種類:名字 是你拿掉的 agent 的。\n'
+                           printf '%s\n' "$marks"; }
       [ -z "$2" ] || printf '%s\n' "$2"; } > "$1/$DIR_FILE"
 }
 drop_made() { # drop_made FILE : a JSON file kit made that is empty again goes away
@@ -927,12 +963,14 @@ dir_claude_allow() { # dir_claude_allow DIR : MCP names on stdin -> .claude/sett
     rm -f "$ops"; drop_made "$f"
 }
 dir_claude_deny() { # dir_claude_deny DIR : deny rules on stdin -> .claude/settings.local.json permissions.deny (kit place)
-    local dir=$1 f="$1/.claude/settings.local.json" names n ops add="" del="" kd
+    # (one the file already has is yours: kit does not count it as its own, so never takes it out)
+    local dir=$1 f="$1/.claude/settings.local.json" names n ops add="" del="" kd have
     kd=$(dir_kind "$dir" deny)
-    names=$(cat); ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
+    names=$(cat); ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX"); have=$(json_strs "$f" permissions.deny)
     while IFS= read -r n; do
         [ -n "$n" ] || continue
         [ -n "$(state_get "$kd" "$n")" ] && continue
+        printf '%s\n' "$have" | grep -qxF -- "$(json_str "$n")" && continue
         printf 'addstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; add="$add$n$LF"
     done <<EOF
 $names
@@ -972,20 +1010,30 @@ place_more() { # place_more NAME FILE RULES : the agent's prompt, after the fold
     [ -z "$3" ] || echo
     printf '<!-- agent: %s -->\n%s\n' "$1" "$b"
 }
-apply_dir() { # apply_dir DIR : the folder's .agentkit -> the tools' files in it
-    local dir=$1 want rules skills mcps d agent tool af fm more="" deny="" cdeny=""
+apply_dir() { # apply_dir DIR : the folder's .agentkit (and its agent) -> the tools' files in it
+    local dir=$1 want rules skills mcps d agent tool af="" rc fm more="" deny="" cdeny="" c
+    # kit place: the agent's rules, skills, MCP, its prompt after the rules, its tool limits into the tools' settings
+    # (read from the agent each time, so kit sync brings a change). An agent kit cannot read: kit's copy from the last
+    # time (the folder stays as it was), said once; no copy either: kit leaves the folder alone.
+    agent=$(dir_mark "$dir" agent); tool=$(dir_mark "$dir" tool)
+    if [ -n "$agent" ]; then
+        af=$(placed_file "$dir"); rc=$?; c=$(placed_copy "$dir")
+        if [ $rc = 0 ]; then
+            cmp -s "$af" "$c" 2>/dev/null || { mkdir -p "${c%/*}" && cp "$af" "$c"; }
+            state_del told "placed:$dir"
+        elif [ -z "$(state_get told "placed:$dir")" ]; then
+            warn "agent $agent 找不到或讀不懂（改了名字、來源不在、或核准的版本沒有它）：${dir} 先照上次的樣子不動，修好後 kit sync（只提醒這一次）"
+            state_set told "placed:$dir" 1
+        fi
+        [ $rc != 1 ] || return 0
+    fi
     want=$(dir_items "$dir")
     rules=$(printf '%s\n' "$want" | sed -n 's/^rule://p')
     skills=$(printf '%s\n' "$want" | sed -n 's/^skill://p')
     mcps=$(printf '%s\n' "$want" | sed -n 's/^mcp://p')
-    # kit place: the agent's prompt goes after the rules, its tool limits into the tools' settings (read from the agent
-    # each time, so kit sync brings a changed prompt)
-    agent=$(dir_mark "$dir" agent); tool=$(dir_mark "$dir" tool)
-    if [ -n "$agent" ]; then
-        if af=$(find_item agent "$agent"); then
-            fm=$(fm_of "$af"); more=$(place_more "$agent" "$af" "$rules")
-            deny=$(fm_val "$fm" tools.deny); cdeny=$(place_deny "$(fm_val "$fm" tools.only)" "$deny")
-        else warn "agent $agent 不在任何來源裡：${dir} 先不放它的提示和工具限制"; fi
+    if [ -n "$af" ]; then
+        fm=$(fm_of "$af"); more=$(place_more "$agent" "$af" "$rules")
+        deny=$(fm_val "$fm" tools.deny); cdeny=$(place_deny "$(fm_val "$fm" tools.only)" "$deny")
     fi
     local DENY_MORE=$deny                                    # codex_mcp_toml: the agent's MCP tool denies too
     set_rules "$dir/CLAUDE.md" import "$more" <<< "$rules"
@@ -2995,19 +3043,24 @@ cmd_add_rm() {
 }
 
 dir_add_rm() { # dir_add_rm add|rm DIR KIND NAME : only that folder (and below it) gets it, or no longer
-    local verb=$1 k=$3 n=$4 i="$3:$4" root why items
+    # (a placed folder: taking out one of its agent's is kept as not:KIND:NAME, adding it again takes that away)
+    local verb=$1 k=$3 n=$4 i="$3:$4" root why own nots ag items
     [ -d "$2" ] || die "找不到資料夾 $2"
     root=$(dir_root "$2") || die "找不到資料夾 $2"
     why=$(dir_why_not "$root"); [ -z "$why" ] || die "${root}：$why"
-    items=$(dir_items "$root")
+    own=$(dir_own "$root"); nots=$(dir_nots "$root"); ag=$(dir_agent_items "$root")
     if [ "$verb" = add ]; then
         find_item "$k" "$n" > /dev/null || die "找不到 ${i}（打 kit list 看有哪些）"
-        printf '%s\n' "$items" | grep -qxF "$i" && { say "kit：$root 已經有 $i"; return 0; }
-        items=$(printf '%s\n%s\n' "$items" "$i" | awk 'NF')
+        dir_items "$root" | grep -qxF "$i" && { say "kit：$root 已經有 $i"; return 0; }
+        nots=$(printf '%s\n' "$nots" | grep -vxF "$i")
+        printf '%s\n' "$ag" | grep -qxF "$i" || own=$(printf '%s\n%s\n' "$own" "$i" | awk 'NF')
     else
-        printf '%s\n' "$items" | grep -qxF "$i" || die "$root 沒有加 ${i}（這個資料夾自己加的才拿得掉）"
-        items=$(printf '%s\n' "$items" | grep -vxF "$i")
+        dir_items "$root" | grep -qxF "$i" || die "$root 沒有加 ${i}（這個資料夾自己加的才拿得掉）"
+        own=$(printf '%s\n' "$own" | grep -vxF "$i")
+        printf '%s\n' "$ag" | grep -qxF "$i" && nots=$(printf '%s\n%s\n' "$nots" "$i" | awk 'NF')
     fi
+    items=$(printf '%s\n' "$own"; printf '%s\n' "$nots" | awk 'NF { print "not:" $0 }')
+    items=$(printf '%s\n' "$items" | awk 'NF')
     dir_write "$root" "$items"
     if [ -n "$items$(dir_mark "$root" agent)" ]; then dirs_set "$root" add; else dirs_set "$root" rm; fi
     apply_dir "$root"
@@ -3170,14 +3223,11 @@ cmd_place() { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR
         mkdir "$d" || die "沒辦法建立資料夾 $d"
     fi
     fm=$(fm_of "$f") || die "bad header in $f"
-    # the folder's items: what it has (again: kit place adds back what the agent has now, keeps what you added) + the agent's
-    items=$(dir_items "$d")
+    # .agentkit: which agent, and what you changed there before (placed again); the agent's own come from it each time
+    items=$(dir_lines "$d")
     for a in rule:rules skill:skills mcp:mcp; do
         k=${a%%:*}
-        for n in $(fm_val "$fm" "${a#*:}"); do
-            if find_item "$k" "$n" >/dev/null; then items=$(printf '%s\n%s\n' "$items" "$k:$n" | awk 'NF && !seen[$0]++')
-            else warns="$warns$k $n 不在任何來源裡：沒有放進來$LF"; fi
-        done
+        for n in $(fm_val "$fm" "${a#*:}"); do find_item "$k" "$n" >/dev/null || warns="$warns$k $n 不在任何來源裡：沒有放進來$LF"; done
     done
     marks="agent:$name${LF}tool:$tool"
     dir_write "$d" "$items" "$marks"
@@ -3234,7 +3284,7 @@ EOF
     [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
     rm -f "$ops"
     [ $left = 0 ] || die "有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall"
-    rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps" "$KIT_CONF/mcp-deps" "$CTX_DIR"
+    rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps" "$KIT_CONF/mcp-deps" "$KIT_CONF/placed" "$CTX_DIR"
     say "kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）"
     say "     來源的 clone 還留在 $KIT_SRC"
     if [ $self = 1 ]; then
@@ -3364,11 +3414,13 @@ guess_kind() { # guess_kind DIR NAME
     printf '%s\n' "$1"
 }
 
-mcp_latest() { # mcp_latest npm|pip PACKAGE -> its newest version (npm view; PyPI's JSON API), empty when kit cannot tell
+mcp_latest() { # mcp_latest npm|pip PACKAGE[@RANGE] -> its newest version (that matches RANGE: npm view; PyPI's JSON API),
+    # empty when kit cannot tell
     local v="" u h hosts
     case $1 in
     npm) command -v npm >/dev/null 2>&1 || return 0
-         v=$(cd "$KIT_STAGE" && ctx_capped 30 npm view "$2" version 2>/dev/null | tail -n 1);;   # (not in a project: its .npmrc)
+         # (not in a project: its .npmrc) a range that matches several prints "pkg@1.2.3 '1.2.3'" lines: the highest one
+         v=$(cd "$KIT_STAGE" && ctx_capped 30 npm view "$2" version 2>/dev/null | ver_top);;
     pip) command -v curl >/dev/null 2>&1 || return 0
          u=${KIT_PYPI_URL:-https://pypi.org/pypi}; u="${u%/}/${2%%\[*}/json"; h=$(url_host "$u")
          hosts=$(allowed_hosts)
@@ -3376,6 +3428,14 @@ mcp_latest() { # mcp_latest npm|pip PACKAGE -> its newest version (npm view; PyP
          curl -fsSL --max-time 20 "$u" > "$KIT_STAGE/pypi.json" 2>/dev/null && v=$(json_get "$KIT_STAGE/pypi.json" info.version | tr -d '"');;
     esac
     printf '%s\n' "$v" | grep -E '^[0-9][0-9A-Za-z.+!-]*$' | head -n 1
+}
+ver_top() { # version lines on stdin (1.2.3, or pkg@1.2.3 '1.2.3') -> the highest (a release before its pre-releases)
+    LC_ALL=C awk '{ v = $NF; gsub(/'"'"'/, "", v) }
+        v ~ /^[0-9]+\.[0-9]+\.[0-9]+/ {
+            k = v; p = ""; if (match(k, /[-+]/)) { p = substr(k, RSTART); k = substr(k, 1, RSTART - 1) }
+            split(k, n, "."); key = sprintf("%09d.%09d.%09d.%s", n[1], n[2], n[3], (p ~ /^-/) ? "0" p : "1")
+            if (top == "" || key > top) { top = key; best = v } }
+        END { if (best != "") print best }'
 }
 mcp_paste_err() { # mcp_paste_err OUT : mcp.awk stopped (an E line): stop kit with its code (the servers' names too)
     local code msg names
@@ -3408,13 +3468,16 @@ mcp_new_config() { # kit new mcp [NAME] --config FILE|- [--to SOURCE] [--look] :
     IFS=$US read -r kind pkg ver argno bin first bad <<EOF
 $(mcp_lines "$out" P | head -n 1 | tr '\t' "$US")
 EOF
+    # (a range or tag: the newest that matches it; mcp.awk says what it was pinned from)
     if [ -n "$kind" ] && [ -n "$pkg" ] && [ -z "$ver" ] && [ -z "$bad" ]; then
-        v=$(mcp_latest "$kind" "$pkg")
+        w=$(mcp_lines "$out" G | head -n 1)
+        v=$(mcp_latest "$kind" "$pkg${w:+@$w}")
         if [ -n "$v" ]; then out=$(mcp_awk -v mode=$form -v name="$NAME" -v pin="$v" "$tmp/in"); mcp_paste_err "$out"
+        elif [ -n "$w" ]; then notes="查不到 $pkg 符合 $w 的版本（沒網路，或沒有 npm？）：先不固定版本，照原本寫的 @$w 在每次啟動時下載"
         else notes="查不到 $pkg 的最新版本（沒網路，或沒有 $( [ "$kind" = npm ] && echo npm || echo curl )？）：先不固定版本，每次啟動時下載最新的"; fi
     fi
     n=$(mcp_lines "$out" N | head -n 1); t=$(mcp_lines "$out" T | head -n 1)
-    dir=$(target_dir "$TO"); dst=$(item_path "$dir" mcp "$n")
+    dir=$(target_dir "$TO") || exit 1; dst=$(item_path "$dir" mcp "$n")
     [ -e "$dst" ] && exists=true
     if [ -f "$MACHINE" ] && f=$(find_item mcp "$n"); then exists=true; dst=$f; fi
     if [ -n "$LOOK" ]; then
@@ -3428,7 +3491,7 @@ EOF
         return 0
     fi
     [ $exists = false ] || die_c exists "已經有 mcp:${n}（${dst}）：換個名字（kit new mcp 新名字 --config …），或先刪掉它"
-    mkdir -p "$(dirname "$dst")"; mcp_lines "$out" Y > "$dst"
+    { mkdir -p "$(dirname "$dst")" && mcp_lines "$out" Y > "$dst"; } 2>/dev/null || { rm -f "$dst"; die "沒辦法寫 $dst"; }
     say "已建立 ${dst#"$dir"/}（在 $(basename "$dir")）"
     mcp_lines "$out" X | while IFS="$TAB" read -r w x; do say "  $w 像是密碼或 token：檔案裡寫成 \${$x}（值沒有寫進去）"; done
     v=$(mcp_lines "$out" V | paste -sd'|' - | sed 's/|/、/g')
@@ -3454,7 +3517,7 @@ cmd_new() {
     [ -z "$LOOK" ] || die_c usage "--look 要和 --config 一起用：kit new mcp [名字] --config 檔案 --look"
     [ -n "$KIND" ] && [ -n "$NAME" ] || die "用法：kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]"
     valid_name "$NAME" || die "名字只能用小寫英文、數字和 -：$NAME"
-    local dir dst tmp f; dir=$(target_dir "$TO")
+    local dir dst tmp f; dir=$(target_dir "$TO") || exit 1
     dst=$(item_path "$dir" "$KIND" "$NAME")
     [ -e "$dst" ] && die "$(basename "$dir") 已經有 $KIND:${NAME}（要更新用 kit update）"
     if [ -f "$MACHINE" ] && f=$(find_item "$KIND" "$NAME"); then die "名字重複：別的來源已經有 $KIND:${NAME}（${f}）"; fi
@@ -3466,7 +3529,7 @@ cmd_new() {
         say "已從 $FROM 帶進 ${dst#"$dir"/}（在 $(basename "$dir")）"
         say "記得刪掉暫存的資料夾：$FROM"
     else
-        mkdir -p "$(dirname "$dst")"; skeleton "$KIND" "$NAME" "$dst"
+        { mkdir -p "$(dirname "$dst")" && skeleton "$KIND" "$NAME" "$dst"; } 2>/dev/null || { rm -f "$dst"; die "沒辦法寫 $dst"; }
         say "已建立 ${dst#"$dir"/}（在 $(basename "$dir")），打開它寫內容"
     fi
     check_dirs "$dir" >/dev/null 2>&1 || warn "kit check 有問題，送出前請先打  kit check  看看"
@@ -3478,7 +3541,7 @@ cmd_diff_update() { # cmd_diff_update diff|update ARGS...
     parse_item_args "$@"
     [ -n "$NAME" ] && [ -n "$FROM" ] || die "用法：kit $mode [種類] <名字> --from 本機資料夾 [--to 來源]"
     local dir dst tmp f old now
-    dir=$(target_dir "$TO")
+    dir=$(target_dir "$TO") || exit 1
     [ -n "$KIND" ] || KIND=$(guess_kind "$dir" "$NAME") || exit 1
     dst=$(item_path "$dir" "$KIND" "$NAME")
     [ -f "$dst" ] || die "$(basename "$dir") 裡沒有 $KIND:${NAME}（新的用 kit new）"
