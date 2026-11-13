@@ -4,6 +4,14 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.5.1（2026-11-13）
+
+更新後要做：`kit self-update`。
+
+**context 細項：工具不再顯示成「?」**
+- 有些公司的 gateway 會把 Claude 回來的 JSON 欄位照字母排（`"id"` 在 `"type"` 前面）。以前 kit 以為 `"type"` 一定排第一個，結果「工具（呼叫＋結果，依工具）」全部變成「?」、次數 0，「怎麼省」也說「?」。現在不管欄位怎麼排都認得出工具名稱。
+- agent 動過的檔案清單（Read、Write、Edit）也一樣，以前在這種 gateway 下會漏掉或對錯檔案。
+
 ## 0.5.0（2026-11-13）
 
 更新後要做：`kit self-update`、`kit sync`。

@@ -1200,6 +1200,16 @@ Kit context --pid $cp --tool claude --dir $P7 --detail
 Check 'context --detail: kept a minute (Claude not asked again)' { (& $nArgs) -eq $n1 -and $out -ceq $d1 }
 Kit context --pid $cp --tool claude --dir $P7 --detail --fresh
 Check 'context --detail --fresh: asked again' { (& $nArgs) -gt $n1 }
+# a gateway that sends the keys in another order ("id" before "type"): the tools still found by name
+$ts7keep = ReadT $TS7
+W $TS7 ($ts7keep +
+    '{"parentUuid":"u3","type":"assistant","message":{"content":[{"signature":"sig","thinking":"x","type":"thinking"},{"text":"reading it","type":"text"},{"id":"toolu_s1","input":{"file_path":"/x/b.txt","name":"inner","type":"x"},"name":"Read","type":"tool_use"}],"id":"m1","model":"claude-opus-5-5","role":"assistant","stop_reason":"tool_use","type":"message","usage":{"input_tokens":5}},"uuid":"u4"}' + "`n" +
+    '{"parentUuid":"u4","type":"user","message":{"role":"user","content":[{"content":"a \"quoted\" {brace} \\ ' + ('0' * 900) + '","is_error":false,"tool_use_id":"toolu_s1","type":"tool_result"}]},"uuid":"u5"}' + "`n")
+Kit context --pid $cp --tool claude --dir $P7 --detail --fresh
+$trm = [regex]::Match($out, '"id": "tool_results", "name": "[^"]*", "tokens": [0-9]*, "est": true, "items": \[([^\]]*)\]')
+Check 'context --detail (claude): keys in another order (a gateway): the tool is still named, not "?"' {
+    $trm.Success -and $trm.Groups[1].Value.Contains('"name": "Read", "tokens": ') -and $trm.Groups[1].Value.Contains('"note": "2 次"') -and -not $trm.Groups[1].Value.Contains('"name": "?"') -and -not $trm.Groups[1].Value.Contains('inner') }
+W $TS7 $ts7keep
 $env:FAKE_SLEEP = '20'; $env:KIT_CTX_PROBE_TIMEOUT = '2'; $t0 = [DateTime]::UtcNow
 Kit context --pid $cp --tool claude --dir $P7 --detail --fresh
 $secs = ([DateTime]::UtcNow - $t0).TotalSeconds; Remove-Item env:FAKE_SLEEP, env:KIT_CTX_PROBE_TIMEOUT
@@ -1259,7 +1269,7 @@ W (Join-Path $H ".claude/sessions/$PID.json") "{`"pid`":$PID,`"sessionId`":`"$SI
 W (Join-Path $PD8 "$SID8.jsonl") (('{"parentUuid":null,"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"@P/a.txt"}},{"type":"tool_use","id":"t2","name":"Edit","input":{"replace_all":false,"file_path":"@P/b.txt","old_string":"\"file_path\":\"/evil\"","new_string":"SECRET"}},{"type":"tool_use","id":"t3","name":"NotebookEdit","input":{"notebook_path":"@P/nb.ipynb"}}]},"uuid":"u1","timestamp":"2026-11-13T01:00:00.000Z"}' + "`n" +
     '{"type":"api-request","messages":[{"type":"assistant","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"@P/api.txt"}}]}]}' + "`n" +
     '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t4","name":"Write","input":{"file_path":"sub/c.txt","content":"SECRET"}},{"type":"tool_use","id":"t5","name":"Read","input":{"file_path":"@P/gone.txt"}},{"type":"tool_use","id":"t6","name":"Write","input":{"file_path":"@P/made.txt","content":"x"}}]},"uuid":"u2","timestamp":"2026-11-13T03:00:00.000Z"}' + "`n").Replace('@P', $jPF))
-W (Join-Path $PD8 "$SID8/subagents/agent-x.jsonl") ('{"isSidechain":true,"message":{"content":[{"type":"tool_use","id":"s1","name":"Read","input":{"file_path":"@P/b.txt"}}]},"type":"assistant","timestamp":"2026-11-13T02:00:00.000Z"}' + "`n").Replace('@P', $jPF)
+W (Join-Path $PD8 "$SID8/subagents/agent-x.jsonl") ('{"isSidechain":true,"message":{"content":[{"id":"s1","input":{"file_path":"@P/b.txt"},"name":"Read","type":"tool_use"}]},"type":"assistant","timestamp":"2026-11-13T02:00:00.000Z"}' + "`n").Replace('@P', $jPF)   # (keys in another order, as a gateway may send them)
 $FL = '{"path": "@F/made.txt", "tag": "write", "exists": false}, {"path": "@F/sub/c.txt", "tag": "write", "exists": true}, {"path": "@F/b.txt", "tag": "read", "exists": true}, {"path": "@F/nb.ipynb", "tag": "edit", "exists": true}, {"path": "@F/a.txt", "tag": "read", "exists": true}'.Replace('@F', $PFs)
 function T0([string]$l) { '"turns": [{"n": 0, "at": "", "text": "", "files": [' + $l + ']}]' }   # (no message in the log: all in turn 0)
 KitJ files --pid $PID --tool claude --dir $PF --json

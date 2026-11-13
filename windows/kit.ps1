@@ -2833,8 +2833,6 @@ $script:NsRx = [regex]'\{"type":"[a-z_]+","name":"'
 $script:RootRx = [regex]'- `r[0-9]+` = `[^`]*`'
 $script:ItemRx = [regex]'\\n- '
 $script:FileRx = [regex]'\(file: [^)]*\)'
-$script:ClaudePartRx = [regex]'\{"type":"(text|thinking|redacted_thinking|tool_use|server_tool_use)"'
-$script:ToolIdRx = [regex]'\{"tool_use_id":"'
 $script:OmpPartRx = [regex]'\{"type":"(text|thinking|toolCall|redactedThinking)"'
 $script:McpTomlRx = [regex]'^[ \t\r\n\f\v]*\[mcp_servers\.([^\].]*)\][ \t\r\n\f\v]*\z'
 $script:ClaudeSkipAt = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -2903,6 +2901,33 @@ function Ctx-Head80([string]$s) { $b = $Utf8.GetBytes($s); [Convert]::ToBase64St
 function Ctx-Parts([string]$s, $rx) { # S cut right before each match of RX (what comes before the first one dropped)
     $ms = $rx.Matches($s); $o = New-List
     for ($i = 0; $i -lt $ms.Count; $i++) { $e = if ($i + 1 -lt $ms.Count) { $ms[$i + 1].Index } else { $s.Length }; $o.Add($s.Substring($ms[$i].Index, $e - $ms[$i].Index)) }
+    , $o
+}
+$script:JsStop = [char[]]'"{}[]'
+$script:JsStr = [char[]]'"\'
+function Ctx-Blocks([string]$s, [int]$at) { # the objects right inside the JSON array at AT in S, whatever order their keys
+    # come in -> a list of @{ t = the object's text; f = its own string fields (still escaped) }
+    $o = New-Object 'System.Collections.Generic.List[object]'; $d = 0; $i = $at; $n = $s.Length; $key = ''; $cur = $null; $b0 = 0
+    while ($i -lt $n) {
+        $i = $s.IndexOfAny($JsStop, $i); if ($i -lt 0) { break }
+        $c = $s[$i]
+        if ($c -eq [char]'"') {
+            $j = $i + 1
+            while ($true) { $j = $s.IndexOfAny($JsStr, $j); if ($j -lt 0) { return , $o }; if ($s[$j] -eq [char]'\') { $j += 2 } else { break } }
+            if ($d -eq 2 -and $null -ne $cur) {
+                $v = $s.Substring($i + 1, $j - $i - 1); $k = $j + 1
+                while ($k -lt $n -and [char]::IsWhiteSpace($s[$k])) { $k++ }
+                if ($k -lt $n -and $s[$k] -eq [char]':') { $key = $v } elseif ($key -cne '') { $cur.f[$key] = $v; $key = '' }
+            }
+            $i = $j + 1; continue
+        }
+        if ($c -eq [char]'{' -or $c -eq [char]'[') { $d++; $key = ''; if ($d -eq 2 -and $c -eq [char]'{') { $cur = @{ t = ''; f = (New-Dict 'string') }; $b0 = $i } }
+        else {
+            if ($d -eq 2 -and $c -eq [char]'}' -and $null -ne $cur) { $cur.t = $s.Substring($b0, $i - $b0 + 1); $o.Add($cur); $cur = $null }
+            $d--; if ($d -le 0) { break }
+        }
+        $i++
+    }
     , $o
 }
 function Ctx-Size([string]$f) { # the size of a file (through a link), -1 when it is not one that can be read
@@ -3232,11 +3257,12 @@ function Claude-MsgScan([string]$f) { # what was said since the last compaction 
                 Dict-Add $a.at $k (Ctx-Wt $s); continue
             }
             if ($l.Contains('"type":"assistant"')) {
-                $s = Claude-Content $l; $j = $s.IndexOf('"stop_reason"', $Ord); if ($j -ge 0) { $s = $s.Substring(0, $j + 1) }
-                foreach ($p in (Ctx-Parts $s $ClaudePartRx)) {
-                    if ($p.StartsWith('{"type":"text"', $Ord)) { $a.reply += $Utf8.GetByteCount((Ctx-Strv $p 'text')) / 4 }
-                    elseif ($p.StartsWith('{"type":"tool_use"', $Ord) -or $p.StartsWith('{"type":"server_tool_use"', $Ord)) {
-                        $nm = Ctx-Unesc (Ctx-Strv $p 'name'); $idn[(Ctx-Strv $p 'id')] = $nm; Dict-Add $a.tc $nm (Ctx-Wt $p); Dict-Add $a.tn $nm 1
+                $j = $l.IndexOf('"content":[', $Ord); if ($j -lt 0) { continue }
+                foreach ($p in (Ctx-Blocks $l ($j + 10))) {   # (some gateways send the keys in a different order: "id" before "type")
+                    $ty = Dict-Get $p.f 'type' ''
+                    if ($ty -ceq 'text') { $a.reply += $Utf8.GetByteCount((Dict-Get $p.f 'text' '')) / 4 }
+                    elseif ($ty -ceq 'tool_use' -or $ty -ceq 'server_tool_use') {
+                        $nm = Ctx-Unesc (Dict-Get $p.f 'name' ''); $idn[(Dict-Get $p.f 'id' '')] = $nm; Dict-Add $a.tc $nm (Ctx-Wt $p.t); Dict-Add $a.tn $nm 1
                     }
                 }
                 continue
@@ -3244,12 +3270,13 @@ function Claude-MsgScan([string]$f) { # what was said since the last compaction 
             if ($l.Contains('"type":"user"')) {
                 $s = Claude-Content $l
                 if ($l.Contains('"isCompactSummary":true')) { $a.summ += Ctx-Wt $s; continue }
-                if ($s.Contains('{"tool_use_id":"')) {
-                    foreach ($p in (Ctx-Parts $s $ToolIdRx)) {
-                        $id = $p.Substring(16); $q = $id.IndexOf('"', $Ord); $id = if ($q -ge 0) { $id.Substring(0, $q) } else { '' }
-                        Dict-Add $a.tr (Dict-Get $idn $id '?') (Ctx-Wt $p)
+                if ($s.Contains('"tool_use_id":"') -and ($j = $s.IndexOf('"content":[', $Ord)) -ge 0) {
+                    $hit = $false
+                    foreach ($p in (Ctx-Blocks $s ($j + 10))) {
+                        if ((Dict-Get $p.f 'type' '') -cne 'tool_result') { continue }
+                        Dict-Add $a.tr (Dict-Get $idn (Dict-Get $p.f 'tool_use_id' '') '?') (Ctx-Wt $p.t); $hit = $true
                     }
-                    continue
+                    if ($hit) { continue }
                 }
                 if ($l.Contains('"isMeta":true')) { $a.meta += Ctx-Wt $s } else { $a.user += Ctx-Wt $s }
             }
@@ -3768,11 +3795,10 @@ function Files-Scan([string]$tool, [string]$f, [int]$fi, [bool]$main, $Keys, $Va
                 $ms = $FilesTsRx.Matches($l)
                 $x = ''; if ($ms.Count -gt 0) { $x = $ms[$ms.Count - 1].Value; $x = $x.Substring(13, $x.Length - 14) }
                 if ($x) { $t = (($x -creplace '[^0-9]', '') + $FilesZero).Substring(0, 17) } elseif (-not $t) { $t = $FilesZero }
-                $s = $l; $i = $s.IndexOf('"type":"tool_use"', $Ord)
-                while ($i -ge 0) {
-                    $s = $s.Substring($i + 17); $i = $s.IndexOf('"type":"tool_use"', $Ord)
-                    $seg = if ($i -ge 0) { $s.Substring(0, $i) } else { $s }
-                    $n = Ctx-Strv $seg 'name'; $g = ''
+                $i = $l.IndexOf('"content":[', $Ord); $bl = if ($i -ge 0) { Ctx-Blocks $l ($i + 10) } else { @() }   # (whatever order the keys come in)
+                foreach ($b in $bl) {
+                    if ((Dict-Get $b.f 'type' '') -cne 'tool_use') { continue }
+                    $seg = $b.t; $n = Dict-Get $b.f 'name' ''; $g = ''
                     if ($n -ceq 'Read') { $g = 'read' } elseif ($n -ceq 'Write') { $g = 'write' } elseif ($n -ceq 'Edit' -or $n -ceq 'MultiEdit' -or $n -ceq 'NotebookEdit') { $g = 'edit' }
                     if (-not $g) { continue }
                     $p = Ctx-Strv $seg 'file_path'; if (-not $p) { $p = Ctx-Strv $seg 'notebook_path' }

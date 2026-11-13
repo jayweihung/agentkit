@@ -1315,6 +1315,16 @@ out2=$(PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail)
 check "context --detail: kept a minute (Claude not asked again)" '[ "$(wc -l < "$T/claude-args")" = "$n1" ] && [ "$out2" = "$out" ]'
 PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh >/dev/null
 check "context --detail --fresh: asked again" '[ "$(wc -l < "$T/claude-args")" -gt "$n1" ]'
+# a gateway that sends the keys in another order ("id" before "type"): the tools still found by name
+cp "$TS7" "$T/ts7.keep"
+{
+    printf '{"parentUuid":"u6","isSidechain":false,"type":"assistant","message":{"content":[{"signature":"sig","thinking":"x","type":"thinking"},{"text":"reading it","type":"text"},{"id":"toolu_s1","input":{"file_path":"/x/b.txt","name":"inner","type":"x"},"name":"Read","type":"tool_use"}],"id":"m1","model":"claude-opus-5-5","role":"assistant","stop_reason":"tool_use","type":"message","usage":{"input_tokens":5}},"uuid":"u9"}\n'
+    printf '{"parentUuid":"u9","isSidechain":false,"type":"user","message":{"role":"user","content":[{"content":"a \\"quoted\\" {brace} \\\\ %s","is_error":false,"tool_use_id":"toolu_s1","type":"tool_result"}]},"uuid":"u10"}\n' "$(printf '%0900d' 0)"
+} >> "$TS7"
+out=$(PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh)
+tr_items=$(echo "$out" | sed -n 's/.*"id": "tool_results", "name": "[^"]*", "tokens": [0-9]*, "est": true, "items": \[\([^]]*\)\].*/\1/p')
+check "context --detail (claude): keys in another order (a gateway): the tool is still named, not \"?\"" 'echo "$tr_items" | grep -qF "\"name\": \"Read\", \"tokens\": " && echo "$tr_items" | grep -qF "\"note\": \"2 次\"" && ! echo "$tr_items" | grep -qF "\"name\": \"?\"" && ! echo "$tr_items" | grep -q inner'
+mv "$T/ts7.keep" "$TS7"
 t0=$(date +%s); out=$(FAKE_SLEEP=20 KIT_CTX_PROBE_TIMEOUT=2 PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh); t1=$(date +%s)
 check "context --detail: Claude Code that does not answer is stopped (timeout), the answer says so, still JSON, estimated" '[ $((t1 - t0)) -lt 10 ] && echo "$out" | grep -qF "\"error\": \"Claude Code 沒有回答" && echo "$out" | grep -qF "\"exact\": false" && echo "$out" | grep -qF "\"used\": 130000, \"window\": 400000" && echo "$out" | grep -qF "\"id\": \"msgs\""'
 printf '{"pid": %s, "session": "x;rm -rf y", "used": 1, "window": 2, "pct": 50, "model": "m"}\n' "$$" > "$H7/.config/agentkit/ctx/claude-$$.json"
@@ -1467,7 +1477,8 @@ printf '{"pid":%s,"sessionId":"%s","cwd":"%s"}\n' "$$" "$SID8" "$PF" > "$H8/.cla
     printf '{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"content":[{"type":"tool_use","id":"t4","name":"Write","input":{"file_path":"sub/c.txt","content":"SECRET"}},{"type":"tool_use","id":"t5","name":"Read","input":{"file_path":"%s/gone.txt"}},{"type":"tool_use","id":"t6","name":"Write","input":{"file_path":"%s/made.txt","content":"x"}},{"type":"tool_use","id":"t7","name":"Bash","input":{"command":"cat %s/d.txt"}}]},"uuid":"u2","timestamp":"2026-11-13T03:00:00.000Z"}\n' "$PF" "$PF" "$PF"
 } > "$TS8"
 # a sub-agent read b.txt at 02:00: after the edit at 01:00, before the writes at 03:00
-printf '{"parentUuid":null,"isSidechain":true,"agentId":"x","message":{"content":[{"type":"tool_use","id":"s1","name":"Read","input":{"file_path":"%s/b.txt"}}]},"type":"assistant","uuid":"s1","timestamp":"2026-11-13T02:00:00.000Z"}\n' "$PF" > "$PD8/$SID8/subagents/agent-x.jsonl"
+# (its keys in another order, as a gateway may send them)
+printf '{"parentUuid":null,"isSidechain":true,"agentId":"x","message":{"content":[{"id":"s1","input":{"file_path":"%s/b.txt"},"name":"Read","type":"tool_use"}]},"type":"assistant","uuid":"s1","timestamp":"2026-11-13T02:00:00.000Z"}\n' "$PF" > "$PD8/$SID8/subagents/agent-x.jsonl"
 FL="{\"path\": \"$PF/made.txt\", \"tag\": \"write\", \"exists\": false}, {\"path\": \"$PF/sub/c.txt\", \"tag\": \"write\", \"exists\": true}, {\"path\": \"$PF/b.txt\", \"tag\": \"read\", \"exists\": true}, {\"path\": \"$PF/nb.ipynb\", \"tag\": \"edit\", \"exists\": true}, {\"path\": \"$PF/a.txt\", \"tag\": \"read\", \"exists\": true}"
 T0="\"turns\": [{\"n\": 0, \"at\": \"\", \"text\": \"\", \"files\": [$FL]}]"
 out=$(KF --pid $$ --tool claude --dir "$PF" --json); rc=$?
