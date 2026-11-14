@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.4'
+$script:KitApi = '1.5'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -41,6 +41,7 @@ $script:TomlBegin = '# agentkit:begin (managed by kit, do not edit)'
 $script:TomlEnd = '# agentkit:end'
 $script:TopBegin = '# agentkit:top:begin (managed by kit, do not edit)'
 $script:TopEnd = '# agentkit:top:end'
+$script:CodexLast = Join-Path $KitConf 'codex-block.toml'   # what kit last wrote in Codex's config.toml (to tell what Codex added there)
 $script:DirsList = Join-Path $KitConf 'dirs'                 # the folders that have their own (kit add --dir), one per line
 $script:DirFile = '.agentkit'                                # in such a folder: what it has; Codex also takes it as the project root
 $script:Utf8 = New-Object System.Text.UTF8Encoding $false     # never write a BOM
@@ -1677,7 +1678,7 @@ function Apply-All {
     $codex = Has-Codex; $omp = Has-Omp
     if ($codex -or $omp) { Sync-Skills $AgentsSkills 'skill.agents' $skills }
     if ($codex) {
-        [void](Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd ((Codex-Mcp-Toml $mcps) + (Codex-Trust)).TrimEnd("`n"))
+        [void](Codex-Block ((Codex-Mcp-Toml $mcps) + (Codex-Trust) + (Codex-Sandbox)).TrimEnd("`n"))
         [void](Replace-TopBlock (Join-Path $CodexDir 'config.toml') $TopBegin $TopEnd (Codex-Top))
     }
     if ($omp) {
@@ -1986,6 +1987,62 @@ function Codex-Trust { # [projects."DIR"] trust for each folder with its own MCP
         $out += "$head`ntrust_level = `"trusted`"`n`n"
     }
     $out
+}
+function Codex-Keep([string]$new) { # tables Codex itself put in kit's block (it adds new ones at the end of the file, which
+    # is inside the block, e.g. [projects."DIR"] when you trust a folder) moved out of it, so kit's rewrite keeps them.
+    # Kit's own: what kit last wrote there ($CodexLast); before kit kept that, only [projects."…"] counted as Codex's.
+    # A table kit is about to write itself stays kit's (never two of one table).
+    $f = Join-Path $CodexDir 'config.toml'
+    if (-not (Test-Path -LiteralPath $f)) { return }
+    $orig = Read-Text $f
+    $parts = $orig -split "`n"; if ($orig.EndsWith("`n")) { $parts = $parts[0..($parts.Count - 2)] }
+    if (-not (@($parts | ForEach-Object { $_.TrimEnd("`r") }) -contains $TomlBegin)) { return }
+    $has = Test-Path -LiteralPath $CodexLast
+    $old = @{}; if ($has) { foreach ($l in (Read-Text $CodexLast) -split "`n") { $l = $l.TrimEnd("`r"); if ($l.StartsWith('[')) { $old[$l] = 1 } } }
+    $nw = @{}; foreach ($l in $new -split "`n") { if ($l.StartsWith('[')) { $nw[$l] = 1 } }
+    $pre = New-Object System.Collections.Generic.List[string]; $blk = New-Object System.Collections.Generic.List[string]
+    $aft = New-Object System.Collections.Generic.List[string]; $mv = New-Object System.Collections.Generic.List[string]
+    $inb = $false; $keep = $false; $seen = $false
+    foreach ($raw in $parts) {
+        $l = $raw.TrimEnd("`r")
+        if ($l -eq $TomlBegin) { $inb = $true; $keep = $false; $seen = $true; $blk.Add($raw); continue }
+        if ($l -eq $TomlEnd) { $inb = $false; $blk.Add($raw); continue }
+        if ($inb) {
+            if ($l.StartsWith('[')) { $keep = -not ($nw.ContainsKey($l) -or $(if ($has) { $old.ContainsKey($l) } else { -not $l.StartsWith('[projects.') })) }
+            if ($keep) { $mv.Add($raw) } else { $blk.Add($raw) }
+            continue
+        }
+        if ($seen) { $aft.Add($raw) } else { $pre.Add($raw) }
+    }
+    if ($mv.Count -eq 0) { return }
+    while ($pre.Count -gt 0 -and $pre[$pre.Count - 1].TrimEnd("`r") -eq '') { $pre.RemoveAt($pre.Count - 1) }
+    while ($mv.Count -gt 0 -and $mv[$mv.Count - 1].TrimEnd("`r") -eq '') { $mv.RemoveAt($mv.Count - 1) }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($l in $pre) { [void]$sb.Append($l).Append("`n") }
+    if ($pre.Count -gt 0) { [void]$sb.Append("`n") }
+    foreach ($l in $mv) { [void]$sb.Append($l).Append("`n") }
+    [void]$sb.Append("`n")
+    foreach ($l in $blk) { [void]$sb.Append($l).Append("`n") }
+    foreach ($l in $aft) { [void]$sb.Append($l).Append("`n") }
+    $tmp = Temp-Next $f
+    Write-Text $tmp $sb.ToString()
+    Swap-In $tmp $f $false
+    Say "kit：Codex 自己加在 kit 那段裡的設定（例如信任資料夾）搬到那段外面了，kit 更新時不會再洗掉"
+}
+function Codex-Block([string]$new) { # kit's block in Codex's config.toml, keeping what Codex added there; remembers what kit wrote
+    Codex-Keep $new
+    if (-not (Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd $new)) { return $false }
+    if ($new) { Ensure-Dir $KitConf; Write-Text $CodexLast ($new.TrimEnd("`n") + "`n") }
+    elseif (Test-Path -LiteralPath $CodexLast) { Remove-Item -LiteralPath $CodexLast -Force }
+    $true
+}
+function Codex-Sandbox { # [sandbox_workspace_write] writable_roots = kit's notes folder: kit note also works in Codex's sandbox
+    if (@(Toml-User (Join-Path $CodexDir 'config.toml') | Where-Object { $_ -match '^\s*(\[sandbox_workspace_write\]|sandbox_workspace_write\.)' }).Count -gt 0) {
+        if ($null -eq (State-Get 'told' 'codex-sandbox')) { Warn "Codex 的 config.toml 已經有自己的 sandbox_workspace_write：要讓 Codex 在沙箱裡也能 kit note，請在 writable_roots 加上 `"$NoteDir`""; State-Set 'told' 'codex-sandbox' 1 }
+        return ''
+    }
+    Ensure-Dir $NoteDir
+    "[sandbox_workspace_write]`nwritable_roots = [$(Json-Str $NoteDir)]`n`n"
 }
 function Codex-Top { # project_root_markers with .agentkit, so Codex started in a sub-folder still finds the folder's own
     if (@(Dirs-Registered).Count -eq 0) { return '' }
@@ -4003,21 +4060,34 @@ function Proc-Start([string]$p) { # when the process started ('' if unknown): th
     ("$(& ps -o lstart= -p $p 2>$null)" -replace '\s+', ' ').Trim()
 }
 function Proc-Alive([string]$p) { $null -ne (Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue) }
-function Note-Read([string]$p) { # @(tool, dir, at, text) of that process's note, or $null (none, or the pid was reused)
+function Note-Read([string]$p) { # @(tool, dir, at, text) of that note (P: a pid or codex-<thread>), or $null (none, or the pid was reused)
     $f = Join-Path $NoteDir $p
     if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
     $l = @([IO.File]::ReadAllText($f, $Utf8).TrimEnd("`n") -split "`n")
     if ($l.Count -lt 5) { return $null }
-    $st = Proc-Start $p
-    if ($st -and $l[0] -cne $st) { return $null }                # another process now has that pid
+    if ($p -cmatch '^[0-9]+\z') { $st = Proc-Start $p; if ($st -and $l[0] -cne $st) { return $null } }   # another process now has that pid
     $t = ($l[4..($l.Count - 1)] -join "`n")
     if (-not $t) { return $null }
     , @($l[1], $l[2], $l[3], $t)
 }
-function Note-Json([string]$p) {
-    $r = Note-Read $p
-    if ($r) { return '{"pid": ' + $p + ', "tool": ' + (Json-S $r[0]) + ', "dir": ' + (Json-S $r[1]) + ', "at": ' + $(if ($r[2]) { $r[2] } else { 'null' }) + ', "text": ' + (Json-S $r[3]) + '}' }
-    '{"pid": ' + $p + ', "tool": null, "dir": null, "at": null, "text": null}'
+function Codex-ThreadOf([string]$p) { # the thread id of the Codex in process P (its newest rollout in its folder), or ''
+    $g = Agent-Guess $p '' ''; if ([string]$g[0] -cne 'codex') { return '' }
+    $f = Codex-Rollout ([string]$g[1]); if (-not $f) { return '' }
+    $b = [IO.Path]::GetFileNameWithoutExtension($f); if ($b.Length -lt 36) { return '' }
+    $t = $b.Substring($b.Length - 36); if ($t -cmatch '^[0-9a-f-]+\z') { return $t }; ''
+}
+function Note-Find([string]$p) { # @(tool, dir, at, text, session) of that process's note, else (a Codex in its sandbox) its thread's
+    $r = Note-Read $p; if ($r) { return , @($r[0], $r[1], $r[2], $r[3], '') }
+    $t = Codex-ThreadOf $p; if (-not $t) { return $null }
+    $r = Note-Read "codex-$t"; if ($r) { return , @($r[0], $r[1], $r[2], $r[3], $t) }
+    $null
+}
+function Note-Json([string]$p, [string]$sess = '') {
+    $pj = if ($p) { $p } else { 'null' }
+    $r = $null
+    if ($sess) { $x = Note-Read "codex-$sess"; if ($x) { $r = @($x[0], $x[1], $x[2], $x[3], $sess) } } else { $r = Note-Find $p }
+    if ($r) { return '{"pid": ' + $pj + ', "session": ' + $(if ($r[4]) { Json-S $r[4] } else { 'null' }) + ', "tool": ' + (Json-S $r[0]) + ', "dir": ' + (Json-S $r[1]) + ', "at": ' + $(if ($r[2]) { $r[2] } else { 'null' }) + ', "text": ' + (Json-S $r[3]) + '}' }
+    '{"pid": ' + $pj + ', "session": null, "tool": null, "dir": null, "at": null, "text": null}'
 }
 function Note-Ago([string]$at) {
     $d = [long]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) - [long]$(if ($at) { $at } else { 0 })
@@ -4025,7 +4095,7 @@ function Note-Ago([string]$at) {
 }
 function Cmd-Note($rest) { # kit note [text...] | --clear | --pid PID [--json] [text...] | --history [--dir DIR] [--json]
     $use = '用法：kit note ["做了什麼；下一步"] | kit note --clear | kit note --pid <pid> [--json] | kit note --history [--dir 資料夾] [--json]'
-    $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $json = $false; $clear = $false; $hist = $false; $words = New-List
+    $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $json = $false; $clear = $false; $hist = $false; $words = New-List; $sess = 
     for ($i = 0; $i -lt $rest.Count; $i++) {
         $a = [string]$rest[$i]
         if ($a -ceq '--json') { $json = $true; continue }
@@ -4044,6 +4114,10 @@ function Cmd-Note($rest) { # kit note [text...] | --clear | --pid PID [--json] [
     if (-not $cpid -and -not $dir) {                              # the agent above (history: only for its folder)
         $ap = Agent-Pid
         if ($ap) { $cpid = [string]$ap[0]; $tool = [string]$ap[1] }
+        elseif ($env:CODEX_THREAD_ID) {                           # in Codex's sandbox: no process list, its thread instead
+            $sess = [string]$env:CODEX_THREAD_ID; $tool = 'codex'
+            if ($sess -cnotmatch '^[0-9A-Za-z-]+\z') { Die-C no-agent "CODEX_THREAD_ID 不對：$sess" }
+        }
         elseif (-not $hist) { Die-C no-agent '找不到上面的 agent（claude、codex、omp）：kit note 要在 agent 自己的 shell 裡跑，或用 --pid 指定' }
     }
     $hf = Join-Path $NoteDir 'history.tsv'
@@ -4056,17 +4130,18 @@ function Cmd-Note($rest) { # kit note [text...] | --clear | --pid PID [--json] [
         [array]::Reverse($sel)
         $sel = @(foreach ($l in $sel) { , ($l -split "`t", 5) })
         if ($json) {
-            $items = @(foreach ($f in $sel) { '{"pid": ' + $f[1] + ', "tool": ' + (Json-S $f[2]) + ', "dir": ' + (Json-S $f[3]) + ', "at": ' + $f[0] + ', "text": ' + (Json-S ($f[4].Replace($US, "`n"))) + '}' })
+            $items = @(foreach ($f in $sel) { '{"pid": ' + $(if ($f[1].StartsWith('codex-')) { 'null, "session": ' + (Json-S $f[1].Substring(6)) } else { $f[1] + ', "session": null' }) + ', "tool": ' + (Json-S $f[2]) + ', "dir": ' + (Json-S $f[3]) + ', "at": ' + $f[0] + ', "text": ' + (Json-S ($f[4].Replace($US, "`n"))) + '}' })
             Out-Json ('{"dir": ' + (Json-S $dir) + ', "notes": [' + ($items -join ', ') + ']}')
         } elseif ($sel.Count -eq 0) { Say "（${dir} 還沒有人寫過進度）" }
-        else { foreach ($f in $sel) { Say "$(Note-Ago $f[0])（$($f[2]) $($f[1])）"; foreach ($x in $f[4].Split([char]31)) { Say "  $x" } } }
+        else { foreach ($f in $sel) { Say "$(Note-Ago $f[0])（$($f[2]) $($f[1] -replace '^codex-', '')）"; foreach ($x in $f[4].Split([char]31)) { Say "  $x" } } }
         return
     }
-    if ($clear) { $f = Join-Path $NoteDir $cpid; if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }; Say '進度清掉了'; return }
+    $key = if ($sess) { "codex-$sess" } else { $cpid }
+    if ($clear) { $f = Join-Path $NoteDir $key; if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }; Say '進度清掉了'; return }
     $text = ($words.ToArray() -join ' ')
     if (-not $text) {
-        if ($json) { Out-Json (Note-Json $cpid) }
-        else { $r = Note-Read $cpid; if ($r) { Say $r[3]; Say "（$(Note-Ago $r[2])）" } else { Say '（還沒寫過進度）' } }
+        if ($json) { Out-Json (Note-Json $cpid $sess) }
+        else { $r = if ($sess) { Note-Read $key } else { Note-Find $cpid }; if ($r) { Say $r[3]; Say "（$(Note-Ago $r[2])）" } else { Say '（還沒寫過進度）' } }
         return
     }
     # write: one or two lines, each trimmed, a TAB made a space
@@ -4075,20 +4150,31 @@ function Cmd-Note($rest) { # kit note [text...] | --clear | --pid PID [--json] [
     if ($lines.Count -gt 2) { Die-C too-long '進度最多兩行：第一行寫剛做了什麼、下一步，第二行（選用）寫目標' }
     $text = $lines -join "`n"
     if ($Utf8.GetByteCount($text) -gt $NoteMax) { Die-C too-long "進度太長（最多 $NoteMax bytes）：寫一兩句就好" }
-    if (-not (Proc-Alive $cpid)) { Die-C no-agent "沒有這個程序：$cpid" }
-    if (-not $tool) { $tool = [string](Agent-Guess $cpid '' '')[0] }
-    $dir = Proc-Cwd ([int]$cpid); if (-not $dir) { $dir = (Get-Location).ProviderPath }
-    Ensure-Dir $NoteDir
-    foreach ($e in @(Get-ChildItem -LiteralPath $NoteDir -File -ErrorAction SilentlyContinue)) {   # notes of processes that are gone (history keeps them)
-        if ($e.Name -cmatch '^[0-9]+\z' -and -not (Proc-Alive $e.Name)) { Remove-Item -LiteralPath $e.FullName -Force }
+    if (-not $sess) {
+        if (-not (Proc-Alive $cpid)) { Die-C no-agent "沒有這個程序：$cpid" }
+        if (-not $tool) { $tool = [string](Agent-Guess $cpid '' '')[0] }
+        $dir = Proc-Cwd ([int]$cpid)
+    }
+    if (-not $dir) { $dir = (Get-Location).ProviderPath }
+    try { Ensure-Dir $NoteDir } catch { }
+    if (-not (Test-Path -LiteralPath $NoteDir -PathType Container)) { Die-C no-write "寫不進 $NoteDir（Codex 的沙箱：kit sync 會把它加到 config.toml 的 writable_roots，Codex 要重開）" }
+    if (-not $sess) {                                            # (in a sandbox a live process may look gone: not there)
+        foreach ($e in @(Get-ChildItem -LiteralPath $NoteDir -File -ErrorAction SilentlyContinue)) {   # notes of processes that are gone (history keeps them)
+            if ($e.Name -cmatch '^[0-9]+\z' -and -not (Proc-Alive $e.Name)) { Remove-Item -LiteralPath $e.FullName -Force }
+        }
+    }
+    foreach ($e in @(Get-ChildItem -LiteralPath $NoteDir -File -Filter 'codex-*' -ErrorAction SilentlyContinue)) {   # Codex threads: a week
+        if ($e.LastWriteTime -lt (Get-Date).AddDays(-7)) { Remove-Item -LiteralPath $e.FullName -Force -ErrorAction SilentlyContinue }
     }
     $at = [string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
-    $f = Join-Path $NoteDir $cpid
-    Write-Text "$f.tmp" ((Proc-Start $cpid) + "`n$tool`n$dir`n$at`n$text`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force
-    [IO.File]::AppendAllText($hf, "$at`t$cpid`t$tool`t$dir`t$($text.Replace("`n", $US))`n", $Utf8)
+    $f = Join-Path $NoteDir $key
+    try {
+        Write-Text "$f.tmp" ($(if ($sess) { '' } else { Proc-Start $cpid }) + "`n$tool`n$dir`n$at`n$text`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force
+        [IO.File]::AppendAllText($hf, "$at`t$key`t$tool`t$dir`t$($text.Replace("`n", $US))`n", $Utf8)
+    } catch { Die-C no-write "寫不進 $NoteDir" }
     $all = [IO.File]::ReadAllLines($hf, $Utf8)
     if ($all.Count -gt $NoteKeep + 100) { [IO.File]::WriteAllText($hf, (($all[($all.Count - $NoteKeep)..($all.Count - 1)] -join "`n") + "`n"), $Utf8) }
-    if ($json) { Out-Json (Note-Json $cpid) } else { Say '進度記下了' }
+    if ($json) { Out-Json (Note-Json $cpid $sess) } else { Say '進度記下了' }
 }
 function Cmd-Files($rest) { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git] [--json] : the files that agent read or changed
     $use = '用法：kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]'
@@ -4783,7 +4869,7 @@ function Cmd-Uninstall($rest) {
         Dirs-Set $d 'rm'
     }
     foreach ($f in @((Join-Path $ClaudeDir 'CLAUDE.md'), (Join-Path $CodexDir 'AGENTS.md'), (Join-Path $OmpDir 'AGENTS.md'))) { if (-not (Replace-Block $f $BeginMark $EndMark '')) { $left = $true } }
-    if (-not (Replace-Block (Join-Path $CodexDir 'config.toml') $TomlBegin $TomlEnd '')) { $left = $true }
+    if (-not (Codex-Block '')) { $left = $true }
     if (-not (Replace-TopBlock (Join-Path $CodexDir 'config.toml') $TopBegin $TopEnd '')) { $left = $true }
     $script:Quiet = $true
     Sync-Skills (Join-Path $ClaudeDir 'skills') 'skill' @()

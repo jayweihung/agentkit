@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.4
+KIT_API=1.5
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -34,6 +34,7 @@ TOML_END='# agentkit:end'
 KINDS="rule skill mcp agent"
 TOP_BEGIN='# agentkit:top:begin (managed by kit, do not edit)'
 TOP_END='# agentkit:top:end'
+CODEX_LAST="$KIT_CONF/codex-block.toml"     # what kit last wrote in Codex's config.toml (to tell what Codex added there)
 DIRS_LIST="$KIT_CONF/dirs"                  # the folders that have their own (kit add --dir), one per line
 DIR_FILE=.agentkit                          # in such a folder: what it has; Codex also takes it as the project root
 
@@ -733,7 +734,7 @@ apply_claude() {
     # Codex and omp share ~/.agents/skills
     if has_codex || has_omp; then sync_skills "$AGENTS_SKILLS" skill.agents <<< "$skills"; fi
     if has_codex; then
-        KIT_BLOCK="$(codex_mcp_toml <<< "$mcps"; codex_trust)" replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END"
+        codex_block "$(codex_mcp_toml <<< "$mcps"; codex_trust; codex_sandbox)"
         KIT_BLOCK=$(codex_top) replace_top_block "$CODEX_DIR/config.toml" "$TOP_BEGIN" "$TOP_END"
     fi
     if has_omp; then
@@ -1105,6 +1106,53 @@ codex_trust() { # [projects."DIR"] trust for each folder with its own MCP (Codex
     done <<EOF
 $(dirs_registered)
 EOF
+}
+codex_keep() { # codex_keep NEWBLOCK : tables Codex itself put in kit's block (it adds new ones at the end of the file,
+    # which is inside the block, e.g. [projects."DIR"] when you trust a folder) moved out of it, so kit's rewrite keeps them.
+    # Kit's own: what kit last wrote there ($CODEX_LAST); before kit kept that, only [projects."…"] counted as Codex's.
+    # A table kit is about to write itself stays kit's (never two of one table).
+    local f="$CODEX_DIR/config.toml" tmp rc=0 last=/dev/null has=0
+    [ -f "$f" ] && grep -qxF "$TOML_BEGIN" "$f" || return 0
+    [ -f "$CODEX_LAST" ] && { last=$CODEX_LAST; has=1; }
+    tmp=$(mktemp "$f.kit.XXXXXX") || return 0
+    cp -p "$f" "$tmp"
+    KIT_NEW=$1 awk -v b="$TOML_BEGIN" -v e="$TOML_END" -v has="$has" -v cf="$f" '
+        function mine(h) { return (h in nw) || (has ? (h in old) : h !~ /^\[projects\./) }
+        FILENAME != cf { sub(/\r$/, ""); if ($0 ~ /^\[/) old[$0] = 1; next }   # (what kit last wrote; may be empty)
+        FNR == 1 { n = split(ENVIRON["KIT_NEW"], a, "\n"); for (i = 1; i <= n; i++) if (a[i] ~ /^\[/) nw[a[i]] = 1 }
+        { l = $0; sub(/\r$/, "", l) }
+        l == b { inb = 1; keep = 0; blk[++bn] = $0; next }
+        l == e { inb = 0; blk[++bn] = $0; next }
+        inb && l ~ /^\[/ { keep = !mine(l) }
+        inb { if (keep) { mv[++mn] = $0; plain[mn] = l } else blk[++bn] = $0; next }
+        { if (bn) aft[++an] = $0; else { pre[++pn] = $0; pp[pn] = l } }
+        END {
+            if (!mn) exit 4
+            while (pn > 0 && pp[pn] == "") pn--
+            while (mn > 0 && plain[mn] == "") mn--
+            for (i = 1; i <= pn; i++) print pre[i]
+            if (pn) print ""
+            for (i = 1; i <= mn; i++) print mv[i]
+            print ""
+            for (i = 1; i <= bn; i++) print blk[i]
+            for (i = 1; i <= an; i++) print aft[i]
+        }' "$last" "$f" > "$tmp" || rc=$?
+    if [ $rc != 0 ]; then rm -f "$tmp"; return 0; fi
+    if [ -L "$f" ]; then cat "$tmp" > "$f"; rm -f "$tmp"; else mv -f "$tmp" "$f"; fi
+    say "kit：Codex 自己加在 kit 那段裡的設定（例如信任資料夾）搬到那段外面了，kit 更新時不會再洗掉"
+}
+codex_block() { # codex_block NEWBLOCK : kit's block in Codex's config.toml, keeping what Codex added there; remembers what kit wrote
+    codex_keep "$1"
+    KIT_BLOCK=$1 replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END" || return 1
+    if [ -n "$1" ]; then mkdir -p "$KIT_CONF" && printf '%s\n' "$1" > "$CODEX_LAST"; else rm -f "$CODEX_LAST"; fi
+}
+codex_sandbox() { # [sandbox_workspace_write] writable_roots = kit's notes folder: kit note also works in Codex's sandbox
+    if toml_user "$CODEX_DIR/config.toml" | grep -qE '^[[:space:]]*(\[sandbox_workspace_write\]|sandbox_workspace_write\.)'; then
+        [ -n "$(state_get told codex-sandbox)" ] || { warn "Codex 的 config.toml 已經有自己的 sandbox_workspace_write：要讓 Codex 在沙箱裡也能 kit note，請在 writable_roots 加上 \"$NOTE_DIR\""; state_set told codex-sandbox 1; }
+        return 0
+    fi
+    mkdir -p "$NOTE_DIR"
+    printf '[sandbox_workspace_write]\nwritable_roots = [%s]\n\n' "$(json_str "$NOTE_DIR")"
 }
 codex_top() { # project_root_markers with .agentkit, so Codex started in a sub-folder still finds the folder's own
     [ -n "$(dirs_registered)" ] || return 0
@@ -2448,6 +2496,9 @@ ctx_detail() { # ctx_detail PID TOOL DIR FRESH : the detail JSON, kept a minute
 # adds it to the folder's history (notes/history.tsv: time pid tool folder text, a line break kept as \037), which
 # outlives the agent (a new one in that folder reads it with kit note --history). Programs read
 # kit note --pid <pid> --json (README: 給程式讀的介面).
+# Codex's sandbox allows no ps (and writes only where config.toml lets it: kit adds this folder to writable_roots), so
+# there the note is kept under its thread (notes/codex-<CODEX_THREAD_ID>) and found for a pid through Codex's newest
+# rollout in that folder, whose name ends in the thread id.
 NOTE_DIR="$KIT_CONF/notes"
 NOTE_MAX=1000          # bytes; one or two lines
 NOTE_KEEP=500          # history lines kept
@@ -2462,19 +2513,37 @@ agent_pid() { # the agent process above this kit (claude, codex, omp: the progra
                   p = up[p] } }'
 }
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
-note_read() { # note_read PID : N_TOOL N_DIR N_AT N_TEXT of that process's note (1 when it has none or the pid was reused)
+note_read() { # note_read KEY : N_TOOL N_DIR N_AT N_TEXT of that note (KEY: a pid or codex-<thread>; 1 when there is none
+    # or the pid was reused)
     local f="$NOTE_DIR/$1" st
     N_TOOL=; N_DIR=; N_AT=; N_TEXT=
     [ -f "$f" ] || return 1
-    st=$(proc_start "$1")
-    [ -z "$st" ] || [ "$(sed -n 1p "$f")" = "$st" ] || return 1     # another process now has that pid
+    case $1 in *[!0-9]*) ;; *) st=$(proc_start "$1")
+        [ -z "$st" ] || [ "$(sed -n 1p "$f")" = "$st" ] || return 1;; esac     # another process now has that pid
     N_TOOL=$(sed -n 2p "$f"); N_DIR=$(sed -n 3p "$f"); N_AT=$(sed -n 4p "$f"); N_TEXT=$(sed -n '5,$p' "$f")
     [ -n "$N_TEXT" ]
 }
-note_json() { # note_json PID : that process's note as JSON (text null: none)
-    if note_read "$1"; then
-        printf '{"pid": %s, "tool": %s, "dir": %s, "at": %s, "text": %s}' "$1" "$(json_s "$N_TOOL")" "$(json_s "$N_DIR")" "${N_AT:-null}" "$(json_s "$N_TEXT")"
-    else printf '{"pid": %s, "tool": null, "dir": null, "at": null, "text": null}' "$1"; fi
+codex_thread_of() { # codex_thread_of PID : the thread id of the Codex in PID (its newest rollout in its folder)
+    local f
+    agent_guess "$1" "" ""; [ "$A_TOOL" = codex ] || return 1
+    f=$(codex_rollout "$A_DIR") || return 1
+    f=${f##*/}; f=${f%.jsonl}; f=${f: -36}
+    case $f in *[!0-9a-f-]*|"") return 1;; esac
+    printf '%s\n' "$f"
+}
+note_find() { # note_find PID : N_* and N_SESSION of that process's note, else (a Codex in its sandbox) its thread's
+    local t
+    N_SESSION=
+    note_read "$1" && return 0
+    t=$(codex_thread_of "$1") || return 1
+    note_read "codex-$t" && N_SESSION=$t
+}
+note_json() { # note_json PID [SESSION] : that process's note as JSON (text null: none)
+    local pid=${1:-null}
+    if [ -n "${2:-}" ]; then note_read "codex-$2" && N_SESSION=$2; else note_find "$1"; fi
+    if [ -n "$N_TEXT" ]; then
+        printf '{"pid": %s, "session": %s, "tool": %s, "dir": %s, "at": %s, "text": %s}' "$pid" "$( [ -n "$N_SESSION" ] && json_s "$N_SESSION" || echo null)" "$(json_s "$N_TOOL")" "$(json_s "$N_DIR")" "${N_AT:-null}" "$(json_s "$N_TEXT")"
+    else printf '{"pid": %s, "session": null, "tool": null, "dir": null, "at": null, "text": null}' "$pid"; fi
 }
 note_ago() { # note_ago EPOCH : 剛剛 / N 分鐘前 / N 小時前 / N 天前
     local d=$(( $(date +%s) - ${1:-0} ))
@@ -2482,7 +2551,7 @@ note_ago() { # note_ago EPOCH : 剛剛 / N 分鐘前 / N 小時前 / N 天前
     elif [ "$d" -lt 86400 ]; then echo "$((d / 3600)) 小時前"; else echo "$((d / 86400)) 天前"; fi
 }
 cmd_note() { # kit note [text...] | --clear | --pid PID [--json] [text...] | --history [--dir DIR] [--json]
-    local pid="" tool="" dir="" json="" clear="" hist="" text="" a f p n=0 out=""
+    local pid="" tool="" dir="" json="" clear="" hist="" text="" a f p n=0 out="" sess="" key
     local use="用法：kit note [\"做了什麼；下一步\"] | kit note --clear | kit note --pid <pid> [--json] | kit note --history [--dir 資料夾] [--json]"
     while [ $# -gt 0 ]; do
         case $1 in
@@ -2501,6 +2570,9 @@ cmd_note() { # kit note [text...] | --clear | --pid PID [--json] [text...] | --h
     if [ -z "$pid" ] && [ -z "$dir" ]; then                 # the agent above (history: only for its folder)
         a=$(agent_pid)
         if [ -n "$a" ]; then pid=${a%% *}; tool=${a#* }
+        elif [ -n "${CODEX_THREAD_ID:-}" ]; then                 # in Codex's sandbox: no ps, its thread instead
+            sess=$CODEX_THREAD_ID; tool=codex
+            case $sess in *[!0-9A-Za-z-]*) die_c no-agent "CODEX_THREAD_ID 不對：$sess";; esac
         elif [ -z "$hist" ]; then die_c no-agent "找不到上面的 agent（claude、codex、omp）：kit note 要在 agent 自己的 shell 裡跑，或用 --pid 指定"; fi
     fi
     if [ -n "$hist" ]; then
@@ -2511,19 +2583,21 @@ cmd_note() { # kit note [text...] | --clear | --pid PID [--json] [text...] | --h
             printf '{"dir": %s, "notes": [' "$(json_s "$dir")" >&3
             [ -z "$out" ] || printf '%s\n' "$out" | while IFS="$TAB" read -r at p t d x; do
                 [ $n = 0 ] || printf ', ' >&3; n=1
-                printf '{"pid": %s, "tool": %s, "dir": %s, "at": %s, "text": %s}' "$p" "$(json_s "$t")" "$(json_s "$d")" "$at" "$(json_s "$(printf '%s' "$x" | tr "$US" '\n')")" >&3
+                case $p in codex-*) a="null, \"session\": $(json_s "${p#codex-}")";; *) a="$p, \"session\": null";; esac
+                printf '{"pid": %s, "tool": %s, "dir": %s, "at": %s, "text": %s}' "$a" "$(json_s "$t")" "$(json_s "$d")" "$at" "$(json_s "$(printf '%s' "$x" | tr "$US" '\n')")" >&3
             done
             printf ']}\n' >&3
         elif [ -z "$out" ]; then echo "（${dir} 還沒有人寫過進度）"
         else printf '%s\n' "$out" | while IFS="$TAB" read -r at p t d x; do
-                printf '%s（%s %s）\n' "$(note_ago "$at")" "$t" "$p"; printf '%s\n' "$x" | tr "$US" '\n' | sed 's/^/  /'; done
+                printf '%s（%s %s）\n' "$(note_ago "$at")" "$t" "${p#codex-}"; printf '%s\n' "$x" | tr "$US" '\n' | sed 's/^/  /'; done
         fi
         return 0
     fi
-    if [ -n "$clear" ]; then rm -f "$NOTE_DIR/$pid"; say "進度清掉了"; return 0; fi
+    key=$pid; [ -z "$sess" ] || key=codex-$sess
+    if [ -n "$clear" ]; then rm -f "$NOTE_DIR/$key"; say "進度清掉了"; return 0; fi
     if [ -z "$text" ]; then
-        if [ -n "$json" ]; then note_json "$pid" >&3; echo >&3
-        elif note_read "$pid"; then printf '%s\n（%s）\n' "$N_TEXT" "$(note_ago "$N_AT")"
+        if [ -n "$json" ]; then note_json "$pid" "$sess" >&3; echo >&3
+        elif { [ -n "$sess" ] && note_read "$key"; } || { [ -z "$sess" ] && note_find "$pid"; }; then printf '%s\n（%s）\n' "$N_TEXT" "$(note_ago "$N_AT")"
         else echo "（還沒寫過進度）"; fi
         return 0
     fi
@@ -2532,20 +2606,27 @@ cmd_note() { # kit note [text...] | --clear | --pid PID [--json] [text...] | --h
     [ -n "$text" ] || die_c usage "$use"
     [ "$(printf '%s\n' "$text" | wc -l | tr -d ' ')" -le 2 ] || die_c too-long "進度最多兩行：第一行寫剛做了什麼、下一步，第二行（選用）寫目標"
     [ "$(printf '%s' "$text" | wc -c | tr -d ' ')" -le $NOTE_MAX ] || die_c too-long "進度太長（最多 $NOTE_MAX bytes）：寫一兩句就好"
-    kill -0 "$pid" 2>/dev/null || die_c no-agent "沒有這個程序：$pid"
-    [ -n "$tool" ] || { agent_guess "$pid" "" ""; tool=$A_TOOL; }
-    dir=$(proc_cwd "$pid"); [ -n "$dir" ] || dir=$PWD
-    mkdir -p "$NOTE_DIR"
-    for f in "$NOTE_DIR"/*; do                                   # notes of processes that are gone (history keeps them)
-        p=${f##*/}; case $p in ""|*[!0-9]*) continue;; esac
-        kill -0 "$p" 2>/dev/null || rm -f "$f"
-    done
+    if [ -z "$sess" ]; then
+        kill -0 "$pid" 2>/dev/null || die_c no-agent "沒有這個程序：$pid"
+        [ -n "$tool" ] || { agent_guess "$pid" "" ""; tool=$A_TOOL; }
+        dir=$(proc_cwd "$pid")
+    fi
+    [ -n "$dir" ] || dir=$PWD
+    mkdir -p "$NOTE_DIR" 2>/dev/null; [ -w "$NOTE_DIR" ] || die_c no-write "寫不進 ${NOTE_DIR}（Codex 的沙箱：kit sync 會把它加到 config.toml 的 writable_roots，Codex 要重開）"
+    if [ -z "$sess" ]; then                                      # (in a sandbox kill -0 may fail for live ones: not there)
+        for f in "$NOTE_DIR"/*; do                               # notes of processes that are gone (history keeps them)
+            p=${f##*/}; case $p in ""|*[!0-9]*) continue;; esac
+            kill -0 "$p" 2>/dev/null || rm -f "$f"
+        done
+    fi
+    find "$NOTE_DIR" -name 'codex-*' -type f -mtime +7 -exec rm -f {} + 2>/dev/null   # Codex threads: a week
     a=$(date +%s)
-    { proc_start "$pid"; printf '%s\n%s\n%s\n%s\n' "$tool" "$dir" "$a" "$text"; } > "$NOTE_DIR/$pid.tmp" && mv "$NOTE_DIR/$pid.tmp" "$NOTE_DIR/$pid"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$a" "$pid" "$tool" "$dir" "$(printf '%s' "$text" | tr '\n' "$US")" >> "$NOTE_DIR/history.tsv"
+    { printf '%s\n' "$( [ -n "$sess" ] || proc_start "$pid")"; printf '%s\n%s\n%s\n%s\n' "$tool" "$dir" "$a" "$text"; } > "$NOTE_DIR/$key.tmp" && mv "$NOTE_DIR/$key.tmp" "$NOTE_DIR/$key" ||
+        die_c no-write "寫不進 $NOTE_DIR"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$a" "$key" "$tool" "$dir" "$(printf '%s' "$text" | tr '\n' "$US")" >> "$NOTE_DIR/history.tsv"
     [ "$(wc -l < "$NOTE_DIR/history.tsv" | tr -d ' ')" -le $((NOTE_KEEP + 100)) ] ||
         { tail -n $NOTE_KEEP "$NOTE_DIR/history.tsv" > "$NOTE_DIR/history.tmp" && mv "$NOTE_DIR/history.tmp" "$NOTE_DIR/history.tsv"; }
-    if [ -n "$json" ]; then note_json "$pid" >&3; echo >&3; else say "進度記下了"; fi
+    if [ -n "$json" ]; then note_json "$pid" "$sess" >&3; echo >&3; else say "進度記下了"; fi
 }
 
 # ---------- kit files: the files an agent read or changed ----------
@@ -3419,7 +3500,7 @@ cmd_uninstall() {
 $(dirs_registered)
 EOF
     for f in "$CLAUDE_DIR/CLAUDE.md" "$CODEX_DIR/AGENTS.md" "$OMP_DIR/AGENTS.md"; do KIT_BLOCK= replace_block "$f" "$BEGIN_MARK" "$END_MARK" || left=1; done
-    KIT_BLOCK= replace_block "$CODEX_DIR/config.toml" "$TOML_BEGIN" "$TOML_END" || left=1
+    codex_block "" || left=1
     KIT_BLOCK= replace_top_block "$CODEX_DIR/config.toml" "$TOP_BEGIN" "$TOP_END" || left=1
     QUIET=1
     sync_skills "$CLAUDE_DIR/skills" skill < /dev/null

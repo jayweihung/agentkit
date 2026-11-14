@@ -56,7 +56,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | Codex | `~/.codex/AGENTS.md`（標記之間，內容直接放進去） | `~/.agents/skills/` | `~/.codex/config.toml`（標記之間） | MCP 工具 → `disabled_tools` |
 | omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | 不支援 |
 
-改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。
+Codex 自己新增的設定（例如信任某個資料夾的 `[projects."…"]`）會加在 `config.toml` 最後面、落進 kit 那段裡；kit 記得自己上次寫了什麼（`~/.config/agentkit/codex-block.toml`），`kit sync` 時把不是它寫的搬到那段外面，不會洗掉。改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。
 
 **Claude 沒在存對話紀錄時提醒你**：在另一個 Claude 的終端機裡開的 Claude（例如 Claude 幫你開新視窗）會帶著 `CLAUDE_CODE_CHILD_SESSION=1`，
 這樣它不寫對話紀錄，關掉後 `/resume` 找不回來。kit 的 SessionStart hook（就是上面那個自動同步）每次 Claude 開啟時會看
@@ -316,7 +316,7 @@ kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最�
 - kit 從自己往上找 agent 的程式（`claude`、`codex`、`omp`，或叫這個名字的程式），記在那個程式名下：`~/.config/agentkit/notes/<pid>`。找不到就失敗（`no-agent`），要寫別的程式的用 `--pid`。
 - 最多兩行（第一行寫動作和下一步，第二行選用寫目標），最多 1000 bytes；tab 變空格，每行頭尾空白去掉，空行拿掉。
 - 那個程式結束後，它的進度在下一次有人寫的時候清掉；歷史（`notes/history.tsv`，最多留 500 則）還在，照資料夾找。程式編號被別的程式拿去用時（啟動時間不同），不會顯示舊的。
-- Codex 的沙箱可能不讓它寫 `~/.config/agentkit`，會問你或寫不進去。
+- Codex 的沙箱不讓它跑 `ps`，也只准寫幾個地方：kit 在 Codex 的 `config.toml`（kit 管的那段）加上 `[sandbox_workspace_write] writable_roots = ["~/.config/agentkit/notes"]`（只多這一個資料夾），沙箱裡的 `kit note` 改記在那個對話名下（`CODEX_THREAD_ID`，`notes/codex-<id>`，一週後清掉）。畫面程式用 Codex 的程式編號問時，kit 照那個資料夾最新的 Codex 紀錄找到對話編號。你的 `config.toml` 已經有自己的 `sandbox_workspace_write` 時 kit 不動它，說一次請你自己加；加了之後已經開著的 Codex 要重開。
 
 ## 給程式讀的介面
 
@@ -325,10 +325,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.4
+    kit api        →  1.5
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.4（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.5（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -492,12 +492,13 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 那個 agent 現在寫的進度（`kit note`），一行：
 
-    {"pid": 4321, "tool": "claude", "dir": "/home/me/proj", "at": 1794641193, "text": "改好 parser；下一步跑測試\n目標：修 #12"}
+    {"pid": 4321, "session": null, "tool": "claude", "dir": "/home/me/proj", "at": 1794641193, "text": "改好 parser；下一步跑測試\n目標：修 #12"}
 
 - `text`：一或兩行（`\n` 分開）；沒寫過、那個程式已經結束後被清掉、或程式編號換了人用：`text`、`tool`、`dir`、`at` 都是 `null`（exit 0）。
+- `session`（1.5 起）：Codex 在沙箱裡寫的（記在對話名下）是那個對話的編號，其他是 `null`。`--history` 裡這種的 `pid` 是 `null`。
 - `at`：寫的時間（Unix 秒）。`dir`：寫的時候那個程式的資料夾（Windows 是 kit 跑的資料夾）。
 - `kit note --history --json [--dir 資料夾]`：`{"dir": "...", "notes": [上面那種，新的在前，最多 20 則]}`。
-- 參數不對：`usage`；寫的時候：找不到 agent `no-agent`、太長或超過兩行 `too-long`。
+- 參數不對：`usage`；寫的時候：找不到 agent `no-agent`、太長或超過兩行 `too-long`、寫不進去（Codex 的沙箱還沒開放）`no-write`。
 
 ### `kit status --json`（1.3 起）
 

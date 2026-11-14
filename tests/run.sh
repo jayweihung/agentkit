@@ -840,8 +840,9 @@ check "codex toml args" 'grep -qF "args = [\"--index-url\", \"https://pypi.examp
 check "codex team deny -> disabled_tools" 'grep -qF "disabled_tools = [\"submit_change\"]" "$H4/.codex/config.toml"'
 check "codex env table, not expanded" 'grep -q "^\[mcp_servers.gerrit.env\]" "$H4/.codex/config.toml" && grep -qF "GERRIT_CONFIG = \"\${HOME}/.config" "$H4/.codex/config.toml"'
 check "codex toml stays private" '[ "$(ls -l "$H4/.codex/config.toml" | cut -c1-10)" = "-rw-------" ]'
+check "codex toml: kit's notes folder writable in Codex's sandbox (kit note)" 'grep -qxF "writable_roots = [\"$H4/.config/agentkit/notes\"]" "$H4/.codex/config.toml" && [ -d "$H4/.config/agentkit/notes" ]'
 if python3 -c "import tomllib" 2>/dev/null; then
-  check "codex toml is valid TOML" 'python3 -c "import tomllib,sys;d=tomllib.load(open(sys.argv[1],\"rb\"));assert d[\"mcp_servers\"][\"gerrit\"][\"env\"][\"GERRIT_CONFIG\"]" "$H4/.codex/config.toml"'
+  check "codex toml is valid TOML" 'python3 -c "import tomllib,sys;d=tomllib.load(open(sys.argv[1],\"rb\"));assert d[\"mcp_servers\"][\"gerrit\"][\"env\"][\"GERRIT_CONFIG\"] and d[\"sandbox_workspace_write\"][\"writable_roots\"]" "$H4/.codex/config.toml"'
 fi
 check "no backup for a file kit created" '[ ! -e "$H4/.agents/mcp.json.kit-backup" ] && [ ! -e "$H4/.omp/agent/mcp.json.kit-backup" ] || [ "$(cat "$H4/.omp/agent/mcp.json.kit-backup")" != "{}" ]'
 check "omp mcp.json has kit server and own" '[ "$(jget "$H4/.omp/agent/mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && [ "$(jget "$H4/.omp/agent/mcp.json" mcpServers.own.command)" = "\"y\"" ]'
@@ -872,6 +873,8 @@ cp "$P/CLAUDE.md" "$T/p.claude"; cp "$P/.mcp.json" "$T/p.mcp"
 (
 export HOME="$H5"
 kit init "$TEAM" >/dev/null 2>&1
+cp -p "$H5/.codex/config.toml" "$T/codex5.init"
+check "init: Codex config = the user's own + kit's block with only the notes folder writable" 'python3 -c "import sys;s=open(sys.argv[1]).read();a,b=s.split(\"# agentkit:begin\");assert a.rstrip(\"\\n\")+\"\\n\"==open(sys.argv[2]).read() and \"writable_roots = [\\\"\"+sys.argv[3]+\"\\\"]\" in b" "$H5/.codex/config.toml" "$T/codex5.orig" "$H5/.config/agentkit/notes"'
 out=$(kit add --dir "$P" skill gerrit-review 2>&1); rc=$?
 check "add --dir: done, says where" '[ $rc -eq 0 ] && echo "$out" | grep -qF "$P"'
 check "add --dir: .agentkit lists it" 'grep -qx "skill:gerrit-review" "$P/.agentkit"'
@@ -902,7 +905,7 @@ printf 'review v2\n' >> "$TEAM/skills/gerrit-review/SKILL.md"; kit sync >/dev/nu
 check "sync updates the folder's copy" 'grep -q "review v2" "$P/.claude/skills/gerrit-review/SKILL.md" && grep -q "review v2" "$P/.agents/skills/gerrit-review/SKILL.md"'
 kit rm --dir "$P" skill gerrit-review >/dev/null 2>&1; kit rm --dir "$P" rule gerrit-flow >/dev/null 2>&1; kit rm --dir "$P" mcp gerrit >/dev/null 2>&1
 check "rm --dir all: the folder exactly as before" 'cmp -s "$P/CLAUDE.md" "$T/p.claude" && cmp -s "$P/.mcp.json" "$T/p.mcp" && [ "$(cd "$P" && ls -A | LC_ALL=C sort | tr "\n" " ")" = ".mcp.json CLAUDE.md sub " ]'
-check "rm --dir all: Codex config byte-identical" 'cmp -s "$H5/.codex/config.toml" "$T/codex5.orig"'
+check "rm --dir all: Codex config byte-identical to after init" 'cmp -s "$H5/.codex/config.toml" "$T/codex5.init"'
 check "rm --dir all: kit forgets the folder" '[ ! -e "$HOME/.config/agentkit/dirs" ] && ! grep -qF "dir:$P:" "$HOME/.config/agentkit/state.tsv"'
 kit add --dir "$P" skill gerrit-review >/dev/null 2>&1; kit add --dir "$P" mcp gerrit >/dev/null 2>&1
 Q="$T/gone"; mkdir -p "$Q"; Q=$(cd "$Q" && pwd -P); kit add --dir "$Q" skill gerrit-review >/dev/null 2>&1; rm -rf "$Q"; kit sync >/dev/null 2>&1
@@ -913,6 +916,36 @@ check "uninstall: Codex config byte-identical" 'cmp -s "$H5/.codex/config.toml" 
 echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"
+
+# ---------- what Codex itself adds in kit's block of config.toml stays (it appends new tables at the end of the file) ----------
+cx_add() { python3 -c "import sys;f=sys.argv[1];s=open(f).read();open(f,\"w\").write(s.replace(\"# agentkit:end\",sys.argv[2].replace(\"\\\\n\",\"\\n\")+\"# agentkit:end\"))" "$1" "$2"; }   # \n in TEXT: a new line
+for impl in sh ps; do
+    [ $impl = ps ] && [ -z "$PWSH" ] && continue
+    (
+    export HOME="$T/home-cx-$impl"; mkdir -p "$HOME/.codex"
+    k() { if [ $impl = ps ]; then kps "$@"; else kit "$@"; fi; }
+    printf 'model = "gpt-5"\n' > "$HOME/.codex/config.toml"
+    k init "$TEAM" >/dev/null 2>&1
+    check "$impl: kit remembers what it wrote in Codex's config.toml" '[ -s "$HOME/.config/agentkit/codex-block.toml" ] && grep -qxF "[sandbox_workspace_write]" "$HOME/.config/agentkit/codex-block.toml"'
+    cx_add "$HOME/.codex/config.toml" '\n[projects."/x/y"]\ntrust_level = "trusted"\n\n[mcp_servers.mine]\ncommand = "z"\n'
+    out=$(k sync 2>&1)
+    check "$impl: sync moves a table Codex put in kit's block out of it, says so" 'echo "$out" | grep -q "搬到那段外面" && python3 -c "import sys;a,b=open(sys.argv[1]).read().split(\"# agentkit:begin\");assert \"[projects.\\\"/x/y\\\"]\" in a and \"[mcp_servers.mine]\" in a and \"/x/y\" not in b and \"mine\" not in b and \"writable_roots\" in b" "$HOME/.codex/config.toml"'
+    cp "$HOME/.codex/config.toml" "$T/cx-$impl.1"; out=$(k sync 2>&1)
+    check "$impl: the next sync leaves it as it is, says nothing" 'cmp -s "$HOME/.codex/config.toml" "$T/cx-$impl.1" && ! echo "$out" | grep -q "搬到那段外面"'
+    if python3 -c "import tomllib" 2>/dev/null; then
+        check "$impl: Codex config valid TOML after the move" 'python3 -c "import tomllib,sys;d=tomllib.load(open(sys.argv[1],\"rb\"));assert d[\"projects\"][\"/x/y\"][\"trust_level\"]==\"trusted\" and d[\"mcp_servers\"][\"mine\"][\"command\"]==\"z\"" "$HOME/.codex/config.toml"'
+    fi
+    rm -f "$HOME/.config/agentkit/codex-block.toml"   # as kit 0.6.0 left it: only [projects."…"] counts as Codex's
+    cx_add "$HOME/.codex/config.toml" '\n[projects."/p/q"]\ntrust_level = "trusted"\n\n[notice]\nx = 1\n'
+    k sync >/dev/null 2>&1
+    check "$impl: kit not yet remembering: a [projects] table moved, anything else kit's" 'python3 -c "import sys;a,b=open(sys.argv[1]).read().split(\"# agentkit:begin\");assert \"/p/q\" in a and \"/p/q\" not in b and \"[notice]\" not in a+b" "$HOME/.codex/config.toml"'
+    k uninstall >/dev/null 2>&1
+    check "$impl: uninstall keeps what Codex added, forgets what kit wrote" 'grep -qF "[projects.\"/x/y\"]" "$HOME/.codex/config.toml" && grep -qF "[projects.\"/p/q\"]" "$HOME/.codex/config.toml" && ! grep -q "agentkit" "$HOME/.codex/config.toml" && [ ! -e "$HOME/.config/agentkit/codex-block.toml" ]'
+    echo "$pass $fail" > "$T/sub"
+    )
+    read pass fail < "$T/sub"
+done
+[ -n "$PWSH" ] && check "sh and ps: the same Codex config after the move" 'cmp -s "$T/cx-sh.1" <(sed "s|home-cx-ps|home-cx-sh|g" "$T/cx-ps.1")'
 
 # ---------- kit place: an agent's own folder (a kit panel: drag an agent onto a space) ----------
 H6="$T/home6"; mkdir -p "$H6/.codex" "$H6/.omp/agent"
@@ -1812,10 +1845,10 @@ check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/age
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.4)" '[ $rc -eq 0 ] && [ "$out" = 1.4 ]'
+check "api: one line, major.minor (1.5)" '[ $rc -eq 0 ] && [ "$out" = 1.5 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.4 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.5 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?
@@ -2204,6 +2237,28 @@ check "note: a reused pid (other start) is not shown" 'printf "%s" "$out" | mj /
 kill $SP 2>/dev/null; wait $SP 2>/dev/null
 note_sh "$NT/bin/claude" "$KIT" note "z" >/dev/null 2>&1
 check "note: notes of gone processes cleared on the next write" '[ ! -e "$NT/conf/notes/$SP" ]'
+# Codex's sandbox: no ps, so the note goes under its thread; found for the Codex's pid through its newest rollout
+TID=01a1d92c-3657-7dc0-8a16-10aed8cdcde4; mkdir -p "$NT/w2" "$HOME/.codex/sessions/2026/11/14"
+rm -f "$NT/cx"; (cd "$NT/w2" && CODEX_THREAD_ID=$TID AGENTKIT_CONFIG="$NT/conf" "$KIT" note --json "沙箱裡寫的" > "$NT/cx" 2>/dev/null &)
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$NT/cx" ] && break; sleep 0.25; done
+check "note in Codex's sandbox (no agent found, CODEX_THREAD_ID): kept under its thread" 'mj "$NT/cx" "assert d[\"pid\"] is None and d[\"session\"]==\"$TID\" and d[\"tool\"]==\"codex\" and d[\"text\"]==\"沙箱裡寫的\"" && [ -f "$NT/conf/notes/codex-$TID" ]'
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"},"cwd":"%s"}\n' "$TID" "$NT/w2" "$NT/w2" > "$HOME/.codex/sessions/2026/11/14/rollout-2026-11-14T16-25-03-$TID.jsonl"
+(cd "$NT/w2" && exec "$NT/bin/codex" sleep 30) & CXP=$!
+sleep 0.5
+cxo=$(note_sh "$KIT" note --pid $CXP --json 2>/dev/null)
+check "note --pid of that Codex: its thread's note (newest rollout in its folder)" 'printf "%s" "$cxo" | mj /dev/stdin "assert d[\"pid\"]==$CXP and d[\"session\"]==\"$TID\" and d[\"text\"]==\"沙箱裡寫的\""'
+out=$(note_sh "$KIT" note --history --json --dir "$NT/w2" 2>/dev/null)
+check "note --history: a Codex thread's note has pid null and its session" 'printf "%s" "$out" | mj /dev/stdin "n=d[\"notes\"][0]; assert n[\"pid\"] is None and n[\"session\"]==\"$TID\""'
+if [ -n "$PWSH" ]; then
+    b=$(note_sh "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" note --pid $CXP --json 2>/dev/null)
+    check "kit.ps1 note --pid of that Codex: the same JSON" '[ "$cxo" = "$b" ] && printf "%s" "$b" | mj /dev/stdin "assert d[\"session\"]==\"$TID\" and d[\"text\"]==\"沙箱裡寫的\""'
+    a=$(note_sh "$KIT" note --history --json --dir "$NT/w2" 2>/dev/null); b=$(note_sh "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" note --history --json --dir "$NT/w2" 2>/dev/null)
+    check "kit.ps1 note --history with a Codex thread: the same JSON" '[ "$a" = "$b" ]'
+    rm -f "$NT/cx"; (cd "$NT/w2" && CODEX_THREAD_ID=$TID AGENTKIT_CONFIG="$NT/conf" "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" note --json > "$NT/cx" 2>/dev/null &)
+    for i in $(seq 1 40); do [ -s "$NT/cx" ] && break; sleep 0.25; done
+    check "kit.ps1 in Codex's sandbox: reads its thread's note" 'mj "$NT/cx" "assert d[\"session\"]==\"$TID\" and d[\"text\"]==\"沙箱裡寫的\""'
+fi
+kill $CXP 2>/dev/null; wait $CXP 2>/dev/null
 if [ -n "$PWSH" ]; then
     out=$(note_sh "$NT/bin/claude" "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" note --json "PS 寫的
 第二行" 2>/dev/null)

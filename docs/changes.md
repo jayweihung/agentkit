@@ -4,6 +4,20 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.1（2026-11-14）
+
+更新後要做：`kit self-update`、`kit sync`（Codex 的 `config.toml` 會多一段 `[sandbox_workspace_write]`），開著的 Codex 重開。kit api 變成 1.5。
+
+**Codex 在沙箱裡也能 `kit note`**
+- Codex 的沙箱不讓它看其他程式（`ps`），也不准寫 `~/.config/agentkit`，所以 0.6.0 的 `kit note` 在 Codex 裡會說「找不到上面的 agent」。
+- 現在：kit 在 Codex 的設定加上 `writable_roots`（只開放 `~/.config/agentkit/notes` 這一個資料夾），沙箱裡的 `kit note` 記在那個 Codex 對話名下；畫面程式用 Codex 的程式編號問，照樣找得到。
+- 你自己的 `config.toml` 已經有 `sandbox_workspace_write` 的話，kit 不動它，說一次請你自己加。
+- 給程式讀：`kit note` 的 JSON 多了 `session`（Codex 對話編號），`--history` 裡這種的 `pid` 是 `null`。
+
+**Codex 自己加的設定不再被 kit 洗掉**
+- Codex 新增設定（例如你按「信任這個資料夾」時的 `[projects."…"]`）會加在 `config.toml` 最後面，剛好落在 kit 管的那段裡，以前下次 `kit sync` 就把它洗掉，Codex 又問一次。
+- 現在 kit 記得自己上次寫了什麼（`~/.config/agentkit/codex-block.toml`），不是它寫的就搬到那段外面，說一聲。第一次更新時 kit 還沒記錄，只認 `[projects."…"]` 是 Codex 的。`kit uninstall` 也會留著這些。
+
 ## 0.6.0（2026-11-14）
 
 更新後要做：`kit self-update`；想讓 agent 自己寫進度，要有一條教它什麼時候寫的 rule：來源裡有 `progress-note` 的話 `kit add rule progress-note`。kit api 變成 1.4。

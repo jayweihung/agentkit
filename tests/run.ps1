@@ -286,7 +286,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.4)' { $rc -eq 0 -and $out -ceq '1.4' }
+Check 'api: one line, major.minor (1.5)' { $rc -eq 0 -and $out -ceq '1.5' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -787,6 +787,7 @@ Check 'codex toml keeps user part' { $toml.StartsWith("model = `"gpt-5`"`n`n[mcp
 Check 'codex toml has kit server' { $toml.Contains("[mcp_servers.gerrit]`ncommand = `"uvx`"") }
 Check 'codex toml args' { $toml.Contains('args = ["--index-url", "https://pypi.example/simple", "gerrit-mcp-server==1.0"]') }
 Check 'codex team deny -> disabled_tools' { $toml.Contains('disabled_tools = ["submit_change"]') }
+Check 'codex toml: kit''s notes folder writable in Codex''s sandbox (kit note)' { $toml.Contains("[sandbox_workspace_write]`nwritable_roots = [") -and $toml.Contains('agentkit/notes') }
 Check 'codex env table, not expanded' { $toml.Contains("[mcp_servers.gerrit.env]`nGERRIT_CONFIG = `"`${HOME}/.config") }
 Check 'omp mcp.json has kit server and own' { (JGet "$H/.omp/agent/mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (JGet "$H/.omp/agent/mcp.json" 'mcpServers.own.command') -eq '"y"' }
 Check 'no backup for a file kit created' { -not (Test-Path "$H/.omp/agent/AGENTS.md.kit-backup") }
@@ -808,6 +809,7 @@ $FP = Join-Path $T 'fproj'; [void](New-Item -ItemType Directory -Force -Path (Jo
 W "$FP/CLAUDE.md" "# my notes`n"; W "$FP/.mcp.json" "{`n  `"mcpServers`": {`n    `"own`": {`n      `"command`": `"y`"`n    }`n  }`n}`n"
 Copy-Item "$FP/CLAUDE.md" "$T/fp.claude"; Copy-Item "$FP/.mcp.json" "$T/fp.mcp"
 Kit init $TEAM
+Copy-Item "$H/.codex/config.toml" "$T/codex5.init"
 $FR = & { $script:OnWindows = $OnWindows; if ($OnWindows) { (Get-Item -LiteralPath $FP).FullName } else { "$(& /bin/sh -c 'cd "$1" && pwd -P' sh $FP)".Trim() } }
 Kit add --dir $FP skill gerrit-review
 Check 'add --dir: done, says where' { $rc -eq 0 -and $out.Contains($FR) }
@@ -832,7 +834,7 @@ Kit rm --dir $FP skill gerrit-workflow
 Check 'rm --dir: only what the folder added' { $rc -ne 0 -and $out.Contains('沒有加') }
 Kit rm --dir $FP skill gerrit-review; Kit rm --dir $FP rule gerrit-flow; Kit rm --dir $FP mcp gerrit
 Check 'rm --dir all: the folder exactly as before' { (SameBytes "$T/fp.claude" "$FP/CLAUDE.md") -and (SameBytes "$T/fp.mcp" "$FP/.mcp.json") -and ((@(Get-ChildItem -LiteralPath $FP -Force | ForEach-Object { $_.Name } | Sort-Object) -join ' ') -eq '.mcp.json CLAUDE.md sub') }
-Check 'rm --dir all: Codex config byte-identical, kit forgets the folder' { (SameBytes "$T/codex5.orig" "$H/.codex/config.toml") -and -not (Test-Path "$H/.config/agentkit/dirs") }
+Check 'rm --dir all: Codex config byte-identical to after init, kit forgets the folder' { (SameBytes "$T/codex5.init" "$H/.codex/config.toml") -and -not (Test-Path "$H/.config/agentkit/dirs") }
 Kit add --dir $FP skill gerrit-review; Kit add --dir $FP mcp gerrit
 Kit uninstall
 Check 'uninstall: the folder and Codex config exactly as before' { (SameBytes "$T/fp.claude" "$FP/CLAUDE.md") -and (SameBytes "$T/fp.mcp" "$FP/.mcp.json") -and -not (Test-Path "$FP/.agentkit") -and (SameBytes "$T/codex5.orig" "$H/.codex/config.toml") }
