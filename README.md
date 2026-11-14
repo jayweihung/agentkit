@@ -303,6 +303,21 @@ kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最�
 - 相對路徑接在 agent 的資料夾後面。檔案已經不在的：讀過的不列，寫過、改過的還是列（`exists: false`）。
 - `--git`：再加上那個資料夾所在的 git repo 裡 `git status` 有變動的檔案（標 `git`，排在後面，已經列過的不重複，只列還在的檔案；改名的列新名字）。不是 git repo 就不加。
 
+## agent 寫自己做到哪：`kit note`
+
+    kit note "改好 parser；下一步跑整套測試"     agent 在自己的 shell 跑：記下一兩行進度
+    kit note                                   印出現在寫的（寫之前先看，還有用的留下）
+    kit note --history [--dir 資料夾]          這個資料夾最近的進度，新的在前，最多 20 則（包括已經關掉的 agent）
+    kit note --clear                           清掉自己的
+    kit note --pid <pid> [--json]              某個 agent 現在寫的（畫面程式用）
+
+同時開好幾個 agent 時，每個 agent 自己寫一行「剛做了什麼、下一步」，畫面程式（例如終端機每一格的標題列）就能顯示它做到哪；重開或交接時，新的 agent 先看 `kit note --history`。教 agent 什麼時候寫要靠一條 rule（例如來源裡的 `progress-note`）。
+
+- kit 從自己往上找 agent 的程式（`claude`、`codex`、`omp`，或叫這個名字的程式），記在那個程式名下：`~/.config/agentkit/notes/<pid>`。找不到就失敗（`no-agent`），要寫別的程式的用 `--pid`。
+- 最多兩行（第一行寫動作和下一步，第二行選用寫目標），最多 1000 bytes；tab 變空格，每行頭尾空白去掉，空行拿掉。
+- 那個程式結束後，它的進度在下一次有人寫的時候清掉；歷史（`notes/history.tsv`，最多留 500 則）還在，照資料夾找。程式編號被別的程式拿去用時（啟動時間不同），不會顯示舊的。
+- Codex 的沙箱可能不讓它寫 `~/.config/agentkit`，會問你或寫不進去。
+
 ## 給程式讀的介面
 
 kit 本身只有指令。想用按的（例如在終端機程式裡加一個 kit 面板），那個程式跑下面這些指令。**這一節是唯一的清單**：沒列在這裡的輸出（給人看的字）隨時會改，程式不要去解析。
@@ -310,10 +325,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.3
+    kit api        →  1.4
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.3（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.4（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -472,6 +487,17 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
   - `text` 是 kit 第一個從紀錄裡拿出「說了什麼」的欄位：只有每則訊息開頭這最多 30 個字，其他的對話內容還是不拿、不印、不存。
 - 找不到紀錄檔（或不認得那種 agent）不算失敗：`files` 是 `[]`（`--git` 的照樣有）、`turns` 是 `[]`、`log` 是 `""`，最後另外有 `"note"`（給人看的原因）。
 - 參數不對：exit 1，`{"error": {"code": "usage", ...}}`。
+
+### `kit note --pid <pid> --json`（1.4 起）
+
+那個 agent 現在寫的進度（`kit note`），一行：
+
+    {"pid": 4321, "tool": "claude", "dir": "/home/me/proj", "at": 1794641193, "text": "改好 parser；下一步跑測試\n目標：修 #12"}
+
+- `text`：一或兩行（`\n` 分開）；沒寫過、那個程式已經結束後被清掉、或程式編號換了人用：`text`、`tool`、`dir`、`at` 都是 `null`（exit 0）。
+- `at`：寫的時間（Unix 秒）。`dir`：寫的時候那個程式的資料夾（Windows 是 kit 跑的資料夾）。
+- `kit note --history --json [--dir 資料夾]`：`{"dir": "...", "notes": [上面那種，新的在前，最多 20 則]}`。
+- 參數不對：`usage`；寫的時候：找不到 agent `no-agent`、太長或超過兩行 `too-long`。
 
 ### `kit status --json`（1.3 起）
 

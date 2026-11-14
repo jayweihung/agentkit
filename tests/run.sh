@@ -333,19 +333,19 @@ cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 0.10.0" >> "$TEAM/kit
 out=$(kit list 2>&1)
 check "team version changed: list tells again (numbers, not text)" 'echo "$out" | grep -qF "團隊要 kit 0.10.0 以上"'
 mkdir -p "$T/dev/unix"; cp "$HERE"/../unix/* "$T/dev/unix/"
-cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 0.6.0" >> "$TEAM/kit.yaml"
+cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 9.6.0" >> "$TEAM/kit.yaml"
 out=$("$T/dev/unix/kit" sync 2>&1)
 check "dev build (no VERSION) is not told" '! echo "$out" | grep -q 團隊要'
-echo "0.6.0+local" > "$T/dev/VERSION"
+echo "9.6.0+local" > "$T/dev/VERSION"
 out=$("$T/dev/unix/kit" sync 2>&1)
 check "+build part ignored" '! echo "$out" | grep -q 團隊要'
-echo "0.5.9" > "$T/dev/VERSION"
+echo "9.5.9" > "$T/dev/VERSION"
 out=$("$T/dev/unix/kit" sync 2>&1)
-check "older patch level is told" 'echo "$out" | grep -qF "團隊要 kit 0.6.0 以上，你的是 0.5.9"'
+check "older patch level is told" 'echo "$out" | grep -qF "團隊要 kit 9.6.0 以上，你的是 9.5.9"'
 state_nag() { awk -F'\t' '$1 == "nag"' "$HOME/.config/agentkit/state.tsv"; }
-echo "0.6.0" > "$T/dev/VERSION"; "$T/dev/unix/kit" sync >/dev/null 2>&1
+echo "9.6.0" > "$T/dev/VERSION"; "$T/dev/unix/kit" sync >/dev/null 2>&1
 check "new enough: note forgotten" '[ -z "$(state_nag)" ]'
-# kit_version 0.6.0 stays for the background sync below
+# kit_version 9.6.0 stays for the background sync below
 
 # ---------- ci-template ----------
 out=$(kit ci-template)
@@ -399,7 +399,7 @@ echo "second change" >> "$TEAM/skills/gerrit-review/SKILL.md"
 kit sync --hook; sleep 2
 check "hook runs at most every 10 minutes" '! grep -q "second change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
 out=$(kit sync 2>&1)
-check "hook: kit_version told at the next sync" 'echo "$out" | grep -qF "團隊要 kit 0.6.0 以上"'
+check "hook: kit_version told at the next sync" 'echo "$out" | grep -qF "團隊要 kit 9.6.0 以上"'
 cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"
 
 # ---------- is Claude saving its transcript? (kit sync --hook under a fake claude started with a chosen environment) ----------
@@ -1812,10 +1812,10 @@ check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/age
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.3)" '[ $rc -eq 0 ] && [ "$out" = 1.3 ]'
+check "api: one line, major.minor (1.4)" '[ $rc -eq 0 ] && [ "$out" = 1.4 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.3 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.4 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?
@@ -2167,6 +2167,56 @@ if [ -n "$PWSH" ]; then
   check "kit.ps1 check: a literal secret fails, not printed" '[ $rc -ne 0 ] && echo "$out" | grep -qF "env.API_TOKEN 看起來是密碼或 token" && ! echo "$out" | grep -qF "$S4"'
 fi
 { kill $MPYPI; wait $MPYPI; } 2>/dev/null; unset KIT_PYPI_URL
+
+# ---------- kit note: an agent's one or two lines about where it is ----------
+NT="$T/note"; mkdir -p "$NT/bin" "$NT/w"
+printf '#!/bin/sh\n"$@"\n' > "$NT/bin/claude"; printf '#!/bin/sh\n"$@"\n' > "$NT/bin/codex"; chmod +x "$NT/bin/claude" "$NT/bin/codex"
+note_sh() { ( cd "$NT/w" && AGENTKIT_CONFIG="$NT/conf" "$@" ); }
+out=$(note_sh "$NT/bin/claude" "$KIT" note "改好 parser；下一步跑測試" 2>&1); rc=$?
+check "note: written under the claude above it" '[ $rc -eq 0 ] && echo "$out" | grep -q 進度記下了 && [ -n "$(ls "$NT/conf/notes" | grep -E "^[0-9]+$")" ]'
+out=$(note_sh "$NT/bin/codex" "$KIT" note --json "第一行
+目標：修 #12" 2>/dev/null)
+check "note --json: the codex above, its folder, two lines" 'printf "%s" "$out" | mj /dev/stdin "assert d[\"tool\"]==\"codex\" and d[\"text\"]==\"第一行\\n目標：修 #12\" and d[\"dir\"].endswith(\"/note/w\") and d[\"at\"]>0"'
+out=$(note_sh "$NT/bin/claude" sh -c "\"$KIT\" note \"一\" >/dev/null && \"$KIT\" note && \"$KIT\" note --pid \$PPID --json" 2>&1)
+check "note: the agent reads its own back (text and --pid --json)" 'echo "$out" | grep -qx 一 && echo "$out" | grep -q "（剛剛）" && echo "$out" | tail -n 1 | mj /dev/stdin "assert d[\"text\"]==\"一\" and d[\"tool\"]==\"claude\""'
+out=$(note_sh "$KIT" note --pid 1 --json 2>/dev/null)
+check "note --pid --json: none -> text null" 'printf "%s" "$out" | mj /dev/stdin "assert d[\"text\"] is None and d[\"pid\"]==1"'
+out=$(note_sh "$KIT" note --history --json --dir "$NT/w" 2>/dev/null)
+check "note --history --json: that folder, newest first, gone agents too" 'printf "%s" "$out" | mj /dev/stdin "n=d[\"notes\"]; assert len(n)==3 and n[0][\"text\"]==\"一\" and n[2][\"text\"].startswith(\"改好\")"'
+out=$(note_sh "$KIT" note --history --dir "$NT/w" 2>&1)
+check "note --history: for people, two lines indented" 'echo "$out" | grep -qx "  目標：修 #12"'
+out=$(note_sh "$KIT" note --history --dir /nowhere 2>&1)
+check "note --history: nothing there said so" 'echo "$out" | grep -q 還沒有人寫過進度'
+out=$(note_sh "$NT/bin/claude" "$KIT" note "a
+b
+c" 2>&1); rc=$?
+check "note: three lines refused" '[ $rc -ne 0 ] && echo "$out" | grep -q 最多兩行'
+out=$(note_sh "$NT/bin/claude" "$KIT" note --json "$(printf "%01100d" 0)" 2>/dev/null); rc=$?
+check "note: too long refused (code too-long)" '[ $rc -ne 0 ] && printf "%s" "$out" | mj /dev/stdin "assert d[\"error\"][\"code\"]==\"too-long\""'
+rm -f "$NT/na"; (cd "$NT/w" && AGENTKIT_CONFIG="$NT/conf" "$KIT" note x --json > "$NT/na" 2>/dev/null &)   # parent gone: nothing above
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$NT/na" ] && break; sleep 0.25; done
+check "note: no agent above -> no-agent" 'mj "$NT/na" "assert d[\"error\"][\"code\"]==\"no-agent\""'
+sleep 30 & SP=$!
+note_sh "$KIT" note --pid $SP "睡著的" >/dev/null 2>&1
+printf 'old start\nclaude\n/x\n1\nold text\n' > "$NT/conf/notes/$SP"
+out=$(note_sh "$KIT" note --pid $SP --json 2>/dev/null)
+check "note: a reused pid (other start) is not shown" 'printf "%s" "$out" | mj /dev/stdin "assert d[\"text\"] is None"'
+kill $SP 2>/dev/null; wait $SP 2>/dev/null
+note_sh "$NT/bin/claude" "$KIT" note "z" >/dev/null 2>&1
+check "note: notes of gone processes cleared on the next write" '[ ! -e "$NT/conf/notes/$SP" ]'
+if [ -n "$PWSH" ]; then
+    out=$(note_sh "$NT/bin/claude" "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" note --json "PS 寫的
+第二行" 2>/dev/null)
+    check "kit.ps1 note --json: the same fields" 'printf "%s" "$out" | mj /dev/stdin "assert d[\"tool\"]==\"claude\" and d[\"text\"]==\"PS 寫的\\n第二行\" and d[\"dir\"].endswith(\"/note/w\")"'
+    a=$(note_sh "$KIT" note --history --json --dir "$NT/w" 2>/dev/null); b=$(note_sh "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" note --history --json --dir "$NT/w" 2>/dev/null)
+    check "kit.ps1 note --history --json: the same JSON as kit" '[ -n "$a" ] && [ "$a" = "$b" ]'
+    a=$(note_sh "$KIT" note --pid 1 --json 2>/dev/null); b=$(note_sh "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" note --pid 1 --json 2>/dev/null)
+    check "kit.ps1 note --pid --json: the same when there is none" '[ "$a" = "$b" ]'
+    out=$(note_sh "$NT/bin/claude" "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" note "a
+b
+c" 2>&1); rc=$?
+    check "kit.ps1 note: three lines refused" '[ $rc -ne 0 ] && echo "$out" | grep -q 最多兩行'
+fi
 
 # ---------- code checks ----------
 check "no \$var directly before non-ASCII (bash 3.2 reads it as part of the name)" '! LC_ALL=C grep -nE "\\\$[A-Za-z_][A-Za-z0-9_]*[^ -~]" "$KIT" "$HERE/../unix/install.sh"'

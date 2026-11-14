@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.3'
+$script:KitApi = '1.4'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -3971,6 +3971,125 @@ function Files-Turns($rows, [string]$dir) { # the turns, newest first (n 0, the 
     }
     , $out
 }
+# ---------- kit note: one or two lines an agent writes about where it is (the same files as unix/kit) ----------
+$script:NoteDir = Join-Path $KitConf 'notes'
+$script:NoteMax = 1000; $script:NoteKeep = 500
+$script:US = [string][char]31
+function Agent-Pid { # @(pid, tool) of the agent above this kit (claude, codex, omp: the program's own name, or a script by that name)
+    $up = @{}; $cl = @{}
+    if ($OnWindows) {
+        foreach ($c in @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CommandLine -ErrorAction SilentlyContinue)) { $up[[int]$c.ProcessId] = [int]$c.ParentProcessId; $cl[[int]$c.ProcessId] = [string]$c.CommandLine }
+    } else {
+        foreach ($l in @(& ps -A -o pid= -o ppid= -o args= 2>$null)) {
+            $w = "$l".Trim() -split '\s+', 3
+            if ($w.Count -ge 2 -and $w[0] -match '^[0-9]+$' -and $w[1] -match '^[0-9]+$') { $up[[int]$w[0]] = [int]$w[1]; $cl[[int]$w[0]] = $(if ($w.Count -gt 2) { $w[2] } else { '' }) }
+        }
+    }
+    if (-not $up.ContainsKey($PID)) { return $null }
+    $p = $up[$PID]
+    for ($n = 0; $n -lt 12 -and $p -gt 1 -and $up.ContainsKey($p); $n++) {
+        $w = @(@("$($cl[$p])".Trim() -split '\s+')[0..1] | Where-Object { $_ } | ForEach-Object { ($_.Trim('"') -split '[\\/]')[-1] })
+        foreach ($x in $w) {
+            if ($x -cmatch '^(claude|claude\.exe|claude\.js|cli\.js)$') { return , @($p, 'claude') }
+            if ($x -cmatch '^(codex|codex\.exe|codex\.js)$') { return , @($p, 'codex') }
+            if ($x -cmatch '^(omp|omp\.exe)$') { return , @($p, 'omp') }
+        }
+        $p = $up[$p]
+    }
+    $null
+}
+function Proc-Start([string]$p) { # when the process started ('' if unknown): the same text unix/kit writes on macOS / Linux
+    if ($OnWindows) { try { return (Get-Process -Id ([int]$p) -ErrorAction Stop).StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') } catch { return '' } }
+    ("$(& ps -o lstart= -p $p 2>$null)" -replace '\s+', ' ').Trim()
+}
+function Proc-Alive([string]$p) { $null -ne (Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue) }
+function Note-Read([string]$p) { # @(tool, dir, at, text) of that process's note, or $null (none, or the pid was reused)
+    $f = Join-Path $NoteDir $p
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
+    $l = @([IO.File]::ReadAllText($f, $Utf8).TrimEnd("`n") -split "`n")
+    if ($l.Count -lt 5) { return $null }
+    $st = Proc-Start $p
+    if ($st -and $l[0] -cne $st) { return $null }                # another process now has that pid
+    $t = ($l[4..($l.Count - 1)] -join "`n")
+    if (-not $t) { return $null }
+    , @($l[1], $l[2], $l[3], $t)
+}
+function Note-Json([string]$p) {
+    $r = Note-Read $p
+    if ($r) { return '{"pid": ' + $p + ', "tool": ' + (Json-S $r[0]) + ', "dir": ' + (Json-S $r[1]) + ', "at": ' + $(if ($r[2]) { $r[2] } else { 'null' }) + ', "text": ' + (Json-S $r[3]) + '}' }
+    '{"pid": ' + $p + ', "tool": null, "dir": null, "at": null, "text": null}'
+}
+function Note-Ago([string]$at) {
+    $d = [long]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) - [long]$(if ($at) { $at } else { 0 })
+    if ($d -lt 60) { '剛剛' } elseif ($d -lt 3600) { "$([math]::Floor($d / 60)) 分鐘前" } elseif ($d -lt 86400) { "$([math]::Floor($d / 3600)) 小時前" } else { "$([math]::Floor($d / 86400)) 天前" }
+}
+function Cmd-Note($rest) { # kit note [text...] | --clear | --pid PID [--json] [text...] | --history [--dir DIR] [--json]
+    $use = '用法：kit note ["做了什麼；下一步"] | kit note --clear | kit note --pid <pid> [--json] | kit note --history [--dir 資料夾] [--json]'
+    $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $json = $false; $clear = $false; $hist = $false; $words = New-List
+    for ($i = 0; $i -lt $rest.Count; $i++) {
+        $a = [string]$rest[$i]
+        if ($a -ceq '--json') { $json = $true; continue }
+        if ($a -ceq '--clear') { $clear = $true; continue }
+        if ($a -ceq '--history') { $hist = $true; continue }
+        if ($a -ceq '--') { for ($j = $i + 1; $j -lt $rest.Count; $j++) { $words.Add([string]$rest[$j]) }; break }
+        if ($a -ceq '--pid' -or $a -ceq '--dir') {
+            if ($i + 1 -ge $rest.Count) { Die-C usage $use }
+            $v = [string]$rest[++$i]; if ($a -ceq '--pid') { $cpid = $v } else { $dir = $v }; continue
+        }
+        if ($a.StartsWith('-')) { Die-C usage $use }
+        $words.Add($a)
+    }
+    if ($json) { $script:JsonOut = $true }
+    if ($cpid -and $cpid -cnotmatch '^[0-9]+\z') { Die-C usage $use }
+    if (-not $cpid -and -not $dir) {                              # the agent above (history: only for its folder)
+        $ap = Agent-Pid
+        if ($ap) { $cpid = [string]$ap[0]; $tool = [string]$ap[1] }
+        elseif (-not $hist) { Die-C no-agent '找不到上面的 agent（claude、codex、omp）：kit note 要在 agent 自己的 shell 裡跑，或用 --pid 指定' }
+    }
+    $hf = Join-Path $NoteDir 'history.tsv'
+    if ($hist) {
+        if (-not $dir -and $cpid) { $dir = Proc-Cwd ([int]$cpid) }
+        if (-not $dir) { $dir = (Get-Location).ProviderPath }
+        $rows = New-List
+        if (Test-Path -LiteralPath $hf) { foreach ($l in [IO.File]::ReadAllLines($hf, $Utf8)) { $f = $l -split "`t", 5; if ($f.Count -eq 5 -and $f[3] -ceq $dir) { $rows.Add($l) } } }
+        $sel = [string[]]$rows.ToArray(); if ($sel.Count -gt 20) { $sel = [string[]]$sel[($sel.Count - 20)..($sel.Count - 1)] }
+        [array]::Reverse($sel)
+        $sel = @(foreach ($l in $sel) { , ($l -split "`t", 5) })
+        if ($json) {
+            $items = @(foreach ($f in $sel) { '{"pid": ' + $f[1] + ', "tool": ' + (Json-S $f[2]) + ', "dir": ' + (Json-S $f[3]) + ', "at": ' + $f[0] + ', "text": ' + (Json-S ($f[4].Replace($US, "`n"))) + '}' })
+            Out-Json ('{"dir": ' + (Json-S $dir) + ', "notes": [' + ($items -join ', ') + ']}')
+        } elseif ($sel.Count -eq 0) { Say "（${dir} 還沒有人寫過進度）" }
+        else { foreach ($f in $sel) { Say "$(Note-Ago $f[0])（$($f[2]) $($f[1])）"; foreach ($x in $f[4].Split([char]31)) { Say "  $x" } } }
+        return
+    }
+    if ($clear) { $f = Join-Path $NoteDir $cpid; if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }; Say '進度清掉了'; return }
+    $text = ($words.ToArray() -join ' ')
+    if (-not $text) {
+        if ($json) { Out-Json (Note-Json $cpid) }
+        else { $r = Note-Read $cpid; if ($r) { Say $r[3]; Say "（$(Note-Ago $r[2])）" } else { Say '（還沒寫過進度）' } }
+        return
+    }
+    # write: one or two lines, each trimmed, a TAB made a space
+    $lines = @(($text -replace "[`t`r]", ' ') -split "`n" | ForEach-Object { $_.Trim(' ') } | Where-Object { $_ })
+    if ($lines.Count -eq 0) { Die-C usage $use }
+    if ($lines.Count -gt 2) { Die-C too-long '進度最多兩行：第一行寫剛做了什麼、下一步，第二行（選用）寫目標' }
+    $text = $lines -join "`n"
+    if ($Utf8.GetByteCount($text) -gt $NoteMax) { Die-C too-long "進度太長（最多 $NoteMax bytes）：寫一兩句就好" }
+    if (-not (Proc-Alive $cpid)) { Die-C no-agent "沒有這個程序：$cpid" }
+    if (-not $tool) { $tool = [string](Agent-Guess $cpid '' '')[0] }
+    $dir = Proc-Cwd ([int]$cpid); if (-not $dir) { $dir = (Get-Location).ProviderPath }
+    Ensure-Dir $NoteDir
+    foreach ($e in @(Get-ChildItem -LiteralPath $NoteDir -File -ErrorAction SilentlyContinue)) {   # notes of processes that are gone (history keeps them)
+        if ($e.Name -cmatch '^[0-9]+\z' -and -not (Proc-Alive $e.Name)) { Remove-Item -LiteralPath $e.FullName -Force }
+    }
+    $at = [string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+    $f = Join-Path $NoteDir $cpid
+    Write-Text "$f.tmp" ((Proc-Start $cpid) + "`n$tool`n$dir`n$at`n$text`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force
+    [IO.File]::AppendAllText($hf, "$at`t$cpid`t$tool`t$dir`t$($text.Replace("`n", $US))`n", $Utf8)
+    $all = [IO.File]::ReadAllLines($hf, $Utf8)
+    if ($all.Count -gt $NoteKeep + 100) { [IO.File]::WriteAllText($hf, (($all[($all.Count - $NoteKeep)..($all.Count - 1)] -join "`n") + "`n"), $Utf8) }
+    if ($json) { Out-Json (Note-Json $cpid) } else { Say '進度記下了' }
+}
 function Cmd-Files($rest) { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git] [--json] : the files that agent read or changed
     $use = '用法：kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]'
     $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $git = $false; $json = $false
@@ -5853,6 +5972,9 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                   那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
   kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
                                   那個 agent 讀過、改過的檔案，新的在前（--json 給程式讀；--git：再加上 git 有變動的）
+  kit note ["做了什麼；下一步"]      agent 寫自己做到哪（一兩行，畫面上看得到）；不帶文字：印出現在寫的
+  kit note --history [--dir 資料夾]   這個資料夾最近的進度（包括已經關掉的 agent），交接時先看
+  kit note --pid <pid> [--json]     某個 agent 的進度（--json 給程式讀）；--clear 清掉自己的
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]
                                     讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
@@ -5915,6 +6037,7 @@ try {
         'install-deps' { Cmd-InstallDeps $rest }
         'context' { Cmd-Context $rest }
         'files' { Cmd-Files $rest }
+        'note' { Cmd-Note $rest }
         'statusline' { Cmd-Statusline }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
         'run' { Cmd-Run $rest }

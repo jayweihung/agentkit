@@ -4,6 +4,16 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.0（2026-11-14）
+
+更新後要做：`kit self-update`；想讓 agent 自己寫進度，要有一條教它什麼時候寫的 rule：來源裡有 `progress-note` 的話 `kit add rule progress-note`。kit api 變成 1.4。
+
+**agent 寫自己做到哪：`kit note`**
+- agent 在自己的 shell 跑 `kit note "剛做了什麼；下一步"`，kit 記在那個 agent 名下。同時開好幾個 agent 時，畫面程式（例如終端機每一格的標題列）可以顯示每個做到哪。
+- `kit note` 不帶文字：印出現在寫的。`kit note --history`：這個資料夾最近的進度（包括已經關掉的 agent），重開或交接時先看。
+- 給程式讀：`kit note --pid <pid> --json`（README「給程式讀的介面」）。
+- Claude、Codex、omp 都可以；Codex 的沙箱可能不讓它寫 `~/.config/agentkit`。
+
 ## 0.5.3（2026-11-14）
 
 更新後要做：`kit self-update`。

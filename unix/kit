@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.3
+KIT_API=1.4
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -2442,6 +2442,112 @@ ctx_detail() { # ctx_detail PID TOOL DIR FRESH : the detail JSON, kept a minute
     printf '%s\n' "$j"
 }
 
+# ---------- kit note: one or two lines an agent writes about where it is ----------
+# The agent runs `kit note "<what just happened; next step>"` in its own shell: kit finds the agent above it (claude,
+# codex, omp), keeps the text under that process ($KIT_CONF/notes/<pid>: start, tool, folder, time, then the text) and
+# adds it to the folder's history (notes/history.tsv: time pid tool folder text, a line break kept as \037), which
+# outlives the agent (a new one in that folder reads it with kit note --history). Programs read
+# kit note --pid <pid> --json (README: 給程式讀的介面).
+NOTE_DIR="$KIT_CONF/notes"
+NOTE_MAX=1000          # bytes; one or two lines
+NOTE_KEEP=500          # history lines kept
+agent_pid() { # the agent process above this kit (claude, codex, omp: the program's own name, or a script by that name)
+    { ps -A -o pid= -o ppid= -o args= 2>/dev/null || ps -o pid,ppid,args 2>/dev/null; } | awk -v p="$$" '
+        $1 ~ /^[0-9]+$/ { a = $3; b = $4; sub(/^.*\//, "", a); sub(/^.*\//, "", b); up[$1] = $2 + 0; w1[$1] = a; w2[$1] = b }
+        function tool(x) { return x == "claude" || x == "claude.exe" || x == "claude.js" || x == "cli.js" ? "claude" : x == "codex" || x == "codex.exe" || x == "codex.js" ? "codex" : x == "omp" || x == "omp.exe" ? "omp" : "" }
+        END { p = up[p + 0]
+              for (i = 0; i < 12 && p > 1 && (p in up); i++) {
+                  t = tool(w1[p]); if (t == "") t = tool(w2[p])
+                  if (t != "") { print p " " t; exit }
+                  p = up[p] } }'
+}
+proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//'; }
+note_read() { # note_read PID : N_TOOL N_DIR N_AT N_TEXT of that process's note (1 when it has none or the pid was reused)
+    local f="$NOTE_DIR/$1" st
+    N_TOOL=; N_DIR=; N_AT=; N_TEXT=
+    [ -f "$f" ] || return 1
+    st=$(proc_start "$1")
+    [ -z "$st" ] || [ "$(sed -n 1p "$f")" = "$st" ] || return 1     # another process now has that pid
+    N_TOOL=$(sed -n 2p "$f"); N_DIR=$(sed -n 3p "$f"); N_AT=$(sed -n 4p "$f"); N_TEXT=$(sed -n '5,$p' "$f")
+    [ -n "$N_TEXT" ]
+}
+note_json() { # note_json PID : that process's note as JSON (text null: none)
+    if note_read "$1"; then
+        printf '{"pid": %s, "tool": %s, "dir": %s, "at": %s, "text": %s}' "$1" "$(json_s "$N_TOOL")" "$(json_s "$N_DIR")" "${N_AT:-null}" "$(json_s "$N_TEXT")"
+    else printf '{"pid": %s, "tool": null, "dir": null, "at": null, "text": null}' "$1"; fi
+}
+note_ago() { # note_ago EPOCH : 剛剛 / N 分鐘前 / N 小時前 / N 天前
+    local d=$(( $(date +%s) - ${1:-0} ))
+    if [ "$d" -lt 60 ]; then echo 剛剛; elif [ "$d" -lt 3600 ]; then echo "$((d / 60)) 分鐘前"
+    elif [ "$d" -lt 86400 ]; then echo "$((d / 3600)) 小時前"; else echo "$((d / 86400)) 天前"; fi
+}
+cmd_note() { # kit note [text...] | --clear | --pid PID [--json] [text...] | --history [--dir DIR] [--json]
+    local pid="" tool="" dir="" json="" clear="" hist="" text="" a f p n=0 out=""
+    local use="用法：kit note [\"做了什麼；下一步\"] | kit note --clear | kit note --pid <pid> [--json] | kit note --history [--dir 資料夾] [--json]"
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --pid|--dir) [ $# -ge 2 ] || die_c usage "$use"
+                case $1 in --pid) pid=$2;; *) dir=$2;; esac; shift 2;;
+            --json) json=1; shift;;
+            --clear) clear=1; shift;;
+            --history) hist=1; shift;;
+            --) shift; text="$text${text:+ }$*"; break;;
+            -*) die_c usage "$use";;
+            *) text="$text${text:+ }$1"; shift;;
+        esac
+    done
+    [ -z "$json" ] || json_mode
+    case $pid in *[!0-9]*) die_c usage "$use";; esac
+    if [ -z "$pid" ] && [ -z "$dir" ]; then                 # the agent above (history: only for its folder)
+        a=$(agent_pid)
+        if [ -n "$a" ]; then pid=${a%% *}; tool=${a#* }
+        elif [ -z "$hist" ]; then die_c no-agent "找不到上面的 agent（claude、codex、omp）：kit note 要在 agent 自己的 shell 裡跑，或用 --pid 指定"; fi
+    fi
+    if [ -n "$hist" ]; then
+        if [ -z "$dir" ] && [ -n "$pid" ]; then dir=$(proc_cwd "$pid"); fi
+        [ -n "$dir" ] || dir=$PWD
+        out=$( [ -f "$NOTE_DIR/history.tsv" ] && awk -F '\t' -v d="$dir" '$4 == d' "$NOTE_DIR/history.tsv" | tail -n 20 | awk '{ l[NR] = $0 } END { for (i = NR; i >= 1; i--) print l[i] }' )
+        if [ -n "$json" ]; then
+            printf '{"dir": %s, "notes": [' "$(json_s "$dir")" >&3
+            [ -z "$out" ] || printf '%s\n' "$out" | while IFS="$TAB" read -r at p t d x; do
+                [ $n = 0 ] || printf ', ' >&3; n=1
+                printf '{"pid": %s, "tool": %s, "dir": %s, "at": %s, "text": %s}' "$p" "$(json_s "$t")" "$(json_s "$d")" "$at" "$(json_s "$(printf '%s' "$x" | tr "$US" '\n')")" >&3
+            done
+            printf ']}\n' >&3
+        elif [ -z "$out" ]; then echo "（${dir} 還沒有人寫過進度）"
+        else printf '%s\n' "$out" | while IFS="$TAB" read -r at p t d x; do
+                printf '%s（%s %s）\n' "$(note_ago "$at")" "$t" "$p"; printf '%s\n' "$x" | tr "$US" '\n' | sed 's/^/  /'; done
+        fi
+        return 0
+    fi
+    if [ -n "$clear" ]; then rm -f "$NOTE_DIR/$pid"; say "進度清掉了"; return 0; fi
+    if [ -z "$text" ]; then
+        if [ -n "$json" ]; then note_json "$pid" >&3; echo >&3
+        elif note_read "$pid"; then printf '%s\n（%s）\n' "$N_TEXT" "$(note_ago "$N_AT")"
+        else echo "（還沒寫過進度）"; fi
+        return 0
+    fi
+    # write: one or two lines, each trimmed, a TAB made a space
+    text=$(printf '%s\n' "$text" | tr '\t\r' '  ' | sed 's/^ *//; s/ *$//' | grep -v '^$')
+    [ -n "$text" ] || die_c usage "$use"
+    [ "$(printf '%s\n' "$text" | wc -l | tr -d ' ')" -le 2 ] || die_c too-long "進度最多兩行：第一行寫剛做了什麼、下一步，第二行（選用）寫目標"
+    [ "$(printf '%s' "$text" | wc -c | tr -d ' ')" -le $NOTE_MAX ] || die_c too-long "進度太長（最多 $NOTE_MAX bytes）：寫一兩句就好"
+    kill -0 "$pid" 2>/dev/null || die_c no-agent "沒有這個程序：$pid"
+    [ -n "$tool" ] || { agent_guess "$pid" "" ""; tool=$A_TOOL; }
+    dir=$(proc_cwd "$pid"); [ -n "$dir" ] || dir=$PWD
+    mkdir -p "$NOTE_DIR"
+    for f in "$NOTE_DIR"/*; do                                   # notes of processes that are gone (history keeps them)
+        p=${f##*/}; case $p in ""|*[!0-9]*) continue;; esac
+        kill -0 "$p" 2>/dev/null || rm -f "$f"
+    done
+    a=$(date +%s)
+    { proc_start "$pid"; printf '%s\n%s\n%s\n%s\n' "$tool" "$dir" "$a" "$text"; } > "$NOTE_DIR/$pid.tmp" && mv "$NOTE_DIR/$pid.tmp" "$NOTE_DIR/$pid"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$a" "$pid" "$tool" "$dir" "$(printf '%s' "$text" | tr '\n' "$US")" >> "$NOTE_DIR/history.tsv"
+    [ "$(wc -l < "$NOTE_DIR/history.tsv" | tr -d ' ')" -le $((NOTE_KEEP + 100)) ] ||
+        { tail -n $NOTE_KEEP "$NOTE_DIR/history.tsv" > "$NOTE_DIR/history.tmp" && mv "$NOTE_DIR/history.tmp" "$NOTE_DIR/history.tsv"; }
+    if [ -n "$json" ]; then note_json "$pid" >&3; echo >&3; else say "進度記下了"; fi
+}
+
 # ---------- kit files: the files an agent read or changed ----------
 # One JSON line (kit.ps1 prints the same), from the agent's own log; only paths are taken from it, and of what was said
 # only the start of the person's messages (turns' "text", 30 characters at most):
@@ -4555,6 +4661,9 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                   那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
   kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
                                   那個 agent 讀過、改過的檔案，新的在前（--json 給程式讀；--git：再加上 git 有變動的）
+  kit note ["做了什麼；下一步"]      agent 寫自己做到哪（一兩行，畫面上看得到）；不帶文字：印出現在寫的
+  kit note --history [--dir 資料夾]   這個資料夾最近的進度（包括已經關掉的 agent），交接時先看
+  kit note --pid <pid> [--json]     某個 agent 的進度（--json 給程式讀）；--clear 清掉自己的
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]
                                     讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
@@ -4630,6 +4739,7 @@ case ${1:-} in
     install-deps) shift; cmd_install_deps "$@";;
     context)   shift; cmd_context "$@";;
     files)     shift; cmd_files "$@";;
+    note)      shift; cmd_note "$@";;
     statusline) shift; cmd_statusline "$@";;
     collect)   shift; cmd_collect "$@";;
     outdated)  shift; cmd_outdated "$@";;

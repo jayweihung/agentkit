@@ -286,7 +286,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.3)' { $rc -eq 0 -and $out -ceq '1.3' }
+Check 'api: one line, major.minor (1.4)' { $rc -eq 0 -and $out -ceq '1.4' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -311,17 +311,17 @@ Kit list
 Check 'team version changed: list tells again (numbers, not text)' { $out.Contains('團隊要 kit 0.10.0 以上') }
 $realKit = $Kit; $Kit = Join-Path $T 'dev/windows/kit.ps1'
 W $Kit ''; Copy-Item -LiteralPath $realKit -Destination $Kit -Force
-Team-Version '0.6.0'
+Team-Version '9.6.0'
 Kit sync
 Check 'dev build (no VERSION) is not told' { -not $out.Contains('團隊要') }
-W "$T/dev/VERSION" "0.6.0+local`n"; Kit sync
+W "$T/dev/VERSION" "9.6.0+local`n"; Kit sync
 Check '+build part ignored' { -not $out.Contains('團隊要') }
-W "$T/dev/VERSION" "0.5.9`n"; Kit sync
-Check 'older patch level is told' { $out.Contains('團隊要 kit 0.6.0 以上，你的是 0.5.9') }
-W "$T/dev/VERSION" "0.6.0`n"; Kit sync
+W "$T/dev/VERSION" "9.5.9`n"; Kit sync
+Check 'older patch level is told' { $out.Contains('團隊要 kit 9.6.0 以上，你的是 9.5.9') }
+W "$T/dev/VERSION" "9.6.0`n"; Kit sync
 Check 'new enough: note forgotten' { (State-Nag) -eq 0 }
 $Kit = $realKit
-# kit_version 0.6.0 stays for the background sync below
+# kit_version 9.6.0 stays for the background sync below
 
 # ---------- ci-template ----------
 Kit ci-template
@@ -377,7 +377,7 @@ Check 'hook: kit_version not told in the background' { -not (ReadT "$H/.config/a
 Kit sync --hook; Start-Sleep -Seconds 2
 Check 'hook runs at most every 10 minutes' { -not (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('second change') }
 Kit sync
-Check 'hook: kit_version told at the next sync' { $out.Contains('團隊要 kit 0.6.0 以上') }
+Check 'hook: kit_version told at the next sync' { $out.Contains('團隊要 kit 9.6.0 以上') }
 W "$TEAM/kit.yaml" $teamYaml
 
 # ---------- is Claude saving its transcript? (kit sync --hook under a fake claude started with a chosen environment) ----------
