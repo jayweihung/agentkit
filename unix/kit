@@ -832,12 +832,20 @@ hook_json() { # hook_json [ARGS TIMEOUT] : a hook entry kit adds to settings.jso
 }
 
 # Codex: ~/.codex/hooks.json takes Claude's hook format. kit sync --hook when Codex starts, kit handoff-hook before
-# each prompt (state: hook.codex). Codex runs a new or changed hook only once you trust it: /hooks in Codex.
+# each prompt, kit codex-guard before its shell commands and patches (state: hook.codex). Codex runs a new or changed
+# hook only once you trust it: /hooks in Codex.
+codex_hook_json() { # codex_hook_json EVENT : kit's entry for that event
+    case $1 in
+        SessionStart) hook_json;;
+        UserPromptSubmit) hook_json handoff-hook 5;;
+        PreToolUse) printf '{"matcher":"Bash|apply_patch",%s' "$(hook_json codex-guard 10 | cut -c2-)";;
+    esac
+}
 codex_hooks() {
     local f="$CODEX_DIR/hooks.json" ops e hj old changed=""
     ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
-    for e in SessionStart UserPromptSubmit; do
-        if [ $e = SessionStart ]; then hj=$(hook_json); else hj=$(hook_json handoff-hook 5); fi
+    for e in SessionStart UserPromptSubmit PreToolUse; do
+        hj=$(codex_hook_json $e)
         old=$(state_get hook.codex $e)
         [ "$hj" = "$old" ] && continue
         [ -n "$old" ] && printf 'rmjson\thooks.%s\t%s\n' $e "$old" >> "$ops"
@@ -846,12 +854,85 @@ codex_hooks() {
     if [ -n "$changed" ]; then
         [ -f "$f" ] || state_set made "$f" 1
         json_edit "$f" "$ops"
-        for e in $changed; do
-            if [ $e = SessionStart ]; then state_set hook.codex $e "$(hook_json)"; else state_set hook.codex $e "$(hook_json handoff-hook 5)"; fi
-        done
-        [ -n "$(state_get told codex-hooks)" ] || { say "  Codex：kit 的 hook 放進 ~/.codex/hooks.json 了，下次開 Codex 打 /hooks 信任它（kit sync 和 context 快滿的提醒）"; state_set told codex-hooks 1; }
+        for e in $changed; do state_set hook.codex $e "$(codex_hook_json $e)"; done
+        [ -n "$(state_get told codex-guard)" ] || { say "  Codex：kit 的 hook 放進 ~/.codex/hooks.json 了，下次開 Codex 打 /hooks 信任它（kit sync、context 快滿的提醒、agent 的工具限制）"; state_set told codex-guard 1; }
     fi
     rm -f "$ops"
+    # the team's tools.deny, kept for kit codex-guard (it runs before each shell command: reading the sources' kit.yaml each time is slow)
+    local want rd="$CTX_DIR/required-deny.txt"; want=$(required_deny)
+    [ -f "$rd" ] && [ "$(cat "$rd")" = "$want" ] || { mkdir -p "$CTX_DIR" 2>/dev/null; printf '%s\n' "$want" > "$rd"; }
+}
+# What kit holds back in Codex. Codex hands its PreToolUse hook the shell command it is about to run (tool Bash) and
+# its patches (apply_patch: adding a file is Write; changing, moving or deleting one is Edit). kit codex-guard says no to
+# what tools.only and tools.deny leave out (Claude's spelling: "Bash", "Bash(git push:*)", "Edit", "Write"): the team's
+# (required.tools.deny), a placed folder's agent's (Codex opened there or below), kit run's (KIT_CODEX_ONLY,
+# KIT_CODEX_DENY, which kit run sets for that Codex). A command is checked a piece at a time (split at && || ; |, new
+# lines, & ( ) and `), each piece from its start. MCP tools: disabled_tools in config.toml.
+CODEX_GUARD_AWK='function trim(s) { sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s }
+    BEGIN { tool = ENVIRON["G_TOOL"]; cmd = ENVIRON["G_CMD"]
+        n = split(ENVIRON["G_ONLY"], O, /[,\n]/); for (i = 1; i <= n; i++) { o = trim(O[i]); if (o != "") { only[o] = 1; lim = 1 } }
+        nd = split(ENVIRON["G_DENY"], D, "\n")
+        if (tool == "apply_patch") {
+            add = cmd ~ /(^|\n)\*\*\* Add File:/; chg = cmd ~ /(^|\n)\*\*\* (Update|Delete) File:/
+            if (lim && add && !only["Write"]) { print "kit: this agent does not use Write (tools.only): no new files"; exit }
+            if (lim && chg && !only["Edit"] && !only["MultiEdit"]) { print "kit: this agent does not use Edit (tools.only): no changing files"; exit }
+            for (i = 1; i <= nd; i++) { d = trim(D[i]); t = d; sub(/\(\*?\)$/, "", t)
+                if ((add && t == "Write") || (chg && (t == "Edit" || t == "MultiEdit"))) { print "kit: " d " is not allowed (tools.deny)"; exit } }
+            exit }
+        if (tool != "Bash") exit
+        if (lim && !only["Bash"]) { print "kit: this agent does not use Bash (tools.only)"; exit }
+        s = cmd; gsub(/&&|\|\||[;|&\n()`]/, "\001", s); np = split(s, P, "\001")
+        for (i = 1; i <= nd; i++) { d = trim(D[i])
+            if (d == "Bash" || d == "Bash()" || d == "Bash(*)") { print "kit: " d " is not allowed (tools.deny)"; exit }
+            if (d !~ /^Bash\(.+\)$/) continue
+            spec = substr(d, 6, length(d) - 6); pre = spec ~ /:\*$/; if (pre) spec = substr(spec, 1, length(spec) - 2)
+            for (j = 1; j <= np; j++) { p = trim(P[j]); if (pre ? index(p, spec) == 1 : p == spec) { print "kit: " d " is not allowed (tools.deny)"; exit } } } }'
+json_unq() { # json_unq RAW : the text of a JSON string (\uXXXX: the ASCII ones; others left as they are)
+    printf '%s' "$1" | LC_ALL=C awk 'BEGIN { RS = "\001"; H = "0123456789abcdef" }
+        { s = $0; sub(/^[ \t\r\n]*"/, "", s); sub(/"[ \t\r\n]*$/, "", s); o = ""
+          while ((i = index(s, "\\")) > 0) { o = o substr(s, 1, i - 1); c = substr(s, i + 1, 1)
+            if (c == "n") o = o "\n"; else if (c == "t") o = o "\t"; else if (c == "r") o = o "\r"
+            else if (c == "u") { h = tolower(substr(s, i + 2, 4)); v = 0
+                for (k = 1; k <= 4; k++) v = v * 16 + index(H, substr(h, k, 1)) - 1
+                o = o (v >= 32 && v < 127 ? sprintf("%c", v) : "\\u" h); s = substr(s, i + 6); continue }
+            else o = o c
+            s = substr(s, i + 2) }
+          printf "%s", o s }'
+}
+codex_guard_says() { # codex_guard_says TOOL CMD ONLY DENY : why Codex may not (nothing: it may)
+    G_TOOL=$1 G_CMD=$2 G_ONLY=$3 G_DENY=$4 LC_ALL=C awk "$CODEX_GUARD_AWK"
+}
+cmd_codex_guard() { # Codex's PreToolUse hook (~/.codex/hooks.json): what it hands over on stdin
+    local in tool cmd cwd r af fm only="" deny why=""
+    in=$(cat); tool=$(str_of tool_name "$in")
+    case $tool in Bash|apply_patch) ;; *) return 0;; esac
+    cmd=$(json_unq "$(printf '%s' "$in" | json_get /dev/stdin tool_input.command)")
+    cwd=$(json_unq "$(printf '%s' "$in" | json_get /dev/stdin cwd)")
+    if [ -f "$CTX_DIR/required-deny.txt" ]; then deny=$(cat "$CTX_DIR/required-deny.txt"); else deny=$( [ -f "$MACHINE" ] && required_deny 2>/dev/null); fi
+    if [ -n "$cwd" ] && [ -d "$cwd" ] && r=$(dir_root "$cwd") && [ -n "$(dir_mark "$r" agent)" ] && af=$(placed_file "$r"; [ $? != 1 ]); then
+        fm=$(fm_of "$af"); only=$(fm_val "$fm" tools.only); deny="$deny$LF$(fm_val "$fm" tools.deny)"
+    fi
+    why=$(codex_guard_says "$tool" "$cmd" "$only" "$deny")
+    [ -n "$why" ] || [ -z "${KIT_CODEX_ONLY:-}${KIT_CODEX_DENY:-}" ] || why=$(codex_guard_says "$tool" "$cmd" "${KIT_CODEX_ONLY:-}" "${KIT_CODEX_DENY:-}")
+    [ -n "$why" ] || return 0
+    printf '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": %s}}\n' "$(json_s "$why")"
+}
+codex_limits_warn() { # codex_limits_warn ONLY DENY : what kit codex-guard cannot apply, one line each
+    local n
+    if [ -n "$1" ]; then
+        echo "Codex 的 tools.only 只管得到 shell（Bash）和改檔（Edit、Write）：Codex 其他的內建工具照樣能用"
+        printf '%s\n' "$1" | tr ',' '\n' | grep -qx Bash || echo "tools.only 沒有 Bash：Codex 讀檔、找檔也是用 shell，所以在 Codex 裡也不能讀檔"
+    fi
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        case $n in
+        mcp__*|Bash|Bash\(*|Edit|Edit\(\*\)|MultiEdit|MultiEdit\(\*\)|Write|Write\(\*\)) ;;
+        *\(*) echo "Codex 只擋得了 Bash(...) 這種帶內容的規則：tools.deny 的 $n 不套用";;
+        *) echo "Codex 沒有 kit 擋得到、跟 $n 一樣的工具：tools.deny 的這條不套用";;
+        esac
+    done <<EOF
+$2
+EOF
 }
 # omp: kit's hook module (templates/omp-hook.txt, filled in): ~/.omp/agent/hooks/pre/kit.js runs kit sync --hook when a
 # session starts and applies the team's tools.deny (required.tools.deny, Claude's spelling); a placed agent's folder gets
@@ -3911,8 +3992,8 @@ EOF
             [ -n "$t" ] && k="${k%\}}, disabled_tools=[$t]}"
             args+=(-c "mcp_servers.$(toml_key "$n")=$k")
         done
-        [ -n "$only" ] && warn "Codex 不能只開某些內建工具，tools.only 這次不套用"
-        printf '%s\n' "$deny" | grep -qv '^mcp__' && [ -n "$deny" ] && warn "Codex 只能禁用 MCP 的工具，其他的 tools.deny 這次不套用"
+        # tools.only, tools.deny: kit codex-guard (Codex's PreToolUse hook) reads them from this Codex's environment
+        codex_limits_warn "$only" "$deny" | while IFS= read -r a; do warn "$a"; done
         ;;
     omp)
         printf 'skills:\n  customDirectories:\n    - %s\n' "$(toml_str "$skdir")" > "$tmp/omp.yml"
@@ -3933,7 +4014,7 @@ EOF
     # a marker (this process -> agent name), so a program showing the pane can tell which agent runs in it
     mkdir -p "$KIT_CONF/run" 2>/dev/null && printf '%s\n' "$name" > "$KIT_CONF/run/$$"
     trap : INT                                               # Ctrl-C is the agent's; kit cleans up when it ends
-    "$tool" "$@"
+    if [ $tool = codex ]; then KIT_CODEX_ONLY=$only KIT_CODEX_DENY=$deny "$tool" "$@"; else "$tool" "$@"; fi
     local rc=$?
     trap 'exit 130' INT
     rm -rf "$tmp"; rm -f "$KIT_CONF/run/$$"; KIT_RUN_TMP=
@@ -3991,8 +4072,7 @@ cmd_place() { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR
     case $tool in
     claude) ;;                                               # tools.only: deny for the others (kit check tells the author)
     codex)
-        [ -z "$only" ] || warns="${warns}Codex 不能只開某些內建工具：tools.only 不套用$LF"
-        printf '%s\n' "$deny" | grep -v '^mcp__' | grep -q . && warns="${warns}Codex 只能禁用 MCP 的工具：其他的 tools.deny 不套用$LF";;
+        local cw; cw=$(codex_limits_warn "$only" "$deny"); [ -z "$cw" ] || warns="$warns$cw$LF";;
     omp)
         local ow; ow=$(omp_limits_warn "$only" "$deny"); [ -z "$ow" ] || warns="$warns$ow$LF";;
     esac
@@ -4035,7 +4115,7 @@ EOF
     [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
     : > "$ops"                                               # Codex's hooks.json, omp's hook module
     while IFS="$TAB" read -r k n v; do [ "$k" = hook.codex ] && printf 'rmjson\thooks.%s\t%s\n' "$n" "$v" >> "$ops"; done < "${STATE:-/dev/null}" 2>/dev/null
-    [ -s "$ops" ] && [ -f "$CODEX_DIR/hooks.json" ] && { json_edit "$CODEX_DIR/hooks.json" "$ops"; prune_empty "$CODEX_DIR/hooks.json" hooks.SessionStart hooks.UserPromptSubmit hooks; drop_made "$CODEX_DIR/hooks.json"; }
+    [ -s "$ops" ] && [ -f "$CODEX_DIR/hooks.json" ] && { json_edit "$CODEX_DIR/hooks.json" "$ops"; prune_empty "$CODEX_DIR/hooks.json" hooks.SessionStart hooks.UserPromptSubmit hooks.PreToolUse hooks; drop_made "$CODEX_DIR/hooks.json"; }
     rm -f "$ops"
     f="$OMP_DIR/hooks/pre/kit.js"; [ -f "$f" ] && [ "$(head -n 1 "$f")" = "$OMP_HOOK_HEAD" ] && rm -f "$f"
     [ $left = 0 ] || die "有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall"
@@ -5392,6 +5472,7 @@ case ${1:-} in
     pending)   shift; cmd_pending "$@";;
     statusline) shift; cmd_statusline "$@";;
     handoff-hook) shift; cmd_handoff_hook "$@";;
+    codex-guard) shift; cmd_codex_guard "$@";;
     collect)   shift; cmd_collect "$@";;
     outdated)  shift; cmd_outdated "$@";;
     status)    shift; cmd_status "$@" >&3;;

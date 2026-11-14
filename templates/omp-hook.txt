@@ -41,8 +41,10 @@ function denied(d, tool, cmd) {
       : name.startsWith(`${d.server}_`) || name.includes(`_${d.server}_`);
   }
   if (!d.tools.includes(tool)) return false;
-  if (d.prefix !== undefined) return cmd.startsWith(d.prefix);
-  if (d.exact !== undefined) return cmd === d.exact;
+  // a command a piece at a time (split at && || ; | & ( ) ` and new lines), each piece from its start
+  const pieces = cmd.split(/&&|\|\||[;|&\n()`]/).map((p) => p.trim());
+  if (d.prefix !== undefined) return pieces.some((p) => p.startsWith(d.prefix));
+  if (d.exact !== undefined) return pieces.includes(d.exact);
   return true;
 }
 

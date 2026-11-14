@@ -28,6 +28,11 @@
 - `kit usage` 多一個 `omp`：`omp usage` 回報的各服務用量（anthropic、openai-codex…），kit 在背景每 5 分鐘問一次，只留數字。
 - omp 的 context 上限：不再套用 Claude Code `settings.json` 的 `autoCompactWindow`（omp 不讀它），只看 omp 自己的模型清單，沒有才用 kit 的猜測。
 
+**Codex 也照 agent 的工具限制（shell 和改檔）**
+- `~/.codex/hooks.json` 多一個 PreToolUse hook（`kit codex-guard`）：Codex 跑 shell 指令、改檔案前問 kit，照團隊規定、`kit place` 放的資料夾（和子資料夾）的 agent、`kit run --tool codex` 的 agent 的 tools.only、tools.deny 擋（`Bash`、`Bash(git push:*)`、`Edit`、`Write`）。實測過 Codex 0.167 會照它的回答擋下來。
+- `Bash(...)` 逐段比：`cd x && git push`、`$(git push)` 也擋。omp 的 hook 模組也改成一樣。
+- Codex 其他的內建工具、別的工具的 `( )` 寫法擋不到，kit 會說。新的 hook 要在 Codex 打 `/hooks` 信任一次。
+
 **omp 也照 agent 的工具限制（tools.only、tools.deny）**
 - `kit place … --tool omp`：限制寫進資料夾的 `.omp/hooks/pre/kit.js`；`kit run … --tool omp`：`--tools` 只開 agent 要的工具，deny 用一個暫時的 `--extension`。
 - 團隊規定一定要擋的（required 的 deny），寫進 `~/.omp/agent/hooks/pre/kit.js`，每個 omp 都擋。

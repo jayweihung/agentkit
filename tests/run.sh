@@ -404,6 +404,10 @@ dev=$(echo "$out" | sed -n 's/^developer_instructions=//p')
 srv=$(echo "$out" | sed -n 's/^mcp_servers\.gerrit=//p')
 check "codex run: instructions have rule, body, skill path" 'echo "$dev" | grep -q "Only comment" && echo "$dev" | grep -q "Gerrit helper" && echo "$dev" | grep -qF "$tmp/skills/gerrit-review/SKILL.md"'
 check "codex run: values are valid TOML" 'printf "a = %s\nb = %s\n" "$dev" "$srv" | python3 -c "import sys,tomllib; d=tomllib.loads(sys.stdin.read()); assert d[\"b\"][\"command\"]==\"uvx\"" 2>/dev/null'
+check "codex run: what kit codex-guard cannot hold back, said" 'echo "$out" | grep -qF "Codex 的 tools.only 只管得到 shell（Bash）和改檔（Edit、Write）：Codex 其他的內建工具照樣能用" && echo "$out" | grep -qF "tools.only 沒有 Bash：Codex 讀檔、找檔也是用 shell，所以在 Codex 裡也不能讀檔"'
+mkdir -p "$T/fakecx"; printf '#!/bin/sh\nprintf "%%s|%%s\\n" "$KIT_CODEX_ONLY" "$KIT_CODEX_DENY" > "%s/cxenv"\n' "$T" > "$T/fakecx/codex"; chmod +x "$T/fakecx/codex"
+PATH="$T/fakecx:$PATH" kit run gerrit --tool codex >/dev/null 2>&1
+check "codex run: the agent's tools.only and tools.deny in that Codex's environment (for kit codex-guard)" '[ "$(cat "$T/cxenv" 2>/dev/null)" = "Read,Grep,Glob|mcp__gerrit__submit_change" ]'
 check "codex run: deny -> disabled_tools" 'echo "$srv" | grep -qF "disabled_tools=[\"submit_change\"]"'
 check "codex run: env not expanded" 'echo "$srv" | grep -qF "\${HOME}/.config/gerrit"'
 check "codex run: warns tools.only, keeps user args" 'echo "$out" | grep -q "tools.only" && echo "$out" | grep -qx exec'
@@ -881,6 +885,8 @@ fi
 check "no backup for a file kit created" '[ ! -e "$H4/.agents/mcp.json.kit-backup" ] && [ ! -e "$H4/.omp/agent/mcp.json.kit-backup" ] || [ "$(cat "$H4/.omp/agent/mcp.json.kit-backup")" != "{}" ]'
 check "omp mcp.json has kit server and own" '[ "$(jget "$H4/.omp/agent/mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && [ "$(jget "$H4/.omp/agent/mcp.json" mcpServers.own.command)" = "\"y\"" ]'
 check "codex hooks.json: kit sync when Codex starts, handoff-hook before each prompt (Claude's hook format)" 'jget "$H4/.codex/hooks.json" hooks.SessionStart | grep -qF "sync --hook" && jget "$H4/.codex/hooks.json" hooks.UserPromptSubmit | grep -qF "handoff-hook"'
+check "codex-guard: the team's tools.deny kept by kit sync (no reading the sources each time)" 'grep -qx "mcp__gerrit__submit_change" "$H4/.config/agentkit/ctx/required-deny.txt"'
+check "codex hooks.json: codex-guard before its shell commands and patches" 'jget "$H4/.codex/hooks.json" hooks.PreToolUse | grep -qF "codex-guard" && jget "$H4/.codex/hooks.json" hooks.PreToolUse | grep -qF "\"Bash|apply_patch\""'
 check "omp hook module: kit sync --hook at session_start (in the background), the team's tools.deny" 'head -n 1 "$H4/.omp/agent/hooks/pre/kit.js" | grep -qF "written by kit (agentkit)" && grep -qF "sync --hook" "$H4/.omp/agent/hooks/pre/kit.js" && grep -qF "pi.on(\"session_start\"" "$H4/.omp/agent/hooks/pre/kit.js" && grep -qF "const DENY = [\"mcp__gerrit__submit_change\"];" "$H4/.omp/agent/hooks/pre/kit.js"'
 if command -v node >/dev/null 2>&1; then
     cp "$H4/.omp/agent/hooks/pre/kit.js" "$T/omphook.mjs"
@@ -1073,7 +1079,46 @@ check "agent unreadable (bad header): the folder is left as it was" 'snap "$G" |
 mv "$T/gerrit.md.away" "$TEAM/agents/gerrit.md"; out=$(kit sync 2>&1)
 check "agent back: kit sync as before, nothing to say" 'snap "$G" | cmp -s - "$T/place2" && ! echo "$out" | grep -qF "找不到或讀不懂"'
 out=$(kit place gerrit "$W/gx" --tool codex --json 2>/dev/null); rc=$?
-check "place --tool codex: the command and what Codex cannot do" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"tool\": \"codex\", \"command\": [\"codex\"], \"warnings\": [\"Codex 不能只開某些內建工具：tools.only 不套用\"]" && grep -qx "tool:codex" "$W/gx/.agentkit" && grep -qx "You are the Gerrit helper." "$W/gx/AGENTS.md"'
+check "place --tool codex: the command and what Codex cannot do" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"tool\": \"codex\", \"command\": [\"codex\"], \"warnings\": [\"Codex 的 tools.only 只管得到 shell（Bash）和改檔（Edit、Write）：Codex 其他的內建工具照樣能用\", \"tools.only 沒有 Bash：Codex 讀檔、找檔也是用 shell，所以在 Codex 裡也不能讀檔\"]" && grep -qx "tool:codex" "$W/gx/.agentkit" && grep -qx "You are the Gerrit helper." "$W/gx/AGENTS.md"'
+# Codex: kit codex-guard (its PreToolUse hook) says no to what the agent leaves out, in its folder and below; kit run's
+# limits come in its environment; a command a piece at a time
+cg() { printf '{"session_id":"s","tool_name":"%s","tool_input":{"command":"%s"},"cwd":"%s"}' "$1" "$2" "$3"; }
+mkdir -p "$W/gx/sub"; CGP='*** Begin Patch\n*** Update File: a.txt\n@@\n-x\n+y\n*** End Patch'; CGA='*** Begin Patch\n*** Add File: b.txt\n+y\n*** End Patch'
+cgall() { # the answers, one per line
+    cg Bash "ls -la" "$W/gx/sub" | "$@" codex-guard; echo .
+    cg apply_patch "$CGP" "$W/gx" | "$@" codex-guard; echo .
+    cg Bash "ls" "$T" | "$@" codex-guard; echo .
+    cg mcp__gerrit__get_change "" "$W/gx" | "$@" codex-guard; echo .
+    cg Bash "cd x \u0026\u0026 git push origin" "$T" | KIT_CODEX_DENY='Bash(git push:*)' "$@" codex-guard; echo .
+    cg Bash "x=\$(git push)" "$T" | KIT_CODEX_DENY='Bash(git push:*)' "$@" codex-guard; echo .
+    cg Bash "git status; git pushx" "$T" | KIT_CODEX_DENY="Bash(git status)$LF" "$@" codex-guard; echo .
+    cg Bash "git log" "$T" | KIT_CODEX_DENY='Bash(git push:*)' "$@" codex-guard; echo .
+    cg apply_patch "$CGA" "$T" | KIT_CODEX_ONLY='Read,Bash,Edit' "$@" codex-guard; echo .
+    cg apply_patch "$CGP" "$T" | KIT_CODEX_DENY='Write' "$@" codex-guard; echo .
+}
+LF='
+'
+out=$(cgall kit)
+want='{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "kit: this agent does not use Bash (tools.only)"}}
+.
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "kit: this agent does not use Edit (tools.only): no changing files"}}
+.
+.
+.
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "kit: Bash(git push:*) is not allowed (tools.deny)"}}
+.
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "kit: Bash(git push:*) is not allowed (tools.deny)"}}
+.
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "kit: Bash(git status) is not allowed (tools.deny)"}}
+.
+.
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "kit: this agent does not use Write (tools.only): no new files"}}
+.
+.'
+check "codex-guard: the placed folder's agent (and below), kit run's limits, a piece at a time, patches as Edit / Write" '[ "$out" = "$want" ]'
+[ "$out" = "$want" ] || printf '%s\n' "$out" | diff - <(printf '%s\n' "$want") | head -20
+[ -n "$PWSH" ] && { out2=$(cgall kps); check "codex-guard: kit.ps1 says the same" '[ "$out2" = "$out" ]'; }
+rmdir "$W/gx/sub"
 out=$(kit place gerrit "$W/go" --tool omp --json 2>/dev/null); rc=$?
 check "place --tool omp: the folder's .mcp.json is omp's too; tool limits through kit's hook module in the folder" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"command\": [\"omp\"], \"warnings\": []" && [ "$(jget "$W/go/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && grep -qF "const ONLY = [\"Read\", \"Grep\", \"Glob\"];" "$W/go/.omp/hooks/pre/kit.js" && grep -qF "const DENY = [\"mcp__gerrit__submit_change\"];" "$W/go/.omp/hooks/pre/kit.js"'
 if command -v node >/dev/null 2>&1; then   # what kit's omp module blocks: a tool outside tools.only, the denied MCP tool (a plugin's too)

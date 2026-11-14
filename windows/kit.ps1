@@ -1684,22 +1684,100 @@ function Hook-Json([string]$args1 = 'sync --hook', [string]$timeout = '10') { # 
 }
 
 # Codex: ~/.codex/hooks.json takes Claude's hook format. kit sync --hook when Codex starts, kit handoff-hook before
-# each prompt (state: hook.codex). Codex runs a new or changed hook only once you trust it: /hooks in Codex.
+# each prompt, kit codex-guard before its shell commands and patches (state: hook.codex). Codex runs a new or changed
+# hook only once you trust it: /hooks in Codex.
+function Codex-HookJson([string]$e) { # kit's entry for that event
+    switch ($e) {
+        'SessionStart' { Hook-Json }
+        'UserPromptSubmit' { Hook-Json 'handoff-hook' '5' }
+        'PreToolUse' { '{"matcher":"Bash|apply_patch",' + (Hook-Json 'codex-guard' '10').Substring(1) }
+    }
+}
 function Codex-Hooks {
     $f = Join-Path $CodexDir 'hooks.json'
     $ops = New-Object System.Collections.Generic.List[object]; $changed = @()
-    foreach ($e in 'SessionStart', 'UserPromptSubmit') {
-        $hj = if ($e -eq 'SessionStart') { Hook-Json } else { Hook-Json 'handoff-hook' '5' }
+    foreach ($e in 'SessionStart', 'UserPromptSubmit', 'PreToolUse') {
+        $hj = Codex-HookJson $e
         $old = State-Get 'hook.codex' $e
         if ($hj -eq $old) { continue }
         if ($old) { $ops.Add(@('rmjson', "hooks.$e", $old)) }
         $ops.Add(@('addjson', "hooks.$e", $hj)); $changed += , @($e, $hj)
     }
+    # the team's tools.deny, kept for kit codex-guard (it runs before each shell command: reading the sources' kit.yaml each time is slow)
+    $rd = Join-Path $CtxDir 'required-deny.txt'; $want = (@(Required-Deny) -join "`n") + "`n"
+    if (-not ((Test-Path -LiteralPath $rd) -and (Read-Text $rd) -eq $want)) { Ensure-Dir $CtxDir; Write-Text $rd $want }
     if ($changed.Count -eq 0) { return }
     if (-not (Test-Path -LiteralPath $f)) { State-Set 'made' $f 1 }
     Json-Edit $f $ops.ToArray()
     foreach ($c in $changed) { State-Set 'hook.codex' $c[0] $c[1] }
-    if ($null -eq (State-Get 'told' 'codex-hooks')) { Say '  Codex：kit 的 hook 放進 ~/.codex/hooks.json 了，下次開 Codex 打 /hooks 信任它（kit sync 和 context 快滿的提醒）'; State-Set 'told' 'codex-hooks' 1 }
+    if ($null -eq (State-Get 'told' 'codex-guard')) { Say '  Codex：kit 的 hook 放進 ~/.codex/hooks.json 了，下次開 Codex 打 /hooks 信任它（kit sync、context 快滿的提醒、agent 的工具限制）'; State-Set 'told' 'codex-guard' 1 }
+}
+# What kit holds back in Codex (the same as unix/kit's codex-guard). Codex hands its PreToolUse hook the shell command
+# it is about to run (tool Bash) and its patches (apply_patch: adding a file is Write; changing, moving or deleting one
+# is Edit). kit codex-guard says no to what tools.only and tools.deny leave out: the team's, a placed folder's agent's
+# (Codex opened there or below), kit run's (KIT_CODEX_ONLY, KIT_CODEX_DENY). A command is checked a piece at a time
+# (split at && || ; |, new lines, & ( ) and `), each piece from its start. MCP tools: disabled_tools in config.toml.
+function Codex-GuardSays([string]$tool, [string]$cmd, $only, $deny) { # why Codex may not ('': it may)
+    $ws = " `t`r`n".ToCharArray()
+    $o = @(foreach ($x in @($only)) { foreach ($y in ("$x" -split '[,\n]')) { $y = $y.Trim($ws); if ($y) { $y } } })
+    $lim = $o.Count -gt 0
+    $ds = @(foreach ($x in @($deny)) { foreach ($y in ("$x" -split "`n")) { $y = $y.Trim($ws); if ($y) { $y } } })
+    if ($tool -ceq 'apply_patch') {
+        $add = $cmd -cmatch '(^|\n)\*\*\* Add File:'; $chg = $cmd -cmatch '(^|\n)\*\*\* (Update|Delete) File:'
+        if ($lim -and $add -and $o -cnotcontains 'Write') { return 'kit: this agent does not use Write (tools.only): no new files' }
+        if ($lim -and $chg -and $o -cnotcontains 'Edit' -and $o -cnotcontains 'MultiEdit') { return 'kit: this agent does not use Edit (tools.only): no changing files' }
+        foreach ($d in $ds) {
+            $t = $d -creplace '\(\*?\)$', ''
+            if (($add -and $t -ceq 'Write') -or ($chg -and ($t -ceq 'Edit' -or $t -ceq 'MultiEdit'))) { return "kit: $d is not allowed (tools.deny)" }
+        }
+        return ''
+    }
+    if ($tool -cne 'Bash') { return '' }
+    if ($lim -and $o -cnotcontains 'Bash') { return 'kit: this agent does not use Bash (tools.only)' }
+    $pieces = @(foreach ($y in ($cmd -split '&&|\|\||[;|&\n()`]')) { $y.Trim($ws) })
+    foreach ($d in $ds) {
+        if ($d -ceq 'Bash' -or $d -ceq 'Bash()' -or $d -ceq 'Bash(*)') { return "kit: $d is not allowed (tools.deny)" }
+        if ($d -cnotmatch '^Bash\(.+\)$') { continue }
+        $spec = $d.Substring(5, $d.Length - 6); $pre = $spec.EndsWith(':*'); if ($pre) { $spec = $spec.Substring(0, $spec.Length - 2) }
+        foreach ($p in $pieces) { if (($pre -and $p.StartsWith($spec, [StringComparison]::Ordinal)) -or (-not $pre -and $p -ceq $spec)) { return "kit: $d is not allowed (tools.deny)" } }
+    }
+    ''
+}
+function Cmd-CodexGuard { # Codex's PreToolUse hook (~/.codex/hooks.json): what it hands over on stdin
+    $in = [Console]::In.ReadToEnd(); $tool = Str-Of 'tool_name' $in
+    if ($tool -cne 'Bash' -and $tool -cne 'apply_patch') { return }
+    $j = $null; try { $j = $in | ConvertFrom-Json } catch { return }
+    $cmd = "$($j.tool_input.command)"; $cwd = "$($j.cwd)"
+    $deny = @(); $rd = Join-Path $CtxDir 'required-deny.txt'
+    if (Test-Path -LiteralPath $rd) { $deny = @((Read-Text $rd) -split "`r?`n") }
+    elseif (Test-Path -LiteralPath $Machine) { try { $deny = @(Required-Deny) } catch { } }
+    $only = @()
+    if ($cwd -and (Test-Path -LiteralPath $cwd -PathType Container)) {
+        $r = Dir-Root $cwd
+        if ($r -and (Dir-Mark $r 'agent')) {
+            $pf = Placed-File $r
+            if ($null -ne $pf) {
+                $fm = $null; try { $fm = Yaml-Lines $pf[0] -Frontmatter } catch { }
+                if ($fm) { $only = @(YGet-From $fm 'tools.only'); $deny += @(YGet-From $fm 'tools.deny') }
+            }
+        }
+    }
+    $why = Codex-GuardSays $tool $cmd $only $deny
+    if (-not $why -and ($env:KIT_CODEX_ONLY -or $env:KIT_CODEX_DENY)) { $why = Codex-GuardSays $tool $cmd @("$env:KIT_CODEX_ONLY") @("$env:KIT_CODEX_DENY") }
+    if (-not $why) { return }
+    [Console]::Out.Write('{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": ' + (Json-S $why) + "}}`n")
+}
+function Codex-LimitsWarn($only, $deny) { # what kit codex-guard cannot apply, one line each
+    $o = @(foreach ($x in @($only)) { foreach ($y in ("$x" -split ',')) { if ($y) { $y } } })
+    if ($o.Count -gt 0) {
+        'Codex 的 tools.only 只管得到 shell（Bash）和改檔（Edit、Write）：Codex 其他的內建工具照樣能用'
+        if ($o -cnotcontains 'Bash') { 'tools.only 沒有 Bash：Codex 讀檔、找檔也是用 shell，所以在 Codex 裡也不能讀檔' }
+    }
+    foreach ($n in @($deny)) {
+        if (-not $n) { continue }
+        if ($n.StartsWith('mcp__') -or $n -ceq 'Bash' -or $n.StartsWith('Bash(') -or $n -cmatch '^(Edit|MultiEdit|Write)(\(\*\))?$') { continue }
+        if ($n.Contains('(')) { "Codex 只擋得了 Bash(...) 這種帶內容的規則：tools.deny 的 $n 不套用" } else { "Codex 沒有 kit 擋得到、跟 $n 一樣的工具：tools.deny 的這條不套用" }
+    }
 }
 # omp: kit's hook module (templates/omp-hook.txt, filled in): ~/.omp/agent/hooks/pre/kit.js runs kit sync --hook when a
 # session starts and applies the team's tools.deny (required.tools.deny, Claude's spelling); a placed agent's folder gets
@@ -5340,8 +5418,8 @@ function Cmd-Run($rest) {
                     if ($tools.Count -gt 0) { $v += ',disabled_tools=[' + ($tools -join ',') + ']' }
                     $a.Add('-c'); $a.Add("mcp_servers.$(Arg-TomlKey $n)=$v}")
                 }
-                if ($only.Count -gt 0) { Warn 'Codex 不能只開某些內建工具，tools.only 這次不套用' }
-                if (@($deny | Where-Object { -not $_.StartsWith('mcp__') }).Count -gt 0) { Warn 'Codex 只能禁用 MCP 的工具，其他的 tools.deny 這次不套用' }
+                # tools.only, tools.deny: kit codex-guard (Codex's PreToolUse hook) reads them from this Codex's environment
+                foreach ($w in @(Codex-LimitsWarn $only $deny)) { Warn $w }
             }
             'omp' {
                 Write-Text (Join-Path $tmp 'omp.yml') ("skills:`n  customDirectories:`n    - " + (Json-Str $skdir) + "`n")
@@ -5366,11 +5444,13 @@ function Cmd-Run($rest) {
         $PSNativeCommandArgumentPassing = 'Legacy'
         # a marker (this process -> agent name), so a program showing the pane can tell which agent runs in it
         try { Ensure-Dir (Join-Path $KitConf 'run'); Write-Text $mark "$name`n" } catch { }
+        if ($tool -eq 'codex') { $env:KIT_CODEX_ONLY = $only -join ','; $env:KIT_CODEX_DENY = $deny -join "`n" }
         & $tool @($a.ToArray())
         $rc = $LASTEXITCODE
     } finally {
         # (on PowerShell 5.1 Remove-Item -Recurse would go into the junctions to kit's packages: they come out first)
         if (-not $dry) {
+            Remove-Item Env:KIT_CODEX_ONLY, Env:KIT_CODEX_DENY -ErrorAction SilentlyContinue
             try { Remove-Tree $tmp } catch { }
             Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue
         }
@@ -5425,8 +5505,7 @@ function Cmd-Place($rest) { # kit place <agent> <dir> [--tool claude|codex|omp] 
     switch ($tool) {
         'claude' { }                                     # tools.only: deny for the others (kit check tells the author)
         'codex' {
-            if ($only.Count -gt 0) { $warns += 'Codex 不能只開某些內建工具：tools.only 不套用' }
-            if (@($deny | Where-Object { $_ -and -not $_.StartsWith('mcp__') }).Count -gt 0) { $warns += 'Codex 只能禁用 MCP 的工具：其他的 tools.deny 不套用' }
+            $warns += @(Codex-LimitsWarn $only $deny)
         }
         'omp' {
             $warns += @(Omp-LimitsWarn $only $deny)
@@ -5467,7 +5546,7 @@ function Cmd-Uninstall($rest) {
     $ch = Join-Path $CodexDir 'hooks.json'
     $ops = New-Object System.Collections.Generic.List[object]
     foreach ($r in State-Rows) { $x = $r.Split("`t"); if ($x[0] -eq 'hook.codex') { $ops.Add(@('rmjson', "hooks.$($x[1])", $x[2])) } }
-    if ($ops.Count -gt 0 -and (Test-Path -LiteralPath $ch)) { Json-Edit $ch $ops.ToArray(); Prune-Empty $ch @('hooks.SessionStart', 'hooks.UserPromptSubmit', 'hooks'); Drop-Made $ch }
+    if ($ops.Count -gt 0 -and (Test-Path -LiteralPath $ch)) { Json-Edit $ch $ops.ToArray(); Prune-Empty $ch @('hooks.SessionStart', 'hooks.UserPromptSubmit', 'hooks.PreToolUse', 'hooks'); Drop-Made $ch }
     $oh = Join-Path $OmpDir 'hooks/pre/kit.js'
     if ((Test-Path -LiteralPath $oh) -and ((Read-Text $oh) -split "`r?`n")[0] -eq $OmpHookHead) { Remove-Item -LiteralPath $oh -Force }
     if ($left) { Die '有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall' }
@@ -6729,6 +6808,7 @@ try {
         'pending' { Cmd-Pending $rest }
         'statusline' { Cmd-Statusline }
         'handoff-hook' { Cmd-HandoffHook }
+        'codex-guard' { Cmd-CodexGuard }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
         'run' { Cmd-Run $rest }
         'place' { Cmd-Place $rest }

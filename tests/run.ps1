@@ -929,7 +929,7 @@ Check 'agent unreadable (bad header): the folder is left as it was' { (Snap $G) 
 Move-Item -LiteralPath "$T/gerrit.md.away" -Destination "$TEAM/agents/gerrit.md" -Force; Kit sync
 Check 'agent back: kit sync as before, nothing to say' { (Snap $G) -ceq $s2 -and -not $out.Contains('找不到或讀不懂') }
 KitJ place gerrit (Join-Path $SP 'gx') --tool codex --json
-Check 'place --tool codex: the command and what Codex cannot do' { $rc -eq 0 -and $out.Contains('"tool": "codex", "command": ["codex"], "warnings": ["Codex 不能只開某些內建工具：tools.only 不套用"]') -and (ReadT "$SP/gx/AGENTS.md").Contains('You are the Gerrit helper.') }
+Check 'place --tool codex: the command and what Codex cannot do' { $rc -eq 0 -and $out.Contains('"tool": "codex", "command": ["codex"], "warnings": ["Codex 的 tools.only 只管得到 shell（Bash）和改檔（Edit、Write）：Codex 其他的內建工具照樣能用", "tools.only 沒有 Bash：Codex 讀檔、找檔也是用 shell，所以在 Codex 裡也不能讀檔"]') -and (ReadT "$SP/gx/AGENTS.md").Contains('You are the Gerrit helper.') }
 KitJ place gerrit (Join-Path $SP 'go') --tool omp --json
 Check 'place --tool omp: the folder''s .mcp.json is omp''s too; tool limits through kit''s hook module' { $rc -eq 0 -and $out.Contains('"command": ["omp"], "warnings": []') }
 Kit uninstall

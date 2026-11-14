@@ -55,7 +55,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | | rule | skill | MCP | 團隊禁用的工具 |
 |---|---|---|---|---|
 | Claude Code | `~/.claude/CLAUDE.md`（標記之間，@ 引用） | `~/.claude/skills/` | `~/.claude.json` | `~/.claude/settings.json` 的 `permissions.deny` |
-| Codex | `~/.codex/AGENTS.md`（標記之間，內容直接放進去） | `~/.agents/skills/` | `~/.codex/config.toml`（標記之間） | MCP 工具 → `disabled_tools` |
+| Codex | `~/.codex/AGENTS.md`（標記之間，內容直接放進去） | `~/.agents/skills/` | `~/.codex/config.toml`（標記之間） | MCP 工具 → `disabled_tools`；shell、改檔 → `~/.codex/hooks.json` 的 `kit codex-guard`（kit 0.6.7 起） |
 | omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | `~/.omp/agent/hooks/pre/kit.js`（kit 0.6.7 起） |
 
 Codex 自己新增的設定（例如信任某個資料夾的 `[projects."…"]`）會加在 `config.toml` 最後面、落進 kit 那段裡；kit 記得自己上次寫了什麼（`~/.config/agentkit/codex-block.toml`），`kit sync` 時把不是它寫的搬到那段外面，不會洗掉。改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。想先看清楚再動手：`kit sync --dry-run`（或 `kit sync --force --dry-run`）列出每個 skill 會新增、更新、拿掉、跳過、還是先備份再換，不改任何檔案（來源還是會先抓最新的，跟 `kit sync` 一樣），最後印一個雜湊；確定了打 `kit sync --expect <雜湊>`（有 `--force` 就兩次都加）。到時候 kit 重算一次，來源更新了或你又改了某個 skill、清單不一樣了，就什麼都不改（錯誤代碼 `plan-changed`），請你再看一次。只管 skill；rule、MCP 等照常更新。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。Codex、omp 也一樣（kit 0.6.7 起）：Codex 是 `~/.codex/hooks.json` 裡同樣的 hook（Codex 第一次看到新的 hook 要你信任：在 Codex 打 `/hooks`），omp 是 `~/.omp/agent/hooks/pre/kit.js`（kit 寫的檔，第一行有標記；同名的檔是你自己的就不動）。context 快滿時提醒寫 HANDOFF.md 的 hook（`kit handoff-hook`）Codex 也有，數字從它的對話檔讀；omp 還沒有。
@@ -102,13 +102,19 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 | | rule + 提示 | skill | MCP | tools.only | tools.deny |
 |---|---|---|---|---|---|
 | Claude | ✅ | ✅ | ✅ | 改成把其他內建工具寫進 deny | ✅ |
-| Codex | ✅ | ✅ | ✅ | ✗ | 只限 MCP 工具 |
+| Codex | ✅ | ✅ | ✅ | 只管 shell（Bash）和改檔（Edit、Write） | MCP 工具、`Bash`、`Bash(...)`、`Edit`、`Write` |
 | omp | ✅ | ✅ | ✅（資料夾的 `.mcp.json`；omp 只在這個資料夾本身開時讀，子資料夾裡開的讀不到） | ✅（`.omp/hooks/pre/kit.js`） | ✅（同一個檔） |
 
 omp 的工具限制：kit 把 Claude 的工具名字換成 omp 做同樣事的工具（例如 Read → read，Bash → bash 和 eval，Grep → grep 和 ast_grep），
 omp 要用被擋的工具時會被拒絕並說原因。tools.deny 的 `Bash(git push:*)` 這種寫法 omp 也照樣擋；別的工具的 `( )` 寫法（例如 `Read(./secret/**)`）omp 擋不到，kit 會說。
 omp 只在這個資料夾本身開時讀 `.omp/hooks/pre/kit.js`（跟 `.mcp.json` 一樣），在子資料夾裡開的 omp 沒有這些限制。
 團隊規定一定要擋的（required 的 deny）也寫進 `~/.omp/agent/hooks/pre/kit.js`，每個 omp 都擋。
+
+Codex 的工具限制（kit 0.6.7 起）：Codex 要跑 shell 指令、要改檔案前，會先問 `~/.codex/hooks.json` 裡 kit 的 hook（`kit codex-guard`，在 Codex 打 `/hooks` 信任一次）。
+kit 照 Claude 的寫法看：團隊規定一定要擋的、`kit place` 放的資料夾（在它或它的子資料夾裡開的 Codex）那個 agent 的、`kit run --tool codex` 那個 agent 的。
+`Bash(git push:*)` 這種逐段比：指令在 `&&`、`||`、`;`、`|`、`&`、括號、反引號、換行切開，每一段從頭比（`cd x && git push` 也擋）。
+Codex 改檔案是一個 patch：新增檔案算 `Write`，改、刪、搬檔案算 `Edit`。Codex 讀檔、找檔也是用 shell，所以 tools.only 沒有 `Bash` 的 agent 在 Codex 裡連檔案都不能讀；
+Codex 其他的內建工具（例如搜尋網路、開子 agent）擋不到，`Read(./secret/**)` 這種別的工具的 `( )` 寫法也擋不到，kit 會說。MCP 的工具照樣寫進 `disabled_tools`。
 
 Claude 的 tools.only：Claude 之後新加的內建工具不在 kit 的清單裡，擋不到（要擋就寫進 tools.deny）。這件事放 agent 的人不會看到，寫 agent 檔的人跑 `kit check` 時會看到一行提醒。
 
@@ -492,7 +498,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 一行：
 
     {"dir": "<資料夾>", "agent": "reviewer", "tool": "codex", "command": ["codex"],
-     "warnings": ["Codex 不能只開某些內建工具：tools.only 不套用"]}
+     "warnings": ["Codex 沒有 kit 擋得到、跟 WebSearch 一樣的工具：tools.deny 的這條不套用"]}
 
 - `dir`：資料夾（解開捷徑後的實際路徑）。`command`：在 `dir` 裡跑這個，開的就是那個 agent（就是 `claude`、`codex` 或 `omp`）。
 - `warnings`：給人看的字（這個工具做不到的、找不到的規則等），也印在 stderr。
