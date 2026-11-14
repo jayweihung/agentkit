@@ -372,7 +372,7 @@ $lines = $out -split "`n" | ForEach-Object { $_.TrimEnd("`r") }
 $tmp = Lines-After 'tmp='
 Check 'omp run: config overlay points at skills' { (ReadT (Join-Path $tmp 'omp.yml')).Contains((Join-Path $tmp 'skills').Replace('\', '\\')) -and (Test-Path (Join-Path $tmp 'skills/gerrit-review/SKILL.md')) }
 Check 'omp run: prompt + lowercase tools' { ($lines -contains '--append-system-prompt') -and ($lines -contains 'read,grep,glob') }
-Check 'omp run: warns no per-agent mcp' { $out.Contains('kit add mcp') }
+Check 'omp run: the agent''s MCP in a plugin folder (--plugin-dir)' { ($lines -contains '--plugin-dir') -and (ReadT (Join-Path $tmp 'omp-plugin/.mcp.json')).Contains('"gerrit"') -and (Test-Path (Join-Path $tmp 'omp-plugin/.claude-plugin/plugin.json')) -and -not $out.Contains('kit add mcp') }
 Remove-Item -Recurse -Force $tmp
 Kit run gerrit --tool vim
 Check 'run rejects unknown tool' { $rc -ne 0 }
@@ -930,7 +930,7 @@ Check 'agent back: kit sync as before, nothing to say' { (Snap $G) -ceq $s2 -and
 KitJ place gerrit (Join-Path $SP 'gx') --tool codex --json
 Check 'place --tool codex: the command and what Codex cannot do' { $rc -eq 0 -and $out.Contains('"tool": "codex", "command": ["codex"], "warnings": ["Codex 不能只開某些內建工具：tools.only 不套用"]') -and (ReadT "$SP/gx/AGENTS.md").Contains('You are the Gerrit helper.') }
 KitJ place gerrit (Join-Path $SP 'go') --tool omp --json
-Check 'place --tool omp: what omp cannot do in a folder' { $rc -eq 0 -and $out.Contains('"command": ["omp"], "warnings": ["omp 只讀整個帳號的 MCP') -and $out.Contains('omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用"]') }
+Check 'place --tool omp: the folder''s .mcp.json is omp''s too; tool limits it cannot' { $rc -eq 0 -and $out.Contains('"command": ["omp"], "warnings": ["omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用"]') }
 Kit uninstall
 Check 'uninstall: the placed folders are empty again (the deny you put in one stays), kit''s copies of the agents gone' { @(Get-ChildItem -LiteralPath $G -Force).Count -eq 0 -and (@(Get-ChildItem -LiteralPath $HP -Force | ForEach-Object { $_.Name }) -join ' ') -ceq '.claude' -and (Flat (JGet $sl 'permissions.deny')) -ceq '["Bash"]' -and @(Get-ChildItem -LiteralPath "$SP/gx" -Force).Count -eq 0 -and -not (Test-Path "$H/.config/agentkit/placed") }
 Check 'uninstall: the deny you had already stays' { (Flat (JGet "$H/.claude/settings.json" 'permissions.deny')) -ceq '["mcp__gerrit__submit_change"]' }

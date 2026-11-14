@@ -4,6 +4,19 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.7（2026-11-15）
+
+更新後要做：`kit self-update`，再 `kit sync`。用 Codex 的話，下次開 Codex 打 `/hooks` 信任 kit 的 hook。
+
+**omp 也拿得到 agent 的 MCP**
+- `kit place … --tool omp`：資料夾的 `.mcp.json`（kit 本來就會寫）omp 也會讀（在這個資料夾本身開時；子資料夾裡開的讀不到），不再說「omp 只讀整個帳號的 MCP」。
+- `kit run … --tool omp`：agent 的 MCP 放在一個暫時的 plugin 資料夾，用 `--plugin-dir` 給 omp（工具名字前面多 `kit:`）。
+
+**Codex、omp 開啟時也會自動 `kit sync`**
+- Codex：`~/.codex/hooks.json` 加上跟 Claude 一樣的 SessionStart hook，和 context 快滿時提醒寫 HANDOFF.md 的 hook（數字從 Codex 的對話檔讀）。Codex 要你在 `/hooks` 信任一次。
+- omp：`~/.omp/agent/hooks/pre/kit.js`，每次開 session 在背景跑 `kit sync --hook`。
+- `kit uninstall` 會拿掉這些。
+
 ## 0.6.6（2026-11-15）
 
 更新後要做：`kit self-update`。kit api 還是 1.7。

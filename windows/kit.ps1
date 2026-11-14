@@ -1685,6 +1685,43 @@ function Hook-Json([string]$args1 = 'sync --hook', [string]$timeout = '10') { # 
     '{"hooks":[{"type":"command","command":' + (Json-Str $cmd) + ',"timeout":' + $timeout + '}]}'
 }
 
+# Codex: ~/.codex/hooks.json takes Claude's hook format. kit sync --hook when Codex starts, kit handoff-hook before
+# each prompt (state: hook.codex). Codex runs a new or changed hook only once you trust it: /hooks in Codex.
+function Codex-Hooks {
+    $f = Join-Path $CodexDir 'hooks.json'
+    $ops = New-Object System.Collections.Generic.List[object]; $changed = @()
+    foreach ($e in 'SessionStart', 'UserPromptSubmit') {
+        $hj = if ($e -eq 'SessionStart') { Hook-Json } else { Hook-Json 'handoff-hook' '5' }
+        $old = State-Get 'hook.codex' $e
+        if ($hj -eq $old) { continue }
+        if ($old) { $ops.Add(@('rmjson', "hooks.$e", $old)) }
+        $ops.Add(@('addjson', "hooks.$e", $hj)); $changed += , @($e, $hj)
+    }
+    if ($changed.Count -eq 0) { return }
+    if (-not (Test-Path -LiteralPath $f)) { State-Set 'made' $f 1 }
+    Json-Edit $f $ops.ToArray()
+    foreach ($c in $changed) { State-Set 'hook.codex' $c[0] $c[1] }
+    if ($null -eq (State-Get 'told' 'codex-hooks')) { Say '  Codex：kit 的 hook 放進 ~/.codex/hooks.json 了，下次開 Codex 打 /hooks 信任它（kit sync 和 context 快滿的提醒）'; State-Set 'told' 'codex-hooks' 1 }
+}
+# omp: a hook module in ~/.omp/agent/hooks/pre/ (omp loads it at start) runs kit sync --hook when a session starts,
+# in the background. Only a file kit wrote (its first line) is replaced or removed.
+$script:OmpHookHead = "// kit's omp hook: written by kit sync (agentkit); edits here are overwritten."
+function Omp-HookJs { # the module; its command is the one Claude's hook runs
+    $c = [regex]::Match((Hook-Json), '"command":("(?:[^"\\]|\\.)*")').Groups[1].Value
+    ($OmpHookHead, "// When a session starts: kit sync --hook (like Claude's SessionStart hook), in the background.",
+        'import { spawn } from "node:child_process";', 'export default function kit(pi) {', '  pi.on("session_start", async () => {',
+        "    try { spawn($c, { shell: true, stdio: `"ignore`", detached: true }).unref(); } catch {}", '  });', '}') -join "`n"
+}
+function Omp-Hook {
+    $f = Join-Path $OmpDir 'hooks/pre/kit.js'; $want = Omp-HookJs
+    if ((Test-Path -LiteralPath $f) -and (Read-Text $f).TrimEnd("`r", "`n") -eq $want) { return }
+    if ((Test-Path -LiteralPath $f) -and ((Read-Text $f) -split "`r?`n")[0] -ne $OmpHookHead) {
+        if ($null -eq (State-Get 'told' 'omp-hook')) { Warn "$f 是你自己的檔：kit 不動它，omp 開啟時不會自動 kit sync"; State-Set 'told' 'omp-hook' 1 }
+        return
+    }
+    try { [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f)); Write-Text $f "$want`n"; State-Set 'hook.omp' 'kit.js' 1 } catch {}
+}
+
 function Statusline-Json { # the statusLine kit puts in settings.json
     $exe = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell' } else { 'pwsh' }
     $cmd = "$exe -NoProfile -ExecutionPolicy Bypass -File `"$($PSCommandPath.Replace('\', '/'))`" statusline"
@@ -1711,6 +1748,8 @@ function Apply-All {
     if ($omp) {
         Sync-McpJson (Join-Path $OmpDir 'mcp.json') 'mcp.omp' $mcps
     }
+    if ($codex) { Codex-Hooks }                              # the same two hooks as Claude's, for Codex and omp
+    if ($omp) { Omp-Hook }
 
     # tool deny rules and the auto-sync hook -> ~/.claude/settings.json
     # (state.tsv only after settings.json was written)
@@ -1999,9 +2038,6 @@ function Apply-Dir([string]$dir) { # the folder's .agentkit (and its agent) -> t
     }
     $ct = Join-Path (Join-Path $dir '.codex') 'config.toml'
     if ((Has-Codex) -or $tool -eq 'codex' -or (Test-Path -LiteralPath $ct)) { [void](Replace-Block $ct $TomlBegin $TomlEnd (Codex-Mcp-Toml $mcps $ct $deny).TrimEnd("`n")) }
-    if (@($mcps).Count -gt 0 -and (Has-Omp) -and $null -eq (State-Get 'told' 'omp-mcp')) {
-        Warn 'omp 只讀整個帳號的 MCP：資料夾自己的 MCP 只有 Claude Code 和 Codex 會用'; State-Set 'told' 'omp-mcp' 1
-    }
     foreach ($x in @('.claude/skills', '.agents/skills', '.claude', '.agents', '.codex')) {
         $p = Join-Path $dir $x
         if ((Test-Path -LiteralPath $p -PathType Container) -and -not (Get-ChildItem -LiteralPath $p -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $p -Force }
@@ -2794,13 +2830,26 @@ function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for 
 $script:HandoffAt = @(80, 90)   # the context's % at which Claude is told (once each) to write HANDOFF.md before going on
 function Cmd-HandoffHook { # Claude's UserPromptSubmit hook (the same as unix/kit's handoff-hook): the context nearly full -> tell the
     # agent, once at each of HandoffAt, to write HANDOFF.md and its kit note before going on; below the first: forgotten
+    # Codex (its hooks.json, the same hook): what it hands over has its rollout (transcript_path): its last token_count
     $in = [Console]::In.ReadToEnd(); $sid = (Str-Of 'session_id' $in) -replace '[^A-Za-z0-9-]', ''
-    $cp = Claude-Pid; if (-not $cp) { return }
-    $f = Join-Path $CtxDir "claude-$cp.json"; if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return }
-    $j = Read-Text $f; $u = Num-Of 'used' $j; $m = Str-Of 'model' $j; $w = Setting-Window $m
-    if (-not $w) { $w = Num-Of 'window' $j }
-    if (-not $u -or -not $w -or [long]$w -le 0) { return }
-    $pct = [long](Ctx-Pct $u $w); $lvl = 0
+    $tp = Ctx-Unjs (Str-Of 'transcript_path' $in)
+    if ($tp -match '[\\/]\.codex[\\/]sessions[\\/]' -or $tp -match '[\\/]sessions[\\/].*[\\/]rollout-[^\\/]*\.jsonl$') {
+        if (-not (Test-Path -LiteralPath $tp -PathType Leaf)) { return }
+        $cp = $sid; $line = ''
+        $o = Ctx-Open $tp $CtxTail
+        if ($o) { try { while ($null -ne ($x = $o[0].ReadLine())) { if ($x.Contains('"token_count"') -and $x.Contains('"last_token_usage"')) { $line = $x } } } finally { $o[0].Dispose() } }
+        $u = Num-Of 'total_tokens' (After-Key 'last_token_usage' $line); $w = Num-Of 'model_context_window' $line
+        if (-not $u -or -not $w -or [long]$w -le 0) { return }
+        $pct = [long](Codex-Pct ([long]$u) ([long]$w))
+    } else {
+        $cp = Claude-Pid; if (-not $cp) { return }
+        $f = Join-Path $CtxDir "claude-$cp.json"; if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return }
+        $j = Read-Text $f; $u = Num-Of 'used' $j; $m = Str-Of 'model' $j; $w = Setting-Window $m
+        if (-not $w) { $w = Num-Of 'window' $j }
+        if (-not $u -or -not $w -or [long]$w -le 0) { return }
+        $pct = [long](Ctx-Pct $u $w)
+    }
+    $lvl = 0
     foreach ($a in $HandoffAt) { if ($pct -ge $a) { $lvl = $a } }
     $mark = Join-Path $CtxDir ("handoff-" + $(if ($sid) { $sid } else { $cp }))
     if ($lvl -eq 0) { if (Test-Path -LiteralPath $mark) { Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue }; return }
@@ -5064,13 +5113,16 @@ function Cmd-Run($rest) {
         $mcpNames = @(YGet-From $fm 'mcp')
 
         $a = New-Object System.Collections.Generic.List[string]
+        $mcps = @()
+        if ($tool -ne 'codex') {   # Claude: --mcp-config; omp: a plugin folder's .mcp.json
+            $mcps = @(foreach ($n in $mcpNames) {
+                $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
+                $k = Mcp-Json $p; if ($k) { (Json-Str $n) + ':' + $k }
+            })
+            Write-Text (Join-Path $tmp 'mcp.json') ('{"mcpServers":{' + ($mcps -join ',') + "}}`n")
+        }
         switch ($tool) {
             'claude' {
-                $mcps = @(foreach ($n in $mcpNames) {
-                    $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
-                    $k = Mcp-Json $p; if ($k) { (Json-Str $n) + ':' + $k }
-                })
-                Write-Text (Join-Path $tmp 'mcp.json') ('{"mcpServers":{' + ($mcps -join ',') + "}}`n")
                 $a.AddRange([string[]]@('--add-dir', $tmp, '--append-system-prompt-file', (Join-Path $tmp 'prompt.md'), '--mcp-config', (Join-Path $tmp 'mcp.json')))
                 if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add($only -join ',') }
                 foreach ($d in $deny) { $a.Add('--disallowedTools'); $a.Add($d) }
@@ -5096,7 +5148,13 @@ function Cmd-Run($rest) {
                 Write-Text (Join-Path $tmp 'omp.yml') ("skills:`n  customDirectories:`n    - " + (Json-Str $skdir) + "`n")
                 $a.AddRange([string[]]@('--config', (Join-Path $tmp 'omp.yml'), '--append-system-prompt', (Join-Path $tmp 'prompt.md')))
                 if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add(($only -join ',').ToLowerInvariant()) }
-                if ($mcpNames.Count -gt 0) { Warn 'omp 不能在啟動時加 MCP：這個 agent 的 MCP 請用  kit add mcp <名字>  加到全域' }
+                if ($mcps.Count -gt 0) {   # omp loads a plugin folder's .mcp.json (--plugin-dir): its tools are kit:<name>
+                    $pd = Join-Path $tmp 'omp-plugin'; $cp = Join-Path $pd '.claude-plugin'
+                    [void](New-Item -ItemType Directory -Force -Path $cp)
+                    Write-Text (Join-Path $cp 'plugin.json') "{`"name`": `"kit`", `"version`": `"0.0.0`"}`n"
+                    Copy-Item -LiteralPath (Join-Path $tmp 'mcp.json') -Destination (Join-Path $pd '.mcp.json')
+                    $a.Add('--plugin-dir'); $a.Add($pd)
+                }
                 if ($deny.Count -gt 0) { Warn 'omp 不能禁用單一工具，tools.deny 這次不套用' }
             }
         }
@@ -5169,7 +5227,6 @@ function Cmd-Place($rest) { # kit place <agent> <dir> [--tool claude|codex|omp] 
             if (@($deny | Where-Object { $_ -and -not $_.StartsWith('mcp__') }).Count -gt 0) { $warns += 'Codex 只能禁用 MCP 的工具：其他的 tools.deny 不套用' }
         }
         'omp' {
-            if (@(YGet-From $fm 'mcp' | Where-Object { $_ }).Count -gt 0) { $warns += 'omp 只讀整個帳號的 MCP：這個 agent 的 MCP 在這裡只有 Claude Code 和 Codex 會用（omp 要用：kit add mcp <名字>）' }
             if ($only.Count -gt 0 -or $deny.Count -gt 0) { $warns += 'omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用' }
         }
     }
@@ -5204,6 +5261,13 @@ function Cmd-Uninstall($rest) {
         if ($f[0] -eq 'statusline' -and (Flat-Json (Json-Get (Join-Path $ClaudeDir 'settings.json') 'statusLine')) -eq (Flat-Json $f[2])) { $ops.Add(@('del', 'statusLine')) }
     }
     if ($ops.Count -gt 0) { Json-Edit (Join-Path $ClaudeDir 'settings.json') $ops.ToArray(); Prune-Deny }
+    # Codex's hooks.json, omp's hook module
+    $ch = Join-Path $CodexDir 'hooks.json'
+    $ops = New-Object System.Collections.Generic.List[object]
+    foreach ($r in State-Rows) { $x = $r.Split("`t"); if ($x[0] -eq 'hook.codex') { $ops.Add(@('rmjson', "hooks.$($x[1])", $x[2])) } }
+    if ($ops.Count -gt 0 -and (Test-Path -LiteralPath $ch)) { Json-Edit $ch $ops.ToArray(); Prune-Empty $ch @('hooks.SessionStart', 'hooks.UserPromptSubmit', 'hooks'); Drop-Made $ch }
+    $oh = Join-Path $OmpDir 'hooks/pre/kit.js'
+    if ((Test-Path -LiteralPath $oh) -and ((Read-Text $oh) -split "`r?`n")[0] -eq $OmpHookHead) { Remove-Item -LiteralPath $oh -Force }
     if ($left) { Die '有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall' }
     foreach ($f in @($State, $Machine)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
     foreach ($x in 'deps', 'pydeps', 'mcp-deps', 'placed', 'ctx') { $deps = Join-Path $KitConf $x; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force } }

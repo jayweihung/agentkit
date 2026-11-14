@@ -399,7 +399,7 @@ out=$(KIT_DRY_RUN=1 kit run gerrit --tool omp 2>&1)
 tmp=$(echo "$out" | sed -n 's/^tmp=//p')
 check "omp run: config overlay points at skills" 'grep -qF "$tmp/skills" "$tmp/omp.yml" && [ -f "$tmp/skills/gerrit-review/SKILL.md" ]'
 check "omp run: prompt + lowercase tools" 'echo "$out" | grep -qx -- --append-system-prompt && echo "$out" | grep -qx "read,grep,glob"'
-check "omp run: warns no per-agent mcp" 'echo "$out" | grep -q "kit add mcp"'
+check "omp run: the agent's MCP in a plugin folder's .mcp.json (--plugin-dir), nothing to warn" 'echo "$out" | grep -qx -- --plugin-dir && echo "$out" | grep -qx "$tmp/omp-plugin" && [ "$(jget "$tmp/omp-plugin/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && [ -f "$tmp/omp-plugin/.claude-plugin/plugin.json" ] && ! echo "$out" | grep -q "kit add mcp"'
 rm -rf "$tmp"
 out=$(kit run gerrit --tool vim 2>&1); rc=$?
 check "run rejects unknown tool" '[ $rc -ne 0 ]'
@@ -865,6 +865,14 @@ if python3 -c "import tomllib" 2>/dev/null; then
 fi
 check "no backup for a file kit created" '[ ! -e "$H4/.agents/mcp.json.kit-backup" ] && [ ! -e "$H4/.omp/agent/mcp.json.kit-backup" ] || [ "$(cat "$H4/.omp/agent/mcp.json.kit-backup")" != "{}" ]'
 check "omp mcp.json has kit server and own" '[ "$(jget "$H4/.omp/agent/mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && [ "$(jget "$H4/.omp/agent/mcp.json" mcpServers.own.command)" = "\"y\"" ]'
+check "codex hooks.json: kit sync when Codex starts, handoff-hook before each prompt (Claude's hook format)" 'jget "$H4/.codex/hooks.json" hooks.SessionStart | grep -qF "sync --hook" && jget "$H4/.codex/hooks.json" hooks.UserPromptSubmit | grep -qF "handoff-hook"'
+check "omp hook module: kit sync --hook at session_start, in the background" 'head -n 1 "$H4/.omp/agent/hooks/pre/kit.js" | grep -qF "written by kit sync" && grep -qF "sync --hook" "$H4/.omp/agent/hooks/pre/kit.js" && grep -qF "pi.on(\"session_start\"" "$H4/.omp/agent/hooks/pre/kit.js"'
+if command -v node >/dev/null 2>&1; then
+    cp "$H4/.omp/agent/hooks/pre/kit.js" "$T/omphook.mjs"
+    check "omp hook module: valid JavaScript" 'node --check "$T/omphook.mjs"'
+fi
+kit sync >/dev/null 2>&1
+check "codex hooks once, after another sync" '[ "$(jget "$H4/.codex/hooks.json" hooks.SessionStart | grep -c "sync --hook")" = 1 ]'
 # a server the user already has in config.toml is left alone
 printf '\n[mcp_servers.gerrit]\ncommand = "theirs"\n' > "$T/extra"; cp "$H4/.codex/config.toml" "$T/c2"
 awk '/^# agentkit:begin/{exit} {print}' "$T/c2" > "$H4/.codex/config.toml"; cat "$T/extra" >> "$H4/.codex/config.toml"
@@ -879,6 +887,7 @@ check "uninstall: codex toml byte-identical" 'cmp -s "$T/codex.orig" "$H4/.codex
 check "uninstall: omp mcp.json byte-identical" 'cmp -s "$T/omp.orig" "$H4/.omp/agent/mcp.json"'
 check "uninstall: omp AGENTS.md (made by kit) gone" '[ ! -e "$H4/.omp/agent/AGENTS.md" ]'
 check "uninstall: ~/.agents/skills emptied" '[ -z "$(ls -A "$H4/.agents/skills" 2>/dev/null)" ]'
+check "uninstall: Codex's hooks.json (made by kit) and omp's hook module gone" '[ ! -e "$H4/.codex/hooks.json" ] && [ ! -e "$H4/.omp/agent/hooks/pre/kit.js" ]'
 echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"
@@ -1051,7 +1060,7 @@ check "agent back: kit sync as before, nothing to say" 'snap "$G" | cmp -s - "$T
 out=$(kit place gerrit "$W/gx" --tool codex --json 2>/dev/null); rc=$?
 check "place --tool codex: the command and what Codex cannot do" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"tool\": \"codex\", \"command\": [\"codex\"], \"warnings\": [\"Codex 不能只開某些內建工具：tools.only 不套用\"]" && grep -qx "tool:codex" "$W/gx/.agentkit" && grep -qx "You are the Gerrit helper." "$W/gx/AGENTS.md"'
 out=$(kit place gerrit "$W/go" --tool omp --json 2>/dev/null); rc=$?
-check "place --tool omp: what omp cannot do in a folder (MCP, tool limits)" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"command\": [\"omp\"], \"warnings\": [\"omp 只讀整個帳號的 MCP" && echo "$out" | grep -qF "omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用\"]"'
+check "place --tool omp: the folder's .mcp.json is omp's too; what it cannot do: tool limits" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"command\": [\"omp\"], \"warnings\": [\"omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用\"]" && [ "$(jget "$W/go/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ]'
 out=$(kit place gerrit "$W/gv" --tool vim --json 2>/dev/null); rc=$?
 check "place --tool: only claude, codex, omp" '[ $rc -ne 0 ] && echo "$out" | grep -qF "\"code\": \"usage\"" && [ ! -e "$W/gv" ]'
 if [ -n "$PWSH" ]; then
@@ -1603,6 +1612,16 @@ check "handoff-hook: again at 90 %; fallen below 80 % (a /compact) and full agai
 if [ -n "$PWSH" ]; then
     rm -f "$H7/.config/agentkit/ctx/handoff-s-7"; b=$(ho 330000 "'$PWSH' -NoProfile -File '$HERE/../windows/kit.ps1'")
     check "handoff-hook (kit.ps1): the same JSON" '[ "$b" = "$o2" ]'
+fi
+# Codex runs the same hook (its hooks.json): its rollout (transcript_path), Codex's own way of counting
+ROH="$H7/.codex/sessions/2026/11/12/rollout-2026-11-12T05-00-00-ho.jsonl"
+printf '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":%s},"model_context_window":258400}}}\n' 220000 > "$ROH"
+cho() { printf '{"session_id":"cx-1","transcript_path":"%s","hook_event_name":"UserPromptSubmit","prompt":"hi"}' "$ROH" | sh -c "$1 handoff-hook"; }
+c1=$(cho "'$KIT'"); c2=$(cho "'$KIT'")
+check "handoff-hook (Codex): its rollout's numbers (84% the way Codex counts), once" 'echo "$c1" | grep -qF "context is 84% full (220k of 258k tokens)" && [ -z "$c2" ]'
+if [ -n "$PWSH" ]; then
+    rm -f "$H7/.config/agentkit/ctx/handoff-cx-1"; c3=$(cho "'$PWSH' -NoProfile -File '$HERE/../windows/kit.ps1'")
+    check "handoff-hook (Codex, kit.ps1): the same JSON" '[ "$c3" = "$c1" ]'
 fi
 # you take kit's statusLine out: it stays out (kit says so once); kit sync --force puts it back
 printf 'del\tstatusLine\n' > "$T/ops7"; LC_ALL=C awk -f "$JA" -v ops="$T/ops7" "$H7/.claude/settings.json" > "$T/s7.new" && cp "$T/s7.new" "$H7/.claude/settings.json"

@@ -58,7 +58,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | Codex | `~/.codex/AGENTS.md`（標記之間，內容直接放進去） | `~/.agents/skills/` | `~/.codex/config.toml`（標記之間） | MCP 工具 → `disabled_tools` |
 | omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | 不支援 |
 
-Codex 自己新增的設定（例如信任某個資料夾的 `[projects."…"]`）會加在 `config.toml` 最後面、落進 kit 那段裡；kit 記得自己上次寫了什麼（`~/.config/agentkit/codex-block.toml`），`kit sync` 時把不是它寫的搬到那段外面，不會洗掉。改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。想先看清楚再動手：`kit sync --dry-run`（或 `kit sync --force --dry-run`）列出每個 skill 會新增、更新、拿掉、跳過、還是先備份再換，不改任何檔案（來源還是會先抓最新的，跟 `kit sync` 一樣），最後印一個雜湊；確定了打 `kit sync --expect <雜湊>`（有 `--force` 就兩次都加）。到時候 kit 重算一次，來源更新了或你又改了某個 skill、清單不一樣了，就什麼都不改（錯誤代碼 `plan-changed`），請你再看一次。只管 skill；rule、MCP 等照常更新。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。
+Codex 自己新增的設定（例如信任某個資料夾的 `[projects."…"]`）會加在 `config.toml` 最後面、落進 kit 那段裡；kit 記得自己上次寫了什麼（`~/.config/agentkit/codex-block.toml`），`kit sync` 時把不是它寫的搬到那段外面，不會洗掉。改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。想先看清楚再動手：`kit sync --dry-run`（或 `kit sync --force --dry-run`）列出每個 skill 會新增、更新、拿掉、跳過、還是先備份再換，不改任何檔案（來源還是會先抓最新的，跟 `kit sync` 一樣），最後印一個雜湊；確定了打 `kit sync --expect <雜湊>`（有 `--force` 就兩次都加）。到時候 kit 重算一次，來源更新了或你又改了某個 skill、清單不一樣了，就什麼都不改（錯誤代碼 `plan-changed`），請你再看一次。只管 skill；rule、MCP 等照常更新。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。Codex、omp 也一樣（kit 0.6.7 起）：Codex 是 `~/.codex/hooks.json` 裡同樣的 hook（Codex 第一次看到新的 hook 要你信任：在 Codex 打 `/hooks`），omp 是 `~/.omp/agent/hooks/pre/kit.js`（kit 寫的檔，第一行有標記；同名的檔是你自己的就不動）。context 快滿時提醒寫 HANDOFF.md 的 hook（`kit handoff-hook`）Codex 也有，數字從它的對話檔讀；omp 還沒有。
 
 **Claude 沒在存對話紀錄時提醒你**：在另一個 Claude 的終端機裡開的 Claude（例如 Claude 幫你開新視窗）會帶著 `CLAUDE_CODE_CHILD_SESSION=1`，
 這樣它不寫對話紀錄，關掉後 `/resume` 找不回來。kit 的 SessionStart hook（就是上面那個自動同步）每次 Claude 開啟時會看
@@ -78,7 +78,7 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 |---|---|---|---|---|---|
 | Claude | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Codex | ✅ | ✅（列在提示裡，用到時才讀） | ✅ | ✗ | 只限 MCP 工具 |
-| omp | ✅ | ✅ | ✗（要用 `kit add mcp` 加到全域） | ✅ | ✗ |
+| omp | ✅ | ✅ | ✅（一個暫時的 plugin 資料夾，`--plugin-dir`；工具名字前面多 `kit:`） | ✅ | ✗ |
 
 ### 一個資料夾就是一個 agent：`kit place`
 
@@ -103,7 +103,7 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 |---|---|---|---|---|---|
 | Claude | ✅ | ✅ | ✅ | 改成把其他內建工具寫進 deny | ✅ |
 | Codex | ✅ | ✅ | ✅ | ✗ | 只限 MCP 工具 |
-| omp | ✅ | ✅ | ✗（要用 `kit add mcp` 加到全域） | ✗ | ✗ |
+| omp | ✅ | ✅ | ✅（資料夾的 `.mcp.json`；omp 只在這個資料夾本身開時讀，子資料夾裡開的讀不到） | ✗ | ✗ |
 
 Claude 的 tools.only：Claude 之後新加的內建工具不在 kit 的清單裡，擋不到（要擋就寫進 tools.deny）。這件事放 agent 的人不會看到，寫 agent 檔的人跑 `kit check` 時會看到一行提醒。
 
@@ -272,7 +272,7 @@ Claude 撞到方案的用量上限停下來（「You've hit your 5-hour limit ·
 
 **Claude 的 statusLine**：`kit sync` 會在 `~/.claude/settings.json` 加上 `statusLine`（執行 `kit statusline`），Claude 底下的狀態列會顯示「Opus 5.5 · context 35%（139k / 400k）」。你已經有自己的 statusLine 時 kit 不動它（只提醒一次），Claude 的用量改從對話紀錄估；Remote Control 的對話紀錄可能不即時。你把 kit 加的 statusLine 拿掉，kit 之後就不會再加回來（說一次）；要加回來打 `kit sync --force`。`kit uninstall` 會拿掉 kit 加的。
 
-**context 快滿時先交接（Claude）**：`kit sync` 也在 `~/.claude/settings.json` 加一個 `UserPromptSubmit` hook（`kit handoff-hook`）。context 到 80%、再到 90% 時，你下一句話送出去時各提醒 Claude 一次：先寫或更新專案資料夾的 `HANDOFF.md`（做完什麼、下一步、還沒解決的、怎麼驗證）、用 `kit note` 記一行進度，並跟你說 context 快滿了，可以開新的 agent 從 `HANDOFF.md` 和 `kit note --history` 接著做，或 `/compact`。用的是 kit statusLine 存的數字（只看一個小檔，很快）；你用自己的 statusLine 時就不會提醒。`/compact` 後掉回 80% 以下，之後再滿會再提醒。Codex、omp 沒有這種 hook，靠畫面程式的 context 百分比提醒你。`kit uninstall` 會拿掉。
+**context 快滿時先交接（Claude）**：`kit sync` 也在 `~/.claude/settings.json` 加一個 `UserPromptSubmit` hook（`kit handoff-hook`）。context 到 80%、再到 90% 時，你下一句話送出去時各提醒 Claude 一次：先寫或更新專案資料夾的 `HANDOFF.md`（做完什麼、下一步、還沒解決的、怎麼驗證）、用 `kit note` 記一行進度，並跟你說 context 快滿了，可以開新的 agent 從 `HANDOFF.md` 和 `kit note --history` 接著做，或 `/compact`。用的是 kit statusLine 存的數字（只看一個小檔，很快）；你用自己的 statusLine 時就不會提醒。`/compact` 後掉回 80% 以下，之後再滿會再提醒。Codex（kit 0.6.7 起）也有：`~/.codex/hooks.json` 裡同樣的 hook，數字從 Codex 的對話檔（hook 給的 `transcript_path`）讀，照 Codex 自己的算法。omp 還沒有，靠畫面程式的 context 百分比提醒你。`kit uninstall` 會拿掉。
 
 ### context 細項：token 用在哪裡
 

@@ -764,6 +764,8 @@ apply_claude() {
     if has_omp; then
         sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp <<< "$mcps"
     fi
+    has_codex && codex_hooks                                 # the same two hooks as Claude's, for Codex and omp
+    has_omp && omp_hook
 
     ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
     # tool deny rules -> ~/.claude/settings.json
@@ -829,6 +831,51 @@ hook_json() { # hook_json [ARGS TIMEOUT] : a hook entry kit adds to settings.jso
     local k="$HOME/.local/bin/kit"
     [ -x "$k" ] || k="$KIT_LIB/kit"
     printf '{"hooks":[{"type":"command","command":%s,"timeout":%s}]}' "$(json_str "'$k' ${1:-sync --hook}")" "${2:-10}"
+}
+
+# Codex: ~/.codex/hooks.json takes Claude's hook format. kit sync --hook when Codex starts, kit handoff-hook before
+# each prompt (state: hook.codex). Codex runs a new or changed hook only once you trust it: /hooks in Codex.
+codex_hooks() {
+    local f="$CODEX_DIR/hooks.json" ops e hj old changed=""
+    ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
+    for e in SessionStart UserPromptSubmit; do
+        if [ $e = SessionStart ]; then hj=$(hook_json); else hj=$(hook_json handoff-hook 5); fi
+        old=$(state_get hook.codex $e)
+        [ "$hj" = "$old" ] && continue
+        [ -n "$old" ] && printf 'rmjson\thooks.%s\t%s\n' $e "$old" >> "$ops"
+        printf 'addjson\thooks.%s\t%s\n' $e "$hj" >> "$ops"; changed="$changed $e"
+    done
+    if [ -n "$changed" ]; then
+        [ -f "$f" ] || state_set made "$f" 1
+        json_edit "$f" "$ops"
+        for e in $changed; do
+            if [ $e = SessionStart ]; then state_set hook.codex $e "$(hook_json)"; else state_set hook.codex $e "$(hook_json handoff-hook 5)"; fi
+        done
+        [ -n "$(state_get told codex-hooks)" ] || { say "  Codex：kit 的 hook 放進 ~/.codex/hooks.json 了，下次開 Codex 打 /hooks 信任它（kit sync 和 context 快滿的提醒）"; state_set told codex-hooks 1; }
+    fi
+    rm -f "$ops"
+}
+# omp: a hook module in ~/.omp/agent/hooks/pre/ (omp loads it at start) runs kit sync --hook when a session starts,
+# in the background. Only a file kit wrote (its first line) is replaced or removed.
+OMP_HOOK_HEAD="// kit's omp hook: written by kit sync (agentkit); edits here are overwritten."
+omp_hook_js() { # the module; its command is the one Claude's hook runs
+    local c; c=$(printf '%s' "$(hook_json)" | sed 's/.*"command":\("\([^"\\]\|\\.\)*"\).*/\1/')
+    printf '%s\n' "$OMP_HOOK_HEAD" "// When a session starts: kit sync --hook (like Claude's SessionStart hook), in the background." \
+        'import { spawn } from "node:child_process";' \
+        'export default function kit(pi) {' \
+        '  pi.on("session_start", async () => {' \
+        "    try { spawn($c, { shell: true, stdio: \"ignore\", detached: true }).unref(); } catch {}" \
+        '  });' '}'
+}
+omp_hook() {
+    local f="$OMP_DIR/hooks/pre/kit.js" want
+    want=$(omp_hook_js)
+    [ -f "$f" ] && [ "$(cat "$f")" = "$want" ] && return 0
+    if [ -f "$f" ] && [ "$(head -n 1 "$f")" != "$OMP_HOOK_HEAD" ]; then
+        [ -n "$(state_get told omp-hook)" ] || { warn "$f 是你自己的檔：kit 不動它，omp 開啟時不會自動 kit sync"; state_set told omp-hook 1; }
+        return 0
+    fi
+    mkdir -p "$(dirname "$f")" 2>/dev/null && printf '%s\n' "$want" > "$f" && state_set hook.omp kit.js 1
 }
 
 statusline_json() { # the statusLine kit puts in settings.json
@@ -1110,9 +1157,6 @@ apply_dir() { # apply_dir DIR : the folder's .agentkit (and its agent) -> the to
     if has_codex || [ "$tool" = codex ] || [ -f "$dir/.codex/config.toml" ]; then
         local CODEX_USER_TOML="$dir/.codex/config.toml"
         KIT_BLOCK=$(codex_mcp_toml <<< "$mcps") replace_block "$dir/.codex/config.toml" "$TOML_BEGIN" "$TOML_END"
-    fi
-    if [ -n "$mcps" ] && has_omp && [ -z "$(state_get told omp-mcp)" ]; then
-        warn "omp 只讀整個帳號的 MCP：資料夾自己的 MCP 只有 Claude Code 和 Codex 會用"; state_set told omp-mcp 1
     fi
     for d in .claude/skills .agents/skills .claude .agents .codex; do rmdir "$dir/$d" 2>/dev/null; done
     return 0
@@ -1792,17 +1836,27 @@ EOF
     else printf '%s\n' "${name:-Claude}"; fi
 }
 HANDOFF_AT="80 90"   # the context's % at which Claude is told (once each) to write HANDOFF.md before going on
-cmd_handoff_hook() { # Claude's UserPromptSubmit hook: the context nearly full (the numbers kit statusline keeps) -> tell the
+cmd_handoff_hook() { # Claude's (and Codex's) UserPromptSubmit hook: the context nearly full (the numbers kit statusline keeps) -> tell the
     # agent, once at each of HANDOFF_AT, to write HANDOFF.md and its kit note before going on. Fast (one ps, one small
     # file); nothing without kit's statusLine. Below the first: forgotten, so a /compact that fills up again is told again.
-    local in sid pid f j u w m pct lvl=0 a mark told
-    in=$(cat); sid=$(str_of session_id "$in" | tr -cd 'A-Za-z0-9-')
-    pid=$(claude_pid); [ -n "$pid" ] || return 0
-    f="$CTX_DIR/claude-$pid.json"; [ -f "$f" ] || return 0
-    j=$(cat "$f"); u=$(num_of used "$j"); m=$(str_of model "$j"); w=$(setting_window "$m")
-    [ -n "$w" ] || w=$(num_of window "$j")
-    [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] 2>/dev/null || return 0
-    pct=$(( (u * 100 + w / 2) / w ))
+    # Codex (its hooks.json, the same hook): what it hands over has its rollout (transcript_path): its last token_count
+    local in sid pid f j u w m pct lvl=0 a mark told tp line
+    in=$(cat); sid=$(str_of session_id "$in" | tr -cd 'A-Za-z0-9-'); tp=$(str_of transcript_path "$in")
+    case $tp in
+    */.codex/sessions/*|*/sessions/*/rollout-*.jsonl)
+        [ -f "$tp" ] || return 0; pid=$sid
+        line=$(ctx_scan "$tp" 'index($0, "\"token_count\"") && index($0, "\"last_token_usage\"") { t = $0 } END { print t }')
+        u=$(num_of total_tokens "$(after_key last_token_usage "$line")"); w=$(num_of model_context_window "$line")
+        [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] 2>/dev/null || return 0
+        pct=$(codex_pct "$u" "$w");;
+    *)
+        pid=$(claude_pid); [ -n "$pid" ] || return 0
+        f="$CTX_DIR/claude-$pid.json"; [ -f "$f" ] || return 0
+        j=$(cat "$f"); u=$(num_of used "$j"); m=$(str_of model "$j"); w=$(setting_window "$m")
+        [ -n "$w" ] || w=$(num_of window "$j")
+        [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] 2>/dev/null || return 0
+        pct=$(( (u * 100 + w / 2) / w ));;
+    esac
     for a in $HANDOFF_AT; do [ "$pct" -ge "$a" ] && lvl=$a; done
     mark="$CTX_DIR/handoff-${sid:-$pid}"
     [ "$lvl" -gt 0 ] || { rm -f "$mark" 2>/dev/null; return 0; }
@@ -3648,8 +3702,7 @@ cmd_run() {
     local only deny; only=$(fmget tools.only | paste -sd, -); deny=$(fmget tools.deny)
 
     local args=()
-    case $tool in
-    claude)
+    if [ $tool != codex ]; then                              # Claude: --mcp-config; omp: a plugin folder's .mcp.json
         local mcps="" first=1
         for n in $(fmget mcp); do
             p=$(find_item mcp "$n") || { warn "mcp $n not found"; continue; }
@@ -3658,6 +3711,9 @@ cmd_run() {
             mcps="$mcps$(json_str "$n"):$k"
         done
         printf '{"mcpServers":{%s}}\n' "$mcps" > "$tmp/mcp.json"
+    fi
+    case $tool in
+    claude)
         args=(--add-dir "$tmp" --append-system-prompt-file "$tmp/prompt.md" --mcp-config "$tmp/mcp.json")
         [ -n "$only" ] && args+=(--tools "$only")
         while IFS= read -r d; do [ -n "$d" ] && args+=(--disallowedTools "$d"); done <<EOF
@@ -3683,7 +3739,10 @@ EOF
         printf 'skills:\n  customDirectories:\n    - %s\n' "$(toml_str "$skdir")" > "$tmp/omp.yml"
         args=(--config "$tmp/omp.yml" --append-system-prompt "$tmp/prompt.md")
         [ -n "$only" ] && args+=(--tools "$(printf '%s' "$only" | tr 'A-Z' 'a-z')")
-        [ -n "$(fmget mcp)" ] && warn "omp 不能在啟動時加 MCP：這個 agent 的 MCP 請用  kit add mcp <名字>  加到全域"
+        if [ -n "$mcps" ]; then                              # omp loads a plugin folder's .mcp.json (--plugin-dir): its tools are kit:<name>
+            mkdir -p "$tmp/omp-plugin/.claude-plugin" && printf '{"name": "kit", "version": "0.0.0"}\n' > "$tmp/omp-plugin/.claude-plugin/plugin.json" &&
+                cp "$tmp/mcp.json" "$tmp/omp-plugin/.mcp.json" && args+=(--plugin-dir "$tmp/omp-plugin")
+        fi
         [ -n "$deny" ] && warn "omp 不能禁用單一工具，tools.deny 這次不套用"
         ;;
     esac
@@ -3753,7 +3812,6 @@ cmd_place() { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR
         [ -z "$only" ] || warns="${warns}Codex 不能只開某些內建工具：tools.only 不套用$LF"
         printf '%s\n' "$deny" | grep -v '^mcp__' | grep -q . && warns="${warns}Codex 只能禁用 MCP 的工具：其他的 tools.deny 不套用$LF";;
     omp)
-        [ -z "$(fm_val "$fm" mcp)" ] || warns="${warns}omp 只讀整個帳號的 MCP：這個 agent 的 MCP 在這裡只有 Claude Code 和 Codex 會用（omp 要用：kit add mcp <名字>）$LF"
         [ -z "$only$deny" ] || warns="${warns}omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用$LF";;
     esac
     [ -z "$warns" ] || printf '%s' "$warns" | while IFS= read -r a; do warn "$a"; done
@@ -3793,7 +3851,11 @@ EOF
         [ "$k" = statusline ] && [ "$(json_get "$CLAUDE_DIR/settings.json" statusLine | tr -d ' \t\r\n')" = "$(printf '%s' "$v" | tr -d ' \t\r\n')" ] && printf 'del\tstatusLine\n' >> "$ops"
     done < "${STATE:-/dev/null}" 2>/dev/null
     [ -s "$ops" ] && { json_edit "$CLAUDE_DIR/settings.json" "$ops"; prune_deny; }
+    : > "$ops"                                               # Codex's hooks.json, omp's hook module
+    while IFS="$TAB" read -r k n v; do [ "$k" = hook.codex ] && printf 'rmjson\thooks.%s\t%s\n' "$n" "$v" >> "$ops"; done < "${STATE:-/dev/null}" 2>/dev/null
+    [ -s "$ops" ] && [ -f "$CODEX_DIR/hooks.json" ] && { json_edit "$CODEX_DIR/hooks.json" "$ops"; prune_empty "$CODEX_DIR/hooks.json" hooks.SessionStart hooks.UserPromptSubmit hooks; drop_made "$CODEX_DIR/hooks.json"; }
     rm -f "$ops"
+    f="$OMP_DIR/hooks/pre/kit.js"; [ -f "$f" ] && [ "$(head -n 1 "$f")" = "$OMP_HOOK_HEAD" ] && rm -f "$f"
     [ $left = 0 ] || die "有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall"
     rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps" "$KIT_CONF/mcp-deps" "$KIT_CONF/placed" "$CTX_DIR"
     say "kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）"
