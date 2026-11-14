@@ -552,6 +552,20 @@ check "check: counts every problem" 'echo "$out" | grep -q "kit check：9 個問
 mkdir -p "$AU/skills/gerrit-review"; printf -- '---\nname: gerrit-review\ndescription: x\n---\nx\n' > "$AU/skills/gerrit-review/SKILL.md"
 out=$(kit check "$AU" 2>&1)
 check "check: duplicate name across sources" 'echo "$out" | grep -q "名字重複：skill:gerrit-review"'
+# a source its kit.yaml calls private (never made public): its own private words are not problems
+PV="$T/private-src"; mkdir -p "$PV/rules/topsecretname-notes"
+printf 'name: pv\nprivate: true\n' > "$PV/kit.yaml"; printf -- '---\nname: pvr\ndescription: x\n---\nTopSecretName runs here\n' > "$PV/rules/pvr.md"
+out=$(kit check "$PV" 2>&1); rc=$?
+check "check: private: true, its private words (content, file names) are not problems" '[ $rc -eq 0 ] && ! echo "$out" | grep -q 不該公開'
+printf 'name: pv\n' > "$PV/kit.yaml"
+out=$(kit check "$PV" 2>&1); rc=$?
+check "check: without private: true they are" '[ $rc -ne 0 ] && echo "$out" | grep -q "rules/pvr.md:5: 有不該公開的字" && echo "$out" | grep -q "rules/topsecretname-notes: 檔名有不該公開的字" && ! echo "$out" | grep -q "runs here"'
+if [ -n "$PWSH" ]; then
+    printf 'name: pv\nprivate: true\n' > "$PV/kit.yaml"
+    out=$(kps check "$PV" 2>&1); rc=$?
+    check "check private: true: kit.ps1 the same" '[ $rc -eq 0 ] && ! echo "$out" | grep -q 不該公開'
+fi
+rm -rf "$PV"
 rm -rf "$AU/skills/gerrit-review"
 # --ci: author emails from the company domain only
 rm -rf "$AU/skills/foo/.git" "$AU/.gitmodules" "$AU/rules/link.md" "$AU/skills/foo/logo.png" "$AU/skills/baz" "$AU/mcp"

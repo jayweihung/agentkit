@@ -639,6 +639,8 @@ README 會一起帶過去（它就是使用說明），跟其他檔案一樣要�
 `kit push` 只送改過的 rule、skill、mcp、agent，只 push `kit/...` 分支，不動 main。
 來源的 `kit.yaml` 寫 `push: direct`（只有自己用的來源）時，改成直接 commit 到現在的分支、推到它所有的 remote，不開 PR。
 不寫就是 `push: pr`。團隊的來源一定要用 `push: pr`。
+只有自己、永遠不會公開的來源，`kit.yaml` 可以再寫 `private: true`：`kit check`（所以 `kit push` 也是）就不查這個來源裡不該公開的字
+（內容和檔名），它本來就會寫到那些私人的名字。其他檢查照做；`kit export-self` 照查。會公開、或有一天可能公開的來源不要寫。
 檢查（`kit check`、`author_domains`、`allowed_hosts`）有一項不過就什麼都不送。
 要自動開 PR 就放 Gitea token：環境變數 `KIT_GITEA_TOKEN`，或檔案
 `~/.config/agentkit/gitea-token`（`chmod 600`）。沒有 token 時會印出網址讓你自己開。

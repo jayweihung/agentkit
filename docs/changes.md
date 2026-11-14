@@ -38,6 +38,10 @@
 - 團隊規定一定要擋的（required 的 deny），寫進 `~/.omp/agent/hooks/pre/kit.js`，每個 omp 都擋。
 - Claude 的工具名字換成 omp 的（Read → read、Bash → bash 和 eval…）。`Bash(git push:*)` 這種照擋；別的工具 `( )` 的寫法 omp 擋不到，kit 會說。
 
+**自己私人的來源可以寫私密字（`private: true`）**
+- 來源的 `kit.yaml` 寫 `private: true`（這個來源永遠不公開，例如只推到自己私人主機的）：`kit check` 不再拿 `~/.config/agentkit/private-words.txt` 查它的內容和檔名，送出不會被「有不該公開的字」擋下。沒寫的照舊查；`kit export-self` 一樣會查。
+- Windows（kit.ps1）：私密字清單只有一個字時，`kit check` 不會再出錯。
+
 ## 0.6.6（2026-11-15）
 
 更新後要做：`kit self-update`。kit api 還是 1.7。

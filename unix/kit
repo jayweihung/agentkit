@@ -4503,8 +4503,9 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
                 printf '%s\n' "$hosts" | grep -qxF "$h" || echo "${line%%:*}" "$(printf '%s' "$line" | cut -d: -f2)" "$h"
             done | while read -r f n h; do problem "${f#"$d"/}:$n: 網址 $h 不在 content_hosts"; done
         fi
-        # private words (only the place, never the word)
-        if [ -s "$pw" ]; then
+        # private words (only the place, never the word); not in a source its kit.yaml calls private (private: true:
+        # never made public, so it may name the private things; kit export-self still checks)
+        if [ -s "$pw" ] && [ "$(yget "$d/kit.yaml" private 2>/dev/null)" != true ]; then
             LC_ALL=C grep -rnIiF -f "$pw" --exclude-dir=.git --exclude=private-words.txt "$d" 2>/dev/null | cut -d: -f1,2 | while IFS= read -r line; do problem "${line#"$d"/}: 有不該公開的字"; done
             ( cd "$d" && find . -mindepth 1 -name .git -prune -o -print ) | sed 's#^\./##' | grep -iF -f "$pw" | while IFS= read -r line; do problem "$line: 檔名有不該公開的字"; done
         fi

@@ -516,11 +516,20 @@ Check 'check: url not in content_hosts' { $out.Contains('agents/bot.md:6: 網址
 Check 'check: mcp from git' { $out.Contains('mcp/m.yaml: MCP 只能') }
 Check 'check: skill header' { $out.Contains('skills/baz/SKILL.md: 開頭要有') }
 Check 'check: binary, symlink, submodule, nested git' { $out.Contains('logo.png: 只能放文字檔') -and (-not $linkOk -or $out.Contains('link.md: 不能放捷徑')) -and $out.Contains('.gitmodules: 不能用') -and $out.Contains('skills/foo/.git: 裡面不能有') }
-Check 'check: private word found, never printed' { $out -match 'rules/sec\.md:\d+: 有不該公開的字' -and $out -notmatch '(?i)topsecret' }
+Check 'check: private word found, never printed' { $out -match 'rules/sec\.md:\d+: 有不該公開的字' -and -not $out.Contains('runs here') }
 Check 'check: counts every problem' { $out.Contains($(if ($linkOk) { 'kit check：9 個問題' } else { 'kit check：8 個問題' })) }
 W "$AU/skills/gerrit-review/SKILL.md" "---`nname: gerrit-review`ndescription: x`n---`nx`n"
 Kit check $AU
 Check 'check: duplicate name across sources' { $out.Contains('名字重複：skill:gerrit-review') }
+# a source its kit.yaml calls private (never made public): its own private words are not problems
+$PV = Join-Path $T 'private-src'; New-Item -ItemType Directory -Force -Path (Join-Path $PV 'rules/topsecretname-notes') | Out-Null
+W "$PV/kit.yaml" "name: pv`nprivate: true`n"; W "$PV/rules/pvr.md" "---`nname: pvr`ndescription: x`n---`nTopSecretName runs here`n"
+Kit check $PV
+Check 'check: private: true, its private words (content, file names) are not problems' { $rc -eq 0 -and -not $out.Contains('不該公開') }
+W "$PV/kit.yaml" "name: pv`n"
+Kit check $PV
+Check 'check: without private: true they are' { $rc -ne 0 -and $out.Contains('rules/pvr.md:5: 有不該公開的字') -and $out.Contains('rules/topsecretname-notes: 檔名有不該公開的字') -and -not $out.Contains('runs here') }
+Remove-Item -LiteralPath $PV -Recurse -Force
 foreach ($x in 'skills/gerrit-review', 'skills/foo/.git', '.gitmodules', 'rules/link.md', 'skills/foo/logo.png', 'skills/baz', 'mcp') { Remove-Item -LiteralPath (Join-Path $AU $x) -Recurse -Force }
 W "$AU/agents/bot.md" "---`nname: bot`ndescription: b`nskills: [foo]`n---`nhi`n"; W "$AU/rules/sec.md" "Be safe.`n"
 [IO.File]::AppendAllText("$AU/kit.yaml", "author_domains: [corp.example]`n")

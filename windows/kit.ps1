@@ -5871,6 +5871,8 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
             if ($e.Length -gt 0 -and (Is-Binary $e.FullName)) { Problem "${rel}: 只能放文字檔"; continue }
             $textFiles.Add(@($rel, $e.FullName))
         }
+        # private words: not in a source its kit.yaml calls private (private: true: never made public; export-self still checks)
+        $pwHere = @(if (@(YGet $kitYaml 'private') -contains 'true') { } else { $pw })
         # URLs only to content_hosts (when the sources list them)
         $hosts = @(YGet $kitYaml 'content_hosts'); if (Test-Path -LiteralPath $Machine) { foreach ($sd in Src-Dirs) { $hosts += @(YGet (Join-Path $sd 'kit.yaml') 'content_hosts') } }
         $hosts = @(Uniq @($hosts | Where-Object { $_ } | ForEach-Object { $_.ToLowerInvariant() }))
@@ -5883,10 +5885,10 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
                         if ($hosts -notcontains $h) { Problem "$($tf[0]):$($i + 1): 網址 $h 不在 content_hosts" }
                     }
                 }
-                if ($pw.Count -gt 0 -and (Split-Path -Leaf $tf[1]) -ne 'private-words.txt' -and (Has-Word $lines[$i] $pw)) { Problem "$($tf[0]):$($i + 1): 有不該公開的字" }
+                if ($pwHere.Count -gt 0 -and (Split-Path -Leaf $tf[1]) -ne 'private-words.txt' -and (Has-Word $lines[$i] $pwHere)) { Problem "$($tf[0]):$($i + 1): 有不該公開的字" }
             }
         }
-        if ($pw.Count -gt 0) { foreach ($e in $entries) { $rel = Rel-Path $d $e.FullName; if (Has-Word $rel $pw) { Problem "${rel}: 檔名有不該公開的字" } } }
+        if ($pwHere.Count -gt 0) { foreach ($e in $entries) { $rel = Rel-Path $d $e.FullName; if (Has-Word $rel $pwHere) { Problem "${rel}: 檔名有不該公開的字" } } }
         # --ci: commit author emails
         if ($script:CheckCi -and (Test-Path -LiteralPath (Join-Path $d '.git'))) {
             $doms = @(YGet $kitYaml 'author_domains')
