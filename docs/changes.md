@@ -15,7 +15,18 @@
 **Codex、omp 開啟時也會自動 `kit sync`**
 - Codex：`~/.codex/hooks.json` 加上跟 Claude 一樣的 SessionStart hook，和 context 快滿時提醒寫 HANDOFF.md 的 hook（數字從 Codex 的對話檔讀）。Codex 要你在 `/hooks` 信任一次。
 - omp：`~/.omp/agent/hooks/pre/kit.js`，每次開 session 在背景跑 `kit sync --hook`。
+- omp 的 hook 模組也在你每次送出一句話前檢查 context：快滿時（80%、90% 各一次）提醒它先寫 HANDOFF.md、記 `kit note`，跟 Claude、Codex 一樣。
 - `kit uninstall` 會拿掉這些。
+
+**Codex：同一個資料夾開兩個，也認得出是哪一個**
+- `kit context`、`kit files`：先看那個 Codex 程式開著哪一份對話檔（Herdr 用 `--no-daemon` 開的 Codex 一直開著它；kit 用 `lsof`／`/proc`），看不到才照舊用那個資料夾最新的一份。Windows 看不到程式開著的檔，照舊。
+
+**omp：Windows 上找對話、面板列的檔、context 細項、方案用量**
+- 沒有終端機可對的 omp（Windows 在 Herdr 裡就是這樣）：找那個程式啟動前後建立、之後還在寫的那份對話，不再只抓資料夾最新的。（Windows 上還沒實測。）
+- `kit list --json --dir`（Kit 面板「這個資料夾另外會讀到的」）：照 omp 自己的規則標誰讀得到（實測過）：每一層資料夾 omp 只讀一份指示檔（`.omp/AGENTS.md` > `.claude/CLAUDE.md` > `.agents/AGENTS.md` > `AGENTS.md` > `CLAUDE.md`），`.claude/skills` 往上找，`.claude/rules/` 不讀。新列出 `.agents/AGENTS.md`、`.agents/skills`（Codex 和 omp）、最近一個 `.omp` 的 `RULES.md` 和 skills、`mcp.json`、`.omp/mcp.json`、`.codex/config.toml` 裡你自己的 MCP，和帳號的 `~/.agents/skills`、`~/.omp/agent/skills`、`RULES.md`、`mcp.json`。
+- `kit context --detail`（omp）：指示檔、skills、MCP 照上面的規則估；`~/.claude/CLAUDE.md`、`~/.claude/skills` 不再算進去（omp 預設不讀）。
+- `kit usage` 多一個 `omp`：`omp usage` 回報的各服務用量（anthropic、openai-codex…），kit 在背景每 5 分鐘問一次，只留數字。
+- omp 的 context 上限：不再套用 Claude Code `settings.json` 的 `autoCompactWindow`（omp 不讀它），只看 omp 自己的模型清單，沒有才用 kit 的猜測。
 
 **omp 也照 agent 的工具限制（tools.only、tools.deny）**
 - `kit place … --tool omp`：限制寫進資料夾的 `.omp/hooks/pre/kit.js`；`kit run … --tool omp`：`--tools` 只開 agent 要的工具，deny 用一個暫時的 `--extension`。

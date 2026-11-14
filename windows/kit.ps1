@@ -1711,12 +1711,12 @@ function Hook-Cmd([string]$args1 = 'sync --hook') {
     $exe = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell' } else { 'pwsh' }
     "$exe -NoProfile -ExecutionPolicy Bypass -File `"$($PSCommandPath.Replace('\', '/'))`" $args1"
 }
-function Omp-HookJs([string]$sync, $only, $deny) { # the module (SYNC: the command, or ''; ONLY, DENY: names / rules)
+function Omp-HookJs([string]$sync, $only, $deny, [string]$handoff = '') { # the module (SYNC, HANDOFF: the commands, or ''; ONLY, DENY: names / rules)
     $t = $null
     foreach ($f in @((Join-Path $KitLib 'templates/omp-hook.txt'), (Join-Path (Split-Path -Parent $KitLib) 'templates/omp-hook.txt'))) { if (Test-Path -LiteralPath $f -PathType Leaf) { $t = $f; break } }
     if (-not $t) { return $null }
-    $sv = if ($sync) { Json-S $sync } else { 'null' }
-    ((Read-Text $t) -replace "`r`n", "`n").TrimEnd("`n").Replace('__SYNC__', $sv).Replace('__ONLY__', (Json-Arr $only)).Replace('__DENY__', (Json-Arr $deny))
+    $sv = if ($sync) { Json-S $sync } else { 'null' }; $hv = if ($handoff) { Json-S $handoff } else { 'null' }
+    ((Read-Text $t) -replace "`r`n", "`n").TrimEnd("`n").Replace('__SYNC__', $sv).Replace('__HANDOFF__', $hv).Replace('__ONLY__', (Json-Arr $only)).Replace('__DENY__', (Json-Arr $deny))
 }
 function Omp-HookPut([string]$f, [string]$want = '') { # kit's module there (no WANT: kit's taken out); $false when F is your own
     if ((Test-Path -LiteralPath $f -PathType Leaf) -and ((Read-Text $f) -split "`r?`n")[0] -ne $OmpHookHead) { return $false }
@@ -1726,7 +1726,7 @@ function Omp-HookPut([string]$f, [string]$want = '') { # kit's module there (no 
 }
 function Omp-Hook {
     $f = Join-Path $OmpDir 'hooks/pre/kit.js'
-    if (Omp-HookPut $f (Omp-HookJs (Hook-Cmd) @() @(Required-Deny))) { State-Set 'hook.omp' 'kit.js' 1 }
+    if (Omp-HookPut $f (Omp-HookJs (Hook-Cmd) @() @(Required-Deny) (Hook-Cmd 'handoff-hook'))) { State-Set 'hook.omp' 'kit.js' 1 }
     elseif ($null -eq (State-Get 'told' 'omp-hook')) { Warn "$f 是你自己的檔：kit 不動它，omp 開啟時不會自動 kit sync"; State-Set 'told' 'omp-hook' 1 }
 }
 function Omp-ToolNames($only) { # Claude's tool names -> omp's tools that do the same, comma-separated (one omp has not: dropped)
@@ -2740,6 +2740,9 @@ function Setting-Window([string]$m) { # the window Claude Code is told to use fo
 function Model-Window([string]$m) { # the context window Claude Code uses for a model: a setting (autoCompactWindow), else the model's own
     $w = Setting-Window $m
     if ($w) { return $w }
+    Model-Size $m
+}
+function Model-Size([string]$m) { # a model's own context window, kit's guess (no tool's setting)
     if ($m -match '\[1m\]$|opus-5|opus-4-7|opus-4-8|sonnet-5|fable|mythos|haiku-5') { return '1000000' }
     if ($m -match '^(claude-|anthropic/)') { return '200000' }
     ''
@@ -2860,7 +2863,12 @@ function Cmd-HandoffHook { # Claude's UserPromptSubmit hook (the same as unix/ki
     # Codex (its hooks.json, the same hook): what it hands over has its rollout (transcript_path): its last token_count
     $in = [Console]::In.ReadToEnd(); $sid = (Str-Of 'session_id' $in) -replace '[^A-Za-z0-9-]', ''
     $tp = Ctx-Unjs (Str-Of 'transcript_path' $in)
-    if ($tp -match '[\\/]\.codex[\\/]sessions[\\/]' -or $tp -match '[\\/]sessions[\\/].*[\\/]rollout-[^\\/]*\.jsonl$') {
+    if ($tp -and ((Ctx-Under $tp (Join-Path $OmpDir 'sessions')) -or $tp -match '[\\/]\.omp[\\/]agent[\\/]sessions[\\/].*\.jsonl$')) {   # omp (kit's hook module)
+        if (-not (Test-Path -LiteralPath $tp -PathType Leaf)) { return }
+        $cp = $sid; $j = Omp-Ctx '' '' $tp; $u = Num-Of 'used' $j; $w = Num-Of 'window' $j; $p1 = Num-Of 'pct' $j
+        if (-not $u -or -not $w -or -not $p1 -or [long]$w -le 0) { return }
+        $pct = [long]$p1
+    } elseif ($tp -match '[\\/]\.codex[\\/]sessions[\\/]' -or $tp -match '[\\/]sessions[\\/].*[\\/]rollout-[^\\/]*\.jsonl$') {
         if (-not (Test-Path -LiteralPath $tp -PathType Leaf)) { return }
         $cp = $sid; $line = ''
         $o = Ctx-Open $tp $CtxTail
@@ -2882,7 +2890,7 @@ function Cmd-HandoffHook { # Claude's UserPromptSubmit hook (the same as unix/ki
     if ($lvl -eq 0) { if (Test-Path -LiteralPath $mark) { Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue }; return }
     $told = 0; if (Test-Path -LiteralPath $mark) { [void][int]::TryParse((Read-Text $mark).Trim(), [ref]$told) }
     if ($told -ge $lvl) { return }
-    try { [IO.File]::WriteAllText($mark, "$lvl`n") } catch { return }
+    try { [void](New-Item -ItemType Directory -Path $CtxDir -Force -ErrorAction Stop); [IO.File]::WriteAllText($mark, "$lvl`n") } catch { return }
     Get-ChildItem -LiteralPath $CtxDir -Filter 'handoff-*' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) } | Remove-Item -Force -ErrorAction SilentlyContinue
     $msg = "kit: this conversation's context is ${pct}% full ($([long][Math]::Floor([long]$u / 1000))k of $([long][Math]::Floor([long]$w / 1000))k tokens). Before the next step: write or update HANDOFF.md in the project folder (what is done, what is next, open questions, how to check it), run kit note with where you are and what is next, and tell the user, in their language, that the context is nearly full: a new session can carry on from HANDOFF.md and kit note --history, or they can /compact. Then go on with what the user asked."
     [Console]::Out.Write('{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":' + (Json-S $msg) + "}}`n")
@@ -2994,8 +3002,8 @@ function Codex-Limit([string]$f) { # "UNTIL_SECONDS KIND", else ''
     $kind = if ($bm -eq 300) { 'five_hour' } elseif ($bm -eq 10080) { 'seven_day' } elseif ($bm -ge 40000 -and $bm -le 45000) { 'monthly' } else { 'limit' }
     $bt + ' ' + $kind
 }
-function Codex-Ctx([string]$cwd) { # the newest rollout started in that folder
-    $f = Codex-Rollout $cwd
+function Codex-Ctx([string]$cwd, [string]$cpid = '') { # that Codex's rollout (Codex-Rollout)
+    $f = Codex-Rollout $cwd $cpid
     if (-not $f) { return Ctx-Json 'codex' '' '' '' '' }
     $s = Codex-Last $f $CtxTail; if ($s.which -eq 'more') { $s = Codex-Last $f 0 }
     $m = Str-Of 'model' $s.c
@@ -3013,7 +3021,7 @@ function Omp-Window([string]$m) {
         $q = "select json_extract(m.value,'`$.contextWindow') from model_cache, json_each(models) m where (provider_id = '$prov' or provider_id like '${prov}:%') and json_extract(m.value,'`$.id') = '$id' limit 1"
         $w = "$(& sqlite3 -readonly "file:$($db.Replace('\', '/'))?mode=ro" $q 2>$null)".Trim()
     }
-    if ($w -match '^[0-9]+$') { $w } else { Model-Window $id }
+    if ($w -match '^[0-9]+$') { $w } else { Model-Size $id }   # (not Claude Code's settings.json: omp does not read it)
 }
 $script:TextRx = [regex]'"text":"(?:[^"\\]|\\.)*"'
 function Omp-Scan([string]$f, [long]$n) {
@@ -3039,9 +3047,9 @@ function Omp-Scan([string]$f, [long]$n) {
     $which = if ($cn -gt $an) { 'cut' } elseif ($an) { 'reply' } elseif ($o -and $o[1]) { 'more' } else { '' }
     @{ which = $which; a = $a; c = $c; m = $m; tb = $tb; im = $im }
 }
-function Omp-Ctx([string]$opid, [string]$cwd) {
-    $f = Omp-Session $opid $cwd
-    if (-not $f) { return Ctx-Json 'omp' '' '' '' '' }
+function Omp-Ctx([string]$opid, [string]$cwd, [string]$sf = '') { # that omp's session (Omp-Session), or SF
+    $f = if ($sf) { $sf } else { Omp-Session $opid $cwd }
+    if (-not $f -or -not (Test-Path -LiteralPath $f -PathType Leaf)) { return Ctx-Json 'omp' '' '' '' '' }
     $s = Omp-Scan $f $CtxTail; if ($s.which -eq 'more') { $s = Omp-Scan $f 0 }
     $m = Str-Of 'model' $s.m
     if ($s.a -and -not $m) { $m = (Str-Of 'provider' $s.a) + '/' + (Str-Of 'model' $s.a) }
@@ -3055,7 +3063,23 @@ function Omp-Ctx([string]$opid, [string]$cwd) {
     $u = [string]([long]$u + [long][Math]::Floor($s.tb / 4) + $s.im * 1600)
     Ctx-Json 'omp' $u $w 'session' $m
 }
-function Omp-Session([string]$opid, [string]$cwd) { # the session its terminal points at, else the newest of that folder ('' if none)
+function Omp-Started([string]$opid, [string]$want) { # with no terminal to go by (as on Windows), the session of that folder
+    # (WANT: its "cwd") the process started: written since it started, named from a minute before its start to 5 minutes
+    # after ('' if none; as unix/kit's omp_started)
+    try { $st = (Get-Process -Id ([int]$opid) -ErrorAction Stop).StartTime } catch { return '' }
+    $d = Join-Path $OmpDir 'sessions'; if (-not $st -or -not (Test-Path -LiteralPath $d -PathType Container)) { return '' }
+    $su = $st.ToUniversalTime(); $t0 = $su.AddSeconds(-60).ToString('yyyy-MM-ddTHH-mm-ss'); $t1 = $su.AddSeconds(300).ToString('yyyy-MM-ddTHH-mm-ss')
+    $since = $st.AddMinutes(-2); $best = ''; $bn = ''
+    foreach ($x in @(Get-ChildItem -LiteralPath $d -Recurse -File -Filter '*.jsonl' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $since })) {
+        $n = $x.Name; if ($n.Length -lt 19) { continue }; $n = $n.Substring(0, 19)
+        if ([string]::CompareOrdinal($n, $t0) -lt 0 -or [string]::CompareOrdinal($n, $t1) -gt 0) { continue }
+        if ($bn -and [string]::CompareOrdinal($n, $bn) -ge 0) { continue }
+        if (@(Get-Content -LiteralPath $x.FullName -TotalCount 3 -Encoding UTF8 | Where-Object { $_.Contains('"type":"session"') -and $_.Contains($want) }).Count -gt 0) { $best = $x.FullName; $bn = $n }
+    }
+    $best
+}
+function Omp-Session([string]$opid, [string]$cwd) { # the session its terminal points at, else the one it started (Omp-Started),
+    # else the newest of that folder ('' if none)
     $f = ''
     if (-not $OnWindows -and $opid) {
         $tty = "$(& ps -o tty= -p $opid 2>$null)".Trim() -replace '^/dev/', '' -replace '/', '-'
@@ -3065,9 +3089,10 @@ function Omp-Session([string]$opid, [string]$cwd) { # the session its terminal p
         $f = ''
         if ($cwd) {
             $want = '"cwd":' + (Json-S $cwd)
-            foreach ($x in Newest-Files (Join-Path $OmpDir 'sessions') '*.jsonl') {
+            if ($opid) { $f = Omp-Started $opid $want }
+            if (-not $f) { foreach ($x in Newest-Files (Join-Path $OmpDir 'sessions') '*.jsonl') {
                 if (@(Get-Content -LiteralPath $x -TotalCount 3 -Encoding UTF8 | Where-Object { $_.Contains('"type":"session"') -and $_.Contains($want) }).Count -gt 0) { $f = $x; break }
-            }
+            } }
         }
     }
     $f
@@ -3104,13 +3129,63 @@ function Codex-Usage([string]$f) {
     if ($parts.Count -eq 0) { return '' }
     '{"at": null, "windows": [' + ($parts -join ', ') + ']}'
 }
-function Cmd-Usage($rest) { # kit usage : the account's plan usage, Claude and Codex (JSON)
+function Omp-UsageParse([string]$f) { # `omp usage --json` -> {"<provider>": U, ...} ('' if it has none; as unix/kit's omp_usage_parse)
+    $lv = Json-LeavesOf $f; if ($null -eq $lv) { return '' }
+    $pv = @{}; $at = @{}; $ro = New-List; $lo = @{}; $val = @{}; $inv = [Globalization.CultureInfo]::InvariantCulture
+    foreach ($l in $lv) {
+        if ($l.Count -lt 4 -or $l[0] -cne 'reports' -or $l[1] -notmatch '^[0-9]+\z') { continue }
+        $r = $l[1]
+        if ($l[2] -ceq 'provider') { $v = $l[3].Replace('"', ''); if ($v -cmatch '^[a-z0-9][a-z0-9._-]*\z') { $pv[$r] = $v }; if (-not $ro.Contains($r)) { $ro.Add($r) }; continue }
+        if ($l[2] -ceq 'fetchedAt' -and $l[3] -match '^[0-9]+\z') { $at[$r] = $l[3]; continue }
+        if ($l[2] -cne 'limits' -or $l.Count -lt 6 -or $l[3] -notmatch '^[0-9]+\z') { continue }
+        $k = "$r`t$($l[3])"; if (-not $lo.ContainsKey($r)) { $lo[$r] = New-List }; if (-not $lo[$r].Contains($l[3])) { $lo[$r].Add($l[3]) }
+        $val["$k`t$(($l[4..($l.Count - 2)]) -join '.')"] = $l[$l.Count - 1]
+    }
+    $out = New-List
+    foreach ($r in $ro) {
+        if (-not $pv.ContainsKey($r) -or -not $lo.ContainsKey($r)) { continue }
+        $w = New-List
+        foreach ($i in $lo[$r]) {
+            $k = "$r`t$i"; $id = "$($val["$k`tid"])".Replace('"', ''); $pre = $pv[$r] + ':'; if ($id.StartsWith($pre, $Ord)) { $id = $id.Substring($pre.Length) }
+            if ($id -cnotmatch '^[A-Za-z0-9:_.-]+\z') { continue }
+            $fr = "$($val["$k`tamount.usedFraction"])"; if ($fr -notmatch '^[0-9.]+\z') { continue }
+            $ms = "$($val["$k`twindow.durationMs"])"; $mi = if ($ms -match '^[0-9]+\z') { [string][Math]::Floor([double]::Parse($ms, $inv) / 60000) } else { 'null' }
+            $t = "$($val["$k`twindow.resetsAt"])"; if ($t -notmatch '^[0-9]+\z') { $t = 'null' }
+            $w.Add('{"id": "' + $id + '", "pct": ' + [string][Math]::Floor([double]::Parse($fr, $inv) * 100 + 0.5) + ', "minutes": ' + $mi + ', "resets_at": ' + $t + '}')
+        }
+        if ($w.Count -gt 0) { $out.Add('"' + $pv[$r] + '": {"at": ' + $(if ($at.ContainsKey($r)) { $at[$r] } else { 'null' }) + ', "windows": [' + ($w -join ', ') + ']}') }
+    }
+    if ($out.Count -eq 0) { return '' }
+    '{' + ($out -join ', ') + '}'
+}
+function Omp-UsageRefresh { # in the background (kit usage --omp-refresh): ask omp, keep the numbers (one at a time)
+    $f = Join-Path $CtxDir 'omp-usage.json'; $lock = Join-Path $CtxDir 'omp-usage.lock'
+    if ((Test-Path -LiteralPath $lock) -and (Get-Item -LiteralPath $lock).LastWriteTime -lt (Get-Date).AddMinutes(-2)) { Remove-Item -LiteralPath $lock -Force -Recurse -ErrorAction SilentlyContinue }
+    try { [void](New-Item -ItemType Directory -Path $CtxDir -Force -ErrorAction Stop); [void](New-Item -ItemType Directory -Path $lock -ErrorAction Stop) } catch { return }
+    try {
+        $raw = Join-Path $lock 'raw.json'
+        $o = @(& omp usage --json 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $o.Count -gt 0) { Write-Text $raw (($o -join "`n") + "`n"); $j = Omp-UsageParse $raw; if ($j) { Write-Text $f ($j + "`n") } }
+        if (Test-Path -LiteralPath $f) { (Get-Item -LiteralPath $f).LastWriteTime = Get-Date } else { Write-Text $f '' }
+    } catch { } finally { Remove-Item -LiteralPath $lock -Force -Recurse -ErrorAction SilentlyContinue }
+}
+function Cmd-Usage($rest) { # kit usage : the account's plan usage, Claude, Codex and omp (JSON)
     $rest = @($rest | Where-Object { $null -ne $_ })
+    if ($rest.Count -eq 1 -and $rest[0] -ceq '--omp-refresh') { Omp-UsageRefresh; return }
     if ($rest.Count -gt 0 -and -not ($rest.Count -eq 1 -and $rest[0] -ceq '--json')) { Die '用法：kit usage' }
     $c = 'null'; $cf = Join-Path $CtxDir 'claude-usage.json'
     if (Test-Path -LiteralPath $cf -PathType Leaf) { try { $c1 = @((Read-Text $cf) -split "`n")[0].TrimEnd("`r"); if ($c1.StartsWith('{') -and $c1.EndsWith('}')) { $c = $c1 } } catch { } }
     $x = ''; $nf = @(Newest-Files (Join-Path $CodexDir 'sessions') 'rollout-*.jsonl'); if ($nf.Count -gt 0) { $x = Codex-Usage $nf[0] }
-    [Console]::Out.Write('{"claude": ' + $c + ', "codex": ' + $(if ($x) { $x } else { 'null' }) + "}`n")
+    $o = 'null'
+    if (Has-Omp) {
+        $of = Join-Path $CtxDir 'omp-usage.json'
+        if (Test-Path -LiteralPath $of -PathType Leaf) { try { $o1 = @((Read-Text $of) -split "`n")[0].TrimEnd("`r"); if ($o1.StartsWith('{') -and $o1.EndsWith('}')) { $o = $o1 } } catch { } }
+        if (-not (Test-Path -LiteralPath $of -PathType Leaf) -or (Get-Item -LiteralPath $of).LastWriteTime -lt (Get-Date).AddMinutes(-5)) {
+            $exe = (Get-Process -Id $PID).Path; $argline = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" usage --omp-refresh"
+            try { if ($OnWindows) { Start-Process -FilePath $exe -ArgumentList $argline -WindowStyle Hidden } else { Start-Process -FilePath $exe -ArgumentList $argline } } catch { }
+        }
+    }
+    [Console]::Out.Write('{"claude": ' + $c + ', "codex": ' + $(if ($x) { $x } else { 'null' }) + ', "omp": ' + $o + "}`n")
 }
 function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [--detail [--fresh]] : how full that agent's context is (JSON)
     $use = '用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]'
@@ -3134,7 +3209,7 @@ function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] 
         }
     }
     if ($detail) { Ctx-Detail $cpid $tool $dir $fresh; return }
-    $out = switch ($tool) { 'claude' { Claude-Ctx $cpid $dir } 'codex' { Codex-Ctx $dir } 'omp' { Omp-Ctx $cpid $dir } default { Ctx-Json '' '' '' '' '' } }
+    $out = switch ($tool) { 'claude' { Claude-Ctx $cpid $dir } 'codex' { Codex-Ctx $dir $cpid } 'omp' { Omp-Ctx $cpid $dir } default { Ctx-Json '' '' '' '' '' } }
     [Console]::Out.Write($out + "`n")
 }
 
@@ -3701,8 +3776,19 @@ function Claude-Detail([string]$cpid, [string]$dir, $R) { # the rows for a Claud
 function Ctx-Int([string]$s) { if ($s -cmatch '^-?[0-9]+\z') { [long]$s } else { [long]0 } }
 
 # ---------- Codex ----------
-function Codex-Rollout([string]$dir) { # the newest rollout started in that folder ('' if none)
-    if (-not $dir -or -not (Test-Path -LiteralPath (Join-Path $CodexDir 'sessions') -PathType Container)) { return '' }
+function Codex-OpenRollout([string]$p) { # the rollout that Codex process has open ('' if none). A Codex run with --no-daemon
+    # (as Herdr starts it) keeps its own rollout open; one that uses Codex's app-server daemon does not. Windows: not looked at.
+    if ($OnWindows -or $p -notmatch '^[0-9]+\z') { return '' }
+    $ls = if (Test-Path -LiteralPath "/proc/$p/fd") { foreach ($l in @(Get-ChildItem -LiteralPath "/proc/$p/fd" -ErrorAction SilentlyContinue)) { "$(& readlink $l.FullName 2>$null)" } }
+        elseif (Get-Command lsof -ErrorAction SilentlyContinue) { foreach ($l in @(& lsof -n -P -b -w -a -p $p -d '^txt,^mem' -Fn 2>$null)) { if ("$l".StartsWith('n')) { "$l".Substring(1) } } }
+    foreach ($l in @($ls)) { if ("$l" -match '/sessions/.*/rollout-[^/]*\.jsonl\z') { return "$l" } }
+    ''
+}
+function Codex-Rollout([string]$dir, [string]$cpid = '') { # that Codex's rollout: the one the process has open, else the newest
+    # started in DIR ('' if none)
+    if (-not (Test-Path -LiteralPath (Join-Path $CodexDir 'sessions') -PathType Container)) { return '' }
+    $f = Codex-OpenRollout $cpid; if ($f -and (Test-Path -LiteralPath $f -PathType Leaf)) { return $f }
+    if (-not $dir) { return '' }
     $want = '"cwd":' + (Json-S $dir)
     foreach ($f in Newest-Files (Join-Path $CodexDir 'sessions') 'rollout-*.jsonl') {
         if ("$(Get-Content -LiteralPath $f -TotalCount 1 -Encoding UTF8)".Contains($want)) { return $f }
@@ -3856,10 +3942,10 @@ function Codex-Scan([string]$f, [string]$total, [string]$window, $files, $mcp, $
     $R.Add("G`ttool_results`t`t1")
     foreach ($k in (Dict-Keys $S.tc $S.tr)) { $R.Add("I`ttool_results`t$k`t" + (Ctx-Num (Ctx-Rnd (((Dict-Get $S.tc $k) + (Dict-Get $S.tr $k)) * $f))) + "`t" + (Ctx-Num (Dict-Get $S.tn $k)) + " 次`t`t") }
 }
-function Codex-Detail([string]$dir, $R) { # the rows for a Codex
+function Codex-Detail([string]$dir, $R, [string]$cpid = '') { # the rows for a Codex
     foreach ($x in @("H`ttool`tcodex", "H`tcompact`t/compact", "H`twith_text`t0", "H`tclear`t/new", "H`tsource`trollout", "H`texact`t0")) { $R.Add($x) }
-    $f = Codex-Rollout $dir; if (-not $f) { $R.Add("H`terror`t找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）"); return }
-    $c = Codex-Ctx $dir; $u = Num-Of 'used' $c; $w = Num-Of 'window' $c
+    $f = Codex-Rollout $dir $cpid; if (-not $f) { $R.Add("H`terror`t找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）"); return }
+    $c = Codex-Ctx $dir $cpid; $u = Num-Of 'used' $c; $w = Num-Of 'window' $c
     foreach ($x in @(("H`tmodel`t" + (Str-Of 'model' $c)), "H`tused`t$u", "H`twindow`t$w", ("H`tpct`t" + (Num-Of 'pct' $c)))) { $R.Add($x) }
     if ((Ctx-Size $f) -gt $CtxDetailTail) { $R.Add("H`tbig`t1") }
     $mcp = New-List; $cf = Ctx-Join $CodexDir 'config.toml'
@@ -3869,23 +3955,30 @@ function Codex-Detail([string]$dir, $R) { # the rows for a Codex
 }
 
 # ---------- omp ----------
-function Omp-InstrFiles([string]$dir) { # the instruction files omp may read for DIR (omp reads several tools' ones; a guess from what is there)
+function Omp-InstrFiles([string]$dir) { # the instruction files omp reads for DIR (as unix/kit's omp_instr_files)
     $o = New-List
-    Ctx-Files 'omp 帳號' @(Ctx-Join $OmpDir 'AGENTS.md') $o
-    Ctx-Files 'Claude 帳號' @(Ctx-Join $ClaudeDir 'CLAUDE.md') $o
+    foreach ($f in @((Ctx-Join $OmpDir 'AGENTS.md'), (Ctx-Join (Ctx-Join $UserHome '.agent') 'AGENTS.md'), (Ctx-Join (Ctx-Join $UserHome '.agents') 'AGENTS.md'))) {
+        if ((Ctx-Size $f) -gt 0) { Ctx-Files 'omp 帳號' @($f) $o; break }
+    }
+    Ctx-Files 'omp 帳號' @(Ctx-Join $OmpDir 'RULES.md') $o
     if ($dir) {
-        foreach ($d in (Ctx-Up $dir)) {
-            if (-not $d -or (Ctx-SamePath $d $UserHome)) { continue }
-            Ctx-Files '資料夾' @((Ctx-Join $d 'AGENTS.md'), (Ctx-Join $d 'CLAUDE.md'), (Ctx-Join (Ctx-Join $d '.omp') 'AGENTS.md'), (Ctx-Join (Ctx-Join $d '.claude') 'CLAUDE.md')) $o
-        }
+        $nat = Omp-Nat $dir; $lev = (Omp-Levels $dir); [Array]::Reverse($lev)
+        foreach ($d in $lev) { $f = Omp-Pick $d $dir $nat; if ($f) { Ctx-Files '資料夾' @($f) $o } }
+        if ($nat) { Ctx-Files '資料夾' @(Ctx-Join (Ctx-Join $nat '.omp') 'RULES.md') $o }
     }
     , $o
 }
 function Omp-SkillFiles([string]$dir) { # "name TAB bytes TAB path TAB where" for the skills omp may list: their name and description
     # ("where" as unix/kit has it: the skill's folder name)
     $o = New-List; $seen = New-Object 'System.Collections.Generic.HashSet[string]'
-    $ds = @((Ctx-Join $OmpDir 'skills'), $AgentsSkills, (Ctx-Join $ClaudeDir 'skills'))
-    if ($dir) { $ds += @((Ctx-Join (Ctx-Join $dir '.omp') 'skills'), (Ctx-Join (Ctx-Join $dir '.agents') 'skills'), (Ctx-Join (Ctx-Join $dir '.claude') 'skills')) }
+    $ds = @((Ctx-Join $OmpDir 'skills'), $AgentsSkills)
+    if ($dir) {
+        $nat = Omp-Nat $dir; if ($nat) { $ds += Ctx-Join (Ctx-Join $nat '.omp') 'skills' }
+        foreach ($d in (Omp-Levels $dir)) {
+            $x = Ctx-Join (Ctx-Join $d '.agents') 'skills'; if (-not (Ctx-SamePath $x $AgentsSkills)) { $ds += $x }
+            $x = Ctx-Join $d '.claude'; if (-not (Ctx-SamePath $x $ClaudeDir)) { $ds += Ctx-Join $x 'skills' }
+        }
+    }
     foreach ($d in $ds) {
         if (-not [IO.Directory]::Exists($d)) { continue }
         $subs = [string[]]@(foreach ($x in [IO.Directory]::GetDirectories($d)) { $n = [IO.Path]::GetFileName($x); if (-not $n.StartsWith('.', $Ord)) { $n } })
@@ -3990,15 +4083,18 @@ function Omp-Detail([string]$opid, [string]$dir, $R) { # the rows for an omp
     $f = Omp-Session $opid $dir; if (-not $f) { $R.Add("H`terror`t找不到這個 omp 的 session（~/.omp/agent/sessions）"); return }
     $c = Omp-Ctx $opid $dir
     foreach ($x in @(("H`tmodel`t" + (Str-Of 'model' $c)), ("H`tused`t" + (Num-Of 'used' $c)), ("H`twindow`t" + (Num-Of 'window' $c)))) { $R.Add($x) }
-    $mcp = New-List; $mf = @(Ctx-Join $OmpDir 'mcp.json'); if ($dir) { $mf += @((Ctx-Join (Ctx-Join $dir '.omp') 'mcp.json'), (Ctx-Join $dir '.mcp.json')) }
+    $mcp = New-List; $mf = @(Ctx-Join $OmpDir 'mcp.json'); if ($dir) { $mf += @((Ctx-Join (Ctx-Join $dir '.omp') 'mcp.json'), (Ctx-Join $dir '.mcp.json'), (Ctx-Join $dir 'mcp.json'), (Ctx-Join (Ctx-Join $dir '.claude') 'mcp.json'), (Ctx-Join (Ctx-Join $dir '.claude') '.mcp.json')) }
     foreach ($x in $mf) { if (Test-Path -LiteralPath $x -PathType Leaf) { foreach ($k in @(Json-Keys $x @('mcpServers'))) { $mcp.Add($k) } } }
+    if ($dir) { $x = Ctx-Join (Ctx-Join $dir '.codex') 'config.toml'
+        if ((Test-Path -LiteralPath $x -PathType Leaf) -and -not (Ctx-SamePath (Ctx-Join $dir '.codex') $CodexDir)) {
+            foreach ($l in (Read-Text $x) -split "`n") { if ($l.TrimEnd("`r") -cmatch '^[ \t]*\[mcp_servers\.([^\].]*)\][ \t]*$') { $mcp.Add($Matches[1].Replace('"', '')) } } } }
     Omp-DetailScan $f (Num-Of 'used' $c) (Num-Of 'window' $c) (Omp-InstrFiles $dir) (Omp-SkillFiles $dir) $mcp $R
     $R.Add("H`tnote`t總數和「系統工具」是 omp 自己記的（最後一次回覆的 context 快照）；其他分類和細項是從檔案和對話紀錄估的（大小 ÷ 4），照比例對到 omp 的數字。指示檔和 skills 是照現在的檔案估的。")
 }
 
 function Ctx-Rows([string]$cpid, [string]$tool, [string]$dir, $R) { # the rows for one agent
     if ($tool -ceq 'claude') { Claude-Detail $cpid $dir $R }
-    elseif ($tool -ceq 'codex') { Codex-Detail $dir $R }
+    elseif ($tool -ceq 'codex') { Codex-Detail $dir $R $cpid }
     elseif ($tool -ceq 'omp') { Omp-Detail $cpid $dir $R }
     else { $R.Add("H`terror`t不是 Claude Code、Codex 或 omp") }
 }
@@ -4344,9 +4440,9 @@ function Note-Read([string]$p) { # @(tool, dir, at, text) of that note (P: a pid
     if (-not $t) { return $null }
     , @($l[1], $l[2], $l[3], $t)
 }
-function Codex-ThreadOf([string]$p) { # the thread id of the Codex in process P (its newest rollout in its folder), or ''
+function Codex-ThreadOf([string]$p) { # the thread id of the Codex in process P (the rollout it has open, else its folder's newest), or ''
     $g = Agent-Guess $p '' ''; if ([string]$g[0] -cne 'codex') { return '' }
-    $f = Codex-Rollout ([string]$g[1]); if (-not $f) { return '' }
+    $f = Codex-Rollout ([string]$g[1]) $p; if (-not $f) { return '' }
     $b = [IO.Path]::GetFileNameWithoutExtension($f); if ($b.Length -lt 36) { return '' }
     $t = $b.Substring($b.Length - 36); if ($t -cmatch '^[0-9a-f-]+\z') { return $t }; ''
 }
@@ -4549,7 +4645,7 @@ function Cmd-Files($rest) { # kit files --pid PID [--tool claude|codex|omp] [--d
     $g = Agent-Guess $cpid $tool $dir; $tool = [string]$g[0]; $dir = [string]$g[1]
     $log = ''; $note = ''
     if ($tool -ceq 'claude') { $s = Claude-Where $cpid $dir; if ($s) { $log = $s[2] }; if (-not $log) { $note = '找不到這個 Claude 的對話紀錄（~/.claude/projects）' } }
-    elseif ($tool -ceq 'codex') { $log = Codex-Rollout $dir; if (-not $log) { $note = '找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）' } }
+    elseif ($tool -ceq 'codex') { $log = Codex-Rollout $dir $cpid; if (-not $log) { $note = '找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）' } }
     elseif ($tool -ceq 'omp') { $log = Omp-Session $cpid $dir; if (-not $log) { $note = '找不到這個 omp 的 session（~/.omp/agent/sessions）' } }
     elseif (-not $tool) { $note = '看不出是哪種 agent（用 --tool claude|codex|omp 指定）' }
     else { $note = "不認得這種 agent：${tool}（只認得 claude、codex、omp）" }
@@ -4851,15 +4947,51 @@ function Kit-Only([string]$f) { # FILE has nothing but kit's block (kit made it 
     foreach ($l in (Read-Text $f) -split "`n") { $l = $l.TrimEnd("`r"); if ($l -eq $BeginMark) { $in = $true }; if (-not $in -and $l.Trim()) { return $false }; if ($l -eq $EndMark) { $in = $false } }
     $true
 }
+function Omp-Levels([string]$d) { # the folders omp looks in for a folder's AGENTS.md / CLAUDE.md, DIR first (as unix/kit's omp_levels)
+    $list = New-List; $a = $d; $git = $false
+    $under = (Ctx-SamePath $d $UserHome) -or (Ctx-Under $d $UserHome)
+    while ($a) {
+        if ($under -and (Ctx-SamePath $a $UserHome)) { if (-not $git) { $list.Add($a) }; break }
+        $list.Add($a)
+        if (Test-Path -LiteralPath (Ctx-Join $a '.git')) { $git = $true; if (-not $under) { break } }
+        $up = Ctx-Parent $a
+        if (-not $up -or $up -ceq $a) { break }
+        $a = $up
+    }
+    , $list.ToArray()
+}
+function Omp-Nat([string]$d) { # the nearest folder (from DIR up) whose .omp has something in it ('' if none)
+    foreach ($x in (Omp-Levels $d)) {
+        $o = Ctx-Join $x '.omp'
+        if ((Ctx-SamePath $o (Ctx-Join $UserHome '.omp')) -or -not [IO.Directory]::Exists($o)) { continue }
+        if (@([IO.Directory]::EnumerateFileSystemEntries($o)).Count -gt 0) { return $x }
+    }
+    ''
+}
+function Omp-Pick([string]$a, [string]$d, [string]$nat) { # the one file omp reads at A's level ('' if none; as unix/kit's omp_pick)
+    $c = @(); if ($nat -and (Ctx-SamePath $a $nat)) { $c += Ctx-Join (Ctx-Join $a '.omp') 'AGENTS.md' }
+    if (Ctx-SamePath $a $d) { $c += Ctx-Join (Ctx-Join $a '.claude') 'CLAUDE.md' }
+    $c += @((Ctx-Join (Ctx-Join $a '.agents') 'AGENTS.md'), (Ctx-Join $a 'AGENTS.md'), (Ctx-Join $a 'CLAUDE.md'))
+    foreach ($f in $c) { if ((Ctx-Size $f) -gt 0) { return $f } }
+    ''
+}
+function Toml-McpNames([string]$f) { # the [mcp_servers.x] names in a Codex config.toml outside kit's block
+    $in = $false
+    @(foreach ($l in (Read-Text $f) -split "`n") { $l = $l.TrimEnd("`r")
+        if ($l -ceq $TomlBegin) { $in = $true; continue }; if ($l -ceq $TomlEnd) { $in = $false; continue }; if ($in) { continue }
+        if ($l -cmatch '^[ \t]*\[mcp_servers\.([^\].]*)\][ \t]*$') { $Matches[1].Replace('"', '') } })
+}
 function Here-Rows([string]$dir) { # what an agent started in DIR gets that kit does not manage: @(scope, kind, name, path, tools)
-    # (the folder's own that kit put there, kit add --dir, are not listed: the panel shows them as kit's)
+    # (the folder's own that kit put there, kit add --dir, are not listed: the panel shows them as kit's; tools: as unix/kit's here_rows)
     $rows = New-Object System.Collections.Generic.List[object]
     $cd = Join-Path $ClaudeDir 'CLAUDE.md'
     $root = Dir-Root $dir; $mine = @(Dir-Items $root)
+    $lev = (Omp-Levels $dir); $nat = Omp-Nat $dir
     $a = $dir
     while ($a) {
+        $ow = ''; $om = ''; if ($lev -ccontains $a) { $om = ' omp'; $ow = Omp-Pick $a $dir $nat }
         foreach ($f in @((Join-Path $a 'CLAUDE.md'), (Join-Path $a 'CLAUDE.local.md'), (Join-Path (Join-Path $a '.claude') 'CLAUDE.md'))) {
-            if ((Test-Path -LiteralPath $f -PathType Leaf) -and $f -ne $cd -and -not (Kit-Only $f)) { $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, 'claude')) }
+            if ((Test-Path -LiteralPath $f -PathType Leaf) -and $f -ne $cd -and -not (Kit-Only $f)) { $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, $(if ($f -ceq $ow) { 'claude omp' } else { 'claude' }))) }
         }
         $dc = Join-Path $a '.claude'
         if ($dc -ne $ClaudeDir) {
@@ -4871,18 +5003,45 @@ function Here-Rows([string]$dir) { # what an agent started in DIR gets that kit 
             if (Test-Path -LiteralPath $sd -PathType Container) {
                 foreach ($n in Sorted-Names (Get-ChildItem -LiteralPath $sd -Directory)) {
                     if ($a -eq $root -and $mine -contains "skill:$n") { continue }
-                    $f = Join-Path (Join-Path $sd $n) 'SKILL.md'; if (Test-Path -LiteralPath $f -PathType Leaf) { $rows.Add(@('dir', 'skill', $n, $f, 'claude')) }
+                    $f = Join-Path (Join-Path $sd $n) 'SKILL.md'; if (Test-Path -LiteralPath $f -PathType Leaf) { $rows.Add(@('dir', 'skill', $n, $f, "claude$om")) }
                 }
             }
         }
         $f = Join-Path $a 'AGENTS.md'
-        if ((Test-Path -LiteralPath $f -PathType Leaf) -and -not (Kit-Only $f)) { $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, 'codex omp')) }
+        if ((Test-Path -LiteralPath $f -PathType Leaf) -and -not (Kit-Only $f)) { $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, $(if ($f -ceq $ow) { 'codex omp' } else { 'codex' }))) }
+        $sd = Join-Path (Join-Path $a '.agents') 'skills'
+        if ($sd -ne $AgentsSkills) {
+            $f = Join-Path (Join-Path $a '.agents') 'AGENTS.md'; if ($f -ceq $ow) { $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, 'omp')) }
+            if (Test-Path -LiteralPath $sd -PathType Container) {
+                foreach ($n in Sorted-Names (Get-ChildItem -LiteralPath $sd -Directory)) {
+                    if ($a -eq $root -and $mine -contains "skill:$n") { continue }
+                    $f = Join-Path (Join-Path $sd $n) 'SKILL.md'; if (Test-Path -LiteralPath $f -PathType Leaf) { $rows.Add(@('dir', 'skill', $n, $f, "codex$om")) }
+                }
+            }
+        }
+        if ($nat -and $a -ceq $nat) {
+            $od = Join-Path $a '.omp'
+            $f = Join-Path $od 'AGENTS.md'; if ($f -ceq $ow) { $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, 'omp')) }
+            $f = Join-Path $od 'RULES.md'; if ((Ctx-Size $f) -gt 0) { $rows.Add(@('dir', 'rule', (Here-Short $dir $f), $f, 'omp')) }
+            $sd = Join-Path $od 'skills'
+            if (Test-Path -LiteralPath $sd -PathType Container) {
+                foreach ($n in Sorted-Names (Get-ChildItem -LiteralPath $sd -Directory)) { $f = Join-Path (Join-Path $sd $n) 'SKILL.md'; if (Test-Path -LiteralPath $f -PathType Leaf) { $rows.Add(@('dir', 'skill', $n, $f, 'omp')) } }
+            }
+        }
         $up = Split-Path -Parent $a
         if (-not $up -or $up -eq $a) { break }
         $a = $up
     }
-    $f = Join-Path $dir '.mcp.json'
-    if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('mcpServers')) { if ($dir -eq $root -and $mine -contains "mcp:$n") { continue }; $rows.Add(@('dir', 'mcp', $n, $f, 'claude')) } }
+    $mj = Join-Path $dir '.mcp.json'
+    foreach ($f in @($mj, (Join-Path $dir 'mcp.json'), (Join-Path (Join-Path $dir '.omp') 'mcp.json'), (Join-Path (Join-Path $dir '.claude') 'mcp.json'), (Join-Path (Join-Path $dir '.claude') '.mcp.json'))) {
+        if (-not (Test-Path -LiteralPath $f -PathType Leaf) -or $f -eq (Join-Path $OmpDir 'mcp.json')) { continue }
+        foreach ($n in Json-Keys $f @('mcpServers')) {
+            if ($f -ceq $mj -and $dir -eq $root -and $mine -contains "mcp:$n") { continue }
+            $rows.Add(@('dir', 'mcp', $n, $f, $(if ($f -ceq $mj) { 'claude omp' } else { 'omp' })))
+        }
+    }
+    $f = Join-Path (Join-Path $dir '.codex') 'config.toml'
+    if ((Test-Path -LiteralPath $f -PathType Leaf) -and (Join-Path $dir '.codex') -ne $CodexDir) { foreach ($n in Toml-McpNames $f) { $rows.Add(@('dir', 'mcp', $n, $f, 'codex omp')) } }
     if (Test-Path -LiteralPath $ClaudeJson -PathType Leaf) {
         $pks = @($dir); if ($dir.Contains('\')) { $pks += $dir.Replace('\', '/') }
         $seenMcp = @{}
@@ -4900,6 +5059,19 @@ function Here-Rows([string]$dir) { # what an agent started in DIR gets that kit 
     if (Test-Path -LiteralPath $ClaudeJson -PathType Leaf) {
         foreach ($n in Json-Keys $ClaudeJson @('mcpServers')) { if ($null -eq (State-Get 'mcp' $n)) { $rows.Add(@('user', 'mcp', $n, $ClaudeJson, 'claude')) } }
     }
+    if (Test-Path -LiteralPath $AgentsSkills -PathType Container) {
+        foreach ($n in Sorted-Names (Get-ChildItem -LiteralPath $AgentsSkills -Directory)) {
+            $f = Join-Path (Join-Path $AgentsSkills $n) 'SKILL.md'
+            if ((Test-Path -LiteralPath $f -PathType Leaf) -and $null -eq (State-Get 'skill' $n)) { $rows.Add(@('user', 'skill', $n, $f, 'codex omp')) }
+        }
+    }
+    $sd = Join-Path $OmpDir 'skills'
+    if (Test-Path -LiteralPath $sd -PathType Container) {
+        foreach ($n in Sorted-Names (Get-ChildItem -LiteralPath $sd -Directory)) { $f = Join-Path (Join-Path $sd $n) 'SKILL.md'; if (Test-Path -LiteralPath $f -PathType Leaf) { $rows.Add(@('user', 'skill', $n, $f, 'omp')) } }
+    }
+    $f = Join-Path $OmpDir 'RULES.md'; if ((Ctx-Size $f) -gt 0) { $rows.Add(@('user', 'rule', (Here-Short $dir $f), $f, 'omp')) }
+    $f = Join-Path $OmpDir 'mcp.json'
+    if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('mcpServers')) { if ($null -eq (State-Get 'mcp.omp' $n)) { $rows.Add(@('user', 'mcp', $n, $f, 'omp')) } } }
     $rows
 }
 function Other-User([string]$top) { # the user of a process under PID that is not me (an agent started with sudo -i), if any

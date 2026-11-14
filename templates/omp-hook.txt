@@ -1,12 +1,14 @@
 // kit's omp hook: written by kit (agentkit); edits here are overwritten.
 // What kit gives omp through a hook module (omp loads ~/.omp/agent/hooks/pre/*.js and <folder>/.omp/hooks/pre/*.js at
-// start, kit run passes it with --extension): kit sync when a session starts (like Claude's SessionStart hook), and the
+// start, kit run passes it with --extension): kit sync when a session starts (like Claude's SessionStart hook), before
+// each prompt kit handoff-hook (the context nearly full: told to write HANDOFF.md, like Claude's UserPromptSubmit hook), and the
 // agent's tool limits, written the way Claude's settings write them (tools.only: Claude's tool names; tools.deny:
 // "Bash", "Bash(git push:*)", "mcp__server__tool", "mcp__server"). Only Bash rules can name what is run; another
 // tool's rule with a ( ) part is not applied (kit says so).
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const SYNC = __SYNC__;
+const HANDOFF = __HANDOFF__;
 const ONLY = __ONLY__;
 const DENY = __DENY__;
 
@@ -47,6 +49,15 @@ function denied(d, tool, cmd) {
 export default function kit(pi) {
   if (SYNC) pi.on("session_start", async () => {
     try { spawn(SYNC, { shell: true, stdio: "ignore", detached: true }).unref(); } catch {}
+  });
+  if (HANDOFF) pi.on("before_agent_start", async (_event, ctx) => {
+    try {
+      const f = ctx?.sessionManager?.getSessionFile?.(); if (!f) return;
+      const sid = String(f).replace(/^.*[\\/]/, "").replace(/\.jsonl$/, "");
+      const r = spawnSync(HANDOFF, { shell: true, input: JSON.stringify({ session_id: sid, transcript_path: f }), encoding: "utf8", timeout: 5000 });
+      const t = JSON.parse(r.stdout || "null")?.hookSpecificOutput?.additionalContext;
+      if (t) return { message: { customType: "kit-handoff", content: t, display: false } };
+    } catch {}
   });
   const only = ONLY.length ? new Set(ONLY.flatMap((n) => OMP[n] ?? [])) : null;
   const deny = DENY.map(parse).filter(Boolean);

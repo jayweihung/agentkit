@@ -236,19 +236,33 @@ printf 'no heading\n' > "$T/proj/sub/CLAUDE.md"; printf '# Rule one\n' > "$T/pro
 printf -- '---\nname: pskill\ndescription: project skill\n---\nx\n' > "$T/proj/sub/.claude/skills/pskill/SKILL.md"
 printf -- '---\nname: mine\ndescription: my own\n---\nx\n' > "$HOME/.claude/skills/mine/SKILL.md"
 printf '{"mcpServers": {"pm": {"command": "x"}}}\n' > "$T/proj/sub/.mcp.json"
+# what Codex and omp read there too: .agents/skills, the nearest .omp (its RULES.md, skills), mcp.json, .codex/config.toml
+mkdir -p "$T/proj/.agents/skills/ask" "$T/proj/.omp" "$T/proj/sub/.omp/skills/os" "$T/proj/sub/.codex"
+printf -- '---\nname: ask\ndescription: agents skill\n---\nx\n' > "$T/proj/.agents/skills/ask/SKILL.md"
+printf -- '---\nname: os\ndescription: omp skill\n---\nx\n' > "$T/proj/sub/.omp/skills/os/SKILL.md"
+printf '# Sticky\n' > "$T/proj/sub/.omp/RULES.md"; printf '# Far\n' > "$T/proj/.omp/RULES.md"
+printf '{"mcpServers": {"om": {"command": "x"}}}\n' > "$T/proj/sub/mcp.json"
+printf '[mcp_servers.cx]\ncommand = "x"\n\n# agentkit:begin (managed by kit, do not edit)\n[mcp_servers.kitone]\ncommand = "y"\n# agentkit:end\n' > "$T/proj/sub/.codex/config.toml"
 PP=$(cd "$T/proj/sub" && pwd -P); PU=$(cd "$T/proj" && pwd -P)
 cp "$HOME/.claude.json" "$T/cj.bak"
 printf 'set\tprojects|%s|mcpServers|lm\t{"command": "y"}\nset\tmcpServers|um\t{"command": "z"}\n' "$PP" > "$T/cj.ops"
 LC_ALL=C awk -f "$JA" -v ops="$T/cj.ops" -v sep="|" "$T/cj.bak" > "$HOME/.claude.json"
 kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here.json" 2>&1; rc=$?
 check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"agent\": null, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": [], \"agent\": null}, \"items\": [" "$T/here.json"'
-check "list --json --dir: rules here and above, AGENTS.md for codex/omp" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"CLAUDE.md\", \"path\": \"$PP/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"\"}" "$T/here.json" &&
+check "list --json --dir: rules here and above, AGENTS.md for codex/omp" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"CLAUDE.md\", \"path\": \"$PP/CLAUDE.md\", \"tools\": \"claude omp\", \"description\": \"\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \".claude/rules/r1.md\", \"path\": \"$PP/.claude/rules/r1.md\", \"tools\": \"claude\", \"description\": \"Rule one\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"$PU/CLAUDE.md\", \"path\": \"$PU/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"Project rules\"}" "$T/here.json" &&
     grep -qF "\"name\": \"$PU/AGENTS.md\", \"path\": \"$PU/AGENTS.md\", \"tools\": \"codex omp\"" "$T/here.json"'
-check "list --json --dir: project skill, .mcp.json and local MCP" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"skill\", \"name\": \"pskill\", \"path\": \"$PP/.claude/skills/pskill/SKILL.md\", \"tools\": \"claude\", \"description\": \"project skill\"}" "$T/here.json" &&
+check "list --json --dir: project skill, .mcp.json and local MCP" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"skill\", \"name\": \"pskill\", \"path\": \"$PP/.claude/skills/pskill/SKILL.md\", \"tools\": \"claude omp\", \"description\": \"project skill\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"mcp\", \"name\": \"pm\", \"path\": \"$PP/.mcp.json\"" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"mcp\", \"name\": \"lm\", \"path\": \"$HOME/.claude.json\"" "$T/here.json"'
+check "list --json --dir: omp reads one file per folder level (CLAUDE.md here, AGENTS.md above), .agents/skills for Codex and omp" 'grep -qF "\"name\": \"$PU/CLAUDE.md\", \"path\": \"$PU/CLAUDE.md\", \"tools\": \"claude\"," "$T/here.json" &&
+    grep -qF "{\"scope\": \"dir\", \"kind\": \"skill\", \"name\": \"ask\", \"path\": \"$PU/.agents/skills/ask/SKILL.md\", \"tools\": \"codex omp\", \"description\": \"agents skill\"}" "$T/here.json"'
+check "list --json --dir: the nearest .omp only (its RULES.md and skills), not one farther up" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \".omp/RULES.md\", \"path\": \"$PP/.omp/RULES.md\", \"tools\": \"omp\", \"description\": \"Sticky\"}" "$T/here.json" &&
+    grep -qF "{\"scope\": \"dir\", \"kind\": \"skill\", \"name\": \"os\", \"path\": \"$PP/.omp/skills/os/SKILL.md\", \"tools\": \"omp\"," "$T/here.json" && ! grep -qF "$PU/.omp/RULES.md" "$T/here.json"'
+check "list --json --dir: MCP omp reads (.mcp.json, mcp.json) and Codex's .codex/config.toml, not kit's block there" 'grep -qF "\"name\": \"pm\", \"path\": \"$PP/.mcp.json\", \"tools\": \"claude omp\"" "$T/here.json" &&
+    grep -qF "\"name\": \"om\", \"path\": \"$PP/mcp.json\", \"tools\": \"omp\"" "$T/here.json" &&
+    grep -qF "\"name\": \"cx\", \"path\": \"$PP/.codex/config.toml\", \"tools\": \"codex omp\"" "$T/here.json" && ! grep -qF "kitone" "$T/here.json"'
 check "list --json --dir: this account's own skill and MCP, not kit's" 'grep -qF "{\"scope\": \"user\", \"kind\": \"skill\", \"name\": \"mine\"" "$T/here.json" && grep -qF "{\"scope\": \"user\", \"kind\": \"mcp\", \"name\": \"um\"" "$T/here.json" &&
     ! grep -q "\"scope\": \"user\", \"kind\": \"skill\", \"name\": \"gerrit-review\"" "$T/here.json" && ! grep -q "\"scope\": \"user\", \"kind\": \"mcp\", \"name\": \"gerrit\"" "$T/here.json"'
 if [ -n "$PWSH" ]; then
@@ -1321,6 +1335,33 @@ printf '{"type":"session_meta","payload":{"id":"zzz","cwd":"/elsewhere"}}\n' > "
 CX() { kit context "$@" 2>&1; }
 out=$(CX --pid 1 --tool codex --dir "$P7")
 check "context (codex): the folder's newest rollout, its last turn; % the way Codex counts it (85% left)" '[ "$out" = "{\"tool\": \"codex\", \"used\": 48813, \"window\": 258400, \"pct\": 15, \"source\": \"rollout\", \"model\": \"gpt-6-luna\"}" ]'
+# a Codex run with --no-daemon keeps its rollout open: that one, though the folder has a newer one
+RO2="$H7/.codex/sessions/2026/11/12/rollout-2026-11-12T00-30-00-old.jsonl"
+printf '{"type":"session_meta","payload":{"id":"old","cwd":"%s"}}\n{"type":"turn_context","payload":{"cwd":"%s","model":"gpt-6-old"}}\n' "$P7" "$P7" > "$RO2"
+printf '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":120000},"model_context_window":258400}}}\n' >> "$RO2"
+touch -t 202611120030 "$RO2"
+( exec 7<"$RO2"; exec sleep 60 ) & hp=$!
+sleep 0.3
+out=$(CX --pid "$hp" --tool codex --dir "$P7")
+check "context (codex): the rollout that Codex process has open, not the folder's newest" 'echo "$out" | grep -qF "\"used\": 120000, \"window\": 258400" && echo "$out" | grep -qF "gpt-6-old"'
+[ -n "$PWSH" ] && { out2=$(kps context --pid "$hp" --tool codex --dir "$P7" 2>&1); check "context (codex) open rollout: kit.ps1 says the same" '[ "$out2" = "$out" ]'; }
+kill "$hp" 2>/dev/null; wait "$hp" 2>/dev/null
+out=$(CX --pid 1 --tool codex --dir "$P7")
+check "context (codex): nothing open -> the folder's newest again" 'echo "$out" | grep -qF "\"used\": 48813"'
+# omp with no terminal to go by (Windows under Herdr): the session the process started, not the folder's newest
+P7o="$T/ctxomp"; mkdir -p "$P7o" "$H7/.omp/agent/sessions/y"; P7o=$(cd "$P7o" && pwd -P)
+sleep 60 & hp=$!
+OA="$H7/.omp/agent/sessions/y/$(date -u +%Y-%m-%dT%H-%M-%S)-000Z_sa.jsonl"; OB="$H7/.omp/agent/sessions/y/2026-11-01T01-00-00-000Z_sb.jsonl"
+for x in "$OA:5000" "$OB:7000"; do
+    printf '{"type":"session","version":3,"id":"s","cwd":"%s"}\n{"type":"model_change","model":"anthropic/claude-opus-5-5"}\n{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5-5","usage":{"input":4},"contextSnapshot":{"promptTokens":%s,"compactionEpoch":0},"stopReason":"stop"}}\n' "$P7o" "${x##*:}" > "${x%:*}"
+done
+sleep 1; touch "$OB"
+out=$(CX --pid "$hp" --tool omp --dir "$P7o")
+check "context (omp, no terminal): the session that process started, not the folder's newest" 'echo "$out" | grep -qF "\"used\": 5000,"'
+[ -n "$PWSH" ] && { out2=$(kps context --pid "$hp" --tool omp --dir "$P7o" 2>&1); check "context (omp, no terminal): kit.ps1 says the same" '[ "$out2" = "$out" ]'; }
+kill "$hp" 2>/dev/null; wait "$hp" 2>/dev/null
+out=$(CX --pid 1 --tool omp --dir "$P7o")
+check "context (omp, no terminal): a process that started none of them -> the folder's newest" 'echo "$out" | grep -qF "\"used\": 7000,"'
 OS="$H7/.omp/agent/sessions/x/2026-11-12T01-00-00-000Z_s1.jsonl"
 printf '{"type":"title","title":"secret words"}\n{"type":"session","version":3,"id":"s1","cwd":"%s"}\n{"type":"model_change","model":"anthropic/claude-opus-5-5"}\n' "$P7" > "$OS"
 printf '{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5-5","usage":{"input":4,"output":12,"cacheRead":149319,"cacheWrite":222},"contextSnapshot":{"promptTokens":149545,"compactionEpoch":0},"stopReason":"stop"}}\n' >> "$OS"
@@ -1549,8 +1590,10 @@ out=$(CX --pid 1)
 check "context: not an agent -> nothing" '[ "$out" = "{\"tool\": \"\", \"used\": null, \"window\": null, \"pct\": null, \"source\": \"\", \"model\": \"\"}" ]'
 # the plan's usage limits: kit statusline keeps what Claude hands over (rate_limits) for kit usage; Codex's from its
 # newest rollout; a Claude stopped at its limit says until when (kit context's "limit"), until it goes on
+FO="$T/fakeomp"; mkdir -p "$FO"; export PATH="$FO:$PATH"
+printf '#!/bin/sh\n[ "$1 $2" = "usage --json" ] && [ -f "%s/omp-usage.json" ] || exit 1\ncat "%s/omp-usage.json"\n' "$T" "$T" > "$FO/omp"; chmod +x "$FO/omp"
 out=$(HOME="$T/nousage" kit usage)
-check "usage: nothing seen yet -> null for both" '[ "$out" = "{\"claude\": null, \"codex\": null}" ]'
+check "usage: nothing seen yet -> null for each" '[ "$out" = "{\"claude\": null, \"codex\": null, \"omp\": null}" ]'
 printf '{"session_id":"abc","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_window":{"context_window_size":400000,"current_usage":{"input_tokens":2,"cache_read_input_tokens":1000},"used_percentage":1},"rate_limits":{"five_hour":{"used_percentage":40.6,"resets_at":1794700000},"seven_day":{"used_percentage":100,"resets_at":1795000000}}}' > "$T/sl3.json"
 mkdir -p "$T/fb11"; printf '#!/bin/sh\n"%s" statusline < "%s/sl3.json"\n' "$KIT" "$T" > "$T/fb11/claude"; chmod +x "$T/fb11/claude"
 "$T/fb11/claude" >/dev/null
@@ -1558,7 +1601,7 @@ RL="$H7/.codex/sessions/2026/11/12/rollout-2026-11-12T03-00-00-rl.jsonl"
 printf '{"type":"session_meta","payload":{"id":"rl","cwd":"/elsewhere"}}\n' > "$RL"
 printf '{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","primary":{"used_percent":%s,"window_minutes":300,"resets_at":1794690000},"secondary":{"used_percent":61.5,"window_minutes":10080,"resets_at":1795100000},"credits":{"has_credits":false}}}}\n' 1.0 3.4 >> "$RL"
 printf '{"type":"event_msg","payload":{"type":"agent_message","message":"done"}}\n' >> "$RL"
-USAGE_WANT='{"claude": {"at": 0, "windows": [{"id": "five_hour", "pct": 41, "minutes": 300, "resets_at": 1794700000000}, {"id": "seven_day", "pct": 100, "minutes": 10080, "resets_at": 1795000000000}]}, "codex": {"at": null, "windows": [{"id": "primary", "pct": 3, "minutes": 300, "resets_at": 1794690000000}, {"id": "secondary", "pct": 62, "minutes": 10080, "resets_at": 1795100000000}]}}'
+USAGE_WANT='{"claude": {"at": 0, "windows": [{"id": "five_hour", "pct": 41, "minutes": 300, "resets_at": 1794700000000}, {"id": "seven_day", "pct": 100, "minutes": 10080, "resets_at": 1795000000000}]}, "codex": {"at": null, "windows": [{"id": "primary", "pct": 3, "minutes": 300, "resets_at": 1794690000000}, {"id": "secondary", "pct": 62, "minutes": 10080, "resets_at": 1795100000000}]}, "omp": null}'
 out=$(kit usage | sed 's/"at": [0-9][0-9]*/"at": 0/')
 check "usage: Claude's 5-hour and weekly use as the status line last saw it; Codex's last rate_limits (the newest rollout, its last one)" '[ "$out" = "$USAGE_WANT" ]'
 printf '{"type":"assistant","apiError":"usage_limit_reached","apiErrorParams":{"rate_limit_info":{"status":"rejected","resetsAt":1794016800,"rateLimitType":"five_hour"}},"message":{"model":"<synthetic>","usage":{"input_tokens":0},"content":[{"type":"text","text":"You hit your limit"}]},"isApiErrorMessage":true}\n{"type":"system","subtype":"stop_hook_summary"}\n{"type":"user","isMeta":true,"message":{"content":"x"}}\n' >> "$C8/t.jsonl"
@@ -1598,6 +1641,16 @@ printf "$CXRL" 100.0 70.0 '"rate_limit_reached"' >> "$RLL"; printf '{"type":"eve
 out=$(CX --pid 1 --tool codex --dir "$PL")
 check "context (codex): told to go on after the limit -> no limit any more" '! echo "$out" | grep -qF "\"limit\""'
 [ -n "$PWSH" ] && { out2=$(kps context --pid 1 --tool codex --dir "$PL" 2>&1); check "context (codex) gone on: kit.ps1 says the same" '[ "$out2" = "$out" ]'; }
+# omp: what `omp usage --json` says, only the numbers, asked in the background (kit prints what it kept)
+printf '{"generatedAt": 1, "reports": [{"provider": "anthropic", "fetchedAt": 1794682355724, "limits": [{"id": "anthropic:5h", "label": "x", "scope": {"provider": "anthropic", "windowId": "5h"}, "window": {"id": "5h", "durationMs": 18000000, "resetsAt": 1794682799776}, "amount": {"used": 56, "limit": 100, "usedFraction": 0.56, "unit": "percent"}, "status": "ok"}, {"id": "anthropic:7d:fable", "window": {"id": "7d", "durationMs": 604800000, "resetsAt": 1794981600000}, "amount": {"usedFraction": 0.43999999999999995}}], "metadata": {"email": "someone@example.com", "accountId": "a-1"}}, {"provider": "openai-codex", "fetchedAt": 1794682355392, "limits": [{"id": "openai-codex:primary", "window": {"id": "30d", "durationMs": 2592000000, "resetsAt": 1796913312000}, "amount": {"usedFraction": 0.03}}]}, {"provider": "nothing", "limits": []}]}\n' > "$T/omp-usage.json"
+OU="$H7/.config/agentkit/ctx/omp-usage.json"; OMP_WANT='"omp": {"anthropic": {"at": 1794682355724, "windows": [{"id": "5h", "pct": 56, "minutes": 300, "resets_at": 1794682799776}, {"id": "7d:fable", "pct": 44, "minutes": 10080, "resets_at": 1794981600000}]}, "openai-codex": {"at": 1794682355392, "windows": [{"id": "primary", "pct": 3, "minutes": 43200, "resets_at": 1796913312000}]}}}'
+rm -f "$OU"; kit usage >/dev/null; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$OU" ] && break; sleep 0.5; done
+out=$(kit usage)
+check "usage (omp): each provider's windows from omp usage, numbers only (no e-mail or account)" 'case $out in *"$OMP_WANT") true;; *) false;; esac && ! grep -q "example.com\|a-1" "$OU"'
+if [ -n "$PWSH" ]; then
+    rm -f "$OU"; kps usage >/dev/null; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$OU" ] && break; sleep 0.5; done
+    out2=$(kps usage); check "usage (omp): kit.ps1 keeps and says the same" '[ "$out2" = "$out" ]'
+fi
 out=$(kit usage x 2>&1); rc=$?
 check "usage: anything after it -> how to use it" '[ $rc -eq 1 ] && echo "$out" | grep -qF "用法：kit usage"'
 # the statusLine in settings.json: kit's when there is none, never over your own, gone again on uninstall
@@ -1631,6 +1684,24 @@ check "handoff-hook (Codex): its rollout's numbers (84% the way Codex counts), o
 if [ -n "$PWSH" ]; then
     rm -f "$H7/.config/agentkit/ctx/handoff-cx-1"; c3=$(cho "'$PWSH' -NoProfile -File '$HERE/../windows/kit.ps1'")
     check "handoff-hook (Codex, kit.ps1): the same JSON" '[ "$c3" = "$c1" ]'
+fi
+# omp: kit's hook module runs the same hook before each prompt with its session (transcript_path)
+OSH="$H7/.omp/agent/sessions/z/2026-11-12T06-00-00-000Z_ho.jsonl"; mkdir -p "${OSH%/*}"
+printf '{"type":"session","version":3,"id":"ho","cwd":"/x"}\n{"type":"model_change","model":"anthropic/claude-opus-5-5"}\n{"type":"message","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-5-5","usage":{"input":4},"contextSnapshot":{"promptTokens":850000,"compactionEpoch":0},"stopReason":"stop"}}\n' > "$OSH"
+oho() { printf '{"session_id":"om-1","transcript_path":"%s"}' "$OSH" | sh -c "$1 handoff-hook"; }
+d1=$(oho "'$KIT'"); d2=$(oho "'$KIT'")
+check "handoff-hook (omp): its session's numbers, once" 'echo "$d1" | grep -qF "context is 85% full (850k of 1000k tokens)" && [ -z "$d2" ]'
+if [ -n "$PWSH" ]; then
+    rm -f "$H7/.config/agentkit/ctx/handoff-om-1"; d3=$(oho "'$PWSH' -NoProfile -File '$HERE/../windows/kit.ps1'")
+    check "handoff-hook (omp, kit.ps1): the same JSON" '[ "$d3" = "$d1" ]'
+fi
+if command -v node >/dev/null 2>&1 && [ -f "$H7/.omp/agent/hooks/pre/kit.js" ]; then
+    rm -f "$H7/.config/agentkit/ctx/handoff-"*; cp "$H7/.omp/agent/hooks/pre/kit.js" "$T/ompacct.mjs"
+    printf '%s\n' 'const m = await import(process.argv[2]); const h = {}; m.default({ on: (e, f) => { h[e] = f; } });' \
+        'const r = await h.before_agent_start({}, { sessionManager: { getSessionFile: () => process.argv[3] } });' \
+        'console.log(r?.message?.customType + " " + String(r?.message?.content ?? "").includes("85% full"));' > "$T/ompho.mjs"
+    out=$(HOME="$H7" node "$T/ompho.mjs" "$T/ompacct.mjs" "$OSH" 2>&1)
+    check "omp module: before each prompt it runs handoff-hook and tells the model" '[ "$out" = "kit-handoff true" ]'
 fi
 # you take kit's statusLine out: it stays out (kit says so once); kit sync --force puts it back
 printf 'del\tstatusLine\n' > "$T/ops7"; LC_ALL=C awk -f "$JA" -v ops="$T/ops7" "$H7/.claude/settings.json" > "$T/s7.new" && cp "$T/s7.new" "$H7/.claude/settings.json"

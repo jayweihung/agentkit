@@ -56,7 +56,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 |---|---|---|---|---|
 | Claude Code | `~/.claude/CLAUDE.md`（標記之間，@ 引用） | `~/.claude/skills/` | `~/.claude.json` | `~/.claude/settings.json` 的 `permissions.deny` |
 | Codex | `~/.codex/AGENTS.md`（標記之間，內容直接放進去） | `~/.agents/skills/` | `~/.codex/config.toml`（標記之間） | MCP 工具 → `disabled_tools` |
-| omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | 不支援 |
+| omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | `~/.omp/agent/hooks/pre/kit.js`（kit 0.6.7 起） |
 
 Codex 自己新增的設定（例如信任某個資料夾的 `[projects."…"]`）會加在 `config.toml` 最後面、落進 kit 那段裡；kit 記得自己上次寫了什麼（`~/.config/agentkit/codex-block.toml`），`kit sync` 時把不是它寫的搬到那段外面，不會洗掉。改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。想先看清楚再動手：`kit sync --dry-run`（或 `kit sync --force --dry-run`）列出每個 skill 會新增、更新、拿掉、跳過、還是先備份再換，不改任何檔案（來源還是會先抓最新的，跟 `kit sync` 一樣），最後印一個雜湊；確定了打 `kit sync --expect <雜湊>`（有 `--force` 就兩次都加）。到時候 kit 重算一次，來源更新了或你又改了某個 skill、清單不一樣了，就什麼都不改（錯誤代碼 `plan-changed`），請你再看一次。只管 skill；rule、MCP 等照常更新。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。Codex、omp 也一樣（kit 0.6.7 起）：Codex 是 `~/.codex/hooks.json` 裡同樣的 hook（Codex 第一次看到新的 hook 要你信任：在 Codex 打 `/hooks`），omp 是 `~/.omp/agent/hooks/pre/kit.js`（kit 寫的檔，第一行有標記；同名的檔是你自己的就不動）。context 快滿時提醒寫 HANDOFF.md 的 hook（`kit handoff-hook`）Codex 也有，數字從它的對話檔讀；omp 還沒有。
 
@@ -269,15 +269,15 @@ Claude 撞到方案的用量上限停下來（「You've hit your 5-hour limit ·
 | agent | 從哪裡讀 | % 怎麼算 |
 |---|---|---|
 | Claude | kit 放的 statusLine 每次更新都把 Claude 自己的數字存在 `~/.config/agentkit/ctx/claude-<pid>.json`；沒有的話讀那個資料夾最新的對話紀錄 | Claude 自己的（`/context` 一樣的上限，`autoCompactWindow` 有設就用它） |
-| Codex | 那個資料夾最新的 `~/.codex/sessions/**/rollout-*.jsonl`，最後一次的 `last_token_usage` | 跟 Codex 畫面的「% context left」一樣：先扣掉它固定的 12000 |
-| omp | 它的終端機指向的 session（`~/.omp/agent/terminal-sessions/<tty>`），或那個資料夾最新的 session；最後一個完成的回覆 | 跟 omp 頁尾一樣：再加上那之後的訊息（工具結果、你的下一句）：文字約 4 bytes 一個 token，一張圖約 1600 個 token（omp 自己畫面用的 `details` 不算，那不會送給模型）；上限用 omp 自己的模型清單 |
+| Codex | 那個 Codex 程式開著的 rollout（用 `--no-daemon` 開的 Codex 會一直開著自己的對話檔，Herdr 就是這樣開；kit 用 `lsof` 或 `/proc` 看，Windows 看不到），否則那個資料夾最新的 `~/.codex/sessions/**/rollout-*.jsonl`；最後一次的 `last_token_usage` | 跟 Codex 畫面的「% context left」一樣：先扣掉它固定的 12000 |
+| omp | 它的終端機指向的 session（`~/.omp/agent/terminal-sessions/<tty>`）；沒有終端機可對的（Windows：omp 用 tty 或終端機程式的變數認終端機，Herdr 裡兩個都沒有），找那個程式啟動前 1 分鐘到啟動後 5 分鐘建立、之後還在寫的那份；都沒有才用那個資料夾最新的 session；最後一個完成的回覆 | 跟 omp 頁尾一樣：再加上那之後的訊息（工具結果、你的下一句）：文字約 4 bytes 一個 token，一張圖約 1600 個 token（omp 自己畫面用的 `details` 不算，那不會送給模型）；上限用 omp 自己的模型清單 |
 
 壓縮（compaction）過、還沒有新回覆時，用壓縮後的大小。Claude Code 自己產生的回覆（`"model":"<synthetic>"`，用量是 0）不算。估出來超過上限時 `pct` 寫 100。
 紀錄檔可能有幾百 MB：kit 只讀最後 8 MB（`KIT_CTX_TAIL` 可改，單位 byte），那一段找不到需要的才整個讀。
 
 **Claude 的 statusLine**：`kit sync` 會在 `~/.claude/settings.json` 加上 `statusLine`（執行 `kit statusline`），Claude 底下的狀態列會顯示「Opus 5.5 · context 35%（139k / 400k）」。你已經有自己的 statusLine 時 kit 不動它（只提醒一次），Claude 的用量改從對話紀錄估；Remote Control 的對話紀錄可能不即時。你把 kit 加的 statusLine 拿掉，kit 之後就不會再加回來（說一次）；要加回來打 `kit sync --force`。`kit uninstall` 會拿掉 kit 加的。
 
-**context 快滿時先交接（Claude）**：`kit sync` 也在 `~/.claude/settings.json` 加一個 `UserPromptSubmit` hook（`kit handoff-hook`）。context 到 80%、再到 90% 時，你下一句話送出去時各提醒 Claude 一次：先寫或更新專案資料夾的 `HANDOFF.md`（做完什麼、下一步、還沒解決的、怎麼驗證）、用 `kit note` 記一行進度，並跟你說 context 快滿了，可以開新的 agent 從 `HANDOFF.md` 和 `kit note --history` 接著做，或 `/compact`。用的是 kit statusLine 存的數字（只看一個小檔，很快）；你用自己的 statusLine 時就不會提醒。`/compact` 後掉回 80% 以下，之後再滿會再提醒。Codex（kit 0.6.7 起）也有：`~/.codex/hooks.json` 裡同樣的 hook，數字從 Codex 的對話檔（hook 給的 `transcript_path`）讀，照 Codex 自己的算法。omp 還沒有，靠畫面程式的 context 百分比提醒你。`kit uninstall` 會拿掉。
+**context 快滿時先交接（Claude、Codex、omp）**：`kit sync` 也在 `~/.claude/settings.json` 加一個 `UserPromptSubmit` hook（`kit handoff-hook`）。context 到 80%、再到 90% 時，你下一句話送出去時各提醒 Claude 一次：先寫或更新專案資料夾的 `HANDOFF.md`（做完什麼、下一步、還沒解決的、怎麼驗證）、用 `kit note` 記一行進度，並跟你說 context 快滿了，可以開新的 agent 從 `HANDOFF.md` 和 `kit note --history` 接著做，或 `/compact`。用的是 kit statusLine 存的數字（只看一個小檔，很快）；你用自己的 statusLine 時就不會提醒。`/compact` 後掉回 80% 以下，之後再滿會再提醒。Codex（kit 0.6.7 起）也有：`~/.codex/hooks.json` 裡同樣的 hook，數字從 Codex 的對話檔（hook 給的 `transcript_path`）讀，照 Codex 自己的算法。omp（kit 0.6.7 起）也有：kit 的 hook 模組（`~/.omp/agent/hooks/pre/kit.js`）在你每次送出一句話前跑同一個 hook，數字從 omp 的 session 檔讀，提醒放在那一輪給模型的訊息裡（畫面上不顯示）。`kit uninstall` 會拿掉。
 
 ### context 細項：token 用在哪裡
 
@@ -294,7 +294,7 @@ Claude 撞到方案的用量上限停下來（「You've hit your 5-hour limit ·
 |---|---|---|
 | Claude | 對它的 session 跑一次 `claude -p --resume <session> --no-session-persistence`，問 Claude Code 自己的 `get_context_usage`（`/context` 用的那個）：所有 hook 關掉（`--settings '{"disableAllHooks":true}'`）、不寫對話紀錄、不叫模型（不花錢），在 agent 的資料夾跑，最多 30 秒（`KIT_CTX_PROBE_TIMEOUT`；`KIT_CTX_PROBE=0` 不問）。session 依序找：kit 的 statusLine 存的、`~/.claude/sessions/<pid>.json`、`~/.claude/daemon/roster.json`（只讀 pid、replPid、sessionId、cwd）、那個資料夾在程式啟動後改過的最新對話紀錄；id 只能有英數字、`_`、`-` | 分類是 Claude Code 自己算的。總數用即時的；這次問不到的差額（剛加進來的、這個 session 之後才連上的 MCP）列成「其他／自上次更新以來」。對話內容、工具、附加內容的細項從對話紀錄估（大小 ÷ 4，一張圖約 1600，最後一次壓縮之前的不算），照比例對到 Claude 的數字。問不到（太舊、PATH 上沒有、逾時）時整份改成估算，`error` 寫原因 |
 | Codex | 它的 rollout 檔：base instructions、AGENTS.md、skills 清單、工具（依命名空間）、MCP（看到的、延後載入的、設定裡有但沒看到的）、訊息、工具呼叫和結果、壓縮摘要 | 總數是 Codex 自己記的；各部分用大小 ÷ 4 估，照比例對到總數（`est: true`）。AGENTS.md 從 git 根目錄往下找 |
-| omp | session 檔，加上 omp 會讀的指示檔、skills、MCP 設定 | 總數和「系統工具」是 omp 自己記的（context 快照）；其他估算，照比例對到總數。指示檔和 skills 照現在的檔案估 |
+| omp | session 檔，加上 omp 會讀的指示檔、skills、MCP 設定（照 omp 自己的規則，實測過：帳號只讀一份（`~/.omp/agent/AGENTS.md` 優先，別的工具帳號層的檔要在 omp 設定 `enabledProviders` 才讀）；每一層資料夾只讀一份，依序 `.omp/AGENTS.md`（最近一個有東西的 `.omp`）、`.claude/CLAUDE.md`（只看開的那層）、`.agents/AGENTS.md`、`AGENTS.md`、`CLAUDE.md`；`RULES.md`；不讀 `.claude/rules/`） | 總數和「系統工具」是 omp 自己記的（context 快照）；其他估算，照比例對到總數。指示檔和 skills 照現在的檔案估 |
 
 對話內容只拿來算大小，不印出、不存；問 Claude Code 時它回的帳號資料不留。問的那一次不寫對話紀錄，但 Claude Code 啟動時照常會更新它自己的東西（例如 plugins 的快取，或在 `~/.claude/projects/<資料夾>/` 建一個空的 `memory/`）。紀錄檔超過 32 MB 時只讀第一行和最後 32 MB（`KIT_CTX_DETAIL_TAIL`，byte）。
 
@@ -310,6 +310,7 @@ Claude 撞到方案的用量上限停下來（「You've hit your 5-hour limit ·
 
 - Claude：kit 的狀態列（`kit sync` 放的 statusLine）每次更新時 Claude Code 會給它用量（5 小時、每週），kit 存在 `~/.config/agentkit/ctx/claude-usage.json`，`at` 是存的時間。用 API key、Bedrock 這類沒有方案上限的，或你用自己的 statusLine 時，是 `null`。
 - Codex：最新那份 `~/.codex/sessions/**/rollout-*.jsonl` 最後一次的 `rate_limits`（`primary`、`secondary`，`minutes` 是那個時段多長）。
+- omp（kit 0.6.7 起）：`"omp": {"anthropic": U, "openai-codex": U, …}`，`omp usage --json` 對每個登入的服務回報的（`id` 是 omp 的名字去掉服務名：`5h`、`7d`、`7d:fable`、`primary`）。問一次要幾秒、要連網，所以 kit 存在 `~/.config/agentkit/ctx/omp-usage.json`，超過 5 分鐘就在背景再問一次：`kit usage` 印的是存著的（第一次還沒問到時是 `null`）。只留數字，不留帳號、email。沒裝 omp 時是 `null`。
 - `pct` 是用掉幾 %，`resets_at` 是重置的時間（Unix 毫秒）。`resets_at` 已經過了的，那個時段重新算了，`pct` 是之前的數字。
 - 只讀數字，不讀對話內容。Windows 版一樣。
 

@@ -860,14 +860,16 @@ codex_hooks() {
 OMP_HOOK_HEAD="// kit's omp hook: written by kit (agentkit); edits here are overwritten."
 OMP_TOOLS="Read Write Edit MultiEdit NotebookEdit Bash Grep Glob LS Task Agent TodoWrite WebSearch AskUserQuestion"
 hook_cmd() { local k="$HOME/.local/bin/kit"; [ -x "$k" ] || k="$KIT_LIB/kit"; printf "'%s' %s" "$k" "${1:-sync --hook}"; }
-omp_hook_js() { # omp_hook_js SYNC ONLY DENY : the module (SYNC: the command, or empty; ONLY, DENY: one per line)
+omp_hook_js() { # omp_hook_js SYNC ONLY DENY [HANDOFF] : the module (SYNC, HANDOFF: the commands, or empty; ONLY, DENY: one per line)
     local t="" f
     for f in "$KIT_LIB/templates/omp-hook.txt" "$KIT_LIB/../templates/omp-hook.txt"; do [ -f "$f" ] && { t=$f; break; }; done
     [ -n "$t" ] || return 1
     KIT_T_SYNC=$(if [ -n "$1" ]; then json_s "$1"; else echo null; fi) KIT_T_ONLY=$(printf '%s\n' "$2" | json_arr) \
+    KIT_T_HANDOFF=$(if [ -n "${4:-}" ]; then json_s "$4"; else echo null; fi) \
     KIT_T_DENY=$(printf '%s\n' "$3" | json_arr) awk '
         function put(s, k, v,   i) { while ((i = index(s, k))) s = substr(s, 1, i - 1) v substr(s, i + length(k)); return s }
-        { $0 = put($0, "__SYNC__", ENVIRON["KIT_T_SYNC"]); $0 = put($0, "__ONLY__", ENVIRON["KIT_T_ONLY"]); print put($0, "__DENY__", ENVIRON["KIT_T_DENY"]) }' "$t"
+        { $0 = put($0, "__SYNC__", ENVIRON["KIT_T_SYNC"]); $0 = put($0, "__HANDOFF__", ENVIRON["KIT_T_HANDOFF"])
+          $0 = put($0, "__ONLY__", ENVIRON["KIT_T_ONLY"]); print put($0, "__DENY__", ENVIRON["KIT_T_DENY"]) }' "$t"
 }
 omp_hook_put() { # omp_hook_put FILE [CONTENT] : write kit's module there (no CONTENT: take kit's out); 1 when FILE is your own
     local f=$1 want=${2:-}
@@ -878,7 +880,7 @@ omp_hook_put() { # omp_hook_put FILE [CONTENT] : write kit's module there (no CO
 }
 omp_hook() {
     local f="$OMP_DIR/hooks/pre/kit.js"
-    if omp_hook_put "$f" "$(omp_hook_js "$(hook_cmd)" "" "$(required_deny)")"; then state_set hook.omp kit.js 1
+    if omp_hook_put "$f" "$(omp_hook_js "$(hook_cmd)" "" "$(required_deny)" "$(hook_cmd handoff-hook)")"; then state_set hook.omp kit.js 1
     elif [ -z "$(state_get told omp-hook)" ]; then warn "$f 是你自己的檔：kit 不動它，omp 開啟時不會自動 kit sync"; state_set told omp-hook 1; fi
 }
 omp_tool_names() { # omp_tool_names "Read,Grep" -> omp's tools that do the same, comma-separated (one omp has not: dropped)
@@ -1784,6 +1786,9 @@ model_window() { # the context window Claude Code uses for a model: a setting (a
     local w
     w=$(setting_window "$1")
     [ -n "$w" ] && { echo "$w"; return; }
+    model_size "$1"
+}
+model_size() { # a model's own context window, kit's guess (no tool's setting)
     case $1 in
         *\[1m\]|*opus-5*|*opus-4-7*|*opus-4-8*|*sonnet-5*|*fable*|*mythos*|*haiku-5*) echo 1000000;;
         claude-*|anthropic/*) echo 200000;;
@@ -1876,6 +1881,10 @@ cmd_handoff_hook() { # Claude's (and Codex's) UserPromptSubmit hook: the context
     local in sid pid f j u w m pct lvl=0 a mark told tp line
     in=$(cat); sid=$(str_of session_id "$in" | tr -cd 'A-Za-z0-9-'); tp=$(str_of transcript_path "$in")
     case $tp in
+    "$OMP_DIR"/sessions/*.jsonl|*/.omp/agent/sessions/*.jsonl)       # omp (kit's hook module): its session
+        [ -f "$tp" ] || return 0; pid=$sid
+        line=$(omp_ctx "" "" "$tp"); u=$(num_of used "$line"); w=$(num_of window "$line"); pct=$(num_of pct "$line")
+        [ -n "$u" ] && [ -n "$w" ] && [ -n "$pct" ] && [ "$w" -gt 0 ] 2>/dev/null || return 0;;
     */.codex/sessions/*|*/sessions/*/rollout-*.jsonl)
         [ -f "$tp" ] || return 0; pid=$sid
         line=$(ctx_scan "$tp" 'index($0, "\"token_count\"") && index($0, "\"last_token_usage\"") { t = $0 } END { print t }')
@@ -1894,7 +1903,7 @@ cmd_handoff_hook() { # Claude's (and Codex's) UserPromptSubmit hook: the context
     mark="$CTX_DIR/handoff-${sid:-$pid}"
     [ "$lvl" -gt 0 ] || { rm -f "$mark" 2>/dev/null; return 0; }
     told=$(cat "$mark" 2>/dev/null); [ "${told:-0}" -ge "$lvl" ] 2>/dev/null && return 0
-    printf '%s\n' "$lvl" > "$mark" 2>/dev/null || return 0
+    mkdir -p "$CTX_DIR" 2>/dev/null; printf '%s\n' "$lvl" > "$mark" 2>/dev/null || return 0
     find "$CTX_DIR" -name 'handoff-*' -mtime +7 -exec rm -f {} + 2>/dev/null
     printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' "$(json_s "kit: this conversation's context is ${pct}% full ($(( u / 1000 ))k of $(( w / 1000 ))k tokens). Before the next step: write or update HANDOFF.md in the project folder (what is done, what is next, open questions, how to check it), run kit note with where you are and what is next, and tell the user, in their language, that the context is nearly full: a new session can carry on from HANDOFF.md and kit note --history, or they can /compact. Then go on with what the user asked.")"
 }
@@ -1969,12 +1978,9 @@ CODEX_LIMIT_AWK='index($0, "\"rate_limits\":{") {
         if (bp < 0) exit
         k = "limit"; if (bm == 300) k = "five_hour"; else if (bm == 10080) k = "seven_day"; else if (bm >= 40000 && bm <= 45000) k = "monthly"
         print bt " " k }'
-codex_ctx() { # codex_ctx CWD : the newest rollout started in that folder, its last token_count and turn_context
-    local f want which line m u w CTX_LIMIT
-    [ -n "$1" ] && [ -d "$CODEX_DIR/sessions" ] || { ctx_json codex "" "" "" ""; return; }
-    want="\"cwd\":$(json_s "$1")"
-    while IFS= read -r f; do
-        [ -n "$f" ] && head -n 1 "$f" | grep -qF "$want" || continue
+codex_ctx() { # codex_ctx CWD [PID] : that Codex's rollout (codex_rollout), its last token_count and turn_context
+    local f which line m u w CTX_LIMIT
+    f=$(codex_rollout "$1" "$2") || { ctx_json codex "" "" "" ""; return; }
         { IFS= read -r which; IFS= read -r line; IFS= read -r m; } <<EOF
 $(ctx_read "$f" 'cut && NR == 1 { next }
     index($0, "\"token_count\"") && index($0, "\"last_token_usage\"") { t = $0 }
@@ -1984,11 +1990,7 @@ EOF
         m=$(str_of model "$m"); CTX_LIMIT=$(ctx_scan "$f" "$CODEX_LIMIT_AWK" 1048576)
         [ -n "$line" ] || { ctx_json codex "" "" rollout "$m"; return; }
         u=$(num_of total_tokens "$(after_key last_token_usage "$line")"); w=$(num_of model_context_window "$line")
-        ctx_json codex "$u" "$w" rollout "$m" "$( [ -n "$u" ] && [ -n "$w" ] && codex_pct "$u" "$w")"; return
-    done <<EOF
-$(newest_files "$CODEX_DIR/sessions" 'rollout-*.jsonl')
-EOF
-    ctx_json codex "" "" "" ""
+        ctx_json codex "$u" "$w" rollout "$m" "$( [ -n "$u" ] && [ -n "$w" ] && codex_pct "$u" "$w")"
 }
 omp_window() { # omp_window provider/model -> the window omp's model list has for it (needs sqlite3), else kit's guess
     local db="$OMP_DIR/models.db" w=""
@@ -1997,21 +1999,12 @@ omp_window() { # omp_window provider/model -> the window omp's model list has fo
             w=$(sqlite3 -readonly "file:$db?mode=ro" "select json_extract(m.value,'\$.contextWindow') from model_cache, json_each(models) m where (provider_id = '${1%%/*}' or provider_id like '${1%%/*}:%') and json_extract(m.value,'\$.id') = '${1#*/}' limit 1" 2>/dev/null);;
         esac
     fi
-    case $w in ""|*[!0-9]*) model_window "${1#*/}";; *) echo "$w";; esac
+    case $w in ""|*[!0-9]*) model_size "${1#*/}";; *) echo "$w";; esac   # (not Claude Code's settings.json: omp does not read it)
 }
-omp_ctx() { # omp_ctx PID CWD
-    local f="" x tty want which a c m tb im u w j rm
-    tty=$(ps -o tty= -p "$1" 2>/dev/null | tr -d ' ' | sed 's|^/dev/||; s|/|-|g')
-    case $tty in ""|"?"|"??") ;; *) [ -f "$OMP_DIR/terminal-sessions/$tty" ] && f=$(sed -n 2p "$OMP_DIR/terminal-sessions/$tty");; esac
-    if [ -z "$f" ] || [ ! -f "$f" ]; then
-        f=""; want="\"cwd\":$(json_s "$2")"
-        [ -n "$2" ] && while IFS= read -r x; do
-            [ -n "$x" ] && head -n 3 "$x" | grep '"type":"session"' | grep -qF "$want" && { f=$x; break; }
-        done <<EOF
-$(newest_files "$OMP_DIR/sessions" '*.jsonl')
-EOF
-    fi
-    [ -n "$f" ] || { ctx_json omp "" "" "" ""; return; }
+omp_ctx() { # omp_ctx PID CWD [SESSION] : that omp's session (omp_session), or SESSION
+    local f="" which a c m tb im u w j rm
+    f=${3:-$(omp_session "$1" "$2")}
+    [ -n "$f" ] && [ -f "$f" ] || { ctx_json omp "" "" "" ""; return; }
     # the last finished reply, the last compaction, the last model change; and like omp's own footer, what came after
     # that reply (tool results, your next message): their text at about 4 bytes a token, each image about 1600 tokens
     # (only the message itself: what omp keeps for its screen, "details", is not sent to the model)
@@ -2069,7 +2062,7 @@ cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [-
     [ -z "$detail" ] || { ctx_detail "$pid" "$tool" "$dir" "$fresh"; return 0; }
     case $tool in
         claude) claude_ctx "$pid" "$dir";;
-        codex) codex_ctx "$dir";;
+        codex) codex_ctx "$dir" "$pid";;
         omp) omp_ctx "$pid" "$dir";;
         *) ctx_json "" "" "" "" "";;
     esac
@@ -2088,14 +2081,54 @@ CODEX_USAGE_AWK='index($0, "\"rate_limits\"") && index($0, "\"used_percent\"") {
             t = "null"; if (match(o, /"resets_at":[0-9]+/)) t = substr(o, RSTART + 12, RLENGTH - 12) "000"
             out = out (out == "" ? "" : ", ") "{\"id\": \"" W[i] "\", \"pct\": " pc ", \"minutes\": " mi ", \"resets_at\": " t "}" }
         if (out != "") print "{\"at\": null, \"windows\": [" out "]}" }'
-cmd_usage() { # kit usage : the account's plan usage, Claude and Codex (JSON)
-    local c="" x="" f
+# omp: what `omp usage --json` says for each provider omp is logged in to, {"<provider>": U}; a window's id is omp's
+# limit id less the provider ("5h", "7d", "7d:fable", "primary"). Only numbers are kept (no account, e-mail or id).
+# Asking takes seconds (over the network), so kit keeps the answer in $CTX_DIR/omp-usage.json and asks again in the
+# background when it is 5 minutes old: kit usage prints what it has (null before the first answer).
+omp_usage_parse() { # omp_usage_parse FILE : `omp usage --json` -> {"<provider>": U, ...} (nothing if it has none)
+    LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$1" 2>/dev/null | LC_ALL=C awk -F '\t' '
+        function uq(s) { gsub(/"/, "", s); return s }
+        $1 != "reports" || $2 !~ /^[0-9]+$/ { next }
+        $3 == "provider" { v = uq($4); if (v ~ /^[a-z0-9][a-z0-9._-]*$/) pv[$2] = v; if (!($2 in seenr)) { seenr[$2] = 1; ro[++nr] = $2 }; next }
+        $3 == "fetchedAt" && $4 ~ /^[0-9]+$/ { at[$2] = $4; next }
+        $3 != "limits" || $4 !~ /^[0-9]+$/ { next }
+        { k = $2 SUBSEP $4; if (!(k in seenl)) { seenl[k] = 1; lo[$2] = lo[$2] " " $4 }
+          p = $5; for (i = 6; i < NF; i++) p = p "." $i; val[k, p] = $NF }
+        END { out = ""
+            for (r = 1; r <= nr; r++) { q = ro[r]; if (!(q in pv)) continue; w = ""; n = split(lo[q], L, " ")
+                for (j = 1; j <= n; j++) { k = q SUBSEP L[j]; id = uq(val[k, "id"]); sub("^" pv[q] ":", "", id)
+                    if (id !~ /^[A-Za-z0-9:_.-]+$/) continue
+                    f = val[k, "amount.usedFraction"]; if (f !~ /^[0-9.]+$/) continue
+                    mi = val[k, "window.durationMs"]; mi = (mi ~ /^[0-9]+$/) ? int(mi / 60000) : "null"
+                    t = val[k, "window.resetsAt"]; if (t !~ /^[0-9]+$/) t = "null"
+                    w = w (w == "" ? "" : ", ") "{\"id\": \"" id "\", \"pct\": " int(f * 100 + 0.5) ", \"minutes\": " mi ", \"resets_at\": " t "}" }
+                if (w != "") out = out (out == "" ? "" : ", ") "\"" pv[q] "\": {\"at\": " ((q in at) ? at[q] : "null") ", \"windows\": [" w "]}" }
+            if (out != "") print "{" out "}" }'
+}
+omp_usage_refresh() { # in the background: ask omp, keep the numbers (one at a time; a lock left by a crash goes after 2 minutes)
+    local f="$CTX_DIR/omp-usage.json" lock="$CTX_DIR/omp-usage.lock" raw
+    [ -n "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null
+    mkdir -p "$CTX_DIR" 2>/dev/null; mkdir "$lock" 2>/dev/null || return 0
+    raw="$lock/raw.json"
+    if omp usage --json > "$raw" 2>/dev/null; then
+        omp_usage_parse "$raw" > "$lock/out" && [ -s "$lock/out" ] && mv -f "$lock/out" "$f"
+    fi
+    rm -f "$raw" "$lock/out"; touch "$f" 2>/dev/null; rmdir "$lock" 2>/dev/null
+}
+cmd_usage() { # kit usage : the account's plan usage, Claude, Codex and omp (JSON)
+    local c="" x="" o="" f
     [ $# -eq 0 ] || [ "$*" = --json ] || die "用法：kit usage"
     [ -f "$CTX_DIR/claude-usage.json" ] && c=$(head -n 1 "$CTX_DIR/claude-usage.json" 2>/dev/null)
     case $c in "{"*"}") ;; *) c=null;; esac
     f=$(newest_files "$CODEX_DIR/sessions" 'rollout-*.jsonl' | head -n 1)
     [ -n "$f" ] && x=$(ctx_scan "$f" "$CODEX_USAGE_AWK" 1048576)
-    printf '{"claude": %s, "codex": %s}\n' "$c" "${x:-null}"
+    if has_omp; then
+        f="$CTX_DIR/omp-usage.json"
+        [ -f "$f" ] && o=$(head -n 1 "$f" 2>/dev/null)
+        if [ ! -f "$f" ] || [ -n "$(find "$f" -mmin +5 2>/dev/null)" ]; then (omp_usage_refresh) </dev/null >/dev/null 2>&1 & fi
+    fi
+    case $o in "{"*"}") ;; *) o=null;; esac
+    printf '{"claude": %s, "codex": %s, "omp": %s}\n' "$c" "${x:-null}" "$o"
 }
 
 # ---------- kit context --detail: where the tokens go ----------
@@ -2459,9 +2492,22 @@ claude_detail() { # claude_detail PID DIR -> rows
 }
 
 # ---------- Codex ----------
-codex_rollout() { # codex_rollout DIR : the newest rollout started in that folder
+codex_open_rollout() { # codex_open_rollout PID : the rollout that Codex process has open. A Codex run with --no-daemon (as
+    # Herdr starts it) keeps its own rollout open; one that uses Codex's app-server daemon does not (the daemon has them all).
+    local p=$1 l
+    case $p in ""|*[!0-9]*) return 1;; esac
+    [ -d "$CODEX_DIR/sessions" ] || return 1
+    if [ -d "/proc/$p/fd" ]; then
+        for l in /proc/"$p"/fd/*; do l=$(readlink "$l" 2>/dev/null) && printf '%s\n' "$l"; done
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -n -P -b -w -a -p "$p" -d '^txt,^mem' -Fn 2>/dev/null | sed -n 's/^n//p'     # only its open files: fast
+    fi | grep -m 1 '/sessions/.*/rollout-[^/]*\.jsonl$'
+}
+codex_rollout() { # codex_rollout DIR [PID] : that Codex's rollout: the one the process has open, else the newest started in DIR
     local f want
-    [ -n "$1" ] && [ -d "$CODEX_DIR/sessions" ] || return 1
+    [ -d "$CODEX_DIR/sessions" ] || return 1
+    f=$(codex_open_rollout "$2") && [ -f "$f" ] && { printf '%s\n' "$f"; return 0; }
+    [ -n "$1" ] || return 1
     want="\"cwd\":$(json_s "$1")"
     while IFS= read -r f; do
         [ -n "$f" ] && head -n 1 "$f" | grep -qF "$want" && { printf '%s\n' "$f"; return 0; }
@@ -2481,11 +2527,11 @@ codex_instr_files() { # the AGENTS.md files Codex reads for DIR: its own (~/.cod
 $(ctx_up "$1")
 EOF
 }
-codex_detail() { # codex_detail DIR -> rows
+codex_detail() { # codex_detail DIR [PID] -> rows
     local f c m u w files mcp
     printf 'H\ttool\tcodex\nH\tcompact\t/compact\nH\twith_text\t0\nH\tclear\t/new\nH\tsource\trollout\nH\texact\t0\n'
-    f=$(codex_rollout "$1") || { printf 'H\terror\t%s\n' "找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）"; return 0; }
-    c=$(codex_ctx "$1"); u=$(num_of used "$c"); w=$(num_of window "$c"); m=$(str_of model "$c")
+    f=$(codex_rollout "$1" "$2") || { printf 'H\terror\t%s\n' "找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）"; return 0; }
+    c=$(codex_ctx "$1" "$2"); u=$(num_of used "$c"); w=$(num_of window "$c"); m=$(str_of model "$c")
     printf 'H\tmodel\t%s\nH\tused\t%s\nH\twindow\t%s\nH\tpct\t%s\n' "$m" "$u" "$w" "$(num_of pct "$c")"
     ctx_big "$f" && printf 'H\tbig\t1\n'
     files=$(codex_instr_files "$1")
@@ -2592,13 +2638,35 @@ codex_detail() { # codex_detail DIR -> rows
 }
 
 # ---------- omp ----------
-omp_session() { # omp_session PID DIR : the session its terminal points at, else the newest of that folder
+omp_started() { # omp_started PID WANT : with no terminal to go by (omp names a terminal by its tty or a terminal program's
+    # variable; Windows has neither under Herdr), the session of that folder (WANT: its "cwd") the process started: written
+    # since it started and named (omp names a session by when it began) from a minute before its start to 5 minutes after
+    local e s t0 t1 x n best="" bn="" LC_ALL=C
+    e=$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' '); [ -n "$e" ] || return 1
+    s=$(printf '%s' "$e" | awk -F '[-:]' '{ s = 0; if (NF == 4) s = $1 * 86400 + $2 * 3600 + $3 * 60 + $4; else if (NF == 3) s = $1 * 3600 + $2 * 60 + $3; else if (NF == 2) s = $1 * 60 + $2; print s }')
+    s=$(( $(date +%s) - s ))
+    t0=$(date -u -r $((s - 60)) +%Y-%m-%dT%H-%M-%S 2>/dev/null || date -u -d "@$((s - 60))" +%Y-%m-%dT%H-%M-%S 2>/dev/null) || return 1
+    t1=$(date -u -r $((s + 300)) +%Y-%m-%dT%H-%M-%S 2>/dev/null || date -u -d "@$((s + 300))" +%Y-%m-%dT%H-%M-%S 2>/dev/null) || return 1
+    while IFS= read -r x; do
+        [ -n "$x" ] || continue
+        n=${x##*/}; n=${n:0:19}
+        [[ "$n" < "$t0" || "$n" > "$t1" ]] && continue
+        [ -z "$bn" ] || [[ "$n" < "$bn" ]] || continue
+        head -n 3 "$x" | grep '"type":"session"' | grep -qF "$2" && { best=$x; bn=$n; }
+    done <<EOF
+$(find "$OMP_DIR/sessions" -type f -name '*.jsonl' -mmin "-$(( ($(date +%s) - s) / 60 + 2 ))" 2>/dev/null)
+EOF
+    [ -n "$best" ] && printf '%s\n' "$best"
+}
+omp_session() { # omp_session PID DIR : the session its terminal points at, else the one it started (omp_started), else the
+    # newest of that folder
     local f="" x tty want
     tty=$(ps -o tty= -p "$1" 2>/dev/null | tr -d ' ' | sed 's|^/dev/||; s|/|-|g')
     case $tty in ""|"?"|"??") ;; *) [ -f "$OMP_DIR/terminal-sessions/$tty" ] && f=$(sed -n 2p "$OMP_DIR/terminal-sessions/$tty");; esac
     if [ -z "$f" ] || [ ! -f "$f" ]; then
         f=""; want="\"cwd\":$(json_s "$2")"
-        [ -n "$2" ] && while IFS= read -r x; do
+        [ -n "$2" ] && [ -n "$1" ] && f=$(omp_started "$1" "$want")
+        [ -n "$2" ] && [ -z "$f" ] && while IFS= read -r x; do
             [ -n "$x" ] && head -n 3 "$x" | grep '"type":"session"' | grep -qF "$want" && { f=$x; break; }
         done <<EOF
 $(newest_files "$OMP_DIR/sessions" '*.jsonl')
@@ -2606,20 +2674,30 @@ EOF
     fi
     [ -n "$f" ] && printf '%s\n' "$f"
 }
-omp_instr_files() { # the instruction files omp may read for DIR (omp reads several tools' ones; a guess from what is there)
-    local d
-    ctx_files "omp 帳號" "$OMP_DIR/AGENTS.md"
-    ctx_files "Claude 帳號" "$CLAUDE_DIR/CLAUDE.md"
+omp_instr_files() { # the instruction files omp reads for DIR (omp's own rules, tried out): one for the account (the first of
+    # ~/.omp/agent/AGENTS.md, ~/.agent/AGENTS.md, ~/.agents/AGENTS.md; another tool's own only if omp's enabledProviders asks:
+    # not counted), the account's RULES.md, one file for each folder level (omp_pick, root first) and the nearest .omp's RULES.md
+    local d f nat
+    for f in "$OMP_DIR/AGENTS.md" "$HOME/.agent/AGENTS.md" "$HOME/.agents/AGENTS.md"; do [ -s "$f" ] && { ctx_files "omp 帳號" "$f"; break; }; done
+    ctx_files "omp 帳號" "$OMP_DIR/RULES.md"
     [ -n "$1" ] || return 0
+    nat=$(omp_nat "$1")
     while IFS= read -r d; do
-        [ -n "$d" ] && [ "$d" != "$HOME" ] && ctx_files "資料夾" "$d/AGENTS.md" "$d/CLAUDE.md" "$d/.omp/AGENTS.md" "$d/.claude/CLAUDE.md"
+        [ -n "$d" ] && f=$(omp_pick "$d" "$1" "$nat") && ctx_files "資料夾" "$f"
     done <<EOF
-$(ctx_up "$1")
+$(omp_levels "$1" | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }')
 EOF
+    [ -z "$nat" ] || ctx_files "資料夾" "$nat/.omp/RULES.md"
 }
 omp_skill_files() { # "name TAB bytes TAB path TAB where" for the skills omp may list: their name and description
     local d f
-    for d in "$OMP_DIR/skills" "$AGENTS_SKILLS" "$CLAUDE_DIR/skills" ${1:+"$1/.omp/skills" "$1/.agents/skills" "$1/.claude/skills"}; do
+    # (the account's: omp's own and ~/.agents/skills; Claude's ~/.claude/skills only if enabledProviders asks: not counted.
+    # A folder's: .omp/skills in the nearest .omp, .agents/skills and .claude/skills in each folder omp looks in)
+    local nat; [ -z "$1" ] || nat=$(omp_nat "$1")
+    { printf '%s\n' "$OMP_DIR/skills" "$AGENTS_SKILLS"; [ -z "$nat" ] || printf '%s\n' "$nat/.omp/skills"
+      [ -z "$1" ] || omp_levels "$1" | while IFS= read -r d; do
+          [ "$d/.agents/skills" = "$AGENTS_SKILLS" ] || printf '%s\n' "$d/.agents/skills"; [ "$d/.claude" = "$CLAUDE_DIR" ] || printf '%s\n' "$d/.claude/skills"; done
+    } | while IFS= read -r d; do
         for f in "$d"/*/SKILL.md; do [ -f "$f" ] && printf '%s\n' "$f"; done
     done | LC_ALL=C awk -v home="$HOME" "$CTX_AWK"'
         { f = $0; n = ""; d = ""; c = 0; nm = f; sub(/\/SKILL\.md$/, "", nm); sub(/.*\//, "", nm); w = nm; sub(/\/[^\/]*\/SKILL\.md$/, "", w)
@@ -2633,7 +2711,8 @@ omp_detail() { # omp_detail PID DIR -> rows
     f=$(omp_session "$1" "$2"); [ -n "$f" ] || { printf 'H\terror\t%s\n' "找不到這個 omp 的 session（~/.omp/agent/sessions）"; return 0; }
     c=$(omp_ctx "$1" "$2"); u=$(num_of used "$c"); w=$(num_of window "$c"); m=$(str_of model "$c")
     printf 'H\tmodel\t%s\nH\tused\t%s\nH\twindow\t%s\n' "$m" "$u" "$w"
-    mcp=$(for x in "$OMP_DIR/mcp.json" ${2:+"$2/.omp/mcp.json" "$2/.mcp.json"}; do [ -f "$x" ] && json_keys "$x" mcpServers; done)
+    mcp=$(for x in "$OMP_DIR/mcp.json" ${2:+"$2/.omp/mcp.json" "$2/.mcp.json" "$2/mcp.json" "$2/.claude/mcp.json" "$2/.claude/.mcp.json"}; do [ -f "$x" ] && json_keys "$x" mcpServers; done
+        [ -n "$2" ] && [ -f "$2/.codex/config.toml" ] && [ "$2/.codex" != "$CODEX_DIR" ] && sed -n 's/^[[:space:]]*\[mcp_servers\.\([^].]*\)\][[:space:]]*$/\1/p' "$2/.codex/config.toml" | tr -d '"')
     files=$(omp_instr_files "$2"); skills=$(omp_skill_files "$2")
     ctx_stream "$f" | CTX_FILES=$files CTX_SKILLS=$skills CTX_MCP=$mcp LC_ALL=C awk -v total="$u" -v window="$w" -v home="$HOME" "$CTX_AWK"'
     function add(k, nm, x) { ne++; ek[ne] = k; en[ne] = nm; ew[ne] = x; el[ne] = NR }
@@ -2712,7 +2791,7 @@ omp_detail() { # omp_detail PID DIR -> rows
 ctx_rows() { # ctx_rows PID TOOL DIR : the rows for one agent
     case $2 in
         claude) claude_detail "$1" "$3";;
-        codex) codex_detail "$3";;
+        codex) codex_detail "$3" "$1";;
         omp) omp_detail "$1" "$3";;
         *) printf 'H\terror\t%s\n' "不是 Claude Code、Codex 或 omp";;
     esac
@@ -2764,10 +2843,10 @@ note_read() { # note_read KEY : N_TOOL N_DIR N_AT N_TEXT of that note (KEY: a pi
     N_TOOL=$(sed -n 2p "$f"); N_DIR=$(sed -n 3p "$f"); N_AT=$(sed -n 4p "$f"); N_TEXT=$(sed -n '5,$p' "$f")
     [ -n "$N_TEXT" ]
 }
-codex_thread_of() { # codex_thread_of PID : the thread id of the Codex in PID (its newest rollout in its folder)
+codex_thread_of() { # codex_thread_of PID : the thread id of the Codex in PID (the rollout it has open, else its folder's newest)
     local f
     agent_guess "$1" "" ""; [ "$A_TOOL" = codex ] || return 1
-    f=$(codex_rollout "$A_DIR") || return 1
+    f=$(codex_rollout "$A_DIR" "$1") || return 1
     f=${f##*/}; f=${f%.jsonl}; f=${f: -36}
     case $f in *[!0-9a-f-]*|"") return 1;; esac
     printf '%s\n' "$f"
@@ -3225,7 +3304,7 @@ cmd_files() { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git
     case $tool in
         claude) s=$(claude_where "$pid" "$dir") && log=${s##*"$TAB"}
                 [ -n "$log" ] || note="找不到這個 Claude 的對話紀錄（~/.claude/projects）";;
-        codex) log=$(codex_rollout "$dir") || note="找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）";;
+        codex) log=$(codex_rollout "$dir" "$pid") || note="找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）";;
         omp) log=$(omp_session "$pid" "$dir"); [ -n "$log" ] || note="找不到這個 omp 的 session（~/.omp/agent/sessions）";;
         "") note="看不出是哪種 agent（用 --tool claude|codex|omp 指定）";;
         *) note="不認得這種 agent：${tool}（只認得 claude、codex、omp）";;
@@ -3434,31 +3513,90 @@ here_short() { # a path as the panel shows it: inside DIR relative to it, else w
 kit_only() { # kit_only FILE : FILE has nothing but kit's block (kit made it for a folder's own)
     [ -z "$(awk -v b="$BEGIN_MARK" -v e="$END_MARK" '{ sub(/\r$/, "") } $0 == b { s = 1 } !s && NF { print; exit } $0 == e { s = 0 }' "$1")" ]
 }
+omp_levels() { # omp_levels DIR : the folders omp looks in for a folder's AGENTS.md / CLAUDE.md, DIR first (omp's own rule:
+    # up to the git root; under the home folder on up to it, the home folder itself only when there is no git root; outside
+    # the home folder with no git root, up to /)
+    local a=$1 git="" under="" list=""
+    case $1/ in "$HOME"/*) under=1;; esac
+    while :; do
+        if [ -n "$under" ] && [ "$a" = "$HOME" ]; then [ -n "$git" ] || list="$list$a$LF"; break; fi
+        list="$list$a$LF"
+        [ -e "$a/.git" ] && { git=1; [ -n "$under" ] || break; }
+        [ "$a" = / ] && break
+        a=$(dirname "$a")
+    done
+    printf '%s' "$list"
+}
+omp_nat() { # omp_nat DIR : the nearest folder (from DIR up) whose .omp has something in it: omp reads .omp/AGENTS.md and
+    # .omp/RULES.md only there (kit's own .omp/hooks counts too)
+    local d
+    while IFS= read -r d; do
+        [ -n "$d" ] && [ "$d/.omp" != "$HOME/.omp" ] && [ -n "$(ls -A "$d/.omp" 2>/dev/null)" ] && { printf '%s\n' "$d"; return 0; }
+    done <<EOF
+$(omp_levels "$1")
+EOF
+    return 1
+}
+omp_pick() { # omp_pick FOLDER DIR NAT : the one file omp reads at FOLDER's level (omp keeps one per level: the first that
+    # is there and not empty of .omp/AGENTS.md (NAT only), .claude/CLAUDE.md (DIR only), .agents/AGENTS.md, AGENTS.md, CLAUDE.md)
+    local f
+    for f in "$( [ "$1" = "$3" ] && printf '%s' "$1/.omp/AGENTS.md")" "$( [ "$1" = "$2" ] && printf '%s' "$1/.claude/CLAUDE.md")" \
+             "$1/.agents/AGENTS.md" "$1/AGENTS.md" "$1/CLAUDE.md"; do
+        [ -n "$f" ] && [ -s "$f" ] && { printf '%s\n' "$f"; return 0; }
+    done
+    return 1
+}
+toml_mcp_names() { # toml_mcp_names FILE : the [mcp_servers.x] names in a Codex config.toml outside kit's block
+    awk -v b="$TOML_BEGIN" -v e="$TOML_END" '{ sub(/\r$/, "") } $0 == b { s = 1 } $0 == e { s = 0; next } s { next }
+        /^[ \t]*\[mcp_servers\.[^].]*\][ \t]*$/ { n = $0; sub(/^[ \t]*\[mcp_servers\./, "", n); sub(/\][ \t]*$/, "", n); gsub(/"/, "", n); print n }' "$1" 2>/dev/null
+}
 here_rows() { # here_rows DIR : what an agent started in DIR gets that kit does not manage
     # lines: scope<TAB>kind<TAB>name<TAB>path<TAB>tools   (scope dir = DIR and the folders above it, user = this account)
     # (the folder's own that kit put there, kit add --dir, are not listed: the panel shows them as kit's)
-    local dir=$1 a f n mine root LC_ALL=C
+    # tools: the agents that read it. omp: only the one file it keeps for each folder level (omp_pick), its skills and
+    # .omp files only in the folders it looks in (omp_levels, omp_nat)
+    local dir=$1 a f n mine root lev nat ow om LC_ALL=C
     root=$(dir_root "$dir" 2>/dev/null); mine=$(dir_items "$root")
+    lev=$(omp_levels "$dir"); nat=$(omp_nat "$dir")
     a=$dir
     while :; do
+        ow=""; om=""; printf '%s\n' "$lev" | grep -qxF "$a" && { om=" omp"; ow=$(omp_pick "$a" "$dir" "$nat"); }
         for f in "$a/CLAUDE.md" "$a/CLAUDE.local.md" "$a/.claude/CLAUDE.md"; do
-            [ -f "$f" ] && [ "$f" != "$CLAUDE_DIR/CLAUDE.md" ] && ! kit_only "$f" && printf 'dir\trule\t%s\t%s\tclaude\n' "$(here_short "$dir" "$f")" "$f"
+            [ -f "$f" ] && [ "$f" != "$CLAUDE_DIR/CLAUDE.md" ] && ! kit_only "$f" && printf 'dir\trule\t%s\t%s\tclaude%s\n' "$(here_short "$dir" "$f")" "$f" "$( [ "$f" = "$ow" ] && echo " omp")"
         done
         if [ "$a/.claude" != "$CLAUDE_DIR" ]; then
             for f in "$a"/.claude/rules/*.md; do [ -f "$f" ] && printf 'dir\trule\t%s\t%s\tclaude\n' "$(here_short "$dir" "$f")" "$f"; done
             for f in "$a"/.claude/skills/*/SKILL.md; do
                 [ -f "$f" ] || continue; n=$(basename "$(dirname "$f")")
                 [ "$a" = "$root" ] && printf '%s\n' "$mine" | grep -qxF "skill:$n" && continue
-                printf 'dir\tskill\t%s\t%s\tclaude\n' "$n" "$f"
+                printf 'dir\tskill\t%s\t%s\tclaude%s\n' "$n" "$f" "$om"
             done
         fi
-        [ -f "$a/AGENTS.md" ] && ! kit_only "$a/AGENTS.md" && printf 'dir\trule\t%s\t%s\tcodex omp\n' "$(here_short "$dir" "$a/AGENTS.md")" "$a/AGENTS.md"
+        [ -f "$a/AGENTS.md" ] && ! kit_only "$a/AGENTS.md" && printf 'dir\trule\t%s\t%s\tcodex%s\n' "$(here_short "$dir" "$a/AGENTS.md")" "$a/AGENTS.md" "$( [ "$a/AGENTS.md" = "$ow" ] && echo " omp")"
+        if [ "$a/.agents/skills" != "$AGENTS_SKILLS" ]; then
+            [ "$a/.agents/AGENTS.md" = "$ow" ] && printf 'dir\trule\t%s\t%s\tomp\n' "$(here_short "$dir" "$ow")" "$ow"
+            for f in "$a"/.agents/skills/*/SKILL.md; do
+                [ -f "$f" ] || continue; n=$(basename "$(dirname "$f")")
+                [ "$a" = "$root" ] && printf '%s\n' "$mine" | grep -qxF "skill:$n" && continue
+                printf 'dir\tskill\t%s\t%s\tcodex%s\n' "$n" "$f" "$om"
+            done
+        fi
+        if [ -n "$nat" ] && [ "$a" = "$nat" ]; then
+            [ "$a/.omp/AGENTS.md" = "$ow" ] && printf 'dir\trule\t%s\t%s\tomp\n' "$(here_short "$dir" "$ow")" "$ow"
+            [ -s "$a/.omp/RULES.md" ] && printf 'dir\trule\t%s\t%s\tomp\n' "$(here_short "$dir" "$a/.omp/RULES.md")" "$a/.omp/RULES.md"
+            for f in "$a"/.omp/skills/*/SKILL.md; do [ -f "$f" ] && printf 'dir\tskill\t%s\t%s\tomp\n' "$(basename "$(dirname "$f")")" "$f"; done
+        fi
         [ "$a" = / ] && break
         a=$(dirname "$a")
     done
-    [ -f "$dir/.mcp.json" ] && json_keys "$dir/.mcp.json" mcpServers | while IFS= read -r n; do
-        [ "$dir" = "$root" ] && printf '%s\n' "$mine" | grep -qxF "mcp:$n" && continue
-        printf 'dir\tmcp\t%s\t%s\tclaude\n' "$n" "$dir/.mcp.json"; done
+    for f in "$dir/.mcp.json" "$dir/mcp.json" "$dir/.omp/mcp.json" "$dir/.claude/mcp.json" "$dir/.claude/.mcp.json"; do
+        [ -f "$f" ] && [ "$f" != "$OMP_DIR/mcp.json" ] || continue
+        json_keys "$f" mcpServers | while IFS= read -r n; do
+            [ "$f" = "$dir/.mcp.json" ] && [ "$dir" = "$root" ] && printf '%s\n' "$mine" | grep -qxF "mcp:$n" && continue
+            printf 'dir\tmcp\t%s\t%s\t%s\n' "$n" "$f" "$( [ "$f" = "$dir/.mcp.json" ] && echo "claude omp" || echo omp)"; done
+    done
+    [ -f "$dir/.codex/config.toml" ] && [ "$dir/.codex" != "$CODEX_DIR" ] && toml_mcp_names "$dir/.codex/config.toml" | while IFS= read -r n; do
+        printf 'dir\tmcp\t%s\t%s\tcodex omp\n' "$n" "$dir/.codex/config.toml"; done
     [ -f "$CLAUDE_JSON" ] && json_keys "$CLAUDE_JSON" "projects$TAB$dir${TAB}mcpServers" | while IFS= read -r n; do
         printf 'dir\tmcp\t%s\t%s\tclaude\n' "$n" "$CLAUDE_JSON"; done
     for f in "$CLAUDE_DIR"/skills/*/SKILL.md; do
@@ -3467,6 +3605,14 @@ here_rows() { # here_rows DIR : what an agent started in DIR gets that kit does 
     done
     [ -f "$CLAUDE_JSON" ] && json_keys "$CLAUDE_JSON" mcpServers | while IFS= read -r n; do
         [ -n "$(state_get mcp "$n")" ] || printf 'user\tmcp\t%s\t%s\tclaude\n' "$n" "$CLAUDE_JSON"; done
+    for f in "$AGENTS_SKILLS"/*/SKILL.md; do
+        [ -f "$f" ] || continue; n=$(basename "$(dirname "$f")")
+        [ -n "$(state_get skill "$n")" ] || printf 'user\tskill\t%s\t%s\tcodex omp\n' "$n" "$f"
+    done
+    for f in "$OMP_DIR"/skills/*/SKILL.md; do [ -f "$f" ] && printf 'user\tskill\t%s\t%s\tomp\n' "$(basename "$(dirname "$f")")" "$f"; done
+    [ -s "$OMP_DIR/RULES.md" ] && printf 'user\trule\t%s\t%s\tomp\n' "$(here_short "$dir" "$OMP_DIR/RULES.md")" "$OMP_DIR/RULES.md"
+    [ -f "$OMP_DIR/mcp.json" ] && json_keys "$OMP_DIR/mcp.json" mcpServers | while IFS= read -r n; do
+        [ -n "$(state_get mcp.omp "$n")" ] || printf 'user\tmcp\t%s\t%s\tomp\n' "$n" "$OMP_DIR/mcp.json"; done
     return 0
 }
 other_user() { # other_user PID : the user of a process under PID that is not me (an agent started with sudo -i), if any
