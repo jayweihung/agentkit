@@ -4,6 +4,14 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.4（2026-11-14）
+
+更新後要做：`kit self-update`。kit api 還是 1.6。
+
+**`kit context` 不會再拿到同一個資料夾裡別的 Claude 的數字**
+- 沒有 kit 狀態列的 Claude（例如關掉 hook 的），以前直接讀那個資料夾裡最新的對話紀錄；兩個 Claude 在同一個資料夾，就會拿到另一個的模型和 context %（Herdr 標題列、關係圖卡片跟著錯）。
+- 現在先照 `~/.claude/sessions/<pid>.json` 找它自己的那一份，找不到才用最新的。
+
 ## 0.6.3（2026-11-14）
 
 更新後要做：`kit self-update`。kit api 變成 1.6。

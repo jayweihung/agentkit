@@ -1161,6 +1161,16 @@ W "$CD/t.jsonl" ("{`"type`":`"assistant`",`"message`":{`"model`":`"claude-sonnet
     "{`"type`":`"assistant`",`"message`":{`"model`":`"<synthetic>`",`"usage`":{`"input_tokens`":0,`"output_tokens`":0}}}`n")
 Kit context --pid 1 --tool claude --dir $PC
 Check 'context (claude): not a <synthetic> reply; past the window -> 100 %' { $out.Trim() -eq '{"tool": "claude", "used": 250000, "window": 200000, "pct": 100, "source": "transcript", "model": "claude-sonnet-4-5"}' }
+# another Claude in the same folder wrote last: each reads its own transcript (~/.claude/sessions/<pid>.json), only
+# one kit can't place falls back to the newest
+[void](New-Item -ItemType Directory -Force -Path "$H/.claude/sessions"); W "$H/.claude/sessions/4242.json" ('{"pid":4242,"sessionId":"t","cwd":' + (ConvertTo-Json $PC) + '}')
+Start-Sleep -Seconds 1
+W "$CD/other.jsonl" "{`"type`":`"assistant`",`"message`":{`"model`":`"claude-haiku-5-5`",`"usage`":{`"input_tokens`":2,`"cache_read_input_tokens`":48555}}}`n"
+Kit context --pid 4242 --tool claude --dir $PC
+Check "context (claude, no status line): its own session's transcript, not another Claude's newer one in the folder" { $out.Trim() -eq '{"tool": "claude", "used": 250000, "window": 200000, "pct": 100, "source": "transcript", "model": "claude-sonnet-4-5"}' }
+Kit context --pid 1 --tool claude --dir $PC
+Check "context (claude): a process kit can't place: the newest of the folder, as before" { $out.Contains('"model": "claude-haiku-5-5"') }
+Remove-Item -LiteralPath "$CD/other.jsonl", "$H/.claude/sessions/4242.json" -Force
 # a long log is read from its end; nothing there -> all of it, the same answer
 Add-Content -LiteralPath "$CD/t.jsonl" -Encoding UTF8 -NoNewline -Value ("{`"type`":`"user`",`"message`":{`"content`":`"$('0' * 400)`"}}`n")
 Add-Content -LiteralPath $RO -Encoding UTF8 -NoNewline -Value ("{`"type`":`"event_msg`",`"payload`":{`"type`":`"agent_message`",`"message`":`"$('0' * 400)`"}}`n")

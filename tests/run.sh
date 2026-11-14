@@ -1322,6 +1322,16 @@ check "context (claude, no status line): the transcript (not a <synthetic> reply
 printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":390000,"postTokens":19421}}\n' >> "$CT"
 out=$(CX --pid 1 --tool claude --dir "$P7")
 check "context (claude): compacted since -> the size after it" 'echo "$out" | grep -qF "\"used\": 19421, \"window\": 400000, \"pct\": 5"'
+# another Claude in the same folder wrote last: each reads its own transcript (~/.claude/sessions/<pid>.json), only
+# one kit can't place falls back to the newest
+mkdir -p "$H7/.claude/sessions"; printf '{"pid":4242,"sessionId":"t1","cwd":"%s"}\n' "$P7" > "$H7/.claude/sessions/4242.json"
+OT="$(dirname "$CT")/other.jsonl"; sleep 1
+printf '{"type":"assistant","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":2,"cache_read_input_tokens":48555}}}\n' > "$OT"
+out=$(CX --pid 4242 --tool claude --dir "$P7")
+check "context (claude, no status line): its own session's transcript, not another Claude's newer one in the folder" 'echo "$out" | grep -qF "\"used\": 19421, \"window\": 400000, \"pct\": 5"'
+out=$(CX --pid 1 --tool claude --dir "$P7")
+check "context (claude): a process kit can't place: the newest of the folder, as before" 'echo "$out" | grep -qF "\"model\": \"claude-haiku-5-5\""'
+rm -f "$OT" "$H7/.claude/sessions/4242.json"
 # kit statusline under a "claude" process keeps the numbers for that process; kit context prefers them
 printf '{"session_id":"abc","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_window":{"total_input_tokens":5,"context_window_size":400000,"current_usage":{"input_tokens":2,"output_tokens":9,"cache_creation_input_tokens":1146,"cache_read_input_tokens":138452},"used_percentage":34.9}}' > "$T/sl.json"
 mkdir -p "$T/fb7"; printf '#!/bin/sh\necho $$ > "%s/cpid"\n"%s" statusline < "%s/sl.json"\n' "$T" "$KIT" "$T" > "$T/fb7/claude"; chmod +x "$T/fb7/claude"

@@ -2804,11 +2804,18 @@ function Claude-Ctx([string]$cpid, [string]$cwd) {
         $j = Read-Text $f; $m = Str-Of 'model' $j; $w = Setting-Window $m; if (-not $w) { $w = Num-Of 'window' $j }
         return Ctx-Json 'claude' (Num-Of 'used' $j) $w 'statusline' $m
     }
-    if (-not $cwd) { return Ctx-Json 'claude' '' '' '' '' }
-    $d = Join-Path (Join-Path $ClaudeDir 'projects') ($cwd -replace '[^A-Za-z0-9]', '-')
-    $t = @(if (Test-Path -LiteralPath $d) { Get-ChildItem -LiteralPath $d -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 })
-    if ($t.Count -eq 0) { return Ctx-Json 'claude' '' '' '' '' }
-    $s = Claude-Scan $t[0].FullName $CtxTail; if ($s.which -eq 'more') { $s = Claude-Scan $t[0].FullName 0 }
+    # its own transcript (Claude-Where: the pid's session), not just the newest of its folder: two Claudes in one
+    # folder would read each other's
+    $tf = ''
+    if ($cpid) { $wh = Claude-Where $cpid $cwd; if ($wh -and $wh[2]) { $tf = $wh[2] } }
+    if (-not $tf) {
+        if (-not $cwd) { return Ctx-Json 'claude' '' '' '' '' }
+        $d = Join-Path (Join-Path $ClaudeDir 'projects') ($cwd -replace '[^A-Za-z0-9]', '-')
+        $t = @(if (Test-Path -LiteralPath $d) { Get-ChildItem -LiteralPath $d -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 })
+        if ($t.Count -eq 0) { return Ctx-Json 'claude' '' '' '' '' }
+        $tf = $t[0].FullName
+    }
+    $s = Claude-Scan $tf $CtxTail; if ($s.which -eq 'more') { $s = Claude-Scan $tf 0 }
     $m = Str-Of 'model' $s.a; $w = Model-Window $m
     if ($s.which -eq 'cut') { return Ctx-Json 'claude' (Num-Of 'postTokens' $s.c) $w 'transcript' $m }
     if (-not $s.a) { return Ctx-Json 'claude' '' '' 'transcript' '' }

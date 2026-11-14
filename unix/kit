@@ -1808,9 +1808,15 @@ claude_ctx() { # claude_ctx PID CWD
         [ -n "$w" ] || w=$(num_of window "$j")
         ctx_json claude "$u" "$w" statusline "$m"; return
     fi
-    [ -n "$2" ] || { ctx_json claude "" "" "" ""; return; }
-    d="$CLAUDE_DIR/projects/$(printf '%s' "$2" | sed 's|[^A-Za-z0-9]|-|g')"
-    t=$(ls -t "$d"/*.jsonl 2>/dev/null | head -n 1)
+    # its own transcript (claude_where: the pid's session), not just the newest of its folder: two Claudes in one
+    # folder would read each other's
+    t=""
+    [ -n "$1" ] && d=$(claude_where "$1" "$2" 2>/dev/null) && t=${d##*"$TAB"}
+    if [ -z "$t" ]; then
+        [ -n "$2" ] || { ctx_json claude "" "" "" ""; return; }
+        d="$CLAUDE_DIR/projects/$(printf '%s' "$2" | sed 's|[^A-Za-z0-9]|-|g')"
+        t=$(ls -t "$d"/*.jsonl 2>/dev/null | head -n 1)
+    fi
     [ -n "$t" ] || { ctx_json claude "" "" "" ""; return; }
     # the last reply with its usage (not one Claude Code made itself: "<synthetic>", usage 0) and the last compaction
     { IFS= read -r which; IFS= read -r line; IFS= read -r cb; } <<EOF
