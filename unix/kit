@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.5
+KIT_API=1.6
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -2671,7 +2671,7 @@ cmd_note() { # kit note [text...] | --clear | --pid PID [--json] [text...] | --h
             kill -0 "$p" 2>/dev/null || rm -f "$f"
         done
     fi
-    find "$NOTE_DIR" -name 'codex-*' -type f -mtime +7 -exec rm -f {} + 2>/dev/null   # Codex threads: a week
+    find "$NOTE_DIR" -maxdepth 1 -name 'codex-*' -type f -mtime +7 -exec rm -f {} + 2>/dev/null   # Codex threads: a week
     a=$(date +%s)
     { printf '%s\n' "$( [ -n "$sess" ] || proc_start "$pid")"; printf '%s\n%s\n%s\n%s\n' "$tool" "$dir" "$a" "$text"; } > "$NOTE_DIR/$key.tmp" && mv "$NOTE_DIR/$key.tmp" "$NOTE_DIR/$key" ||
         die_c no-write "寫不進 $NOTE_DIR"
@@ -2679,6 +2679,87 @@ cmd_note() { # kit note [text...] | --clear | --pid PID [--json] [text...] | --h
     [ "$(wc -l < "$NOTE_DIR/history.tsv" | tr -d ' ')" -le $((NOTE_KEEP + 100)) ] ||
         { tail -n $NOTE_KEEP "$NOTE_DIR/history.tsv" > "$NOTE_DIR/history.tmp" && mv "$NOTE_DIR/history.tmp" "$NOTE_DIR/history.tsv"; }
     if [ -n "$json" ]; then note_json "$pid" "$sess" >&3; echo >&3; else say "進度記下了"; fi
+}
+
+# ---------- kit pending: what an agent (or a service) waits on its owner for ----------
+# kit pending add "<what>" [--id ID] [--pid PID | --keep] : kept as $NOTE_DIR/pending/<id> (the agent's start time or
+# empty, its pid or empty, folder, time, text; in the notes folder, so it works in Codex's sandbox too). An item tied to
+# an agent (the one above kit, or --pid) is gone when that agent is; --keep (or no agent found): until kit pending done.
+# kit status --json lists them in pending (kind owner); an account a panel cannot ask (root) shows them in the file it
+# writes. Read only by status: a gone agent's file is removed by kit pending / kit pending add, never by status.
+PEND_DIR="$NOTE_DIR/pending"
+PEND_MAX=300           # bytes; one line
+pend_read() { # pend_read ID : P_PID P_DIR P_AT P_WHAT of that item; 1 when there is none or its agent is gone
+    local f="$PEND_DIR/$1" st
+    P_PID=; P_DIR=; P_AT=; P_WHAT=
+    [ -f "$f" ] || return 1
+    P_PID=$(sed -n 2p "$f"); P_DIR=$(sed -n 3p "$f"); P_AT=$(sed -n 4p "$f"); P_WHAT=$(sed -n 5p "$f")
+    if [ -n "$P_PID" ]; then                                 # gone: no such process, or another process has that pid
+        kill -0 "$P_PID" 2>/dev/null || [ -n "$(proc_start "$P_PID")" ] || return 1
+        st=$(proc_start "$P_PID"); [ -z "$st" ] || [ "$(sed -n 1p "$f")" = "$st" ] || return 1
+    fi
+    [ -n "$P_WHAT" ]
+}
+pend_ids() { local f; for f in "$PEND_DIR"/*; do [ -f "$f" ] || continue; f=${f##*/}; case $f in *.tmp) ;; *) printf '%s\n' "$f";; esac; done | LC_ALL=C sort; }
+pend_json() { # one {"kind": "owner", ...} line per item that still waits
+    local id m
+    m=$(hostname -s 2>/dev/null || uname -n)
+    pend_ids | while IFS= read -r id; do
+        pend_read "$id" || continue
+        printf '{"kind": "owner", "id": %s, "what": %s, "since": %s000, "machine": %s, "dir": %s, "pid": %s}\n' "$(json_s "$id")" "$(json_s "$P_WHAT")" \
+            "${P_AT:-0}" "$(json_s "$m")" "$(json_or_null "$P_DIR")" "$(json_uint "$P_PID")"
+    done
+}
+pend_prune() { local id; pend_ids | while IFS= read -r id; do pend_read "$id" || rm -f "$PEND_DIR/$id"; done; }
+cmd_pending() { # kit pending | kit pending add "<what>" [--id ID] [--pid PID | --keep] | kit pending done ID
+    local use="用法：kit pending | kit pending add \"在等你什麼\" [--id 名字] [--pid 程式編號 | --keep] | kit pending done <名字>"
+    local sub=${1:-} id="" pid="" keep="" text="" a since n=0
+    [ $# -eq 0 ] || shift
+    case $sub in
+        "")
+            pend_prune
+            pend_ids | while IFS= read -r id; do
+                pend_read "$id" || continue
+                printf '%s：%s（%s%s）\n' "$id" "$P_WHAT" "$(note_ago "$P_AT")" "${P_DIR:+，$P_DIR}"
+            done
+            [ -n "$(pend_ids)" ] || echo "（沒有在等你的事）"
+            return 0;;
+        done)
+            [ $# -eq 1 ] || die_c usage "$use"
+            case $1 in ""|.*|*[!A-Za-z0-9._-]*) die_c usage "$use";; esac
+            if [ -f "$PEND_DIR/$1" ]; then rm -f "$PEND_DIR/$1" || die_c no-write "寫不進 $PEND_DIR"; say "拿掉了：$1"
+            else say "（沒有 $1 這一項）"; fi
+            return 0;;
+        add) ;;
+        *) die_c usage "$use";;
+    esac
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --id|--pid) [ $# -ge 2 ] || die_c usage "$use"
+                case $1 in --id) id=$2;; *) pid=$2;; esac; shift 2;;
+            --keep) keep=1; shift;;
+            --) shift; text="$text${text:+ }$*"; break;;
+            -*) die_c usage "$use";;
+            *) text="$text${text:+ }$1"; shift;;
+        esac
+    done
+    text=$(printf '%s' "$text" | tr '\t\r\n' '   ' | sed 's/^ *//; s/ *$//')
+    [ -n "$text" ] || die_c usage "$use"
+    [ "$(printf '%s' "$text" | wc -c | tr -d ' ')" -le $PEND_MAX ] || die_c too-long "太長（最多 $PEND_MAX bytes）：一句話說在等什麼就好"
+    case $pid in *[!0-9]*) die_c usage "$use";; esac
+    [ -z "$keep" ] || [ -z "$pid" ] || die_c usage "$use"
+    if [ -n "$id" ]; then
+        [ "${#id}" -le 64 ] || die_c usage "$use"
+        case $id in .*|*[!A-Za-z0-9._-]*) die_c usage "$use";; esac
+    else id="$(date +%s)-$$"; fi
+    if [ -n "$pid" ]; then kill -0 "$pid" 2>/dev/null || die_c no-agent "沒有這個程序：$pid"
+    elif [ -z "$keep" ]; then a=$(agent_pid); pid=${a%% *}; fi    # none found (a service, Codex's sandbox): kept until done
+    mkdir -p "$PEND_DIR" 2>/dev/null; [ -w "$PEND_DIR" ] || die_c no-write "寫不進 $PEND_DIR"
+    pend_prune
+    since=$(date +%s); pend_read "$id" && since=$P_AT              # the same item again: it has waited since then
+    { printf '%s\n' "$( [ -z "$pid" ] || proc_start "$pid")"; printf '%s\n%s\n%s\n%s\n' "$pid" "$( [ -z "$pid" ] && printf '%s' "$PWD" || proc_cwd "$pid")" "$since" "$text"; } \
+        > "$PEND_DIR/$id.tmp" && mv "$PEND_DIR/$id.tmp" "$PEND_DIR/$id" || die_c no-write "寫不進 $PEND_DIR"
+    say "記下了：${id}（等到了跑 kit pending done ${id}）"
 }
 
 # ---------- kit files: the files an agent read or changed ----------
@@ -4706,6 +4787,22 @@ cmd_approve() { # kit approve <approvals repo> <source clone>... --key <ssh key>
 # runs kit status --json > FILE itself and the panel reads that file.
 head_sha() { [ -e "$1/.git" ] && git -C "$1" rev-parse -q --verify HEAD 2>/dev/null; }   # head_sha DIR : when DIR is a git clone
 json_uint() { case $1 in ""|*[!0-9]*) printf null;; *) printf '%s' "$1" | sed 's/^0*\(.\)/\1/';; esac; }   # a number, or null
+sign_pending() { # sign_pending NAME DIR APPROVED : {"kind": "sign", ...} when the source's remote (as kit's last fetch saw it) is
+    # past the commit approved.txt names: commits waiting for the signer (signed on the Mac, never here). Nothing else.
+    local n=$1 d=$2 a=$3 head c since what
+    [ -e "$d/.git" ] || return 0
+    head=$(git -C "$d" rev-parse -q --verify refs/remotes/origin/HEAD 2>/dev/null) || head=$(git -C "$d" rev-parse -q --verify refs/remotes/origin/main 2>/dev/null) \
+        || head=$(git -C "$d" rev-parse -q --verify refs/remotes/origin/master 2>/dev/null) || return 0
+    [ "$head" = "$a" ] && return 0
+    if [ -n "$a" ] && git -C "$d" cat-file -e "$a^{commit}" 2>/dev/null; then
+        c=$(git -C "$d" rev-list --count "$a..$head" 2>/dev/null); [ "${c:-0}" -gt 0 ] 2>/dev/null || return 0   # approved is ahead: nothing to sign
+        since=$(git -C "$d" log --format=%ct "$a..$head" 2>/dev/null | tail -n 1); what="${n} 有 ${c} 個新 commit 等核准"
+    else
+        c=$(git -C "$d" rev-list --count "$head" 2>/dev/null); since=$(git -C "$d" log -1 --format=%ct "$head" 2>/dev/null); what="${n} 還沒核准過"
+    fi
+    printf '{"kind": "sign", "name": %s, "what": %s, "commits": %s, "head": %s, "since": %s, "machine": %s}' "$(json_s "$n")" "$(json_s "$what")" \
+        "$(json_uint "$c")" "$(json_s "$head")" "$( [ -n "$since" ] && printf '%s000' "$since" || printf null)" "$(json_s "$(hostname -s 2>/dev/null || uname -n)")"
+}
 cmd_status() {
     [ $# -eq 1 ] && [ "$1" = --json ] || die_c usage "用法：kit status --json"
     local repo url name s d f ad appr="" valid=false first=1 self=null approvals=null
@@ -4717,14 +4814,27 @@ cmd_status() {
         fi
         approvals="{\"serial\": $(json_uint "$(awk '$1 == "serial:" { print $2; exit }' "$f" 2>/dev/null)"), \"used\": $(json_uint "$(state_get approvals serial)"), \"valid\": $valid}"
     fi
+    local pend="" one
     repo=$(cat "$KIT_LIB/.repo" 2>/dev/null)                  # kit's own clone (the one kit self-update pulls)
     if [ -n "$repo" ]; then
         name=$(basename "$repo")
         [ -e "$repo/.git" ] && url=$(git -C "$repo" remote get-url origin 2>/dev/null) && [ -n "$url" ] && name=$(src_name "$url")
         self="{\"name\": $(json_s "$name"), \"commit\": $(json_or_null "$(head_sha "$repo")"), \"approved\": $(json_or_null "$(printf '%s\n' "$appr" | awk -v n="$name" '$1 == n { print $2; exit }')")}"
+        [ $valid = true ] && one=$(sign_pending "$name" "$repo" "$(printf '%s\n' "$appr" | awk -v n="$name" '$1 == n { print $2; exit }')") && [ -n "$one" ] && pend="$pend$one$LF"
     fi
-    printf '{\n  "kit": %s,\n  "api": %s,\n  "user": %s,\n  "at": %s,\n  "self": %s,\n  "approvals": %s,\n  "sources": [' \
-        "$(json_s "$KIT_VERSION")" "$(json_s "$KIT_API")" "$(json_s "$(id -un)")" "$(date +%s)" "$self" "$approvals"
+    if [ $valid = true ]; then                               # what waits for the signer (a valid list only: else nothing is known)
+        while IFS= read -r s; do
+            [ -n "$s" ] && is_url "$s" || continue
+            name=$(src_name "$s"); one=$(sign_pending "$name" "$(src_dir "$s")" "$(printf '%s\n' "$appr" | awk -v n="$name" '$1 == n { print $2; exit }')")
+            [ -z "$one" ] || pend="$pend$one$LF"
+        done <<EOF
+$(m_sources)
+EOF
+    fi
+    one=$(pend_json); [ -z "$one" ] || pend="$pend$one$LF"   # what agents (or services) here wait on the owner for
+    printf '{\n  "kit": %s,\n  "api": %s,\n  "user": %s,\n  "at": %s,\n  "self": %s,\n  "approvals": %s,\n  "pending": [%s],\n  "sources": [' \
+        "$(json_s "$KIT_VERSION")" "$(json_s "$KIT_API")" "$(json_s "$(id -un)")" "$(date +%s)" "$self" "$approvals" \
+        "$(printf '%s' "$pend" | awk 'NF { printf "%s\n    %s", (n++ ? "," : ""), $0 } END { if (n) printf "\n  " }')"
     while IFS= read -r s; do
         [ -n "$s" ] || continue
         [ $first = 1 ] || printf ','; first=0
@@ -4840,6 +4950,9 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit note ["做了什麼；下一步"]      agent 寫自己做到哪（一兩行，畫面上看得到）；不帶文字：印出現在寫的
   kit note --history [--dir 資料夾]   這個資料夾最近的進度（包括已經關掉的 agent），交接時先看
   kit note --pid <pid> [--json]     某個 agent 的進度（--json 給程式讀）；--clear 清掉自己的
+  kit pending add "要你同意：…" [--id 名字]
+                                    agent 或服務在等你同意時記一筆（畫面程式會提醒你）；kit pending done <名字> 拿掉
+  kit pending                       列出這個帳號在等你的事
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]
                                     讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
@@ -4928,6 +5041,7 @@ case ${1:-} in
     context)   shift; cmd_context "$@";;
     files)     shift; cmd_files "$@";;
     note)      shift; cmd_note "$@";;
+    pending)   shift; cmd_pending "$@";;
     statusline) shift; cmd_statusline "$@";;
     handoff-hook) shift; cmd_handoff_hook "$@";;
     collect)   shift; cmd_collect "$@";;

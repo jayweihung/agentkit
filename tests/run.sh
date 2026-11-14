@@ -204,7 +204,7 @@ kit status --json > "$T/status.json" 2>"$T/status.err"; rc=$?
 check "status --json: exit 0, valid JSON, nothing on stderr" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/status.json" > /dev/null && [ ! -s "$T/status.err" ]'
 check "status --json: kit, api, user, at" '[ "$(jget "$T/status.json" kit)" = "\"$(cat "$HERE/../VERSION")\"" ] && [ "$(jget "$T/status.json" api)" = "\"$(kit api)\"" ] &&
     [ "$(jget "$T/status.json" user)" = "\"$(id -un)\"" ] && grep -qE "^  \"at\": [0-9]{10},$" "$T/status.json"'
-check "status --json: no self (kit not installed from a clone), no approvals" 'grep -qxF "  \"self\": null," "$T/status.json" && grep -qxF "  \"approvals\": null," "$T/status.json"'
+check "status --json: no self (kit not installed from a clone), no approvals, nothing pending" 'grep -qxF "  \"self\": null," "$T/status.json" && grep -qxF "  \"approvals\": null," "$T/status.json" && grep -qxF "  \"pending\": []," "$T/status.json"'
 check "status --json: a git source has its commit, a folder that is not git null" 'grep -qxF "    {\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\", \"commit\": \"$(git -C "$TEAM" rev-parse HEAD)\", \"approved\": null}," "$T/status.json" &&
     grep -qxF "    {\"name\": \"third-party\", \"source\": \"$TP\", \"dir\": \"$TP\", \"commit\": null, \"approved\": null}" "$T/status.json" && [ "$(tail -n 2 "$T/status.json")" = "$(printf "  ]\n}")" ]'
 check "status --json writes nothing (state.tsv and the rest of HOME the same)" 'snap "$HOME" | cmp -s - "$T/st.snap"'
@@ -1862,6 +1862,7 @@ out=$(rk status --json 2>/dev/null); rc=$?
 check "status --json with approvals: serial, used, valid; the approved commit next to the one in use" '[ $rc -eq 0 ] && echo "$out" | grep -qxF "  \"approvals\": {\"serial\": 2, \"used\": 2, \"valid\": true}," &&
     echo "$out" | grep -qxF "    {\"name\": \"srcA\", \"source\": \"file://$SA/srcA.git\", \"dir\": \"$RH/agentkit/srcA\", \"commit\": \"$v2\", \"approved\": \"$v2\"}"'
 check "status --json with approvals: nothing fetched or written" 'snap "$RH" | cmp -s - "$T/rst.snap"'
+check "status --json with approvals: nothing waits for the signer (the remote is at the approved commit)" 'echo "$out" | grep -qxF "  \"pending\": [],"'
 echo "srcB 0123456789012345678901234567890123456789" >> "$RH/agentkit/.approvals/approved.txt"
 out=$(rk status --json 2>/dev/null); rc=$?
 check "status --json: an edited approved.txt is not valid, no approved commits" '[ $rc -eq 0 ] && echo "$out" | grep -qxF "  \"approvals\": {\"serial\": 2, \"used\": 2, \"valid\": false}," &&
@@ -1876,15 +1877,24 @@ if [ -n "$PWSH" ]; then
     check "status --json with approvals: kit.ps1 says it has none (null), on stderr why" '[ $rc -eq 0 ] && echo "$out" | grep -qxF "  \"approvals\": null," && grep -q "Windows 版的 kit 不支援" "$T/err" &&
         echo "$out" | grep -qxF "    {\"name\": \"srcA\", \"source\": \"file://$SA/srcA.git\", \"dir\": \"$RH/agentkit/srcA\", \"commit\": \"$v2\", \"approved\": null}"'
 fi
+# a new commit on the source, fetched by kit sync but not approved: kit status says it waits for the signer
+( cd "$SA/work/srcA" && echo "v3, not approved yet." > rules/ar.md && git commit -qam v3 && git push -q origin HEAD 2>/dev/null )
+rk sync >/dev/null 2>&1; v3=$(git -C "$SA/work/srcA" rev-parse HEAD)
+out=$(rk status --json 2>/dev/null); rc=$?
+check "status --json: a new commit kit sync fetched but nobody approved waits for the signer (pending, kind sign)" '[ $rc -eq 0 ] && [ "$(git -C "$RH/agentkit/srcA" rev-parse HEAD)" = "$v2" ] &&
+    printf "%s" "$out" | python3 -c "import json,sys;p=json.load(sys.stdin)[\"pending\"];assert len(p)==1 and p[0][\"kind\"]==\"sign\" and p[0][\"name\"]==\"srcA\" and p[0][\"commits\"]==1 and p[0][\"head\"]==sys.argv[1] and p[0][\"what\"]==\"srcA 有 1 個新 commit 等核准\" and p[0][\"since\"]>1e12 and p[0][\"machine\"]" "$v3"'
+kit approve "$SA/appr-work" "$SA/work/srcA" --key "$SA/key" --yes >/dev/null 2>&1; git -C "$SA/appr-work" push -q origin HEAD 2>/dev/null; rk sync >/dev/null 2>&1
+out=$(rk status --json 2>/dev/null)
+check "status --json: approved and synced: nothing pending" 'echo "$out" | grep -qxF "  \"pending\": []," && [ "$(git -C "$RH/agentkit/srcA" rev-parse HEAD)" = "$v3" ]'
 out=$(HOME="$RH" AGENTKIT_CONFIG="$RH/.config/agentkit" AGENTKIT_SOURCES="$RH/agentkit2" "$KIT" init "file://$SA/srcA.git" --approvals "$SA/nowhere" --signers "$SA/allowed_signers" 2>&1); rc=$?
 check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/agentkit2/srcA/rules" ]'
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.5)" '[ $rc -eq 0 ] && [ "$out" = 1.5 ]'
+check "api: one line, major.minor (1.6)" '[ $rc -eq 0 ] && [ "$out" = 1.6 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.5 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.6 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?
@@ -2308,6 +2318,47 @@ b
 c" 2>&1); rc=$?
     check "kit.ps1 note: three lines refused" '[ $rc -ne 0 ] && echo "$out" | grep -q 最多兩行'
 fi
+
+# ---------- kit pending: what an agent or a service waits on its owner for (kind owner in status --json) ----------
+PD="$NT/conf/notes/pending"
+(cd "$NT/w" && exec "$NT/bin/claude" sleep 30) & CP=$!
+sleep 0.5
+out=$(note_sh "$KIT" pending add --pid $CP --id core-0001 "要你同意：裝伺服器的 core 0001" 2>&1); rc=$?
+check "pending add --pid: kept under its id, tied to that agent" '[ $rc -eq 0 ] && echo "$out" | grep -qF "記下了：core-0001（等到了跑 kit pending done core-0001）" && [ "$(sed -n 2p "$PD/core-0001")" = "$CP" ]'
+note_sh "$KIT" pending add --keep --id svc "服務在等你：換金鑰" >/dev/null 2>&1
+check "pending add --keep: no agent (until kit pending done)" '[ -f "$PD/svc" ] && [ -z "$(sed -n 2p "$PD/svc")" ] && [ "$(sed -n 5p "$PD/svc")" = "服務在等你：換金鑰" ]'
+note_sh "$NT/bin/claude" "$KIT" pending add --id auto "等一下" >/dev/null 2>&1
+check "pending add: tied to the agent above it (the claude that ran it)" 'case "$(sed -n 2p "$PD/auto")" in ""|*[!0-9]*) false;; esac'
+sed -i.bak '4s/.*/1000/' "$PD/svc"; rm -f "$PD/svc.bak"
+note_sh "$KIT" pending add --keep --id svc "服務在等你：換金鑰（第二次）" >/dev/null 2>&1
+snap "$NT/conf" > "$T/pd.snap"
+out=$(AGENTKIT_CONFIG="$NT/conf" "$KIT" status --json 2>/dev/null); rc=$?
+check "status --json: owner items, the agent's gone one not listed, the same id again waits since the first time" '[ $rc -eq 0 ] && printf "%s" "$out" | mj /dev/stdin "p=d[\"pending\"]; assert [x[\"id\"] for x in p]==[\"core-0001\",\"svc\"], p; a,b=p; assert a[\"kind\"]==\"owner\" and a[\"pid\"]==$CP and a[\"what\"]==\"要你同意：裝伺服器的 core 0001\" and a[\"dir\"].endswith(\"/note/w\") and a[\"since\"]>1e12 and a[\"machine\"]; assert b[\"pid\"] is None and b[\"since\"]==1000000 and b[\"what\"].endswith(\"（第二次）\")"'
+check "status --json: still writes nothing (the gone agent's item is left for kit pending)" 'snap "$NT/conf" | cmp -s - "$T/pd.snap"'
+if [ -n "$PWSH" ]; then
+    a=$(AGENTKIT_CONFIG="$NT/conf" "$KIT" status --json 2>/dev/null | at0); b=$(AGENTKIT_CONFIG="$NT/conf" kps status --json 2>/dev/null | at0)
+    check "kit.ps1 status --json: the same owner items" '[ -n "$a" ] && [ "$a" = "$b" ]'
+    a=$(note_sh "$KIT" pending 2>&1); b=$(note_sh "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" pending 2>&1)
+    check "kit.ps1 pending: the same list" '[ "$a" = "$b" ]'
+    out=$(note_sh "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" pending add --keep --id ps1 "PS 記的" 2>&1); rc=$?
+    check "kit.ps1 pending add: the same file kit reads" '[ $rc -eq 0 ] && echo "$out" | grep -qF "記下了：ps1" && AGENTKIT_CONFIG="$NT/conf" "$KIT" status --json 2>/dev/null | mj /dev/stdin "assert [x[\"what\"] for x in d[\"pending\"] if x[\"id\"]==\"ps1\"]==[\"PS 記的\"]"'
+    out=$(note_sh "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" pending done ps1 2>&1)
+    check "kit.ps1 pending done" 'echo "$out" | grep -qF "拿掉了：ps1" && [ ! -e "$PD/ps1" ]'
+    out=$(note_sh "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" pending add --id ../x y 2>&1); rc=$?
+    check "kit.ps1 pending add: a bad id refused" '[ $rc -ne 0 ] && echo "$out" | grep -q 用法'
+fi
+out=$(note_sh "$KIT" pending 2>&1)
+check "pending: lists what waits; the gone agent's item removed" 'echo "$out" | grep -F "core-0001：要你同意：裝伺服器的 core 0001（剛剛，" | grep -qF "/note/w）" && echo "$out" | grep -qF "svc：服務在等你：換金鑰（第二次）" && [ ! -e "$PD/auto" ]'
+out=$(note_sh "$KIT" pending done svc 2>&1); o2=$(note_sh "$KIT" pending done svc 2>&1); rc=$?
+check "pending done: removed; again: says there is none (not an error)" 'echo "$out" | grep -qF "拿掉了：svc" && [ ! -e "$PD/svc" ] && [ $rc -eq 0 ] && echo "$o2" | grep -qF "沒有 svc 這一項"'
+out=$(note_sh "$KIT" pending add --id ../x y 2>&1); rc=$?; o2=$(note_sh "$KIT" pending add --keep --pid 1 y 2>&1); r2=$?
+o3=$(note_sh "$KIT" pending add --keep "$(printf "%0301d" 0)" 2>&1); r3=$?
+check "pending add: a bad id, --keep with --pid, too long: refused" '[ $rc -ne 0 ] && echo "$out" | grep -q 用法 && [ $r2 -ne 0 ] && echo "$o2" | grep -q 用法 && [ $r3 -ne 0 ] && echo "$o3" | grep -q 太長'
+kill $CP 2>/dev/null; wait $CP 2>/dev/null
+out=$(AGENTKIT_CONFIG="$NT/conf" "$KIT" status --json 2>/dev/null)
+check "status --json: the agent gone, its item not listed" 'echo "$out" | grep -qxF "  \"pending\": [],"'
+out=$(note_sh "$KIT" pending 2>&1)
+check "pending: nothing waits, said so" 'echo "$out" | grep -qF "沒有在等你的事" && [ -z "$(ls "$PD")" ]'
 
 # ---------- code checks ----------
 check "no \$var directly before non-ASCII (bash 3.2 reads it as part of the name)" '! LC_ALL=C grep -nE "\\\$[A-Za-z_][A-Za-z0-9_]*[^ -~]" "$KIT" "$HERE/../unix/install.sh"'

@@ -322,6 +322,19 @@ kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最�
 - 那個程式結束後，它的進度在下一次有人寫的時候清掉；歷史（`notes/history.tsv`，最多留 500 則）還在，照資料夾找。程式編號被別的程式拿去用時（啟動時間不同），不會顯示舊的。
 - Codex 的沙箱不讓它跑 `ps`，也只准寫幾個地方：kit 在 Codex 的 `config.toml`（kit 管的那段）加上 `[sandbox_workspace_write] writable_roots = ["~/.config/agentkit/notes"]`（只多這一個資料夾），沙箱裡的 `kit note` 改記在那個對話名下（`CODEX_THREAD_ID`，`notes/codex-<id>`，一週後清掉）。畫面程式用 Codex 的程式編號問時，kit 照那個資料夾最新的 Codex 紀錄找到對話編號。你的 `config.toml` 已經有自己的 `sandbox_workspace_write` 時 kit 不動它，說一次請你自己加；加了之後已經開著的 Codex 要重開。
 
+## 在等你同意的事：`kit pending`
+
+    kit pending add "要你同意：裝伺服器的 core 0001" [--id 名字]   agent 或服務在等你時記一筆
+    kit pending done <名字>                                     等到了：拿掉
+    kit pending                                                 列出這個帳號在等你的事
+
+agent 停下來等你點頭（例如要你同意才能裝、才能上線）時，自己記一筆；畫面程式從 `kit status --json` 的 `pending`（`kind` 是 `"owner"`）讀到，提醒你去那個 agent 回答。你不用在每個窗格之間找誰在等你。
+
+- 記在 kit 往上找到的 agent（`claude`、`codex`、`omp`）名下：那個 agent 結束，這一筆就不算了（下一次 `kit pending`、`kit pending add` 時清掉）。`--pid` 指定別的程式；`--keep`（或上面沒有 agent，例如服務、排程）留到 `kit pending done`。
+- `--id`：自己取名字（英數字、`.`、`_`、`-`，最多 64 個字），之後用它拿掉；同一個名字再記一次是更新那句話，等的時間從第一次算。沒給就自動取一個，`kit pending add` 會印出來。
+- 一句話，最多 300 bytes。存在 `~/.config/agentkit/notes/pending/`（在 notes 裡，Codex 的沙箱也寫得進去）。
+- 畫面程式問不到的帳號（例如伺服器上的 root）把 `kit status --json` 寫到你讀得到的檔案時，裡面就有它的 `pending`。
+
 ## 給程式讀的介面
 
 kit 本身只有指令。想用按的（例如在終端機程式裡加一個 kit 面板），那個程式跑下面這些指令。**這一節是唯一的清單**：沒列在這裡的輸出（給人看的字）隨時會改，程式不要去解析。
@@ -329,10 +342,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.5
+    kit api        →  1.6
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.5（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.6（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -516,6 +529,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
       "at": 1763000000,
       "self": {"name": "agentkit", "commit": "<40 字的 commit>", "approved": "<40 字的 commit>"},
       "approvals": {"serial": 7, "used": 7, "valid": true},
+      "pending": [
+        {"kind": "sign", "name": "team", "what": "team 有 3 個新 commit 等核准", "commits": 3, "head": "<40 字的 commit>", "since": 1763000000000, "machine": "server"},
+        {"kind": "owner", "id": "core-0001", "what": "要你同意：裝伺服器的 core 0001", "since": 1763000300000, "machine": "server", "dir": "/srv/app", "pid": 4242}
+      ],
       "sources": [
         {"name": "team", "source": "<網址或資料夾>", "dir": "<clone 的資料夾>", "commit": "<40 字的 commit>", "approved": "<40 字的 commit>"}
       ]
@@ -527,6 +544,12 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
   - `serial`：本機那份 `approved.txt` 的 serial（沒有檔案或不是數字是 `null`）。
   - `used`：kit 上次換版本時用的 serial（還沒換過是 `null`）。
   - `valid`：`approved.txt` 的簽章是對的（用 signers 檔驗，跟 `kit sync` 一樣）。檔案不在、簽章不對都是 `false`。只看簽章：`serial` 比 `used` 小的清單 kit 也不會用，畫面程式要自己比。
+- `pending`（1.6 起）：在等人處理的事，沒有就是 `[]`。現在只有一種：
+  - `kind` 是 `"sign"`：用核准紀錄的帳號，某個來源（或 kit 本身）上次 `kit sync` 抓到的遠端最新 commit，比 `approved.txt` 核准的新，在等簽核的人簽。`name`：來源名字（`approved.txt` 用的）；`what`：給人看的一句話；`commits`：還沒核准的 commit 數；`head`：遠端最新的 commit；`since`：最早那個還沒核准的 commit 的時間（Unix 毫秒）；`machine`：這台的主機名稱。從來沒核准過的來源，`what` 是「X 還沒核准過」。
+  - 只在核准清單有效（`valid` 是 `true`）時算；跟其他欄位一樣不連網，看的是上次 `kit sync` 抓到的。簽章還是在簽核的電腦上親手做（`kit approve`），畫面程式只顯示。
+  - 沒用核准紀錄的帳號、Windows 版：沒有 `"sign"`。
+  - `kind` 是 `"owner"`：agent 或服務用 `kit pending add` 記的、在等你同意的事（上面「在等你同意的事」）。`id`：`kit pending done` 用的名字；`what`：那句話；`since`：第一次記的時間（Unix 毫秒）；`machine`：這台的主機名稱；`dir`：記的 agent 所在的資料夾（`--keep` 時是跑指令的資料夾）；`pid`：記在哪個程式名下，`--keep` 時 `null`。記的 agent 已經結束的不列。Windows 版也有。
+  - 之後可能多別的 `kind`，畫面程式看不懂的 `kind` 照 `what` 顯示就好。
 - `sources`：跟 `kit list --json` 的 `sources` 同樣順序，同樣的 `name`、`source`、`dir`；沒有來源時是 `[]`。`commit`：那個資料夾現在的 commit，不是 git repo（或還沒 clone）就是 `null`。
 - `approved`（`self` 和每個來源都有）：`approved.txt` 裡那個名字的 commit。只有 `valid` 是 `true` 才有；沒用核准紀錄、簽章不對、清單裡沒有這個名字都是 `null`。`commit` 和 `approved` 一樣＝在用核准的那一版。
 - 只讀這台已經有的：**不連網**（不 clone、不 pull、不 fetch；核准紀錄也只看上次 `kit sync` 拿到的那份，所以不一定是遠端最新的），**什麼都不寫**，也不等別的 kit 跑完（不拿鎖）。

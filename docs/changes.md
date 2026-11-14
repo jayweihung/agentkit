@@ -4,6 +4,16 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.3（2026-11-14）
+
+更新後要做：`kit self-update`。kit api 變成 1.6。
+
+**`kit status --json` 多了 `pending`：在等你的事**
+- 等簽章：用核准紀錄的帳號（例如 root），來源上次 `kit sync` 抓到的新 commit 還沒核准，就列在 `pending`（`kind: "sign"`，「X 有 N 個新 commit 等核准」、從什麼時候開始等）。簽章還是在 Mac 親手做。
+- 等你同意：新指令 `kit pending add "要你同意：…" [--id 名字]`，agent 或服務在等你點頭時記一筆，`kit pending done <名字>` 拿掉，`kit pending` 列出來。列在 `pending`（`kind: "owner"`）；記的 agent 結束了就不列。
+- 畫面程式（Herdr 的關係分頁）拿來提醒「等你簽」「等你同意」。root 這種畫面程式問不到的帳號，寫給你讀的 `kit status --json` 檔案裡就有。
+- 沒有在等的是 `[]`。
+
 ## 0.6.2（2026-11-14）
 
 更新後要做：`kit self-update`、`kit sync`（Claude 的 `settings.json` 會多一個 `UserPromptSubmit` hook）。kit api 還是 1.5。

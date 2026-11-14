@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.5'
+$script:KitApi = '1.6'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -4231,6 +4231,89 @@ function Cmd-Note($rest) { # kit note [text...] | --clear | --pid PID [--json] [
     if ($all.Count -gt $NoteKeep + 100) { [IO.File]::WriteAllText($hf, (($all[($all.Count - $NoteKeep)..($all.Count - 1)] -join "`n") + "`n"), $Utf8) }
     if ($json) { Out-Json (Note-Json $cpid $sess) } else { Say '進度記下了' }
 }
+# ---------- kit pending: what an agent (or a service) waits on its owner for (the same files as unix/kit) ----------
+$script:PendDir = Join-Path $NoteDir 'pending'
+$script:PendMax = 300
+function Pend-Read([string]$id) { # @(pid, dir, at, what) of that item, or $null (none, or its agent is gone)
+    $f = Join-Path $PendDir $id
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
+    $l = @([IO.File]::ReadAllText($f, $Utf8) -split "`n")
+    while ($l.Count -lt 5) { $l += '' }
+    $p = $l[1]
+    if ($p) {                                                    # gone: no such process, or another process has that pid
+        if (-not (Proc-Alive $p)) { return $null }
+        $st = Proc-Start $p; if ($st -and $l[0] -cne $st) { return $null }
+    }
+    if (-not $l[4]) { return $null }
+    , @($p, $l[2], $l[3], $l[4])
+}
+function Pend-Ids { # the items' names, in byte order (as unix/kit lists them)
+    if (-not (Test-Path -LiteralPath $PendDir -PathType Container)) { return }
+    $n = [string[]]@(Get-ChildItem -LiteralPath $PendDir -File | Where-Object { -not $_.Name.EndsWith('.tmp') } | ForEach-Object { $_.Name })
+    [Array]::Sort($n, [StringComparer]::Ordinal); $n
+}
+function Host-Short { if ($OnWindows) { [string]$env:COMPUTERNAME } else { "$(& hostname -s 2>$null)".Trim() } }
+function Pend-Json { # one {"kind": "owner", ...} per item that still waits
+    $m = Host-Short
+    foreach ($id in @(Pend-Ids)) {
+        $r = Pend-Read $id; if (-not $r) { continue }
+        '{"kind": "owner", "id": ' + (Json-S $id) + ', "what": ' + (Json-S $r[3]) + ', "since": ' + $(if ($r[2]) { $r[2] } else { '0' }) + '000, "machine": ' + (Json-S $m) + ', "dir": ' + (Json-OrNull $r[1]) + ', "pid": ' + $(if ($r[0]) { $r[0] } else { 'null' }) + '}'
+    }
+}
+function Pend-Prune { foreach ($id in @(Pend-Ids)) { if (-not (Pend-Read $id)) { Remove-Item -LiteralPath (Join-Path $PendDir $id) -Force -ErrorAction SilentlyContinue } } }
+function Cmd-Pending($rest) { # kit pending | kit pending add "<what>" [--id ID] [--pid PID | --keep] | kit pending done ID
+    $use = '用法：kit pending | kit pending add "在等你什麼" [--id 名字] [--pid 程式編號 | --keep] | kit pending done <名字>'
+    $rest = @($rest | Where-Object { $null -ne $_ }); $sub = if ($rest.Count -gt 0) { [string]$rest[0] } else { '' }
+    $rest = @(if ($rest.Count -gt 1) { $rest[1..($rest.Count - 1)] })
+    if ($sub -ceq '') {
+        Pend-Prune; $any = $false
+        foreach ($id in @(Pend-Ids)) {
+            $r = Pend-Read $id; if (-not $r) { continue }; $any = $true
+            Say "${id}：$($r[3])（$(Note-Ago $r[2])$(if ($r[1]) { "，$($r[1])" })）"
+        }
+        if (-not $any) { Say '（沒有在等你的事）' }
+        return
+    }
+    if ($sub -ceq 'done') {
+        if ($rest.Count -ne 1) { Die-C usage $use }
+        $id = [string]$rest[0]; if ($id -cnotmatch '^[A-Za-z0-9_-][A-Za-z0-9._-]*\z') { Die-C usage $use }
+        $f = Join-Path $PendDir $id
+        if (Test-Path -LiteralPath $f -PathType Leaf) { try { Remove-Item -LiteralPath $f -Force -ErrorAction Stop } catch { Die-C no-write "寫不進 $PendDir" }; Say "拿掉了：$id" }
+        else { Say "（沒有 $id 這一項）" }
+        return
+    }
+    if ($sub -cne 'add') { Die-C usage $use }
+    $id = ''; $cpid = ''; $keep = $false; $words = New-List
+    for ($i = 0; $i -lt $rest.Count; $i++) {
+        $a = [string]$rest[$i]
+        if ($a -ceq '--keep') { $keep = $true; continue }
+        if ($a -ceq '--') { for ($j = $i + 1; $j -lt $rest.Count; $j++) { $words.Add([string]$rest[$j]) }; break }
+        if ($a -ceq '--id' -or $a -ceq '--pid') {
+            if ($i + 1 -ge $rest.Count) { Die-C usage $use }
+            $v = [string]$rest[++$i]; if ($a -ceq '--id') { $id = $v } else { $cpid = $v }; continue
+        }
+        if ($a.StartsWith('-')) { Die-C usage $use }
+        $words.Add($a)
+    }
+    $text = (($words.ToArray() -join ' ') -replace "[`t`r`n]", ' ').Trim(' ')
+    if (-not $text) { Die-C usage $use }
+    if ($Utf8.GetByteCount($text) -gt $PendMax) { Die-C too-long "太長（最多 $PendMax bytes）：一句話說在等什麼就好" }
+    if ($cpid -and $cpid -cnotmatch '^[0-9]+\z') { Die-C usage $use }
+    if ($keep -and $cpid) { Die-C usage $use }
+    if ($id) { if ($id.Length -gt 64 -or $id -cnotmatch '^[A-Za-z0-9_-][A-Za-z0-9._-]*\z') { Die-C usage $use } }
+    else { $id = "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())-$PID" }
+    if ($cpid) { if (-not (Proc-Alive $cpid)) { Die-C no-agent "沒有這個程序：$cpid" } }
+    elseif (-not $keep) { $ap = Agent-Pid; if ($ap) { $cpid = [string]$ap[0] } }   # none found (a service, Codex's sandbox): kept until done
+    try { Ensure-Dir $PendDir } catch { }
+    if (-not (Test-Path -LiteralPath $PendDir -PathType Container)) { Die-C no-write "寫不進 $PendDir" }
+    Pend-Prune
+    $since = [string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()); $old = Pend-Read $id; if ($old) { $since = $old[2] }   # the same item again: it has waited since then
+    $dir = if ($cpid) { Proc-Cwd ([int]$cpid) } else { (Get-Location).ProviderPath }
+    $f = Join-Path $PendDir $id
+    try { Write-Text "$f.tmp" ($(if ($cpid) { Proc-Start $cpid } else { '' }) + "`n$cpid`n$dir`n$since`n$text`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force }
+    catch { Die-C no-write "寫不進 $PendDir" }
+    Say "記下了：${id}（等到了跑 kit pending done ${id}）"
+}
 function Cmd-Files($rest) { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git] [--json] : the files that agent read or changed
     $use = '用法：kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]'
     $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $git = $false; $json = $false
@@ -6114,8 +6197,10 @@ function Cmd-Status($rest) {
         }
         $self = "{`"name`": $(Json-S $name), `"commit`": $(Json-OrNull (Head-Sha $repo)), `"approved`": null}"
     }
+    $pl = @(Pend-Json)                                      # what agents (or services) here wait on the owner for (no signing on Windows)
+    $pend = if ($pl.Count -gt 0) { "`n    " + ($pl -join ",`n    ") + "`n  " } else { '' }
     $sb = New-Object System.Text.StringBuilder
-    [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"api`": $(Json-S $KitApi),`n  `"user`": $(Json-S ([Environment]::UserName)),`n  `"at`": $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),`n  `"self`": $self,`n  `"approvals`": null,`n  `"sources`": [")
+    [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"api`": $(Json-S $KitApi),`n  `"user`": $(Json-S ([Environment]::UserName)),`n  `"at`": $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),`n  `"self`": $self,`n  `"approvals`": null,`n  `"pending`": [$pend],`n  `"sources`": [")
     $first = $true
     foreach ($s in @(M-Sources)) {
         if (-not $s) { continue }
@@ -6154,6 +6239,9 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit note ["做了什麼；下一步"]      agent 寫自己做到哪（一兩行，畫面上看得到）；不帶文字：印出現在寫的
   kit note --history [--dir 資料夾]   這個資料夾最近的進度（包括已經關掉的 agent），交接時先看
   kit note --pid <pid> [--json]     某個 agent 的進度（--json 給程式讀）；--clear 清掉自己的
+  kit pending add "要你同意：…" [--id 名字]
+                                    agent 或服務在等你同意時記一筆（畫面程式會提醒你）；kit pending done <名字> 拿掉
+  kit pending                       列出這個帳號在等你的事
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
   kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]
                                     讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
@@ -6227,6 +6315,7 @@ try {
         'context' { Cmd-Context $rest }
         'files' { Cmd-Files $rest }
         'note' { Cmd-Note $rest }
+        'pending' { Cmd-Pending $rest }
         'statusline' { Cmd-Statusline }
         'handoff-hook' { Cmd-HandoffHook }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }

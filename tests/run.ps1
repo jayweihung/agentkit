@@ -239,7 +239,7 @@ if (-not $OnWindows) {
 }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ status --json
-Check 'status --json before kit init: exit 0, sources [], approvals null' { $rc -eq 0 -and $out.EndsWith("`n  `"approvals`": null,`n  `"sources`": []`n}") -and -not (Test-Path (Join-Path $T 'noconf')) }
+Check 'status --json before kit init: exit 0, sources [], approvals null, nothing pending' { $rc -eq 0 -and $out.EndsWith("`n  `"approvals`": null,`n  `"pending`": [],`n  `"sources`": []`n}") -and -not (Test-Path (Join-Path $T 'noconf')) }
 $AC = Join-Path $T 'apconf'; W "$AC/machine.yaml" ((ReadT "$H/.config/agentkit/machine.yaml") + "approvals: https://gitea.example/acme/approvals.git`nsigners: $T/allowed_signers`n")
 $env:AGENTKIT_CONFIG = $AC
 Kit status --json
@@ -299,7 +299,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.5)' { $rc -eq 0 -and $out -ceq '1.5' }
+Check 'api: one line, major.minor (1.6)' { $rc -eq 0 -and $out -ceq '1.6' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
