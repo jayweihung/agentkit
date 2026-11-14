@@ -78,7 +78,7 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 |---|---|---|---|---|---|
 | Claude | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Codex | ✅ | ✅（列在提示裡，用到時才讀） | ✅ | ✗ | 只限 MCP 工具 |
-| omp | ✅ | ✅ | ✅（一個暫時的 plugin 資料夾，`--plugin-dir`；工具名字前面多 `kit:`） | ✅ | ✗ |
+| omp | ✅ | ✅ | ✅（一個暫時的 plugin 資料夾，`--plugin-dir`；工具名字前面多 `kit:`） | ✅（換成 omp 的工具名字） | ✅（一個暫時的 omp 擴充，`--extension`） |
 
 ### 一個資料夾就是一個 agent：`kit place`
 
@@ -103,7 +103,12 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 |---|---|---|---|---|---|
 | Claude | ✅ | ✅ | ✅ | 改成把其他內建工具寫進 deny | ✅ |
 | Codex | ✅ | ✅ | ✅ | ✗ | 只限 MCP 工具 |
-| omp | ✅ | ✅ | ✅（資料夾的 `.mcp.json`；omp 只在這個資料夾本身開時讀，子資料夾裡開的讀不到） | ✗ | ✗ |
+| omp | ✅ | ✅ | ✅（資料夾的 `.mcp.json`；omp 只在這個資料夾本身開時讀，子資料夾裡開的讀不到） | ✅（`.omp/hooks/pre/kit.js`） | ✅（同一個檔） |
+
+omp 的工具限制：kit 把 Claude 的工具名字換成 omp 做同樣事的工具（例如 Read → read，Bash → bash 和 eval，Grep → grep 和 ast_grep），
+omp 要用被擋的工具時會被拒絕並說原因。tools.deny 的 `Bash(git push:*)` 這種寫法 omp 也照樣擋；別的工具的 `( )` 寫法（例如 `Read(./secret/**)`）omp 擋不到，kit 會說。
+omp 只在這個資料夾本身開時讀 `.omp/hooks/pre/kit.js`（跟 `.mcp.json` 一樣），在子資料夾裡開的 omp 沒有這些限制。
+團隊規定一定要擋的（required 的 deny）也寫進 `~/.omp/agent/hooks/pre/kit.js`，每個 omp 都擋。
 
 Claude 的 tools.only：Claude 之後新加的內建工具不在 kit 的清單裡，擋不到（要擋就寫進 tools.deny）。這件事放 agent 的人不會看到，寫 agent 檔的人跑 `kit check` 時會看到一行提醒。
 

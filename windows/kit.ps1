@@ -1680,9 +1680,7 @@ function Sync-McpJson([string]$f, [string]$kind, $names) { # wanted MCP -> FILE'
 }
 
 function Hook-Json([string]$args1 = 'sync --hook', [string]$timeout = '10') { # a hook entry kit adds to settings.json (default: SessionStart's)
-    $exe = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell' } else { 'pwsh' }
-    $cmd = "$exe -NoProfile -ExecutionPolicy Bypass -File `"$($PSCommandPath.Replace('\', '/'))`" $args1"
-    '{"hooks":[{"type":"command","command":' + (Json-Str $cmd) + ',"timeout":' + $timeout + '}]}'
+    '{"hooks":[{"type":"command","command":' + (Json-Str (Hook-Cmd $args1)) + ',"timeout":' + $timeout + '}]}'
 }
 
 # Codex: ~/.codex/hooks.json takes Claude's hook format. kit sync --hook when Codex starts, kit handoff-hook before
@@ -1703,23 +1701,46 @@ function Codex-Hooks {
     foreach ($c in $changed) { State-Set 'hook.codex' $c[0] $c[1] }
     if ($null -eq (State-Get 'told' 'codex-hooks')) { Say '  Codex：kit 的 hook 放進 ~/.codex/hooks.json 了，下次開 Codex 打 /hooks 信任它（kit sync 和 context 快滿的提醒）'; State-Set 'told' 'codex-hooks' 1 }
 }
-# omp: a hook module in ~/.omp/agent/hooks/pre/ (omp loads it at start) runs kit sync --hook when a session starts,
-# in the background. Only a file kit wrote (its first line) is replaced or removed.
-$script:OmpHookHead = "// kit's omp hook: written by kit sync (agentkit); edits here are overwritten."
-function Omp-HookJs { # the module; its command is the one Claude's hook runs
-    $c = [regex]::Match((Hook-Json), '"command":("(?:[^"\\]|\\.)*")').Groups[1].Value
-    ($OmpHookHead, "// When a session starts: kit sync --hook (like Claude's SessionStart hook), in the background.",
-        'import { spawn } from "node:child_process";', 'export default function kit(pi) {', '  pi.on("session_start", async () => {',
-        "    try { spawn($c, { shell: true, stdio: `"ignore`", detached: true }).unref(); } catch {}", '  });', '}') -join "`n"
+# omp: kit's hook module (templates/omp-hook.txt, filled in): ~/.omp/agent/hooks/pre/kit.js runs kit sync --hook when a
+# session starts and applies the team's tools.deny (required.tools.deny, Claude's spelling); a placed agent's folder gets
+# <folder>/.omp/hooks/pre/kit.js with its tools.only and tools.deny; kit run passes one with --extension. Only a file kit
+# wrote (its first line) is replaced or removed.
+$script:OmpHookHead = "// kit's omp hook: written by kit (agentkit); edits here are overwritten."
+$script:OmpTools = @('Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob', 'LS', 'Task', 'Agent', 'TodoWrite', 'WebSearch', 'AskUserQuestion')
+function Hook-Cmd([string]$args1 = 'sync --hook') {
+    $exe = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell' } else { 'pwsh' }
+    "$exe -NoProfile -ExecutionPolicy Bypass -File `"$($PSCommandPath.Replace('\', '/'))`" $args1"
+}
+function Omp-HookJs([string]$sync, $only, $deny) { # the module (SYNC: the command, or ''; ONLY, DENY: names / rules)
+    $t = $null
+    foreach ($f in @((Join-Path $KitLib 'templates/omp-hook.txt'), (Join-Path (Split-Path -Parent $KitLib) 'templates/omp-hook.txt'))) { if (Test-Path -LiteralPath $f -PathType Leaf) { $t = $f; break } }
+    if (-not $t) { return $null }
+    $sv = if ($sync) { Json-S $sync } else { 'null' }
+    ((Read-Text $t) -replace "`r`n", "`n").TrimEnd("`n").Replace('__SYNC__', $sv).Replace('__ONLY__', (Json-Arr $only)).Replace('__DENY__', (Json-Arr $deny))
+}
+function Omp-HookPut([string]$f, [string]$want = '') { # kit's module there (no WANT: kit's taken out); $false when F is your own
+    if ((Test-Path -LiteralPath $f -PathType Leaf) -and ((Read-Text $f) -split "`r?`n")[0] -ne $OmpHookHead) { return $false }
+    if (-not $want) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }; return $true }
+    if ((Test-Path -LiteralPath $f -PathType Leaf) -and (Read-Text $f).TrimEnd("`r", "`n") -eq $want) { return $true }
+    try { [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f)); Write-Text $f "$want`n"; return $true } catch { return $true }
 }
 function Omp-Hook {
-    $f = Join-Path $OmpDir 'hooks/pre/kit.js'; $want = Omp-HookJs
-    if ((Test-Path -LiteralPath $f) -and (Read-Text $f).TrimEnd("`r", "`n") -eq $want) { return }
-    if ((Test-Path -LiteralPath $f) -and ((Read-Text $f) -split "`r?`n")[0] -ne $OmpHookHead) {
-        if ($null -eq (State-Get 'told' 'omp-hook')) { Warn "$f 是你自己的檔：kit 不動它，omp 開啟時不會自動 kit sync"; State-Set 'told' 'omp-hook' 1 }
-        return
+    $f = Join-Path $OmpDir 'hooks/pre/kit.js'
+    if (Omp-HookPut $f (Omp-HookJs (Hook-Cmd) @() @(Required-Deny))) { State-Set 'hook.omp' 'kit.js' 1 }
+    elseif ($null -eq (State-Get 'told' 'omp-hook')) { Warn "$f 是你自己的檔：kit 不動它，omp 開啟時不會自動 kit sync"; State-Set 'told' 'omp-hook' 1 }
+}
+function Omp-ToolNames($only) { # Claude's tool names -> omp's tools that do the same, comma-separated (one omp has not: dropped)
+    $map = @{ Read = @('read'); Write = @('write'); Edit = @('edit', 'ast_edit'); MultiEdit = @('edit', 'ast_edit'); NotebookEdit = @('edit')
+        Bash = @('bash', 'eval'); Grep = @('grep', 'ast_grep'); Glob = @('glob', 'find'); LS = @('find', 'glob'); Task = @('task'); Agent = @('task')
+        TodoWrite = @('todo'); WebSearch = @('web_search'); AskUserQuestion = @('ask') }
+    (Uniq @(foreach ($n in @($only)) { if ($n -and $map.ContainsKey($n)) { $map[$n] } })) -join ','
+}
+function Omp-LimitsWarn($only, $deny) { # what kit's omp module cannot apply, one line each
+    foreach ($n in @($deny)) {
+        if (-not $n -or $n.StartsWith('mcp__') -or $n.StartsWith('Bash(')) { continue }
+        if ($n.Contains('(')) { "omp 只擋得了 Bash(...) 這種帶內容的規則：tools.deny 的 $n 不套用" }
+        elseif ($OmpTools -cnotcontains $n) { "omp 沒有跟 $n 一樣的工具：tools.deny 的這條不套用" }
     }
-    try { [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f)); Write-Text $f "$want`n"; State-Set 'hook.omp' 'kit.js' 1 } catch {}
 }
 
 function Statusline-Json { # the statusLine kit puts in settings.json
@@ -2038,7 +2059,13 @@ function Apply-Dir([string]$dir) { # the folder's .agentkit (and its agent) -> t
     }
     $ct = Join-Path (Join-Path $dir '.codex') 'config.toml'
     if ((Has-Codex) -or $tool -eq 'codex' -or (Test-Path -LiteralPath $ct)) { [void](Replace-Block $ct $TomlBegin $TomlEnd (Codex-Mcp-Toml $mcps $ct $deny).TrimEnd("`n")) }
-    foreach ($x in @('.claude/skills', '.agents/skills', '.claude', '.agents', '.codex')) {
+    # omp: the agent's tool limits through kit's hook module in the folder (none: kit's module goes)
+    $oo = @(); if ($af) { $oo = @(YGet-From $fm 'tools.only' | Where-Object { $_ }) }
+    $oh = Join-Path $dir '.omp/hooks/pre/kit.js'
+    if (((Has-Omp) -or $tool -eq 'omp') -and ($oo.Count -gt 0 -or @($deny | Where-Object { $_ }).Count -gt 0)) {
+        if (-not (Omp-HookPut $oh (Omp-HookJs '' $oo $deny))) { Warn "$oh 是你自己的檔：kit 不動它，omp 在這裡不會照 agent 的 tools.only、tools.deny" }
+    } else { [void](Omp-HookPut $oh) }
+    foreach ($x in @('.claude/skills', '.agents/skills', '.claude', '.agents', '.codex', '.omp/hooks/pre', '.omp/hooks', '.omp')) {
         $p = Join-Path $dir $x
         if ((Test-Path -LiteralPath $p -PathType Container) -and -not (Get-ChildItem -LiteralPath $p -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $p -Force }
     }
@@ -5147,7 +5174,7 @@ function Cmd-Run($rest) {
             'omp' {
                 Write-Text (Join-Path $tmp 'omp.yml') ("skills:`n  customDirectories:`n    - " + (Json-Str $skdir) + "`n")
                 $a.AddRange([string[]]@('--config', (Join-Path $tmp 'omp.yml'), '--append-system-prompt', (Join-Path $tmp 'prompt.md')))
-                if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add(($only -join ',').ToLowerInvariant()) }
+                if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add((Omp-ToolNames $only)) }
                 if ($mcps.Count -gt 0) {   # omp loads a plugin folder's .mcp.json (--plugin-dir): its tools are kit:<name>
                     $pd = Join-Path $tmp 'omp-plugin'; $cp = Join-Path $pd '.claude-plugin'
                     [void](New-Item -ItemType Directory -Force -Path $cp)
@@ -5155,7 +5182,10 @@ function Cmd-Run($rest) {
                     Copy-Item -LiteralPath (Join-Path $tmp 'mcp.json') -Destination (Join-Path $pd '.mcp.json')
                     $a.Add('--plugin-dir'); $a.Add($pd)
                 }
-                if ($deny.Count -gt 0) { Warn 'omp 不能禁用單一工具，tools.deny 這次不套用' }
+                if ($deny.Count -gt 0) {   # tools.deny: kit's hook module, --extension
+                    $kt = Join-Path $tmp 'kit-tools.js'; Write-Text $kt ((Omp-HookJs '' @() $deny) + "`n"); $a.Add('--extension'); $a.Add($kt)
+                    foreach ($w in @(Omp-LimitsWarn @() $deny)) { Warn $w }
+                }
             }
         }
         foreach ($x in $extra) { $a.Add($x) }
@@ -5227,7 +5257,7 @@ function Cmd-Place($rest) { # kit place <agent> <dir> [--tool claude|codex|omp] 
             if (@($deny | Where-Object { $_ -and -not $_.StartsWith('mcp__') }).Count -gt 0) { $warns += 'Codex 只能禁用 MCP 的工具：其他的 tools.deny 不套用' }
         }
         'omp' {
-            if ($only.Count -gt 0 -or $deny.Count -gt 0) { $warns += 'omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用' }
+            $warns += @(Omp-LimitsWarn $only $deny)
         }
     }
     foreach ($w in $warns) { Warn $w }

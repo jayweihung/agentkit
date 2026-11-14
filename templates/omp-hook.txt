@@ -1,0 +1,59 @@
+// kit's omp hook: written by kit (agentkit); edits here are overwritten.
+// What kit gives omp through a hook module (omp loads ~/.omp/agent/hooks/pre/*.js and <folder>/.omp/hooks/pre/*.js at
+// start, kit run passes it with --extension): kit sync when a session starts (like Claude's SessionStart hook), and the
+// agent's tool limits, written the way Claude's settings write them (tools.only: Claude's tool names; tools.deny:
+// "Bash", "Bash(git push:*)", "mcp__server__tool", "mcp__server"). Only Bash rules can name what is run; another
+// tool's rule with a ( ) part is not applied (kit says so).
+import { spawn } from "node:child_process";
+
+const SYNC = __SYNC__;
+const ONLY = __ONLY__;
+const DENY = __DENY__;
+
+// Claude's built-in tools -> omp's tools that do the same
+const OMP = {
+  Read: ["read"], Write: ["write"], Edit: ["edit", "ast_edit"], MultiEdit: ["edit", "ast_edit"], NotebookEdit: ["edit"],
+  Bash: ["bash", "eval"], Grep: ["grep", "ast_grep"], Glob: ["glob", "find"], LS: ["find", "glob"], Task: ["task"],
+  Agent: ["task"], TodoWrite: ["todo"], WebSearch: ["web_search"], AskUserQuestion: ["ask"],
+};
+const LIMITED = new Set(Object.values(OMP).flat());
+// omp names an MCP tool mcp__<server>_<tool>, letters and digits kept, the rest "_" (a plugin's server: <plugin>_<server>)
+const clean = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "_");
+
+function parse(r) {
+  r = String(r).trim();
+  const m = /^mcp__(.+?)(?:__(.+))?$/.exec(r);
+  if (m) return { raw: r, server: clean(m[1]), tool: m[2] && m[2] !== "*" ? clean(m[2]) : null };
+  const b = /^([A-Za-z]+)(?:\((.*)\))?$/.exec(r);
+  if (!b || !OMP[b[1]]) return null;
+  if (b[2] === undefined || b[2] === "*" || b[2] === "") return { raw: r, tools: OMP[b[1]] };
+  if (b[1] !== "Bash") return null;
+  const spec = b[2];
+  return spec.endsWith(":*") ? { raw: r, tools: ["bash"], prefix: spec.slice(0, -2) } : { raw: r, tools: ["bash"], exact: spec };
+}
+function denied(d, tool, cmd) {
+  if (d.server) {
+    if (!tool.startsWith("mcp__")) return false;
+    const name = clean(tool.slice(5));
+    return d.tool ? name === `${d.server}_${d.tool}` || name.endsWith(`_${d.server}_${d.tool}`)
+      : name.startsWith(`${d.server}_`) || name.includes(`_${d.server}_`);
+  }
+  if (!d.tools.includes(tool)) return false;
+  if (d.prefix !== undefined) return cmd.startsWith(d.prefix);
+  if (d.exact !== undefined) return cmd === d.exact;
+  return true;
+}
+
+export default function kit(pi) {
+  if (SYNC) pi.on("session_start", async () => {
+    try { spawn(SYNC, { shell: true, stdio: "ignore", detached: true }).unref(); } catch {}
+  });
+  const only = ONLY.length ? new Set(ONLY.flatMap((n) => OMP[n] ?? [])) : null;
+  const deny = DENY.map(parse).filter(Boolean);
+  if (!only && !deny.length) return;
+  pi.on("tool_call", async (event) => {
+    const tool = String(event?.toolName ?? ""), cmd = String(event?.input?.command ?? "").trim();
+    if (only && LIMITED.has(tool) && !only.has(tool)) return { block: true, reason: `kit: this agent does not use ${tool} (tools.only)` };
+    for (const d of deny) if (denied(d, tool, cmd)) return { block: true, reason: `kit: ${d.raw} is not allowed (tools.deny)` };
+  });
+}

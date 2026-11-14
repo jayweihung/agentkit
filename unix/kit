@@ -828,9 +828,7 @@ EOF
 }
 
 hook_json() { # hook_json [ARGS TIMEOUT] : a hook entry kit adds to settings.json (default: SessionStart's, kit sync --hook)
-    local k="$HOME/.local/bin/kit"
-    [ -x "$k" ] || k="$KIT_LIB/kit"
-    printf '{"hooks":[{"type":"command","command":%s,"timeout":%s}]}' "$(json_str "'$k' ${1:-sync --hook}")" "${2:-10}"
+    printf '{"hooks":[{"type":"command","command":%s,"timeout":%s}]}' "$(json_str "$(hook_cmd "${1:-}")")" "${2:-10}"
 }
 
 # Codex: ~/.codex/hooks.json takes Claude's hook format. kit sync --hook when Codex starts, kit handoff-hook before
@@ -855,27 +853,57 @@ codex_hooks() {
     fi
     rm -f "$ops"
 }
-# omp: a hook module in ~/.omp/agent/hooks/pre/ (omp loads it at start) runs kit sync --hook when a session starts,
-# in the background. Only a file kit wrote (its first line) is replaced or removed.
-OMP_HOOK_HEAD="// kit's omp hook: written by kit sync (agentkit); edits here are overwritten."
-omp_hook_js() { # the module; its command is the one Claude's hook runs
-    local c; c=$(printf '%s' "$(hook_json)" | sed 's/.*"command":\("\([^"\\]\|\\.\)*"\).*/\1/')
-    printf '%s\n' "$OMP_HOOK_HEAD" "// When a session starts: kit sync --hook (like Claude's SessionStart hook), in the background." \
-        'import { spawn } from "node:child_process";' \
-        'export default function kit(pi) {' \
-        '  pi.on("session_start", async () => {' \
-        "    try { spawn($c, { shell: true, stdio: \"ignore\", detached: true }).unref(); } catch {}" \
-        '  });' '}'
+# omp: kit's hook module (templates/omp-hook.txt, filled in): ~/.omp/agent/hooks/pre/kit.js runs kit sync --hook when a
+# session starts and applies the team's tools.deny (required.tools.deny, Claude's spelling); a placed agent's folder gets
+# <folder>/.omp/hooks/pre/kit.js with its tools.only and tools.deny; kit run passes one with --extension. Only a file kit
+# wrote (its first line) is replaced or removed.
+OMP_HOOK_HEAD="// kit's omp hook: written by kit (agentkit); edits here are overwritten."
+OMP_TOOLS="Read Write Edit MultiEdit NotebookEdit Bash Grep Glob LS Task Agent TodoWrite WebSearch AskUserQuestion"
+hook_cmd() { local k="$HOME/.local/bin/kit"; [ -x "$k" ] || k="$KIT_LIB/kit"; printf "'%s' %s" "$k" "${1:-sync --hook}"; }
+omp_hook_js() { # omp_hook_js SYNC ONLY DENY : the module (SYNC: the command, or empty; ONLY, DENY: one per line)
+    local t="" f
+    for f in "$KIT_LIB/templates/omp-hook.txt" "$KIT_LIB/../templates/omp-hook.txt"; do [ -f "$f" ] && { t=$f; break; }; done
+    [ -n "$t" ] || return 1
+    KIT_T_SYNC=$(if [ -n "$1" ]; then json_s "$1"; else echo null; fi) KIT_T_ONLY=$(printf '%s\n' "$2" | json_arr) \
+    KIT_T_DENY=$(printf '%s\n' "$3" | json_arr) awk '
+        function put(s, k, v,   i) { while ((i = index(s, k))) s = substr(s, 1, i - 1) v substr(s, i + length(k)); return s }
+        { $0 = put($0, "__SYNC__", ENVIRON["KIT_T_SYNC"]); $0 = put($0, "__ONLY__", ENVIRON["KIT_T_ONLY"]); print put($0, "__DENY__", ENVIRON["KIT_T_DENY"]) }' "$t"
+}
+omp_hook_put() { # omp_hook_put FILE [CONTENT] : write kit's module there (no CONTENT: take kit's out); 1 when FILE is your own
+    local f=$1 want=${2:-}
+    if [ -f "$f" ] && [ "$(head -n 1 "$f")" != "$OMP_HOOK_HEAD" ]; then return 1; fi
+    if [ -z "$want" ]; then rm -f "$f"; return 0; fi
+    [ -f "$f" ] && [ "$(cat "$f")" = "$want" ] && return 0
+    mkdir -p "$(dirname "$f")" 2>/dev/null && printf '%s\n' "$want" > "$f"
 }
 omp_hook() {
-    local f="$OMP_DIR/hooks/pre/kit.js" want
-    want=$(omp_hook_js)
-    [ -f "$f" ] && [ "$(cat "$f")" = "$want" ] && return 0
-    if [ -f "$f" ] && [ "$(head -n 1 "$f")" != "$OMP_HOOK_HEAD" ]; then
-        [ -n "$(state_get told omp-hook)" ] || { warn "$f 是你自己的檔：kit 不動它，omp 開啟時不會自動 kit sync"; state_set told omp-hook 1; }
-        return 0
-    fi
-    mkdir -p "$(dirname "$f")" 2>/dev/null && printf '%s\n' "$want" > "$f" && state_set hook.omp kit.js 1
+    local f="$OMP_DIR/hooks/pre/kit.js"
+    if omp_hook_put "$f" "$(omp_hook_js "$(hook_cmd)" "" "$(required_deny)")"; then state_set hook.omp kit.js 1
+    elif [ -z "$(state_get told omp-hook)" ]; then warn "$f 是你自己的檔：kit 不動它，omp 開啟時不會自動 kit sync"; state_set told omp-hook 1; fi
+}
+omp_tool_names() { # omp_tool_names "Read,Grep" -> omp's tools that do the same, comma-separated (one omp has not: dropped)
+    printf '%s\n' "$1" | tr ',' '\n' | while IFS= read -r n; do
+        case $n in
+        Read) echo read;; Write) echo write;; Edit|MultiEdit) printf 'edit\nast_edit\n';; NotebookEdit) echo edit;;
+        Bash) printf 'bash\neval\n';; Grep) printf 'grep\nast_grep\n';; Glob) printf 'glob\nfind\n';; LS) printf 'find\nglob\n';;
+        Task|Agent) echo task;; TodoWrite) echo todo;; WebSearch) echo web_search;; AskUserQuestion) echo ask;;
+        *) ;;
+        esac
+    done | awk 'NF && !seen[$0]++' | paste -sd, -
+}
+omp_limits_warn() { # omp_limits_warn ONLY DENY : what kit's omp module cannot apply, one line each
+    local n
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        case $n in
+        mcp__*) ;;
+        Bash\(*) ;;
+        *\(*) echo "omp 只擋得了 Bash(...) 這種帶內容的規則：tools.deny 的 $n 不套用";;
+        *) case " $OMP_TOOLS " in *" $n "*) ;; *) echo "omp 沒有跟 $n 一樣的工具：tools.deny 的這條不套用";; esac;;
+        esac
+    done <<EOF
+$2
+EOF
 }
 
 statusline_json() { # the statusLine kit puts in settings.json
@@ -1158,7 +1186,12 @@ apply_dir() { # apply_dir DIR : the folder's .agentkit (and its agent) -> the to
         local CODEX_USER_TOML="$dir/.codex/config.toml"
         KIT_BLOCK=$(codex_mcp_toml <<< "$mcps") replace_block "$dir/.codex/config.toml" "$TOML_BEGIN" "$TOML_END"
     fi
-    for d in .claude/skills .agents/skills .claude .agents .codex; do rmdir "$dir/$d" 2>/dev/null; done
+    # omp: the agent's tool limits through kit's hook module in the folder (none: kit's module goes)
+    local oo=""; [ -z "$af" ] || oo=$(fm_val "$fm" tools.only)
+    if { has_omp || [ "$tool" = omp ]; } && [ -n "$oo$deny" ]; then omp_hook_put "$dir/.omp/hooks/pre/kit.js" "$(omp_hook_js "" "$oo" "$deny")" ||
+        warn "$dir/.omp/hooks/pre/kit.js 是你自己的檔：kit 不動它，omp 在這裡不會照 agent 的 tools.only、tools.deny"
+    else omp_hook_put "$dir/.omp/hooks/pre/kit.js"; fi
+    for d in .claude/skills .agents/skills .claude .agents .codex .omp/hooks/pre .omp/hooks .omp; do rmdir "$dir/$d" 2>/dev/null; done
     return 0
 }
 apply_dirs() { # kit sync: every folder with its own; a folder that is gone (or has no .agentkit any more) leaves the list
@@ -3738,12 +3771,15 @@ EOF
     omp)
         printf 'skills:\n  customDirectories:\n    - %s\n' "$(toml_str "$skdir")" > "$tmp/omp.yml"
         args=(--config "$tmp/omp.yml" --append-system-prompt "$tmp/prompt.md")
-        [ -n "$only" ] && args+=(--tools "$(printf '%s' "$only" | tr 'A-Z' 'a-z')")
+        [ -n "$only" ] && args+=(--tools "$(omp_tool_names "$only")")
         if [ -n "$mcps" ]; then                              # omp loads a plugin folder's .mcp.json (--plugin-dir): its tools are kit:<name>
             mkdir -p "$tmp/omp-plugin/.claude-plugin" && printf '{"name": "kit", "version": "0.0.0"}\n' > "$tmp/omp-plugin/.claude-plugin/plugin.json" &&
                 cp "$tmp/mcp.json" "$tmp/omp-plugin/.mcp.json" && args+=(--plugin-dir "$tmp/omp-plugin")
         fi
-        [ -n "$deny" ] && warn "omp 不能禁用單一工具，tools.deny 這次不套用"
+        if [ -n "$deny" ]; then                               # tools.deny: kit's hook module, --extension
+            omp_hook_js "" "" "$deny" > "$tmp/kit-tools.js" && args+=(--extension "$tmp/kit-tools.js")
+            omp_limits_warn "" "$deny" | while IFS= read -r a; do warn "$a"; done
+        fi
         ;;
     esac
     set -- "${args[@]}" "$@"
@@ -3812,7 +3848,7 @@ cmd_place() { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR
         [ -z "$only" ] || warns="${warns}Codex 不能只開某些內建工具：tools.only 不套用$LF"
         printf '%s\n' "$deny" | grep -v '^mcp__' | grep -q . && warns="${warns}Codex 只能禁用 MCP 的工具：其他的 tools.deny 不套用$LF";;
     omp)
-        [ -z "$only$deny" ] || warns="${warns}omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用$LF";;
+        local ow; ow=$(omp_limits_warn "$only" "$deny"); [ -z "$ow" ] || warns="$warns$ow$LF";;
     esac
     [ -z "$warns" ] || printf '%s' "$warns" | while IFS= read -r a; do warn "$a"; done
     if [ -n "$json" ]; then

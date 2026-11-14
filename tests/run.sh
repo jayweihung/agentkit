@@ -398,7 +398,8 @@ rm -rf "$tmp"
 out=$(KIT_DRY_RUN=1 kit run gerrit --tool omp 2>&1)
 tmp=$(echo "$out" | sed -n 's/^tmp=//p')
 check "omp run: config overlay points at skills" 'grep -qF "$tmp/skills" "$tmp/omp.yml" && [ -f "$tmp/skills/gerrit-review/SKILL.md" ]'
-check "omp run: prompt + lowercase tools" 'echo "$out" | grep -qx -- --append-system-prompt && echo "$out" | grep -qx "read,grep,glob"'
+check "omp run: prompt + tools.only as omp's tools (Grep: grep, ast_grep; Glob: glob, find)" 'echo "$out" | grep -qx -- --append-system-prompt && echo "$out" | grep -qx "read,grep,ast_grep,glob,find"'
+check "omp run: tools.deny through kit's hook module (--extension)" 'echo "$out" | grep -qx -- --extension && echo "$out" | grep -qx "$tmp/kit-tools.js" && grep -qF "const DENY = [\"mcp__gerrit__submit_change\"];" "$tmp/kit-tools.js" && grep -qF "const SYNC = null;" "$tmp/kit-tools.js" && ! echo "$out" | grep -q "不能禁用"'
 check "omp run: the agent's MCP in a plugin folder's .mcp.json (--plugin-dir), nothing to warn" 'echo "$out" | grep -qx -- --plugin-dir && echo "$out" | grep -qx "$tmp/omp-plugin" && [ "$(jget "$tmp/omp-plugin/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && [ -f "$tmp/omp-plugin/.claude-plugin/plugin.json" ] && ! echo "$out" | grep -q "kit add mcp"'
 rm -rf "$tmp"
 out=$(kit run gerrit --tool vim 2>&1); rc=$?
@@ -866,7 +867,7 @@ fi
 check "no backup for a file kit created" '[ ! -e "$H4/.agents/mcp.json.kit-backup" ] && [ ! -e "$H4/.omp/agent/mcp.json.kit-backup" ] || [ "$(cat "$H4/.omp/agent/mcp.json.kit-backup")" != "{}" ]'
 check "omp mcp.json has kit server and own" '[ "$(jget "$H4/.omp/agent/mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && [ "$(jget "$H4/.omp/agent/mcp.json" mcpServers.own.command)" = "\"y\"" ]'
 check "codex hooks.json: kit sync when Codex starts, handoff-hook before each prompt (Claude's hook format)" 'jget "$H4/.codex/hooks.json" hooks.SessionStart | grep -qF "sync --hook" && jget "$H4/.codex/hooks.json" hooks.UserPromptSubmit | grep -qF "handoff-hook"'
-check "omp hook module: kit sync --hook at session_start, in the background" 'head -n 1 "$H4/.omp/agent/hooks/pre/kit.js" | grep -qF "written by kit sync" && grep -qF "sync --hook" "$H4/.omp/agent/hooks/pre/kit.js" && grep -qF "pi.on(\"session_start\"" "$H4/.omp/agent/hooks/pre/kit.js"'
+check "omp hook module: kit sync --hook at session_start (in the background), the team's tools.deny" 'head -n 1 "$H4/.omp/agent/hooks/pre/kit.js" | grep -qF "written by kit (agentkit)" && grep -qF "sync --hook" "$H4/.omp/agent/hooks/pre/kit.js" && grep -qF "pi.on(\"session_start\"" "$H4/.omp/agent/hooks/pre/kit.js" && grep -qF "const DENY = [\"mcp__gerrit__submit_change\"];" "$H4/.omp/agent/hooks/pre/kit.js"'
 if command -v node >/dev/null 2>&1; then
     cp "$H4/.omp/agent/hooks/pre/kit.js" "$T/omphook.mjs"
     check "omp hook module: valid JavaScript" 'node --check "$T/omphook.mjs"'
@@ -1060,7 +1061,15 @@ check "agent back: kit sync as before, nothing to say" 'snap "$G" | cmp -s - "$T
 out=$(kit place gerrit "$W/gx" --tool codex --json 2>/dev/null); rc=$?
 check "place --tool codex: the command and what Codex cannot do" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"tool\": \"codex\", \"command\": [\"codex\"], \"warnings\": [\"Codex 不能只開某些內建工具：tools.only 不套用\"]" && grep -qx "tool:codex" "$W/gx/.agentkit" && grep -qx "You are the Gerrit helper." "$W/gx/AGENTS.md"'
 out=$(kit place gerrit "$W/go" --tool omp --json 2>/dev/null); rc=$?
-check "place --tool omp: the folder's .mcp.json is omp's too; what it cannot do: tool limits" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"command\": [\"omp\"], \"warnings\": [\"omp 不能在資料夾裡限制工具：tools.only、tools.deny 不套用\"]" && [ "$(jget "$W/go/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ]'
+check "place --tool omp: the folder's .mcp.json is omp's too; tool limits through kit's hook module in the folder" '[ $rc -eq 0 ] && echo "$out" | grep -qF "\"command\": [\"omp\"], \"warnings\": []" && [ "$(jget "$W/go/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && grep -qF "const ONLY = [\"Read\", \"Grep\", \"Glob\"];" "$W/go/.omp/hooks/pre/kit.js" && grep -qF "const DENY = [\"mcp__gerrit__submit_change\"];" "$W/go/.omp/hooks/pre/kit.js"'
+if command -v node >/dev/null 2>&1; then   # what kit's omp module blocks: a tool outside tools.only, the denied MCP tool (a plugin's too)
+    cp "$W/go/.omp/hooks/pre/kit.js" "$T/ompfolder.mjs"
+    printf '%s\n' 'const m = await import(process.argv[2]); const h = {}; m.default({ on: (e, f) => { h[e] = f; } });' \
+        'const r = []; for (const t of ["read", "glob", "bash", "write", "mcp__gerrit_submit_change", "mcp__kit_gerrit_submit_change", "mcp__gerrit_get_change", "yield"]) r.push(t + "=" + ((await h.tool_call({ toolName: t, input: {} }))?.block ? "no" : "ok"));' \
+        'console.log(Object.keys(h).join(",") + " " + r.join(" "));' > "$T/omprun.mjs"
+    out=$(node "$T/omprun.mjs" "$T/ompfolder.mjs" 2>&1)
+    check "omp module in the folder: blocks what the agent may not use, nothing else" '[ "$out" = "tool_call read=ok glob=ok bash=no write=no mcp__gerrit_submit_change=no mcp__kit_gerrit_submit_change=no mcp__gerrit_get_change=ok yield=ok" ]'
+fi
 out=$(kit place gerrit "$W/gv" --tool vim --json 2>/dev/null); rc=$?
 check "place --tool: only claude, codex, omp" '[ $rc -ne 0 ] && echo "$out" | grep -qF "\"code\": \"usage\"" && [ ! -e "$W/gv" ]'
 if [ -n "$PWSH" ]; then
