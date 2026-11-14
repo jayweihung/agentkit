@@ -1403,6 +1403,24 @@ out=$(PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh)
 tr_items=$(echo "$out" | sed -n 's/.*"id": "tool_results", "name": "[^"]*", "tokens": [0-9]*, "est": true, "items": \[\([^]]*\)\].*/\1/p')
 check "context --detail (claude): keys in another order (a gateway): the tool is still named, not \"?\"" 'echo "$tr_items" | grep -qF "\"name\": \"Read\", \"tokens\": " && echo "$tr_items" | grep -qF "\"note\": \"2 次\"" && ! echo "$tr_items" | grep -qF "\"name\": \"?\"" && ! echo "$tr_items" | grep -q inner'
 mv "$T/ts7.keep" "$TS7"
+# a long log: read from its last compaction, not its whole tail (a quote of that line, escaped, doesn't count); the
+# same answer as reading all of it; Claude Code asked while the log is read
+cp "$TS7" "$T/ts7.keep"
+{
+    i=0; while [ $i -lt 200 ]; do printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"o%s","name":"Bash","input":{"command":"%s"}}]},"uuid":"o"}\n' $i "$(printf '%01000d' 0)"; i=$((i + 1)); done
+    cat "$T/ts7.keep"
+    printf '{"parentUuid":"u8","isSidechain":false,"type":"user","message":{"role":"user","content":"it wrote \\"subtype\\":\\"compact_boundary\\" once"},"uuid":"u11"}\n'
+} > "$TS7"
+la=$(PATH="$FC:$PATH" KIT_CTX_DETAIL_TAIL=100000 CX --pid $$ --tool claude --dir "$P7" --detail --fresh | sed 's/"at": [0-9]*/"at": 0/')
+lb=$(PATH="$FC:$PATH" KIT_CTX_DETAIL_TAIL=99999999 CX --pid $$ --tool claude --dir "$P7" --detail --fresh | sed 's/"at": [0-9]*/"at": 0/')
+check "context --detail (claude): a long log read from its last compaction: the same as reading all of it, nothing before it" '[ -n "$la" ] && [ "$la" = "$lb" ] && echo "$la" | grep -qF "\"exact\": true" && ! echo "$la" | grep -qF "\"name\": \"Bash\"" && echo "$la" | grep -qF "\"name\": \"壓縮後的摘要\""'
+t0=$(date +%s); lc=$(FAKE_SLEEP=2 PATH="$FC:$PATH" KIT_CTX_DETAIL_TAIL=100000 CX --pid $$ --tool claude --dir "$P7" --detail --fresh | sed 's/"at": [0-9]*/"at": 0/'); t1=$(date +%s)
+check "context --detail (claude): a slow Claude Code (2 s) still answers, the same" '[ "$lc" = "$la" ] && [ $((t1 - t0)) -lt 8 ]'
+if [ -n "$PWSH" ]; then
+    lp=$(PATH="$FC:$PATH" KIT_CTX_DETAIL_TAIL=100000 kps context --pid $$ --tool claude --dir "$P7" --detail --fresh 2>&1 | sed 's/"at": [0-9]*/"at": 0/')
+    check "context --detail (claude) from the last compaction: kit.ps1 says the same" '[ "$lp" = "$la" ]'
+fi
+mv "$T/ts7.keep" "$TS7"
 t0=$(date +%s); out=$(FAKE_SLEEP=20 KIT_CTX_PROBE_TIMEOUT=2 PATH="$FC:$PATH" CX --pid $$ --tool claude --dir "$P7" --detail --fresh); t1=$(date +%s)
 check "context --detail: Claude Code that does not answer is stopped (timeout), the answer says so, still JSON, estimated" '[ $((t1 - t0)) -lt 10 ] && echo "$out" | grep -qF "\"error\": \"Claude Code 沒有回答" && echo "$out" | grep -qF "\"exact\": false" && echo "$out" | grep -qF "\"used\": 130000, \"window\": 400000" && echo "$out" | grep -qF "\"id\": \"msgs\""'
 printf '{"pid": %s, "session": "x;rm -rf y", "used": 1, "window": 2, "pct": 50, "model": "m"}\n' "$$" > "$H7/.config/agentkit/ctx/claude-$$.json"

@@ -12,6 +12,10 @@
 - Codex 撞到方案的上限停下來、還沒繼續時，跟 Claude 一樣多一個 `limit`。kit 看的是它對話檔裡最後一次的用量（`rate_limit_reached`）。
 - `kind` 多一種 `monthly`（Codex 免費方案是 30 天一個時段）。工作區額度用完沒有恢復時間，不算。
 
+**`kit context --detail` 對很長的 Claude 對話快一倍**
+- 很長的對話（幾百 MB）以前要 7 秒左右，現在約 3.5 秒，數字一樣。
+- 問 Claude Code 各部分用量和讀對話檔改成同時做；只讀最後一次壓縮之後的部分，用位元組搜尋找起點（macOS 上不再用很慢的 `tail -c`）。Windows（kit.ps1）也一樣。
+
 ## 0.6.5（2026-11-15）
 
 更新後要做：`kit self-update`。kit api 變成 1.7。

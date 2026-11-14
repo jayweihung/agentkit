@@ -2069,10 +2069,20 @@ ctx_capped() { # ctx_capped SECS CMD... : CMD, stopped after SECS seconds (with 
     elif command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"
     else "$@"; fi
 }
-ctx_stream() { # ctx_stream FILE : a log for a detail look: all of it, or its first line and the last KIT_CTX_DETAIL_TAIL bytes
-    local size
+ctx_stream() { # ctx_stream FILE : a log for a detail look: all of it, or its first line and its last KIT_CTX_DETAIL_TAIL
+    # bytes (from a block boundary, whole lines); a Claude log from its last compaction (the line Claude Code writes,
+    # "subtype":"compact_boundary" as it is: what was said quotes it escaped) when that is in those bytes: before it
+    # nothing counts, and a long one is mostly that. dd, not tail -c: macOS's tail takes seconds for 32 MB.
+    local size start=0 off bs=65536
     size=$(wc -c < "$1" 2>/dev/null | tr -d ' ')
-    if [ "${size:-0}" -gt "$CTX_DETAIL_TAIL" ]; then head -n 1 "$1"; tail -c "$CTX_DETAIL_TAIL" "$1" | tail -n +2
+    [ "${size:-0}" -gt "$CTX_DETAIL_TAIL" ] && start=$(( (size - CTX_DETAIL_TAIL) / bs * bs ))
+    off=$(dd if="$1" bs=$bs skip=$(( start / bs )) 2>/dev/null | LC_ALL=C grep -b -F '"subtype":"compact_boundary"' 2>/dev/null | tail -n 1 | cut -d: -f1)
+    case $off in
+        *[!0-9]*|"") off="";;
+    esac
+    # from the block that line is in: whatever comes before it there is dropped at it (the readers start over there)
+    if [ -n "$off" ]; then dd if="$1" bs=$bs skip=$(( (start + off) / bs )) 2>/dev/null
+    elif [ "$start" -gt 0 ]; then head -n 1 "$1"; dd if="$1" bs=$bs skip=$(( start / bs )) 2>/dev/null | sed 1d
     else cat "$1"; fi
 }
 ctx_big() { local size; size=$(wc -c < "$1" 2>/dev/null | tr -d ' '); [ "${size:-0}" -gt "$CTX_DETAIL_TAIL" ]; }
@@ -2240,10 +2250,12 @@ claude_probe_rows() { # what Claude Code said (stdin: the c1 line) -> rows, and 
         if (sc["tokens"] + 0 > 0) { print "G\tcommands\t\t0"; print "I\tcommands\t" sc["includedCommands"] " 個指令\t" sc["tokens"] "\t\t\t" }
     }'
 }
-claude_msg_rows() { # claude_msg_rows TARGET : what was said since the last compaction (stdin: the transcript), scaled to TARGET
+claude_msg_rows() { # claude_msg_rows TARGET [raw] : what was said since the last compaction (stdin: the transcript), scaled to
+    # TARGET; raw: not scaled nor rounded (claude_msg_scale scales it later, to the same numbers)
     # (thinking from earlier turns is not counted: the API drops it; attachments Claude Code counts elsewhere neither)
-    LC_ALL=C awk -v target="$1" "$CTX_AWK"'
+    LC_ALL=C awk -v target="$1" -v raw="${2:-}" "$CTX_AWK"'
     function reset() { user = meta = reply = summ = 0; split("", tc); split("", tr); split("", tn); split("", at) }
+    function out(x) { return R ? sprintf("%.17g", x) : rnd(x) }
     function content(s,   i, j) { i = index(s, "\"content\":"); if (i) s = substr(s, i); j = index(s, "},\"uuid\":\""); if (j) s = substr(s, 1, j); return s }
     BEGIN { reset(); split("skill_listing instructions deferred_tools_delta deferred_tools_record mcp_instructions_delta agent_listing_delta prompt_snapshot thinking_drop credential_org", sk, " "); for (i in sk) skip[sk[i]] = 1 }
     index($0, "\"isSidechain\":true") { next }
@@ -2276,21 +2288,34 @@ claude_msg_rows() { # claude_msg_rows TARGET : what was said since the last comp
         for (k in tc) tcs += tc[k]; for (k in tr) trs += tr[k]; for (k in at) ats += at[k]
         all = user + meta + reply + summ + tcs + trs + ats
         f = (target > 0 && all > 0) ? target / all : 1
+        if (raw != "") { f = 1; R = 1 }
         print "H\tmsgs_raw\t" rnd(all)
+        if (R) print "H\tmsgs_all\t" sprintf("%.17g", all)
         print "G\tmsgs\t\t1"
-        print "I\tmsgs\t你的訊息\t" rnd(user * f) "\t\t\t"; print "I\tmsgs\t系統附加的提示\t" rnd(meta * f) "\t\t\t"
-        print "I\tmsgs\t回覆\t" rnd(reply * f) "\t\t\t"; print "I\tmsgs\t工具呼叫\t" rnd(tcs * f) "\t\t\t"
-        print "I\tmsgs\t工具結果\t" rnd(trs * f) "\t\t\t"; print "I\tmsgs\t附加內容\t" rnd(ats * f) "\t\t\t"
-        if (summ > 0) print "I\tmsgs\t壓縮後的摘要\t" rnd(summ * f) "\t\t\t"
+        print "I\tmsgs\t你的訊息\t" out(user * f) "\t\t\t"; print "I\tmsgs\t系統附加的提示\t" out(meta * f) "\t\t\t"
+        print "I\tmsgs\t回覆\t" out(reply * f) "\t\t\t"; print "I\tmsgs\t工具呼叫\t" out(tcs * f) "\t\t\t"
+        print "I\tmsgs\t工具結果\t" out(trs * f) "\t\t\t"; print "I\tmsgs\t附加內容\t" out(ats * f) "\t\t\t"
+        if (summ > 0) print "I\tmsgs\t壓縮後的摘要\t" out(summ * f) "\t\t\t"
         print "G\ttool_results\t\t1"
         for (k in tc) seen[k] = 1; for (k in tr) seen[k] = 1
-        for (k in seen) print "I\ttool_results\t" k "\t" rnd((tc[k] + tr[k]) * f) "\t" (tn[k] + 0) " 次\t\t"
+        for (k in seen) print "I\ttool_results\t" k "\t" out((tc[k] + tr[k]) * f) "\t" (tn[k] + 0) " 次\t\t"
         print "G\tattachments\t\t1"
-        for (k in at) print "I\tattachments\t" k "\t" rnd(at[k] * f) "\t\t\t"
+        for (k in at) print "I\tattachments\t" k "\t" out(at[k] * f) "\t\t\t"
     }'
 }
+claude_msg_scale() { # claude_msg_scale TARGET : claude_msg_rows ... raw (stdin) scaled to TARGET and rounded, as
+    # claude_msg_rows TARGET would have printed it
+    LC_ALL=C awk -F '\t' -v OFS='\t' -v target="$1" '
+    function rnd(x) { return int(x + 0.5) }
+    { L[++n] = $0 } $1 == "H" && $2 == "msgs_all" { all = $3 + 0 }
+    END { f = (target > 0 && all > 0) ? target / all : 1
+        for (i = 1; i <= n; i++) { $0 = L[i]
+            if ($1 == "H" && $2 == "msgs_all") continue
+            if ($1 == "I") $4 = rnd($4 * f)
+            print } }'
+}
 claude_detail() { # claude_detail PID DIR -> rows
-    local pid=$1 dir=$2 s sid="" cwd="" tp="" live lu lw lm probe rows tot max mdl msgs buf thr w used other free why=""
+    local pid=$1 dir=$2 s sid="" cwd="" tp="" live lu lw lm probe rows tot max mdl msgs buf thr w used other free why="" raw="" pf ppid
     live=$(claude_ctx "$pid" "$dir"); lu=$(num_of used "$live"); lw=$(num_of window "$live"); lm=$(str_of model "$live")
     printf 'H\ttool\tclaude\nH\tcompact\t/compact\nH\twith_text\t1\nH\tclear\t/clear\n'
     if s=$(claude_where "$pid" "$dir"); then sid=${s%%"$TAB"*}; s=${s#*"$TAB"}; cwd=${s%%"$TAB"*}; tp=${s#*"$TAB"}; fi
@@ -2299,7 +2324,11 @@ claude_detail() { # claude_detail PID DIR -> rows
     if [ -z "$sid" ]; then why="找不到這個 Claude 的 session"
     elif [ "${KIT_CTX_PROBE:-1}" = 0 ]; then why="沒有問 Claude Code（KIT_CTX_PROBE=0）"
     else
-        probe=$(claude_probe "$sid" "$cwd")
+        # Claude Code is asked while the transcript is read (each takes a second or two on a long conversation)
+        pf=$(mktemp "${TMPDIR:-/tmp}/kit-probe.XXXXXX") || pf=""
+        if [ -n "$pf" ]; then claude_probe "$sid" "$cwd" > "$pf" & ppid=$!; fi
+        raw=$( [ -n "$tp" ] && ctx_stream "$tp" | claude_msg_rows "" raw)
+        if [ -n "$pf" ]; then wait "$ppid" 2>/dev/null; probe=$(cat "$pf"); rm -f "$pf"; else probe=$(claude_probe "$sid" "$cwd"); fi
         if [ -z "$probe" ]; then why="Claude Code 沒有回答（太舊、沒裝在 PATH 上，或超過 ${KIT_CTX_PROBE_TIMEOUT:-30} 秒）"
         else
             rows=$(printf '%s\n' "$probe" | claude_probe_rows)
@@ -2309,10 +2338,10 @@ claude_detail() { # claude_detail PID DIR -> rows
     if [ -n "$why" ]; then
         # Claude Code's own split is not there: the live total, and what was said estimated from the transcript
         printf 'H\terror\t%s\nH\tsource\t%s\nH\tmodel\t%s\nH\texact\t0\n' "$why" "$(str_of source "$live")" "$lm"
-        rows=$( [ -n "$tp" ] && ctx_stream "$tp" | claude_msg_rows "")
-        msgs=$(printf '%s\n' "$rows" | sed -n 's/^H	msgs_raw	//p'); msgs=${msgs:-0}
+        [ -n "$raw" ] || raw=$( [ -n "$tp" ] && ctx_stream "$tp" | claude_msg_rows "" raw)
+        msgs=$(printf '%s\n' "$raw" | sed -n 's/^H	msgs_raw	//p'); msgs=${msgs:-0}
         [ -n "$lu" ] && [ "$msgs" -gt "$lu" ] && msgs=$lu
-        rows=$( [ -n "$tp" ] && ctx_stream "$tp" | claude_msg_rows "$msgs")
+        rows=$( [ -n "$tp" ] && printf '%s\n' "$raw" | claude_msg_scale "$msgs")
         printf '%s\n' "$rows" | grep -v '^H	'
         printf 'H\tused\t%s\nH\twindow\t%s\n' "$lu" "$lw"
         if [ -n "$lu" ]; then
@@ -2338,7 +2367,7 @@ claude_detail() { # claude_detail PID DIR -> rows
     [ -n "$buf" ] && printf 'C\tautocompact_buffer\t\t%s\tbuffer\t0\n' "$buf"
     free=$(( ${w:-0} - used - ${buf:-0} )); [ "$free" -gt 0 ] || free=0
     printf 'C\tfree_space\t\t%s\tfree\t0\n' "$free"
-    [ -n "$tp" ] && ctx_stream "$tp" | claude_msg_rows "${msgs:-0}" | grep -v '^H	'
+    [ -n "$tp" ] && printf '%s\n' "$raw" | claude_msg_scale "${msgs:-0}" | grep -v '^H	'
     printf 'H\tnote\t%s\n' "分類是 Claude Code 自己算的；「對話內容」「工具」「附加內容」的細項是從對話紀錄估的（大小 ÷ 4，一張圖約 1600），照比例對到 Claude 算的總數。"
 }
 

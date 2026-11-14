@@ -3218,15 +3218,32 @@ function Ctx-Files([string]$note, $files, $out) { # "path TAB bytes TAB note" fo
     foreach ($f in $files) { $n = Ctx-Size $f; if ($n -gt 0) { $out.Add("$f`t$n`t$note") } }
 }
 function Ctx-Stream([string]$f) { # @(reader, first line or $null): a log for a detail look: all of it, or its first line and the
-    # whole lines in its last KIT_CTX_DETAIL_TAIL bytes
+    # whole lines in its last KIT_CTX_DETAIL_TAIL bytes; a Claude log from its last compaction (the line Claude Code writes,
+    # "subtype":"compact_boundary" as it is: what was said quotes it escaped) when that is in those bytes: before it
+    # nothing counts, and a long one is mostly that
     try { $fs = New-Object IO.FileStream($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)) } catch { return $null }
     try {
+        $start = [long]0; if ($fs.Length -gt $CtxDetailTail) { $start = $fs.Length - $CtxDetailTail }
+        $at = Ctx-LastCompact $fs $start
+        if ($at -ge 0) { [void]$fs.Seek($at, [IO.SeekOrigin]::Begin); return , @((New-Object IO.StreamReader($fs, $Utf8)), $null) }
+        [void]$fs.Seek(0, [IO.SeekOrigin]::Begin)
         if ($fs.Length -le $CtxDetailTail) { return , @((New-Object IO.StreamReader($fs, $Utf8)), $null) }
         $r = New-Object IO.StreamReader($fs, $Utf8, $true, 65536, $true); $first = $r.ReadLine(); $r.Dispose()
         [void]$fs.Seek(-$CtxDetailTail, [IO.SeekOrigin]::End)
         $r = New-Object IO.StreamReader($fs, $Utf8); [void]$r.ReadLine()                # (cut off in the middle)
         , @($r, $first)
     } catch { $fs.Dispose(); $null }
+}
+function Ctx-LastCompact($fs, [long]$start) { # where the line with the last "subtype":"compact_boundary" from START on begins, else -1
+    $pat = [byte[]][char[]]'"subtype":"compact_boundary"'; $n = $fs.Length - $start; if ($n -le 0) { return -1 }
+    $buf = New-Object byte[] $n; [void]$fs.Seek($start, [IO.SeekOrigin]::Begin); $got = 0
+    while ($got -lt $n) { $k = $fs.Read($buf, $got, $n - $got); if ($k -le 0) { break }; $got += $k }
+    # bytes as Latin-1 characters, one each: an ordinal search finds the same place
+    $txt = [Text.Encoding]::GetEncoding(28591).GetString($buf, 0, $got)
+    $i = $txt.LastIndexOf([Text.Encoding]::GetEncoding(28591).GetString($pat), [StringComparison]::Ordinal)
+    if ($i -lt 0) { return -1 }
+    $j = $txt.LastIndexOf([char]10, $i)
+    $start + $j + 1
 }
 
 # the rows (a TAB between fields): H key value | C id name tokens kind est | G id name est | I group name tokens note path parent
@@ -3399,13 +3416,17 @@ function Claude-Bin { # how to start Claude Code: @(program, its arguments befor
     , @($p, '', $p)
 }
 function Claude-Probe([string]$sid, [string]$cwd) { # Claude Code's own get_context_usage answer for that session (one line), else ''
-    $b = Claude-Bin; if (-not $b) { return '' }
-    if (-not $cwd -or -not [IO.Directory]::Exists($cwd)) { return '' }
+    Claude-ProbeEnd (Claude-ProbeStart $sid $cwd)
+}
+function Claude-ProbeStart([string]$sid, [string]$cwd) { # started, its answer read in the background (Claude-ProbeEnd takes it): the
+    # transcript is read meanwhile; $null when it can't be asked
+    $b = Claude-Bin; if (-not $b) { return $null }
+    if (-not $cwd -or -not [IO.Directory]::Exists($cwd)) { return $null }
     $t = 30; if ("$env:KIT_CTX_PROBE_TIMEOUT" -match '^[0-9]+$') { $t = [int]$env:KIT_CTX_PROBE_TIMEOUT }; if ($t -le 0) { $t = 86400 }
     # every hook off (a SessionStart hook must not run), no transcript written; only the c1 line is kept (the
     # initialize answer, which names the account, is never stored)
     $set = '{"disableAllHooks":true}'
-    if ($OnWindows) { $sf = Join-Path $CtxDir 'probe-settings.json'; try { Ensure-Dir $CtxDir; [IO.File]::WriteAllText($sf, $set + "`n", $Utf8) } catch { return '' }; $set = $sf }
+    if ($OnWindows) { $sf = Join-Path $CtxDir 'probe-settings.json'; try { Ensure-Dir $CtxDir; [IO.File]::WriteAllText($sf, $set + "`n", $Utf8) } catch { return $null }; $set = $sf }
     $a = '-p --input-format stream-json --output-format stream-json --verbose --resume ' + $sid + ' --no-session-persistence --settings ' + (Ctx-Arg $set)
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = $b[0]
@@ -3413,26 +3434,27 @@ function Claude-Probe([string]$sid, [string]$cwd) { # Claude Code's own get_cont
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WorkingDirectory = $cwd
     $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = $Utf8; $psi.StandardErrorEncoding = $Utf8
-    $end = [DateTime]::UtcNow.AddSeconds($t); $line = ''; $p = $null
+    $end = [DateTime]::UtcNow.AddSeconds($t); $p = $null
     try {
         $p = [Diagnostics.Process]::Start($psi)
         [void]$p.StandardError.ReadToEndAsync()                                   # read, never shown
         # straight to the pipe: Windows PowerShell's writer may put a BOM in front
         try { $in = $Utf8.GetBytes($CtxProbeInit + "`n" + $CtxProbeAsk + "`n"); $p.StandardInput.BaseStream.Write($in, 0, $in.Length); $p.StandardInput.BaseStream.Flush() } catch { }
         try { $p.StandardInput.BaseStream.Close() } catch { }
-        while ($true) {
-            $left = ($end - [DateTime]::UtcNow).TotalMilliseconds; if ($left -le 0) { break }
-            $r = $p.StandardOutput.ReadLineAsync()
-            if (-not $r.Wait([int][Math]::Min($left, 2147483647))) { break }
-            if ($null -eq $r.Result) { break }
-            if ($r.Result.Contains('"request_id":"c1"')) { $line = $r.Result; break }
-        }
-        if ($line) {                                                               # let it end by itself (within the time)
-            [void]$p.StandardOutput.ReadToEndAsync()
-            $left = ($end - [DateTime]::UtcNow).TotalMilliseconds; if ($left -gt 0) { [void]$p.WaitForExit([int][Math]::Min($left, 2147483647)) }
+        # it ends by itself once it answered (its input is closed): all it says, read while the transcript is
+        @{ p = $p; end = $end; out = $p.StandardOutput.ReadToEndAsync() }
+    } catch { if ($p) { Ctx-Kill $p; try { $p.Dispose() } catch { } }; $null }
+}
+function Claude-ProbeEnd($h) { # Claude-ProbeStart's answer: the c1 line, else '' (stopped at its time)
+    if (-not $h) { return '' }
+    $line = ''
+    try {
+        $left = ($h.end - [DateTime]::UtcNow).TotalMilliseconds
+        if ($left -gt 0 -and $h.out.Wait([int][Math]::Min($left, 2147483647))) {
+            foreach ($l in ($h.out.Result -split "`n")) { if ($l.Contains('"request_id":"c1"')) { $line = $l.TrimEnd("`r"); break } }
         }
     } catch { }
-    finally { if ($p) { Ctx-Kill $p; try { $p.Dispose() } catch { } } }
+    finally { Ctx-Kill $h.p; try { $h.p.Dispose() } catch { } }
     $line
 }
 function Claude-ProbeRows([string]$line, $R) { # what Claude Code said (the c1 line) -> rows, and H probe_total / probe_max /
@@ -3557,15 +3579,18 @@ function Claude-Detail([string]$cpid, [string]$dir, $R) { # the rows for a Claud
     $s = Claude-Where $cpid $dir; if ($s) { $sid = $s[0]; $cwd = $s[1]; $tp = $s[2] }
     if (-not $cwd) { $cwd = $dir }
     $R.Add("H`tsession`t$sid")
-    $why = ''; $pr = New-List
+    $why = ''; $pr = New-List; $acc = $null
     if (-not $sid) { $why = '找不到這個 Claude 的 session' }
     elseif ("$env:KIT_CTX_PROBE" -ceq '0') { $why = '沒有問 Claude Code（KIT_CTX_PROBE=0）' }
     else {
-        $probe = Claude-Probe $sid $cwd
+        # Claude Code is asked while the transcript is read (each takes a second or two on a long conversation)
+        $ph = Claude-ProbeStart $sid $cwd
+        if ($tp) { $acc = Claude-MsgScan $tp }
+        $probe = Claude-ProbeEnd $ph
         if (-not $probe) { $why = 'Claude Code 沒有回答（太舊、沒裝在 PATH 上，或超過 ' + $(if ($env:KIT_CTX_PROBE_TIMEOUT) { $env:KIT_CTX_PROBE_TIMEOUT } else { '30' }) + ' 秒）' }
         else { Claude-ProbeRows $probe $pr; $why = Row-H $pr 'probe_error' }
     }
-    $acc = if ($tp) { Claude-MsgScan $tp } else { $null }
+    if ($null -eq $acc -and $tp) { $acc = Claude-MsgScan $tp }
     if ($why) {
         # Claude Code's own split is not there: the live total, and what was said estimated from the transcript
         foreach ($x in @("H`terror`t$why", ("H`tsource`t" + (Str-Of 'source' $live)), "H`tmodel`t$lm", "H`texact`t0")) { $R.Add($x) }
