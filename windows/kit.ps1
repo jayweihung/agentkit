@@ -2715,7 +2715,7 @@ function Ctx-Json([string]$tool, [string]$u, [string]$w, [string]$src, [string]$
     if ($u -and $w -and [long]$w -gt 0) { $pct = Ctx-Pct $u $w }
     if ($own) { $pct = $own }
     if ($pct -ne 'null' -and [long]$pct -gt 100) { $pct = '100' }      # an estimate past the window: full
-    # CtxLimit ("UNTIL_SECONDS KIND", from Claude-Limit): the agent stopped at its plan's usage limit -> a "limit" field
+    # CtxLimit ("UNTIL_SECONDS KIND", from Claude-Limit, Codex-Limit): the agent stopped at its plan's usage limit -> a "limit" field
     $lim = ''; if ($script:CtxLimit) { $p2 = $script:CtxLimit -split ' ', 2; $lim = ', "limit": {"until": ' + $p2[0] + '000, "kind": ' + (Json-S $p2[1]) + '}' }
     '{"tool": ' + (Json-S $tool) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $pct + ', "source": ' + (Json-S $src) + ', "model": ' + (Json-S $m) + $lim + '}'
 }
@@ -2888,14 +2888,47 @@ function Codex-Last([string]$f, [long]$n) { # its last token_count and turn_cont
     }
     @{ which = $(if ((-not $t -or -not $c) -and $o -and $o[1]) { 'more' } else { 'ok' }); t = $t; c = $c }
 }
+# A Codex that stopped at its plan's usage limit: its last rate_limits (in a token_count) says rate_limit_reached
+# (or the workspace's usage_limit_reached); until when: the reset of its fullest window (primary, secondary). Going on
+# (a new turn, your next message, a rate_limits not reached) clears it. Credits run out has no reset: not counted.
+function Codex-Limit([string]$f) { # "UNTIL_SECONDS KIND", else ''
+    $o = Ctx-Open $f 1048576; $l = ''; $ln = 0; $an = 0; $i = 0
+    if (-not $o) { return '' }
+    try {
+        while ($null -ne ($x = $o[0].ReadLine())) {
+            $i++
+            if ($x.Contains('"rate_limits":{')) {
+                if ($x.Contains('"rate_limit_reached_type":"rate_limit_reached"') -or $x -cmatch '"rate_limit_reached_type":"[a-z_]*usage_limit_reached"') { $l = $x; $ln = $i } else { $an = $i }
+                continue
+            }
+            if ($x.Contains('"type":"task_started"') -or $x.Contains('"type":"user_message"')) { $an = $i }
+        }
+    } finally { $o[0].Dispose() }
+    if (-not $ln -or $ln -lt $an) { return '' }
+    $r = $l.Substring($l.IndexOf('"rate_limits":{')); $bp = [double]-1; $bt = ''; $bm = [long]0
+    foreach ($wn in 'primary', 'secondary') {
+        $k = '"' + $wn + '":{'; $p = $r.IndexOf($k); if ($p -lt 0) { continue }
+        $o2 = $r.Substring($p + $k.Length); $e = $o2.IndexOf('}'); if ($e -ge 0) { $o2 = $o2.Substring(0, $e) }
+        $t = [regex]::Match($o2, '"resets_at":([0-9]+)'); if (-not $t.Success) { continue }
+        $pc = [regex]::Match($o2, '"used_percent":([0-9.]+)'); $pc = if ($pc.Success) { [double]::Parse($pc.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) } else { [double]0 }
+        $mi = [regex]::Match($o2, '"window_minutes":([0-9]+)'); $mi = if ($mi.Success) { [long]$mi.Groups[1].Value } else { [long]0 }
+        if ($pc -gt $bp -or ($pc -eq $bp -and [long]$t.Groups[1].Value -gt [long]$bt)) { $bp = $pc; $bt = $t.Groups[1].Value; $bm = $mi }
+    }
+    if ($bp -lt 0) { return '' }
+    $kind = if ($bm -eq 300) { 'five_hour' } elseif ($bm -eq 10080) { 'seven_day' } elseif ($bm -ge 40000 -and $bm -le 45000) { 'monthly' } else { 'limit' }
+    $bt + ' ' + $kind
+}
 function Codex-Ctx([string]$cwd) { # the newest rollout started in that folder
     $f = Codex-Rollout $cwd
     if (-not $f) { return Ctx-Json 'codex' '' '' '' '' }
     $s = Codex-Last $f $CtxTail; if ($s.which -eq 'more') { $s = Codex-Last $f 0 }
     $m = Str-Of 'model' $s.c
-    if (-not $s.t) { return Ctx-Json 'codex' '' '' 'rollout' $m }
-    $u = Num-Of 'total_tokens' (After-Key 'last_token_usage' $s.t); $w = Num-Of 'model_context_window' $s.t
-    Ctx-Json 'codex' $u $w 'rollout' $m $(if ($u -and $w) { Codex-Pct ([long]$u) ([long]$w) } else { '' })
+    $script:CtxLimit = Codex-Limit $f
+    try {
+        if (-not $s.t) { return Ctx-Json 'codex' '' '' 'rollout' $m }
+        $u = Num-Of 'total_tokens' (After-Key 'last_token_usage' $s.t); $w = Num-Of 'model_context_window' $s.t
+        Ctx-Json 'codex' $u $w 'rollout' $m $(if ($u -and $w) { Codex-Pct ([long]$u) ([long]$w) } else { '' })
+    } finally { $script:CtxLimit = '' }
 }
 function Omp-Window([string]$m) {
     $db = Join-Path $OmpDir 'models.db'; $w = ''

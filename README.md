@@ -259,7 +259,7 @@ kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最�
 
 印出 JSON：`used`（用了幾個 token）、`window`（上限）、`pct`（%）、`source`（從哪裡讀的）、`model`。給畫面程式在 agent 窗格上顯示「context 35% 139k/400k」這種數字用。只讀數字，不讀對話內容。
 
-Claude 撞到方案的用量上限停下來（「You've hit your 5-hour limit · resets 12:10am」）、之後還沒有人叫它繼續時，多一個 `limit`：`{"until": <幾點恢復，Unix 毫秒>, "kind": "five_hour" | "seven_day" | …}`。kit 看的是它自己對話紀錄的最後（Claude Code 記下的 `usage_limit_reached` 和恢復時間）；之後它又回話、或有人打了字，就不算。畫面程式拿來提醒「撞到上限，幾點恢復」，時間到了可以替你打「繼續」。沒撞到時沒有這個欄位。Codex、omp 還沒有。
+Claude 撞到方案的用量上限停下來（「You've hit your 5-hour limit · resets 12:10am」）、之後還沒有人叫它繼續時，多一個 `limit`：`{"until": <幾點恢復，Unix 毫秒>, "kind": "five_hour" | "seven_day" | …}`。kit 看的是它自己對話紀錄的最後（Claude Code 記下的 `usage_limit_reached` 和恢復時間）；之後它又回話、或有人打了字，就不算。畫面程式拿來提醒「撞到上限，幾點恢復」，時間到了可以替你打「繼續」。沒撞到時沒有這個欄位。Codex（kit 0.6.6 以上）看它對話檔裡最後一次的 `rate_limits`：寫著 `rate_limit_reached`（或工作區的 `…usage_limit_reached`）就是撞到了，`until` 是用得最滿的那個時段的重置時間，`kind` 依時段長短是 `five_hour`、`seven_day`、`monthly`（免費方案 30 天）；之後開始新的一輪、你打了字、或再一次 `rate_limits` 沒撞到，就不算。工作區額度（credits）用完沒有恢復時間，不算。omp 還沒有。
 
 | agent | 從哪裡讀 | % 怎麼算 |
 |---|---|---|

@@ -4,6 +4,14 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.6（2026-11-15）
+
+更新後要做：`kit self-update`。kit api 還是 1.7。
+
+**`kit context` 也會說 Codex 撞到用量上限、幾點恢復**
+- Codex 撞到方案的上限停下來、還沒繼續時，跟 Claude 一樣多一個 `limit`。kit 看的是它對話檔裡最後一次的用量（`rate_limit_reached`）。
+- `kind` 多一種 `monthly`（Codex 免費方案是 30 天一個時段）。工作區額度用完沒有恢復時間，不算。
+
 ## 0.6.5（2026-11-15）
 
 更新後要做：`kit self-update`。kit api 變成 1.7。

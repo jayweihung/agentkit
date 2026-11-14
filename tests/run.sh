@@ -1539,6 +1539,29 @@ fi
 printf '{"type":"user","message":{"content":"go on"}}\n' >> "$C8/t.jsonl"
 out=$(CX --pid 1 --tool claude --dir "$P8")
 check "context (claude): told to go on after the limit -> no limit any more" '[ "$out" = "{\"tool\": \"claude\", \"used\": 250000, \"window\": 200000, \"pct\": 100, \"source\": \"transcript\", \"model\": \"claude-sonnet-4-5\"}" ]'
+# a Codex stopped at its limit: its last rate_limits says rate_limit_reached; until the reset of its fullest window
+PL="$T/cxlim"; mkdir -p "$PL"; PL=$(cd "$PL" && pwd -P); RLL="$H7/.codex/sessions/2026/11/12/rollout-2026-11-12T04-00-00-lim.jsonl"
+printf '{"type":"session_meta","payload":{"id":"lim","cwd":"%s"}}\n{"type":"turn_context","payload":{"cwd":"%s","model":"gpt-6-luna"}}\n' "$PL" "$PL" > "$RLL"
+CXRL='{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":20000},"model_context_window":258400},"rate_limits":{"limit_id":"codex","primary":{"used_percent":%s,"window_minutes":300,"resets_at":1794690000},"secondary":{"used_percent":%s,"window_minutes":10080,"resets_at":1795100000},"credits":null,"plan_type":"plus","rate_limit_reached_type":%s}}}\n'
+printf "$CXRL" 40.0 61.5 null >> "$RLL"
+out=$(CX --pid 1 --tool codex --dir "$PL")
+check "context (codex): under its limits -> no limit" '[ "$out" = "{\"tool\": \"codex\", \"used\": 20000, \"window\": 258400, \"pct\": 3, \"source\": \"rollout\", \"model\": \"gpt-6-luna\"}" ]'
+printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$RLL"; printf "$CXRL" 100.0 70.0 '"rate_limit_reached"' >> "$RLL"
+printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$RLL"
+out=$(CX --pid 1 --tool codex --dir "$PL")
+check "context (codex): stopped at the 5-hour limit -> until its reset" 'echo "$out" | grep -qF "\"model\": \"gpt-6-luna\", \"limit\": {\"until\": 1794690000000, \"kind\": \"five_hour\"}}"'
+LIMITED=$out
+printf "$CXRL" 100.0 100.0 '"workspace_member_usage_limit_reached"' >> "$RLL"
+out=$(CX --pid 1 --tool codex --dir "$PL")
+check "context (codex): both windows full -> the later reset (weekly); the workspace's limit counts too" 'echo "$out" | grep -qF "\"limit\": {\"until\": 1795100000000, \"kind\": \"seven_day\"}}"'
+[ -n "$PWSH" ] && { out2=$(kps context --pid 1 --tool codex --dir "$PL" 2>&1); check "context (codex) limit: kit.ps1 says the same" '[ "$out2" = "$out" ]'; }
+printf "$CXRL" 0 0 '"workspace_member_credits_depleted"' >> "$RLL"
+out=$(CX --pid 1 --tool codex --dir "$PL")
+check "context (codex): credits run out has no reset -> no limit" '! echo "$out" | grep -qF "\"limit\""'
+printf "$CXRL" 100.0 70.0 '"rate_limit_reached"' >> "$RLL"; printf '{"type":"event_msg","payload":{"type":"user_message","message":"繼續"}}\n' >> "$RLL"
+out=$(CX --pid 1 --tool codex --dir "$PL")
+check "context (codex): told to go on after the limit -> no limit any more" '! echo "$out" | grep -qF "\"limit\""'
+[ -n "$PWSH" ] && { out2=$(kps context --pid 1 --tool codex --dir "$PL" 2>&1); check "context (codex) gone on: kit.ps1 says the same" '[ "$out2" = "$out" ]'; }
 out=$(kit usage x 2>&1); rc=$?
 check "usage: anything after it -> how to use it" '[ $rc -eq 1 ] && echo "$out" | grep -qF "用法：kit usage"'
 # the statusLine in settings.json: kit's when there is none, never over your own, gone again on uninstall

@@ -1726,7 +1726,7 @@ claude_pid() { # the Claude process above this one (Claude runs the status line 
                   p = up[p] } }'
 }
 ctx_json() { # ctx_json TOOL USED WINDOW SOURCE MODEL [PCT] -> the answer (PCT: the tool's own way of counting); CTX_LIMIT
-    # ("UNTIL_SECONDS KIND", from claude_limit): the agent stopped at its plan's usage limit -> a "limit" field
+    # ("UNTIL_SECONDS KIND", from claude_limit, CODEX_LIMIT_AWK): the agent stopped at its plan's usage limit -> a "limit" field
     local pct=null u=${2:-} w=${3:-} lim=""
     [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] 2>/dev/null && pct=$(( (u * 100 + w / 2) / w ))
     [ -z "${6:-}" ] || pct=$6
@@ -1865,8 +1865,25 @@ codex_pct() { # codex_pct USED WINDOW : Codex's own "% context left" turned into
     e=$((w - b)); used=$((u > b ? u - b : 0)); rem=$((e > used ? e - used : 0))
     echo $(( 100 - (rem * 100 + e / 2) / e ))
 }
+# A Codex that stopped at its plan's usage limit: its last rate_limits (in a token_count) says rate_limit_reached
+# (or the workspace's usage_limit_reached); until when: the reset of its fullest window (primary, secondary). Going on
+# (a new turn, your next message, a rate_limits not reached) clears it. Credits run out has no reset: not counted.
+CODEX_LIMIT_AWK='index($0, "\"rate_limits\":{") {
+        if (index($0, "\"rate_limit_reached_type\":\"rate_limit_reached\"") || match($0, /"rate_limit_reached_type":"[a-z_]*usage_limit_reached"/)) { l = $0; ln = NR } else an = NR
+        next }
+    index($0, "\"type\":\"task_started\"") || index($0, "\"type\":\"user_message\"") { an = NR }
+    END { if (!ln || ln < an) exit
+        r = substr(l, index(l, "\"rate_limits\":{")); bp = -1; n = split("primary secondary", W, " ")
+        for (i = 1; i <= n; i++) { k = "\"" W[i] "\":{"; p = index(r, k); if (!p) continue; o = substr(r, p + length(k)); sub(/}.*/, "", o)
+            if (!match(o, /"resets_at":[0-9]+/)) continue; t = substr(o, RSTART + 12, RLENGTH - 12)
+            pc = 0; if (match(o, /"used_percent":[0-9.]+/)) pc = substr(o, RSTART + 15, RLENGTH - 15) + 0
+            mi = 0; if (match(o, /"window_minutes":[0-9]+/)) mi = substr(o, RSTART + 17, RLENGTH - 17) + 0
+            if (pc > bp || (pc == bp && t + 0 > bt + 0)) { bp = pc; bt = t; bm = mi } }
+        if (bp < 0) exit
+        k = "limit"; if (bm == 300) k = "five_hour"; else if (bm == 10080) k = "seven_day"; else if (bm >= 40000 && bm <= 45000) k = "monthly"
+        print bt " " k }'
 codex_ctx() { # codex_ctx CWD : the newest rollout started in that folder, its last token_count and turn_context
-    local f want which line m u w
+    local f want which line m u w CTX_LIMIT
     [ -n "$1" ] && [ -d "$CODEX_DIR/sessions" ] || { ctx_json codex "" "" "" ""; return; }
     want="\"cwd\":$(json_s "$1")"
     while IFS= read -r f; do
@@ -1877,7 +1894,7 @@ $(ctx_read "$f" 'cut && NR == 1 { next }
     index($0, "\"turn_context\"") { c = $0 }
     END { print ((t == "" || c == "") && cut ? "more" : "ok"); print t; print c }')
 EOF
-        m=$(str_of model "$m")
+        m=$(str_of model "$m"); CTX_LIMIT=$(ctx_scan "$f" "$CODEX_LIMIT_AWK" 1048576)
         [ -n "$line" ] || { ctx_json codex "" "" rollout "$m"; return; }
         u=$(num_of total_tokens "$(after_key last_token_usage "$line")"); w=$(num_of model_context_window "$line")
         ctx_json codex "$u" "$w" rollout "$m" "$( [ -n "$u" ] && [ -n "$w" ] && codex_pct "$u" "$w")"; return
