@@ -115,7 +115,26 @@ echo "my change" >> "$HOME/.claude/skills/gerrit-review/SKILL.md"
 echo "team change" >> "$TEAM/skills/gerrit-review/SKILL.md"
 out=$(kit sync 2>&1)
 check "hand-edited skill not overwritten" 'grep -q "my change" "$HOME/.claude/skills/gerrit-review/SKILL.md" && echo "$out" | grep -q 手動改過'
-kit sync --force >/dev/null 2>&1
+# look first: kit sync --dry-run lists what it would do with skills and a hash; --expect HASH does it only while that list holds
+hsnap() { find "$HOME/.claude" "$HOME/.agents" "$HOME/.config/agentkit/state.tsv" -type f -print0 2>/dev/null | xargs -0 cksum | LC_ALL=C sort; }
+hashof() { printf '%s\n' "$1" | LC_ALL=C sed -n 's/.*--expect \([0-9][0-9]*\).*/\1/p' | head -n 1; }
+hsnap > "$T/dr.snap"
+out=$(kit sync --force --dry-run 2>&1); rc=$?; h=$(hashof "$out")
+check "sync --force --dry-run: your edited skill backed up then replaced, a hash, nothing changed" '[ $rc -eq 0 ] && echo "$out" | grep -qF "/gerrit-review：你改過的先備份，再換新的" && [ -n "$h" ] && echo "$out" | grep -qF "kit sync --force --expect $h" && hsnap | cmp -s - "$T/dr.snap"'
+out=$(kit sync --dry-run 2>&1)
+check "sync --dry-run without --force: your edited skill skipped, another hash" 'echo "$out" | grep -qF "/gerrit-review：你改過：跳過" && [ "$(hashof "$out")" != "$h" ] && hsnap | cmp -s - "$T/dr.snap"'
+out=$(kit sync --dry-run 2>&1)
+check "sync --dry-run twice: the same hash" '[ "$(hashof "$out")" = "$(hashof "$(kit sync --dry-run 2>&1)")" ]'
+echo "my change 2" >> "$HOME/.claude/skills/gerrit-review/SKILL.md"
+out=$(kit sync --force --expect "$h" 2>&1); rc=$?
+check "sync --expect: you changed the skill after --dry-run: nothing changed, says look again" '[ $rc -ne 0 ] && echo "$out" | grep -q "清單跟 --dry-run" && grep -q "my change 2" "$HOME/.claude/skills/gerrit-review/SKILL.md" && [ ! -d "$HOME/.config/agentkit/backups" ]'
+out=$(kit sync --dry-run --expect 1 2>&1); rc=$?
+check "sync: --dry-run with --expect, or --expect alone without a hash: usage" '[ $rc -ne 0 ] && echo "$out" | grep -q 不能一起用 && ! kit sync --expect >/dev/null 2>&1 && ! kit sync --bogus >/dev/null 2>&1'
+if [ -n "$PWSH" ]; then
+    out=$(kps sync --force --dry-run 2>&1); b=$(hashof "$out")
+    check "kit.ps1 sync --force --dry-run: the same list (its own hash); a wrong hash changes nothing" 'echo "$out" | grep -qF "/gerrit-review：你改過的先備份，再換新的" && [ -n "$b" ] && ! kps sync --force --expect 1 >/dev/null 2>&1 && grep -q "my change 2" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
+fi
+kit sync --force --expect "$(hashof "$(kit sync --force --dry-run 2>&1)")" >/dev/null 2>&1
 check "--force overwrites" 'grep -q "team change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
 check "--force keeps your edit as a backup (outside the skills folder)" 'grep -q "my change" "$HOME"/.config/agentkit/backups/skills/gerrit-review-*/SKILL.md'
 mkdir -p "$TEAM/skills/team-build"; printf -- '---\nname: team-build\ndescription: b\n---\nx\n' > "$TEAM/skills/team-build/SKILL.md"
@@ -1487,6 +1506,23 @@ cp "$H7/.claude/settings.json" "$T/s7.orig"
 mkdir -p "$T/src7/skills/a"; printf -- '---\nname: a\ndescription: a\n---\nx\n' > "$T/src7/skills/a/SKILL.md"
 kit init "$T/src7" >/dev/null 2>&1
 check "sync: kit's statusLine in settings.json" 'jget "$H7/.claude/settings.json" statusLine.command | grep -q "statusline" && jget "$H7/.claude/settings.json" modelSettings.claude-opus-5-5.autoCompactWindow | grep -q 400000'
+# the context nearly full: kit's UserPromptSubmit hook tells Claude (once at 80 %, once at 90 %) to write HANDOFF.md first
+check "sync: kit's UserPromptSubmit hook (handoff-hook) in settings.json, next to SessionStart's" 'jget "$H7/.claude/settings.json" hooks.UserPromptSubmit | grep -q "handoff-hook" && jget "$H7/.claude/settings.json" hooks.SessionStart | grep -q "sync --hook"'
+mkdir -p "$T/fbh"; cat > "$T/fbh/claude" <<'FAKE'
+#!/bin/sh
+echo "{\"pid\": $$, \"used\": $USED, \"window\": 1000000, \"model\": \"claude-opus-5-5\"}" > "$HOME/.config/agentkit/ctx/claude-$$.json"
+echo '{"session_id":"s-7","prompt":"hi"}' | sh -c "$HK handoff-hook"
+FAKE
+chmod +x "$T/fbh/claude"
+ho() { USED=$1 HK=$2 "$T/fbh/claude"; }
+o1=$(ho 300000 "'$KIT'"); o2=$(ho 330000 "'$KIT'"); o3=$(ho 340000 "'$KIT'"); o4=$(ho 370000 "'$KIT'"); o5=$(ho 100000 "'$KIT'"); o6=$(ho 330000 "'$KIT'")
+check "handoff-hook: nothing below 80 % (the window from settings.json, 400k)" '[ -z "$o1" ]'
+check "handoff-hook: at 80 % tells Claude to write HANDOFF.md and its kit note (valid JSON), once" 'echo "$o2" | grep -qF "context is 83% full (330k of 400k tokens)" && echo "$o2" | grep -q HANDOFF.md && echo "$o2" | LC_ALL=C awk -f "$JA" >/dev/null && [ "$(jget /dev/stdin hookSpecificOutput.hookEventName <<< "$o2")" = "\"UserPromptSubmit\"" ] && [ -z "$o3" ]'
+check "handoff-hook: again at 90 %; fallen below 80 % (a /compact) and full again: told again" 'echo "$o4" | grep -qF "93% full" && [ -z "$o5" ] && echo "$o6" | grep -qF "83% full"'
+if [ -n "$PWSH" ]; then
+    rm -f "$H7/.config/agentkit/ctx/handoff-s-7"; b=$(ho 330000 "'$PWSH' -NoProfile -File '$HERE/../windows/kit.ps1'")
+    check "handoff-hook (kit.ps1): the same JSON" '[ "$b" = "$o2" ]'
+fi
 # you take kit's statusLine out: it stays out (kit says so once); kit sync --force puts it back
 printf 'del\tstatusLine\n' > "$T/ops7"; LC_ALL=C awk -f "$JA" -v ops="$T/ops7" "$H7/.claude/settings.json" > "$T/s7.new" && cp "$T/s7.new" "$H7/.claude/settings.json"
 out=$(kit sync 2>&1)

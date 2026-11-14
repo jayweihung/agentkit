@@ -140,7 +140,20 @@ Check 'removed stays removed after sync' { -not (Test-Path "$H/.claude/skills/ge
 [IO.File]::AppendAllText("$TEAM/skills/gerrit-review/SKILL.md", "team change`n")
 Kit sync
 Check 'hand-edited skill not overwritten' { (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('my change') -and $out.Contains('手動改過') }
-Kit sync --force
+# look first: kit sync --dry-run lists what it would do with skills and a hash; --expect HASH does it only while that list holds
+function HashOf([string]$o) { if ($o -match '--expect (\d+)') { $Matches[1] } else { '' } }
+$st0 = ReadT "$H/.config/agentkit/state.tsv"
+Kit sync --force --dry-run; $ph = HashOf $out
+Check 'sync --force --dry-run: your edited skill backed up then replaced, a hash, nothing changed' { $rc -eq 0 -and $out.Contains('/gerrit-review：你改過的先備份，再換新的') -and $ph -and $out.Contains("kit sync --force --expect $ph") -and (ReadT "$H/.config/agentkit/state.tsv") -ceq $st0 -and -not (Test-Path "$H/.config/agentkit/backups") }
+Kit sync --dry-run
+Check 'sync --dry-run without --force: your edited skill skipped, another hash' { $out.Contains('/gerrit-review：你改過：跳過') -and (HashOf $out) -ne $ph }
+[IO.File]::AppendAllText("$H/.claude/skills/gerrit-review/SKILL.md", "my change 2`n")
+Kit sync --force --expect $ph
+Check 'sync --expect: you changed the skill after --dry-run: nothing changed, says look again' { $rc -ne 0 -and $out.Contains('清單跟 --dry-run') -and (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('my change 2') -and -not (Test-Path "$H/.config/agentkit/backups") }
+Kit sync --dry-run --expect 1
+Check 'sync: --dry-run with --expect: usage' { $rc -ne 0 -and $out.Contains('不能一起用') }
+Kit sync --force --dry-run; $ph = HashOf $out
+Kit sync --force --expect $ph
 Check '--force overwrites' { (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('team change') }
 function BackupHas([string]$name, [string]$text) { @(Get-ChildItem -Path "$H/.config/agentkit/backups/skills" -Filter "$name-*" -Directory -ErrorAction SilentlyContinue | Where-Object { (ReadT (Join-Path $_.FullName 'SKILL.md')).Contains($text) }).Count -gt 0 }
 Check '--force keeps your edit as a backup (outside the skills folder)' { BackupHas 'gerrit-review' 'my change' }

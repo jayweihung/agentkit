@@ -378,7 +378,7 @@ function Prune-Empty([string]$f, [string[]]$paths) { # delete each PATH whose va
         if ($v -eq '[]' -or $v -eq '{}') { Json-Edit $f @(, @('del', $p)) }
     }
 }
-function Prune-Deny { Prune-Empty (Join-Path $ClaudeDir 'settings.json') @('permissions.deny', 'permissions', 'hooks.SessionStart', 'hooks') }
+function Prune-Deny { Prune-Empty (Join-Path $ClaudeDir 'settings.json') @('permissions.deny', 'permissions', 'hooks.SessionStart', 'hooks.UserPromptSubmit', 'hooks') }
 
 function Text-Hash([string]$s) {
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -1573,47 +1573,74 @@ function Apply-Rules($want) { # the account's instructions (Claude, Codex, omp):
     if (Has-Omp) { Set-Rules (Join-Path $OmpDir 'AGENTS.md') $rules 'inline' $hint }
 }
 
-function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills into DIR
+function Skills-Plan([string]$dir, [string]$kind, $names) { # what Sync-Skills will do with the wanted skills; changes nothing
+    # rows @{ a; n; sum; src } (the same as unix/kit's skills_plan). sum: the source's hash, or (yours) the copy's: a plan stays
+    # the same plan only while neither changed. a: add, update, same, missing, foreign, modified, replace, remove, keep, drop
     $names = @($names | Where-Object { $_ })
-    if ($names.Count -gt 0) { Ensure-Dir $dir }
     foreach ($n in $names) {
-        $p = Find-Item 'skill' $n; if (-not $p) { Warn "skill $n not found in any source"; continue }
+        $p = Find-Item 'skill' $n; if (-not $p) { @{ a = 'missing'; n = $n; sum = ''; src = '' }; continue }
         $src = Split-Path -Parent $p; $dst = Join-Path $dir $n; $h = Dir-Hash $src
         $old = State-Get $kind $n
-        if ((Test-Path -LiteralPath $dst) -and -not $old) {
-            # someone else's folder: say it once, not at every sync
-            if ($null -eq (State-Get 'skipped' $dst)) { Warn "$dst 已經存在，不是 kit 放的，跳過（只提醒這一次）"; State-Set 'skipped' $dst 1 }
-            continue
+        if ((Test-Path -LiteralPath $dst) -and -not $old) { @{ a = 'foreign'; n = $n; sum = ''; src = '' }; continue }
+        if ($old -and (Test-Path -LiteralPath $dst)) {
+            $cur = Dir-Hash $dst
+            if ($cur -ne $old) {
+                if ($script:Force) { @{ a = 'replace'; n = $n; sum = "$cur $h"; src = $src } } else { @{ a = 'modified'; n = $n; sum = $cur; src = '' } }
+                continue
+            }
         }
-        if ($null -ne (State-Get 'skipped' $dst)) { State-Del 'skipped' $dst }
-        if ($old -and (Test-Path -LiteralPath $dst) -and (Dir-Hash $dst) -ne $old) {
-            if (-not $script:Force) { Warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）"; continue }
-            $b = Backup-Skill $dst $n
-            if (-not $b) { Warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; continue }
-            Say "  你改過的 skill $n 備份在 $b"
-        }
-        if ($h -eq $old -and (Test-Path -LiteralPath $dst)) { Link-Deps $n $dst; continue }
-        if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Item -LiteralPath $dst -Recurse -Force }
-        Copy-Item -LiteralPath $src -Destination $dst -Recurse
-        State-Set $kind $n $h; Say "  skill $n → $dir"
-        Link-Deps $n $dst
+        if ($h -eq $old -and (Test-Path -LiteralPath $dst)) { @{ a = 'same'; n = $n; sum = $h; src = $src } }
+        elseif ($old -and (Test-Path -LiteralPath $dst)) { @{ a = 'update'; n = $n; sum = $h; src = $src } }
+        else { @{ a = 'add'; n = $n; sum = $h; src = $src } }
     }
     foreach ($n in State-List $kind) {
         if ($names -contains $n) { continue }
         $dst = Join-Path $dir $n; $old = State-Get $kind $n
-        if ((Test-Path -LiteralPath $dst -PathType Container) -and (Dir-Hash $dst) -ne $old) {
-            # you changed it: never deleted. --force keeps a backup; without it the copy stays and is yours from now on
-            if ($script:Force) {
-                $b = Backup-Skill $dst $n
-                if (-not $b) { Warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有刪"; continue }
-                Say "  removed skill $n ← $dir（你改過的那份備份在 $b）"
-            } else {
-                Warn "skill ${n}（${dir}）被手動改過，沒有刪；kit 之後不再管它，不要了請自己刪"
-            }
-            State-Del $kind $n; continue
+        if (Test-Path -LiteralPath $dst -PathType Container) {
+            $cur = Dir-Hash $dst
+            if ($cur -ne $old) { @{ a = $(if ($script:Force) { 'drop' } else { 'keep' }); n = $n; sum = $cur; src = '' }; continue }
         }
-        if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Item -LiteralPath $dst -Recurse -Force }
-        State-Del $kind $n; Say "  removed skill $n ← $dir"
+        @{ a = 'remove'; n = $n; sum = $old; src = '' }
+    }
+}
+function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills into DIR, as Skills-Plan says
+    $names = @($names | Where-Object { $_ })
+    if ($names.Count -gt 0) { Ensure-Dir $dir }
+    foreach ($r in @(Skills-Plan $dir $kind $names)) {
+        $n = $r.n; $dst = Join-Path $dir $n
+        if ($r.a -ne 'foreign' -and $r.a -ne 'missing' -and $null -ne (State-Get 'skipped' $dst)) { State-Del 'skipped' $dst }
+        switch ($r.a) {
+            'missing' { Warn "skill $n not found in any source" }
+            'foreign' {   # someone else's folder: say it once, not at every sync
+                if ($null -eq (State-Get 'skipped' $dst)) { Warn "$dst 已經存在，不是 kit 放的，跳過（只提醒這一次）"; State-Set 'skipped' $dst 1 }
+            }
+            'modified' { Warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）" }
+            'same' { Link-Deps $n $dst }
+            { $_ -in 'add', 'update', 'replace' } {
+                $sum = $r.sum
+                if ($r.a -eq 'replace') {
+                    $b = Backup-Skill $dst $n
+                    if (-not $b) { Warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; break }
+                    Say "  你改過的 skill $n 備份在 $b"; $sum = $sum.Substring($sum.IndexOf(' ') + 1)
+                }
+                if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Item -LiteralPath $dst -Recurse -Force }
+                Copy-Item -LiteralPath $r.src -Destination $dst -Recurse
+                State-Set $kind $n $sum; Say "  skill $n → $dir"
+                Link-Deps $n $dst
+            }
+            'drop' {   # you changed it: never deleted; --force keeps a backup
+                $b = Backup-Skill $dst $n
+                if (-not $b) { Warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有刪"; break }
+                Say "  removed skill $n ← $dir（你改過的那份備份在 $b）"; State-Del $kind $n
+            }
+            'keep' {   # without --force the copy stays and is yours from now on
+                Warn "skill ${n}（${dir}）被手動改過，沒有刪；kit 之後不再管它，不要了請自己刪"; State-Del $kind $n
+            }
+            'remove' {
+                if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Item -LiteralPath $dst -Recurse -Force }
+                State-Del $kind $n; Say "  removed skill $n ← $dir"
+            }
+        }
     }
 }
 function Backup-Skill([string]$dst, [string]$n) { # move a hand-edited skill copy to kit's backups (not a skills folder); returns where, or nothing
@@ -1652,10 +1679,10 @@ function Sync-McpJson([string]$f, [string]$kind, $names) { # wanted MCP -> FILE'
     }
 }
 
-function Hook-Json { # the SessionStart hook entry kit adds to settings.json
+function Hook-Json([string]$args1 = 'sync --hook', [string]$timeout = '10') { # a hook entry kit adds to settings.json (default: SessionStart's)
     $exe = if ($PSVersionTable.PSEdition -eq 'Desktop') { 'powershell' } else { 'pwsh' }
-    $cmd = "$exe -NoProfile -ExecutionPolicy Bypass -File `"$($PSCommandPath.Replace('\', '/'))`" sync --hook"
-    '{"hooks":[{"type":"command","command":' + (Json-Str $cmd) + ',"timeout":10}]}'
+    $cmd = "$exe -NoProfile -ExecutionPolicy Bypass -File `"$($PSCommandPath.Replace('\', '/'))`" $args1"
+    '{"hooks":[{"type":"command","command":' + (Json-Str $cmd) + ',"timeout":' + $timeout + '}]}'
 }
 
 function Statusline-Json { # the statusLine kit puts in settings.json
@@ -1699,10 +1726,17 @@ function Apply-All {
         if ($deny -contains $n) { continue }
         $ops.Add(@('rmstr', 'permissions.deny', $n)); $del += $n; Say "  removed deny $n"
     }
+    # update automatically when Claude starts -> hooks.SessionStart; the context nearly full -> tell the agent to write
+    # HANDOFF.md first (hooks.UserPromptSubmit). Each is replaced when its command changes.
     $hj = Hook-Json; $old = State-Get 'hook' 'SessionStart'
     if ($hj -ne $old) {
         if ($old) { $ops.Add(@('rmjson', 'hooks.SessionStart', $old)) }
         $ops.Add(@('addjson', 'hooks.SessionStart', $hj))
+    }
+    $hj2 = Hook-Json 'handoff-hook' '5'; $old2 = State-Get 'hook' 'UserPromptSubmit'
+    if ($hj2 -ne $old2) {
+        if ($old2) { $ops.Add(@('rmjson', 'hooks.UserPromptSubmit', $old2)) }
+        $ops.Add(@('addjson', 'hooks.UserPromptSubmit', $hj2))
     }
     # Claude's status line: kit statusline keeps the numbers kit context shows (only when there is no status line of
     # your own; kit's is replaced when its command changes). Taken out by you: kit leaves it out (kit sync --force
@@ -1725,6 +1759,7 @@ function Apply-All {
         foreach ($n in $add) { State-Set 'deny' $n 1 }
         foreach ($n in $del) { State-Del 'deny' $n }
         if ($hj -ne $old) { State-Set 'hook' 'SessionStart' $hj }
+        if ($hj2 -ne $old2) { State-Set 'hook' 'UserPromptSubmit' $hj2 }
     }
 }
 
@@ -2709,6 +2744,26 @@ function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for 
     $nm = if ($name) { $name } else { 'Claude' }
     $uk = if ($u) { [long]$u } else { 0 }
     if ($pct -and $w) { [Console]::Out.Write("$nm · context $pct%（$([long][Math]::Floor($uk / 1000))k / $([long][Math]::Floor([long]$w / 1000))k）`n") } else { [Console]::Out.Write("$nm`n") }
+}
+$script:HandoffAt = @(80, 90)   # the context's % at which Claude is told (once each) to write HANDOFF.md before going on
+function Cmd-HandoffHook { # Claude's UserPromptSubmit hook (the same as unix/kit's handoff-hook): the context nearly full -> tell the
+    # agent, once at each of HandoffAt, to write HANDOFF.md and its kit note before going on; below the first: forgotten
+    $in = [Console]::In.ReadToEnd(); $sid = (Str-Of 'session_id' $in) -replace '[^A-Za-z0-9-]', ''
+    $cp = Claude-Pid; if (-not $cp) { return }
+    $f = Join-Path $CtxDir "claude-$cp.json"; if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return }
+    $j = Read-Text $f; $u = Num-Of 'used' $j; $m = Str-Of 'model' $j; $w = Setting-Window $m
+    if (-not $w) { $w = Num-Of 'window' $j }
+    if (-not $u -or -not $w -or [long]$w -le 0) { return }
+    $pct = [long](Ctx-Pct $u $w); $lvl = 0
+    foreach ($a in $HandoffAt) { if ($pct -ge $a) { $lvl = $a } }
+    $mark = Join-Path $CtxDir ("handoff-" + $(if ($sid) { $sid } else { $cp }))
+    if ($lvl -eq 0) { if (Test-Path -LiteralPath $mark) { Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue }; return }
+    $told = 0; if (Test-Path -LiteralPath $mark) { [void][int]::TryParse((Read-Text $mark).Trim(), [ref]$told) }
+    if ($told -ge $lvl) { return }
+    try { [IO.File]::WriteAllText($mark, "$lvl`n") } catch { return }
+    Get-ChildItem -LiteralPath $CtxDir -Filter 'handoff-*' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) } | Remove-Item -Force -ErrorAction SilentlyContinue
+    $msg = "kit: this conversation's context is ${pct}% full ($([long][Math]::Floor([long]$u / 1000))k of $([long][Math]::Floor([long]$w / 1000))k tokens). Before the next step: write or update HANDOFF.md in the project folder (what is done, what is next, open questions, how to check it), run kit note with where you are and what is next, and tell the user, in their language, that the context is nearly full: a new session can carry on from HANDOFF.md and kit note --history, or they can /compact. Then go on with what the user asked."
+    [Console]::Out.Write('{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":' + (Json-S $msg) + "}}`n")
 }
 # A log can be hundreds of MB: kit reads its last 8 MB (all of it only when those have nothing to go by), line by line
 # from a seek, never the whole file into memory.
@@ -4296,10 +4351,48 @@ function Add-Includes([bool]$quietly = $false) { # add sources that a source inc
         }
     }
 }
-function Cmd-Sync {
+function Plan-All { # what kit sync will do with skills, everywhere it puts them: rows "DIR`tACTION`tNAME`tSUM" (Skills-Plan)
+    $in = { param($d, $k, $names) foreach ($r in @(Skills-Plan $d $k $names)) { "$d`t$($r.a)`t$($r.n)`t$($r.sum)" } }
+    foreach ($d in @(Dirs-Registered)) {                      # the folders' own first, as kit sync does
+        if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
+        $agent = Dir-Mark $d 'agent'; $tool = Dir-Mark $d 'tool'
+        if ($agent -and $null -eq (Placed-File $d)) { continue }
+        $skills = Of-Kind @(Dir-Items $d) 'skill'
+        & $in (Join-Path (Join-Path $d '.claude') 'skills') (Dir-Kind $d 'skill') $skills
+        $kd = Dir-Kind $d 'skill.agents'
+        if ((Has-Codex) -or (Has-Omp) -or $tool -eq 'codex' -or $tool -eq 'omp' -or @(State-List $kd).Count -gt 0) { & $in (Join-Path (Join-Path $d '.agents') 'skills') $kd $skills }
+    }
+    $skills = Of-Kind (Wanted) 'skill'
+    & $in (Join-Path $ClaudeDir 'skills') 'skill' $skills
+    if ((Has-Codex) -or (Has-Omp)) { & $in $AgentsSkills 'skill.agents' $skills }
+}
+function Plan-Hash($rows) { # the number kit sync --expect checks (its own hash: unix/kit's differs, each checks its own)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $b = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes((@($rows) -join "`n") + "`n"))
+    [string][BitConverter]::ToUInt32($b, 0)
+}
+function Sync-DryRun { # kit sync --dry-run [--force] : the sources brought up to date (as kit sync does), then what it would do with skills
+    $rows = @(Plan-All); $f = $(if ($script:Force) { ' --force' } else { '' }); $shown = $false
+    Say "kit sync$f 會這樣改 skill（只看 skill；rule、MCP 等照常更新）："
+    $what = @{ add = '新增'; update = '更新'; replace = '你改過的先備份，再換新的'; remove = '拿掉'; drop = '你改過的先備份，再拿掉'
+        keep = '不再要了，但你改過：留著，之後歸你'; modified = '你改過：跳過（--force 會先備份再換）'; foreign = '不是 kit 放的：跳過'; missing = '來源裡找不到：跳過' }
+    foreach ($row in $rows) {
+        $c = $row -split "`t"
+        if (-not $what.ContainsKey($c[1])) { continue }
+        Say "  $(Here-Short ((Get-Location).ProviderPath) $c[0])/$($c[2])：$($what[$c[1]])"; $shown = $true
+    }
+    if (-not $shown) { Say '  （沒有要改的）' }
+    $h = Plan-Hash $rows
+    Say "清單的雜湊：${h}。要照這份做：kit sync$f --expect ${h}（到時候清單變了就什麼都不改）"
+}
+function Cmd-Sync([string]$dry = '', [string]$expect = '') { # kit sync [--force] [--dry-run | --expect HASH]
     Need-Init
     foreach ($s in M-Sources) { Fetch-Source $s }
     Add-Includes
+    if ($dry) { Sync-DryRun; return }
+    if ($expect -and (Plan-Hash @(Plan-All)) -ne $expect) {
+        Die-C 'plan-changed' "skill 的清單跟 --dry-run 那時候不一樣了（來源更新了，或你改了某個 skill）：什麼都沒改。再打一次  kit sync$(if ($script:Force) { ' --force' }) --dry-run  看新的清單"
+    }
     Apply-Dirs                                                # first: a folder that is gone leaves the list Codex's trust comes from
     Apply-All
     $new = @(foreach ($i in Available) { if ($null -eq (State-Get 'seen' $i)) { $i } })
@@ -6066,6 +6159,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                     讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
                                     （建立最後一層資料夾；之後用 kit add|rm --dir 改，每個資料夾各自獨立）
   kit sync [--force]                現在更新（kit run 會自動做）
+  kit sync --dry-run                先看 skill 會怎麼改，給一個雜湊；kit sync --expect 雜湊：清單一樣才改
 
 寫內容的人用（只吃本機資料夾，不連網）：
   kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]
@@ -6111,10 +6205,19 @@ try {
     switch ($cmd) {
         'init' { Cmd-Init $rest }
         'sync' {
-            if ($rest -contains '--force') { $script:Force = $true }
             if ($rest -contains '--hook') { Sync-Hook }
             if ($rest -contains '--bg') { Sync-Bg; exit 0 }
-            Cmd-Sync
+            $dry = ''; $expect = ''; $use = 'kit sync [--force] [--dry-run | --expect 雜湊]'; $a = @($rest | Where-Object { $null -ne $_ })
+            for ($i = 0; $i -lt $a.Count; $i++) {
+                switch ($a[$i]) {
+                    '--force' { $script:Force = $true }
+                    '--dry-run' { $dry = 'dry' }
+                    '--expect' { if ($i + 1 -ge $a.Count -or -not $a[$i + 1]) { Die-C 'usage' "用法：$use" }; $i++; $expect = $a[$i] }
+                    default { Die-C 'usage' "用法：$use" }
+                }
+            }
+            if ($dry -and $expect) { Die-C 'usage' '--dry-run 和 --expect 不能一起用' }
+            Cmd-Sync $dry $expect
         }
         { $_ -in 'list', 'ls' } { Cmd-List $rest }
         'add' { Cmd-AddRm 'add' $rest }
@@ -6125,6 +6228,7 @@ try {
         'files' { Cmd-Files $rest }
         'note' { Cmd-Note $rest }
         'statusline' { Cmd-Statusline }
+        'handoff-hook' { Cmd-HandoffHook }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
         'run' { Cmd-Run $rest }
         'place' { Cmd-Place $rest }

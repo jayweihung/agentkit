@@ -4,6 +4,19 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.2（2026-11-14）
+
+更新後要做：`kit self-update`、`kit sync`（Claude 的 `settings.json` 會多一個 `UserPromptSubmit` hook）。kit api 還是 1.5。
+
+**先看 skill 會怎麼改：`kit sync --dry-run`**
+- 列出每個 skill 會新增、更新、拿掉、跳過（你改過的、不是 kit 放的），或先備份再換（`--force`），不改任何檔案，最後給一個雜湊。
+- `kit sync --expect <雜湊>`：kit 重算一次，清單一樣才動手；中間來源更新了、或你又改了某個 skill，就什麼都不改，請你再看一次（錯誤代碼 `plan-changed`）。
+- 只管 skill；rule、MCP 等照常更新。
+
+**context 快滿時先交接（Claude）**
+- context 到 80%、90% 時各提醒 Claude 一次：先寫 `HANDOFF.md`、`kit note` 記進度，再跟你說可以換新的 agent 接手或 `/compact`。
+- 要有 kit 的 statusLine（用它存的數字）。Codex、omp 沒有這種 hook。
+
 ## 0.6.1（2026-11-14）
 
 更新後要做：`kit self-update`、`kit sync`（Codex 的 `config.toml` 會多一段 `[sandbox_workspace_write]`），開著的 Codex 重開。kit api 變成 1.5。

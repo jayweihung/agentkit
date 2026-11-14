@@ -121,7 +121,7 @@ prune_empty() { # prune_empty FILE PATH... : delete each PATH whose value is [] 
     done
     rm -f "$ops"
 }
-prune_deny() { prune_empty "$CLAUDE_DIR/settings.json" permissions.deny permissions hooks.SessionStart hooks; }
+prune_deny() { prune_empty "$CLAUDE_DIR/settings.json" permissions.deny permissions hooks.SessionStart hooks.UserPromptSubmit hooks; }
 
 json_get() { LC_ALL=C awk -f "$KIT_LIB/json.awk" -v get="$2" "$1" 2>/dev/null; }
 json_strs() { # json_strs FILE A.B : the strings in the array at A.B, as JSON text ("..."), one per line (json_str NAME is one)
@@ -548,45 +548,69 @@ apply_rules() { # apply_rules WANTED : the account's instructions (Claude, Codex
     return 0
 }
 
-sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin) into DIR
-    local dir=$1 kind=$2 names n p dst h old b
+skills_plan() { # skills_plan DIR STATEKIND : what sync_skills will do with the wanted skills (names on stdin); changes nothing
+    # rows ACTION<TAB>NAME<TAB>SUM<TAB>SOURCE. SUM: the source's hash, or (yours) the copy's: a plan stays the same plan
+    # only while neither changed. ACTION: add, update (a newer one over kit's copy), same, missing (in no source),
+    # foreign (a folder kit did not put there), modified (you changed kit's copy: skipped), replace (that with --force:
+    # backed up first), remove (not wanted any more), keep (that, changed by you: stays, yours from now on), drop (keep
+    # with --force: backed up, then gone)
+    local dir=$1 kind=$2 names n p dst h old cur
     names=$(cat)
-    [ -n "$names" ] && mkdir -p "$dir"
     for n in $names; do
-        p=$(find_item skill "$n") || { warn "skill $n not found in any source"; continue; }
+        p=$(find_item skill "$n" 2>/dev/null) || { printf 'missing\t%s\t\t\n' "$n"; continue; }
         p=$(dirname "$p"); dst="$dir/$n"; h=$(dir_hash "$p")
         old=$(state_get "$kind" "$n")
-        if [ -e "$dst" ] && [ -z "$old" ]; then
-            # someone else's folder: say it once, not at every sync
-            [ -n "$(state_get skipped "$dst")" ] || { warn "$dst 已經存在，不是 kit 放的，跳過（只提醒這一次）"; state_set skipped "$dst" 1; }
+        if [ -e "$dst" ] && [ -z "$old" ]; then printf 'foreign\t%s\t\t\n' "$n"; continue; fi
+        if [ -n "$old" ] && [ -d "$dst" ] && cur=$(dir_hash "$dst") && [ "$cur" != "$old" ]; then
+            if [ -n "${FORCE:-}" ]; then printf 'replace\t%s\t%s %s\t%s\n' "$n" "$cur" "$h" "$p"
+            else printf 'modified\t%s\t%s\t\n' "$n" "$cur"; fi
             continue
         fi
-        state_del skipped "$dst"
-        if [ -n "$old" ] && [ -d "$dst" ] && [ "$(dir_hash "$dst")" != "$old" ]; then
-            [ -n "${FORCE:-}" ] || { warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）"; continue; }
-            b=$(backup_skill "$dst" "$n") || { warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; continue; }
-            say "  你改過的 skill $n 備份在 $b"
-        fi
-        [ "$h" = "$old" ] && [ -d "$dst" ] && { link_deps "$n" "$dst"; continue; }
-        rm -rf "$dst"; cp -R "$p" "$dst" || { warn "沒辦法複製 skill $n 到 $dir"; rm -rf "$dst"; continue; }
-        state_set "$kind" "$n" "$h"; say "  skill $n → $dir"
-        link_deps "$n" "$dst"
+        if [ "$h" = "$old" ] && [ -d "$dst" ]; then printf 'same\t%s\t%s\t%s\n' "$n" "$h" "$p"
+        elif [ -n "$old" ] && [ -d "$dst" ]; then printf 'update\t%s\t%s\t%s\n' "$n" "$h" "$p"
+        else printf 'add\t%s\t%s\t%s\n' "$n" "$h" "$p"; fi
     done
     for n in $(state_list "$kind"); do
         printf '%s\n' "$names" | grep -qxF "$n" && continue
         dst="$dir/$n"; old=$(state_get "$kind" "$n")
-        if [ -d "$dst" ] && [ "$(dir_hash "$dst")" != "$old" ]; then
-            # you changed it: never deleted. --force keeps a backup; without it the copy stays and is yours from now on
-            if [ -n "${FORCE:-}" ]; then
-                b=$(backup_skill "$dst" "$n") || { warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有刪"; continue; }
-                say "  removed skill $n ← ${dir}（你改過的那份備份在 ${b}）"
-            else
-                warn "skill ${n}（${dir}）被手動改過，沒有刪；kit 之後不再管它，不要了請自己刪"
-            fi
-            state_del "$kind" "$n"; continue
-        fi
-        rm -rf "$dst"; state_del "$kind" "$n"; say "  removed skill $n ← $dir"
+        if [ -d "$dst" ] && cur=$(dir_hash "$dst") && [ "$cur" != "$old" ]; then
+            if [ -n "${FORCE:-}" ]; then printf 'drop\t%s\t%s\t\n' "$n" "$cur"; else printf 'keep\t%s\t%s\t\n' "$n" "$cur"; fi
+        else printf 'remove\t%s\t%s\t\n' "$n" "$old"; fi
     done
+}
+
+sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin) into DIR, as skills_plan says
+    local dir=$1 kind=$2 names act n sum p dst b
+    names=$(cat)
+    [ -n "$names" ] && mkdir -p "$dir"
+    while IFS="$TAB" read -r act n sum p; do
+        [ -n "$act" ] || continue
+        dst="$dir/$n"
+        [ "$act" = foreign ] || [ "$act" = missing ] || state_del skipped "$dst"
+        case $act in
+            missing) warn "skill $n not found in any source";;
+            foreign)    # someone else's folder: say it once, not at every sync
+                [ -n "$(state_get skipped "$dst")" ] || { warn "$dst 已經存在，不是 kit 放的，跳過（只提醒這一次）"; state_set skipped "$dst" 1; };;
+            modified) warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）";;
+            same) link_deps "$n" "$dst";;
+            add|update|replace)
+                if [ "$act" = replace ]; then
+                    b=$(backup_skill "$dst" "$n") || { warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; continue; }
+                    say "  你改過的 skill $n 備份在 $b"; sum=${sum#* }
+                fi
+                rm -rf "$dst"; cp -R "$p" "$dst" || { warn "沒辦法複製 skill $n 到 $dir"; rm -rf "$dst"; continue; }
+                state_set "$kind" "$n" "$sum"; say "  skill $n → $dir"
+                link_deps "$n" "$dst";;
+            drop)       # you changed it: never deleted; --force keeps a backup
+                b=$(backup_skill "$dst" "$n") || { warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有刪"; continue; }
+                say "  removed skill $n ← ${dir}（你改過的那份備份在 ${b}）"; state_del "$kind" "$n";;
+            keep)       # without --force the copy stays and is yours from now on
+                warn "skill ${n}（${dir}）被手動改過，沒有刪；kit 之後不再管它，不要了請自己刪"; state_del "$kind" "$n";;
+            remove) rm -rf "$dst"; state_del "$kind" "$n"; say "  removed skill $n ← $dir";;
+        esac
+    done <<PLAN
+$(skills_plan "$dir" "$kind" <<< "$names")
+PLAN
 }
 
 backup_skill() { # backup_skill DST NAME : move a hand-edited skill copy to kit's backups (not a skills folder); prints where
@@ -759,11 +783,17 @@ EOF
         printf 'rmstr\tpermissions.deny\t%s\n' "$n" >> "$ops"; del="$del$n
 "; say "  removed deny $n"
     done
-    # update automatically when Claude starts -> settings.json hooks.SessionStart
-    local hj old; hj=$(hook_json); old=$(state_get hook SessionStart)
+    # update automatically when Claude starts -> settings.json hooks.SessionStart; the context nearly full -> tell the
+    # agent to write HANDOFF.md first (hooks.UserPromptSubmit). Each is replaced when its command changes.
+    local hj old hj2 old2; hj=$(hook_json); old=$(state_get hook SessionStart)
     if [ "$hj" != "$old" ]; then
         [ -n "$old" ] && printf 'rmjson\thooks.SessionStart\t%s\n' "$old" >> "$ops"
         printf 'addjson\thooks.SessionStart\t%s\n' "$hj" >> "$ops"
+    fi
+    hj2=$(hook_json handoff-hook 5); old2=$(state_get hook UserPromptSubmit)
+    if [ "$hj2" != "$old2" ]; then
+        [ -n "$old2" ] && printf 'rmjson\thooks.UserPromptSubmit\t%s\n' "$old2" >> "$ops"
+        printf 'addjson\thooks.UserPromptSubmit\t%s\n' "$hj2" >> "$ops"
     fi
     # Claude's status line: kit statusline keeps the numbers kit context shows (only when there is no status line of
     # your own; kit's is replaced when its command changes). Taken out by you: kit leaves it out (kit sync --force
@@ -790,14 +820,15 @@ EOF
 $del
 EOF
         [ "$hj" = "$old" ] || state_set hook SessionStart "$hj"
+        [ "$hj2" = "$old2" ] || state_set hook UserPromptSubmit "$hj2"
     fi
     rm -f "$ops"
 }
 
-hook_json() { # the SessionStart hook entry kit adds to settings.json
+hook_json() { # hook_json [ARGS TIMEOUT] : a hook entry kit adds to settings.json (default: SessionStart's, kit sync --hook)
     local k="$HOME/.local/bin/kit"
     [ -x "$k" ] || k="$KIT_LIB/kit"
-    printf '{"hooks":[{"type":"command","command":%s,"timeout":10}]}' "$(json_str "'$k' sync --hook")"
+    printf '{"hooks":[{"type":"command","command":%s,"timeout":%s}]}' "$(json_str "'$k' ${1:-sync --hook}")" "${2:-10}"
 }
 
 statusline_json() { # the statusLine kit puts in settings.json
@@ -1734,6 +1765,27 @@ EOF
     if [ -n "$pct" ] && [ -n "$w" ]; then printf '%s · context %s%%（%sk / %sk）\n' "${name:-Claude}" "$pct" "$(( ${u:-0} / 1000 ))" "$(( w / 1000 ))"
     else printf '%s\n' "${name:-Claude}"; fi
 }
+HANDOFF_AT="80 90"   # the context's % at which Claude is told (once each) to write HANDOFF.md before going on
+cmd_handoff_hook() { # Claude's UserPromptSubmit hook: the context nearly full (the numbers kit statusline keeps) -> tell the
+    # agent, once at each of HANDOFF_AT, to write HANDOFF.md and its kit note before going on. Fast (one ps, one small
+    # file); nothing without kit's statusLine. Below the first: forgotten, so a /compact that fills up again is told again.
+    local in sid pid f j u w m pct lvl=0 a mark told
+    in=$(cat); sid=$(str_of session_id "$in" | tr -cd 'A-Za-z0-9-')
+    pid=$(claude_pid); [ -n "$pid" ] || return 0
+    f="$CTX_DIR/claude-$pid.json"; [ -f "$f" ] || return 0
+    j=$(cat "$f"); u=$(num_of used "$j"); m=$(str_of model "$j"); w=$(setting_window "$m")
+    [ -n "$w" ] || w=$(num_of window "$j")
+    [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] 2>/dev/null || return 0
+    pct=$(( (u * 100 + w / 2) / w ))
+    for a in $HANDOFF_AT; do [ "$pct" -ge "$a" ] && lvl=$a; done
+    mark="$CTX_DIR/handoff-${sid:-$pid}"
+    [ "$lvl" -gt 0 ] || { rm -f "$mark" 2>/dev/null; return 0; }
+    told=$(cat "$mark" 2>/dev/null); [ "${told:-0}" -ge "$lvl" ] 2>/dev/null && return 0
+    printf '%s\n' "$lvl" > "$mark" 2>/dev/null || return 0
+    find "$CTX_DIR" -name 'handoff-*' -mtime +7 -exec rm -f {} + 2>/dev/null
+    printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' "$(json_s "kit: this conversation's context is ${pct}% full ($(( u / 1000 ))k of $(( w / 1000 ))k tokens). Before the next step: write or update HANDOFF.md in the project folder (what is done, what is next, open questions, how to check it), run kit note with where you are and what is next, and tell the user, in their language, that the context is nearly full: a new session can carry on from HANDOFF.md and kit note --history, or they can /compact. Then go on with what the user asked.")"
+}
+
 # A log can be hundreds of MB: kit reads its last 8 MB (all of it only when those have nothing to go by), in one awk
 # pass. Each pass prints what it found, first "more" when it found nothing in a part of the file.
 CTX_TAIL=${KIT_CTX_TAIL:-8388608}
@@ -3029,11 +3081,54 @@ EOF
     done
 }
 
-cmd_sync() {
+plan_in() { skills_plan "$1" "$2" | while IFS="$TAB" read -r a n s _; do [ -z "$a" ] || printf '%s\t%s\t%s\t%s\n' "$1" "$a" "$n" "$s"; done; }   # plan_in DIR KIND : skills_plan's rows with DIR in front
+plan_all() { # what kit sync will do with skills, everywhere it puts them: rows DIR<TAB>ACTION<TAB>NAME<TAB>SUM (skills_plan)
+    local skills d agent tool kd
+    while IFS= read -r d; do                                 # the folders' own first, as kit sync does
+        [ -n "$d" ] && [ -d "$d" ] || continue
+        agent=$(dir_mark "$d" agent); tool=$(dir_mark "$d" tool)
+        if [ -n "$agent" ]; then placed_file "$d" >/dev/null; [ $? != 1 ] || continue; fi
+        skills=$(dir_items "$d" | sed -n 's/^skill://p')
+        plan_in "$d/.claude/skills" "$(dir_kind "$d" skill)" <<< "$skills"
+        kd=$(dir_kind "$d" skill.agents)
+        if has_codex || has_omp || [ "$tool" = codex ] || [ "$tool" = omp ] || [ -n "$(state_list "$kd")" ]; then plan_in "$d/.agents/skills" "$kd" <<< "$skills"; fi
+    done <<EOF
+$(dirs_registered)
+EOF
+    skills=$(wanted | sed -n 's/^skill://p')
+    plan_in "$CLAUDE_DIR/skills" skill <<< "$skills"
+    if has_codex || has_omp; then plan_in "$AGENTS_SKILLS" skill.agents <<< "$skills"; fi
+}
+plan_hash() { printf '%s\n' "$1" | cksum | awk '{ print $1 }'; }   # plan_hash ROWS : the number kit sync --expect checks
+
+sync_dry_run() { # kit sync --dry-run [--force] : the sources brought up to date (as kit sync does), then what it would do with skills
+    local rows a d n s shown=0 what
+    rows=$(plan_all)
+    say "kit sync$([ -z "${FORCE:-}" ] || printf ' --force') 會這樣改 skill（只看 skill；rule、MCP 等照常更新）："
+    while IFS="$TAB" read -r d a n s; do
+        case $a in
+            add) what="新增";; update) what="更新";; replace) what="你改過的先備份，再換新的";; remove) what="拿掉";;
+            drop) what="你改過的先備份，再拿掉";; keep) what="不再要了，但你改過：留著，之後歸你";;
+            modified) what="你改過：跳過（--force 會先備份再換）";; foreign) what="不是 kit 放的：跳過";; missing) what="來源裡找不到：跳過";;
+            *) continue;;
+        esac
+        say "  $(here_short "$PWD" "$d")/${n}：${what}"; shown=1
+    done <<EOF
+$rows
+EOF
+    [ $shown = 1 ] || say "  （沒有要改的）"
+    say "清單的雜湊：$(plan_hash "$rows")。要照這份做：kit sync$([ -z "${FORCE:-}" ] || printf ' --force') --expect $(plan_hash "$rows")（到時候清單變了就什麼都不改）"
+}
+
+cmd_sync() { # kit sync [--force] [--dry-run | --expect HASH]
     need_init
-    local s
+    local s dry=${1:-} expect=${2:-}
     while IFS= read -r s; do [ -z "$s" ] || fetch_source "$s"; done <<< "$(m_sources)"
     add_includes
+    [ "$dry" = dry ] && { sync_dry_run; return 0; }
+    if [ -n "$expect" ] && [ "$(plan_hash "$(plan_all)")" != "$expect" ]; then
+        die_c plan-changed "skill 的清單跟 --dry-run 那時候不一樣了（來源更新了，或你改了某個 skill）：什麼都沒改。再打一次  kit sync$([ -z "${FORCE:-}" ] || printf ' --force') --dry-run  看新的清單"
+    fi
     apply_dirs                                               # first: a folder that is gone leaves the list Codex's trust comes from
     apply_claude
     local new=""
@@ -4750,6 +4845,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                     讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
                                     （建立最後一層資料夾；之後用 kit add|rm --dir 改，每個資料夾各自獨立）
   kit sync [--force]                現在更新（kit run 會自動做）
+  kit sync --dry-run                先看 skill 會怎麼改，給一個雜湊；kit sync --expect 雜湊：清單一樣才改
 
 寫內容的人用（只吃本機資料夾，不連網）：
   kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]
@@ -4796,8 +4892,19 @@ case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent|install-deps|place) 
 case ${1:-} in
     init)      shift; cmd_init "$@";;
     sync)      shift
-               case ${1:-} in --force) FORCE=1;; --hook) sync_hook;; esac
-               cmd_sync;;
+               [ "${1:-}" = --hook ] && { sync_hook; cmd_sync; exit 0; }
+               dry=; expect=
+               while [ $# -gt 0 ]; do
+                   case $1 in
+                       --force) FORCE=1;;
+                       --dry-run) dry=dry;;
+                       --expect) [ -n "${2:-}" ] || die_c usage "用法：kit sync [--force] [--dry-run | --expect 雜湊]"; expect=$2; shift;;
+                       *) die_c usage "用法：kit sync [--force] [--dry-run | --expect 雜湊]";;
+                   esac
+                   shift
+               done
+               [ -n "$dry" ] && [ -n "$expect" ] && die_c usage "--dry-run 和 --expect 不能一起用"
+               cmd_sync "$dry" "$expect";;
     list|ls)   shift; cmd_list "$@";;
     add)       shift; cmd_add_rm add "$@";;
     rm|remove) shift; cmd_add_rm rm "$@";;
@@ -4822,6 +4929,7 @@ case ${1:-} in
     files)     shift; cmd_files "$@";;
     note)      shift; cmd_note "$@";;
     statusline) shift; cmd_statusline "$@";;
+    handoff-hook) shift; cmd_handoff_hook "$@";;
     collect)   shift; cmd_collect "$@";;
     outdated)  shift; cmd_outdated "$@";;
     status)    shift; cmd_status "$@" >&3;;
