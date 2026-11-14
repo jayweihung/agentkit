@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.6
+KIT_API=1.7
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -1725,19 +1725,35 @@ claude_pid() { # the Claude process above this one (Claude runs the status line 
                   if (w1[p] == "claude" || w1[p] == "claude.exe" || w2[p] == "claude" || w2[p] == "claude.js" || w2[p] == "cli.js") { print p; exit }
                   p = up[p] } }'
 }
-ctx_json() { # ctx_json TOOL USED WINDOW SOURCE MODEL [PCT] -> the answer (PCT: the tool's own way of counting)
-    local pct=null u=${2:-} w=${3:-}
+ctx_json() { # ctx_json TOOL USED WINDOW SOURCE MODEL [PCT] -> the answer (PCT: the tool's own way of counting); CTX_LIMIT
+    # ("UNTIL_SECONDS KIND", from claude_limit): the agent stopped at its plan's usage limit -> a "limit" field
+    local pct=null u=${2:-} w=${3:-} lim=""
     [ -n "$u" ] && [ -n "$w" ] && [ "$w" -gt 0 ] 2>/dev/null && pct=$(( (u * 100 + w / 2) / w ))
     [ -z "${6:-}" ] || pct=$6
     [ "$pct" != null ] && [ "$pct" -gt 100 ] 2>/dev/null && pct=100      # an estimate past the window: full
-    printf '{"tool": %s, "used": %s, "window": %s, "pct": %s, "source": %s, "model": %s}\n' "$(json_s "$1")" "${u:-null}" "${w:-null}" "$pct" "$(json_s "$4")" "$(json_s "$5")"
+    [ -z "${CTX_LIMIT:-}" ] || lim=", \"limit\": {\"until\": ${CTX_LIMIT%% *}000, \"kind\": $(json_s "${CTX_LIMIT#* }")}"
+    printf '{"tool": %s, "used": %s, "window": %s, "pct": %s, "source": %s, "model": %s%s}\n' "$(json_s "$1")" "${u:-null}" "${w:-null}" "$pct" "$(json_s "$4")" "$(json_s "$5")" "$lim"
+}
+# A Claude that stopped at its plan's usage limit ("You've hit your 5-hour limit · resets 12:10am"): its transcript's last
+# word is a reply Claude Code made itself with "apiError":"usage_limit_reached" and the reset time (resetsAt, seconds).
+# Anything said after it (a reply, the user typing, a tool's answer) means it went on. Only the last 1 MB is read.
+CLAUDE_LIMIT_AWK='index($0, "\"apiError\":\"usage_limit_reached\"") { l = $0; ln = NR; next }
+    index($0, "\"isMeta\":true") { next }
+    index($0, "\"type\":\"assistant\"") || index($0, "\"type\":\"user\"") { an = NR }
+    END { if (!ln || ln < an) exit
+        r = l; if (!match(r, /"resetsAt":[0-9]+/)) exit; r = substr(r, RSTART + 11, RLENGTH - 11)
+        k = "limit"; if (match(l, /"rateLimitType":"[A-Za-z0-9_]+"/)) k = substr(l, RSTART + 17, RLENGTH - 18)
+        print r " " k }'
+claude_limit() { # claude_limit TRANSCRIPT -> "UNTIL_SECONDS KIND" when that Claude stopped at its usage limit, else nothing
+    [ -n "$1" ] && [ -f "$1" ] || return 0
+    ctx_scan "$1" "$CLAUDE_LIMIT_AWK" 1048576
 }
 cmd_statusline() { # what Claude's statusLine runs: keep the numbers for kit context, print a short status line
     # (it runs on every update of Claude's status line: one awk for what Claude hands over, one ps for the Claude process;
     # the window set in settings.json, autoCompactWindow, only when settings.json has one)
-    local w pct u sid model name tp cwd pid tmp us sw st=""
+    local w pct u sid model name tp cwd lim pid tmp us sw st=""
     us=$(printf '\037')
-    IFS=$us read -r w pct u sid model name tp cwd <<EOF
+    IFS=$us read -r w pct u sid model name tp cwd lim <<EOF
 $(LC_ALL=C awk -v us="$us" '
     function after(s, k,   p) { p = 0; while (match(substr(s, p + 1), "\"" k "\"[ \t\r\n]*:[ \t\r\n]*")) p += RSTART + RLENGTH - 1; return p ? substr(s, p + 1) : s }
     function num(s, k) { if (!match(s, "\"" k "\"[ \t\r\n]*:[ \t\r\n]*[0-9]+")) return ""; s = substr(s, RSTART, RLENGTH); sub(/^.*:[ \t\r\n]*/, "", s); return s }
@@ -1748,7 +1764,14 @@ $(LC_ALL=C awk -v us="$us" '
         u = ""; if (match(j, /"current_usage"/) && index(substr(j, RSTART), "{")) {
             c = after(j, "current_usage"); if (c !~ /^null/) u = sprintf("%d", num(c, "input_tokens") + num(c, "cache_creation_input_tokens") + num(c, "cache_read_input_tokens")) }
         d = str(j, "project_dir"); if (d == "") d = str(j, "cwd")
-        printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n", num(j, "context_window_size"), us, pct, us, u, us, str(j, "session_id"), us, str(after(j, "model"), "id"), us, str(j, "display_name"), us, str(j, "transcript_path"), us, d
+        # the plan'"'"'s usage limits (rate_limits: five_hour, seven_day, each used_percentage and resets_at in seconds)
+        lim = ""; if (index(j, "\"rate_limits\"")) { r = after(j, "rate_limits"); n = split("five_hour 300 seven_day 10080", W, " ")
+            for (i = 1; i < n; i += 2) { if (!index(r, "\"" W[i] "\"")) continue; o = after(r, W[i]); sub(/}.*/, "", o)
+                p = ""; if (match(o, /"used_percentage"[ \t\r\n]*:[ \t\r\n]*[0-9]+(\.[0-9]+)?/)) { p = substr(o, RSTART, RLENGTH); sub(/^[^:]*:[ \t\r\n]*/, "", p); p = sprintf("%d", p + 0.5) }
+                t = num(o, "resets_at"); if (p == "") continue
+                lim = lim (lim == "" ? "" : ", ") "{\"id\": \"" W[i] "\", \"pct\": " p ", \"minutes\": " W[i + 1] ", \"resets_at\": " (t == "" ? "null" : t "000") "}" }
+            if (lim != "") { srand(); now = srand(); lim = "{\"at\": " now "000, \"windows\": [" lim "]}" } }
+        printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n", num(j, "context_window_size"), us, pct, us, u, us, str(j, "session_id"), us, str(after(j, "model"), "id"), us, str(j, "display_name"), us, str(j, "transcript_path"), us, d, us, lim
     }')
 EOF
     pid=$(claude_pid)
@@ -1757,6 +1780,9 @@ EOF
             # the paths as Claude wrote them (already JSON text)
             printf '{"pid": %s, "session": %s, "used": %s, "window": %s, "pct": %s, "model": %s, "transcript": "%s", "cwd": "%s"}\n' "$pid" "$(json_s "$sid")" "${u:-null}" "${w:-null}" "${pct:-null}" "$(json_s "$model")" "$tp" "$cwd" > "$tmp" && mv -f "$tmp" "$CTX_DIR/claude-$pid.json"; } 2>/dev/null
     fi
+    # the account's usage limits, whichever Claude saw them last (kit usage)
+    [ -z "$lim" ] || { { [ -d "$CTX_DIR" ] || mkdir -p "$CTX_DIR"; } 2>/dev/null && tmp="$CTX_DIR/.claude-usage.$$" &&
+        printf '%s\n' "$lim" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CTX_DIR/claude-usage.json"; } 2>/dev/null
     [ -f "$CLAUDE_DIR/settings.json" ] && st=$(< "$CLAUDE_DIR/settings.json") 2>/dev/null
     case $st in *autoCompactWindow*) sw=$(setting_window "$model")
         [ -n "$sw" ] && [ "$sw" != "$w" ] && [ -n "$u" ] && { w=$sw; pct=$(( (u * 100 + w / 2) / w )); };;
@@ -1806,7 +1832,7 @@ claude_ctx() { # claude_ctx PID CWD
         # the window: what settings.json tells Claude Code (autoCompactWindow, as its own /context shows), else Claude's
         j=$(cat "$f"); u=$(num_of used "$j"); m=$(str_of model "$j"); w=$(setting_window "$m")
         [ -n "$w" ] || w=$(num_of window "$j")
-        ctx_json claude "$u" "$w" statusline "$m"; return
+        CTX_LIMIT=$(claude_limit "$(str_of transcript "$j")") ctx_json claude "$u" "$w" statusline "$m"; return
     fi
     # its own transcript (claude_where: the pid's session), not just the newest of its folder: two Claudes in one
     # folder would read each other's
@@ -1818,6 +1844,7 @@ claude_ctx() { # claude_ctx PID CWD
         t=$(ls -t "$d"/*.jsonl 2>/dev/null | head -n 1)
     fi
     [ -n "$t" ] || { ctx_json claude "" "" "" ""; return; }
+    local CTX_LIMIT; CTX_LIMIT=$(claude_limit "$t")
     # the last reply with its usage (not one Claude Code made itself: "<synthetic>", usage 0) and the last compaction
     { IFS= read -r which; IFS= read -r line; IFS= read -r cb; } <<EOF
 $(ctx_read "$t" 'cut && NR == 1 { next }
@@ -1942,6 +1969,29 @@ cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [-
         omp) omp_ctx "$pid" "$dir";;
         *) ctx_json "" "" "" "" "";;
     esac
+}
+
+# ---------- kit usage: how much of the plan's limits the account used ----------
+# One JSON line (kit.ps1 prints the same): {"claude": U | null, "codex": U | null}, U = {"at": ms | null, "windows":
+# [{"id", "pct", "minutes", "resets_at": ms | null}]}. Claude: what kit's statusLine last saw (Claude Code hands it
+# rate_limits: five_hour, seven_day); Codex: the last rate_limits in the newest rollout (primary, secondary). A window
+# whose resets_at has passed has started again: its pct is from before. Only numbers are read.
+CODEX_USAGE_AWK='index($0, "\"rate_limits\"") && index($0, "\"used_percent\"") { l = $0 }
+    END { if (l == "") exit; r = substr(l, index(l, "\"rate_limits\"")); n = split("primary secondary", W, " "); out = ""
+        for (i = 1; i <= n; i++) { k = "\"" W[i] "\":{"; p = index(r, k); if (!p) continue; o = substr(r, p + length(k)); sub(/}.*/, "", o)
+            if (!match(o, /"used_percent":[0-9.]+/)) continue; pc = substr(o, RSTART + 15, RLENGTH - 15); pc = sprintf("%d", pc + 0.5)
+            mi = "null"; if (match(o, /"window_minutes":[0-9]+/)) mi = substr(o, RSTART + 17, RLENGTH - 17)
+            t = "null"; if (match(o, /"resets_at":[0-9]+/)) t = substr(o, RSTART + 12, RLENGTH - 12) "000"
+            out = out (out == "" ? "" : ", ") "{\"id\": \"" W[i] "\", \"pct\": " pc ", \"minutes\": " mi ", \"resets_at\": " t "}" }
+        if (out != "") print "{\"at\": null, \"windows\": [" out "]}" }'
+cmd_usage() { # kit usage : the account's plan usage, Claude and Codex (JSON)
+    local c="" x="" f
+    [ $# -eq 0 ] || [ "$*" = --json ] || die "用法：kit usage"
+    [ -f "$CTX_DIR/claude-usage.json" ] && c=$(head -n 1 "$CTX_DIR/claude-usage.json" 2>/dev/null)
+    case $c in "{"*"}") ;; *) c=null;; esac
+    f=$(newest_files "$CODEX_DIR/sessions" 'rollout-*.jsonl' | head -n 1)
+    [ -n "$f" ] && x=$(ctx_scan "$f" "$CODEX_USAGE_AWK" 1048576)
+    printf '{"claude": %s, "codex": %s}\n' "$c" "${x:-null}"
 }
 
 # ---------- kit context --detail: where the tokens go ----------
@@ -4951,6 +5001,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit install-deps mcp <名字>       裝 MCP 的套件（固定的版本），之後不用每次啟動時下載
   kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]
                                   那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
+  kit usage                       這個帳號的方案用量（Claude、Codex：5 小時、每週用了幾 %、幾點重置；JSON）
   kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
                                   那個 agent 讀過、改過的檔案，新的在前（--json 給程式讀；--git：再加上 git 有變動的）
   kit note ["做了什麼；下一步"]      agent 寫自己做到哪（一兩行，畫面上看得到）；不帶文字：印出現在寫的
@@ -5045,6 +5096,7 @@ case ${1:-} in
     install-tool) shift; cmd_install_tool "$@";;
     install-deps) shift; cmd_install_deps "$@";;
     context)   shift; cmd_context "$@";;
+    usage)     shift; cmd_usage "$@";;
     files)     shift; cmd_files "$@";;
     note)      shift; cmd_note "$@";;
     pending)   shift; cmd_pending "$@";;

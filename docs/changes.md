@@ -4,6 +4,18 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.5（2026-11-15）
+
+更新後要做：`kit self-update`。kit api 變成 1.7。
+
+**看方案用了多少：`kit usage`**
+- 印出 Claude 和 Codex 這個帳號 5 小時、每週的用量（%）和幾點重置。Claude 的是 kit 狀態列每次更新時存下來的（要 kit 的 statusLine），Codex 的從它最新的對話檔讀。
+- 畫面程式（Herdr）拿來顯示用量。
+
+**`kit context` 會說 Claude 撞到用量上限、幾點恢復**
+- Claude 撞到上限停下來、還沒人叫它繼續時，多一個 `limit`（`until`：幾點恢復，`kind`：哪一種上限）。Herdr 拿來提醒你，時間到了替你打「繼續」。
+- 沒撞到時跟以前一樣，沒有這個欄位。
+
 ## 0.6.4（2026-11-14）
 
 更新後要做：`kit self-update`。kit api 還是 1.6。

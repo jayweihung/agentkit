@@ -299,7 +299,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.6)' { $rc -eq 0 -and $out -ceq '1.6' }
+Check 'api: one line, major.minor (1.7)' { $rc -eq 0 -and $out -ceq '1.7' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }

@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.6'
+$script:KitApi = '1.7'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -2715,7 +2715,30 @@ function Ctx-Json([string]$tool, [string]$u, [string]$w, [string]$src, [string]$
     if ($u -and $w -and [long]$w -gt 0) { $pct = Ctx-Pct $u $w }
     if ($own) { $pct = $own }
     if ($pct -ne 'null' -and [long]$pct -gt 100) { $pct = '100' }      # an estimate past the window: full
-    '{"tool": ' + (Json-S $tool) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $pct + ', "source": ' + (Json-S $src) + ', "model": ' + (Json-S $m) + '}'
+    # CtxLimit ("UNTIL_SECONDS KIND", from Claude-Limit): the agent stopped at its plan's usage limit -> a "limit" field
+    $lim = ''; if ($script:CtxLimit) { $p2 = $script:CtxLimit -split ' ', 2; $lim = ', "limit": {"until": ' + $p2[0] + '000, "kind": ' + (Json-S $p2[1]) + '}' }
+    '{"tool": ' + (Json-S $tool) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $pct + ', "source": ' + (Json-S $src) + ', "model": ' + (Json-S $m) + $lim + '}'
+}
+$script:CtxLimit = ''
+# A Claude that stopped at its plan's usage limit ("You've hit your 5-hour limit · resets 12:10am"): its transcript's last
+# word is a reply Claude Code made itself with "apiError":"usage_limit_reached" and the reset time (resetsAt, seconds).
+# Anything said after it (a reply, the user typing, a tool's answer) means it went on. Only the last 1 MB is read.
+function Claude-Limit([string]$f) { # "UNTIL_SECONDS KIND" when that Claude stopped at its usage limit, else ''
+    if (-not $f -or -not (Test-Path -LiteralPath $f -PathType Leaf)) { return '' }
+    $o = Ctx-Open $f 1048576; $l = ''; $ln = 0; $an = 0; $i = 0
+    if (-not $o) { return '' }
+    try {
+        while ($null -ne ($x = $o[0].ReadLine())) {
+            $i++
+            if ($x.Contains('"apiError":"usage_limit_reached"')) { $l = $x; $ln = $i; continue }
+            if ($x.Contains('"isMeta":true')) { continue }
+            if ($x.Contains('"type":"assistant"') -or $x.Contains('"type":"user"')) { $an = $i }
+        }
+    } finally { $o[0].Dispose() }
+    if (-not $ln -or $ln -lt $an) { return '' }
+    $r = [regex]::Match($l, '"resetsAt":([0-9]+)'); if (-not $r.Success) { return '' }
+    $k = [regex]::Match($l, '"rateLimitType":"([A-Za-z0-9_]+)"')
+    $r.Groups[1].Value + ' ' + $(if ($k.Success) { $k.Groups[1].Value } else { 'limit' })
 }
 function Ctx-Pct([string]$u, [string]$w) { [string][long][Math]::Floor(([double][long]$u * 100 + [Math]::Floor([long]$w / 2)) / [long]$w) }   # (u * 100 + w / 2) / w in whole numbers
 function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for kit context, print a short status line
@@ -2727,6 +2750,21 @@ function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for 
     if ($j -match '"current_usage"\s*:\s*\{') { $u = [string](Sum-Of (After-Key 'current_usage' $j) @('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')) }
     $sid = Str-Of 'session_id' $j; $model = Str-Of 'id' (After-Key 'model' $j); $name = Str-Of 'display_name' $j
     $tp = Str-Of 'transcript_path' $j; $cwd = Str-Of 'project_dir' $j; if (-not $cwd) { $cwd = Str-Of 'cwd' $j }
+    # the plan's usage limits (rate_limits: five_hour, seven_day, each used_percentage and resets_at in seconds)
+    $lim = ''
+    $ri = $j.LastIndexOf('"rate_limits"')
+    if ($ri -ge 0) {
+        $r = $j.Substring($ri + 13); $parts = @()
+        foreach ($wd in @(@('five_hour', 300), @('seven_day', 10080))) {
+            $k = [regex]::Match($r, '"' + $wd[0] + '"\s*:\s*'); if (-not $k.Success) { continue }
+            $o = $r.Substring($k.Index + $k.Length); $e = $o.IndexOf('}'); if ($e -ge 0) { $o = $o.Substring(0, $e) }
+            $pm2 = [regex]::Match($o, '"used_percentage"\s*:\s*([0-9]+(\.[0-9]+)?)'); if (-not $pm2.Success) { continue }
+            $pp = [string][long][Math]::Floor([double]::Parse($pm2.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) + 0.5)
+            $t = Num-Of 'resets_at' $o
+            $parts += '{"id": "' + $wd[0] + '", "pct": ' + $pp + ', "minutes": ' + $wd[1] + ', "resets_at": ' + $(if ($t) { $t + '000' } else { 'null' }) + '}'
+        }
+        if ($parts.Count -gt 0) { $lim = '{"at": ' + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + '000, "windows": [' + ($parts -join ', ') + ']}' }
+    }
     $cp = Claude-Pid
     if ($cp) {
         try {
@@ -2735,6 +2773,14 @@ function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for 
             $line = '{"pid": ' + $cp + ', "session": ' + (Json-S $sid) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $(if ($pct) { $pct } else { 'null' }) + ', "model": ' + (Json-S $model) + ', "transcript": "' + $tp + '", "cwd": "' + $cwd + "`"}`n"
             $tmp = Join-Path $CtxDir ".claude-$cp.$PID"; [IO.File]::WriteAllText($tmp, $line, (New-Object Text.UTF8Encoding $false))
             Move-Item -LiteralPath $tmp -Destination (Join-Path $CtxDir "claude-$cp.json") -Force
+        } catch { }
+    }
+    # the account's usage limits, whichever Claude saw them last (kit usage)
+    if ($lim) {
+        try {
+            Ensure-Dir $CtxDir
+            $tmp = Join-Path $CtxDir ".claude-usage.$PID"; [IO.File]::WriteAllText($tmp, "$lim`n", (New-Object Text.UTF8Encoding $false))
+            Move-Item -LiteralPath $tmp -Destination (Join-Path $CtxDir 'claude-usage.json') -Force
         } catch { }
     }
     $sf = Join-Path $ClaudeDir 'settings.json'; $st = ''
@@ -2802,7 +2848,8 @@ function Claude-Ctx([string]$cpid, [string]$cwd) {
     if ($f) {
         # the window: what settings.json tells Claude Code (autoCompactWindow, as its own /context shows), else Claude's
         $j = Read-Text $f; $m = Str-Of 'model' $j; $w = Setting-Window $m; if (-not $w) { $w = Num-Of 'window' $j }
-        return Ctx-Json 'claude' (Num-Of 'used' $j) $w 'statusline' $m
+        $script:CtxLimit = Claude-Limit (Ctx-Unjs (Str-Of 'transcript' $j))
+        try { return Ctx-Json 'claude' (Num-Of 'used' $j) $w 'statusline' $m } finally { $script:CtxLimit = '' }
     }
     # its own transcript (Claude-Where: the pid's session), not just the newest of its folder: two Claudes in one
     # folder would read each other's
@@ -2817,9 +2864,12 @@ function Claude-Ctx([string]$cpid, [string]$cwd) {
     }
     $s = Claude-Scan $tf $CtxTail; if ($s.which -eq 'more') { $s = Claude-Scan $tf 0 }
     $m = Str-Of 'model' $s.a; $w = Model-Window $m
-    if ($s.which -eq 'cut') { return Ctx-Json 'claude' (Num-Of 'postTokens' $s.c) $w 'transcript' $m }
-    if (-not $s.a) { return Ctx-Json 'claude' '' '' 'transcript' '' }
-    Ctx-Json 'claude' ([string](Sum-Of (After-Key 'usage' $s.a) @('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))) $w 'transcript' $m
+    $script:CtxLimit = Claude-Limit $tf
+    try {
+        if ($s.which -eq 'cut') { return Ctx-Json 'claude' (Num-Of 'postTokens' $s.c) $w 'transcript' $m }
+        if (-not $s.a) { return Ctx-Json 'claude' '' '' 'transcript' '' }
+        Ctx-Json 'claude' ([string](Sum-Of (After-Key 'usage' $s.a) @('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))) $w 'transcript' $m
+    } finally { $script:CtxLimit = '' }
 }
 function Codex-Pct([long]$u, [long]$w) { # Codex's own "% context left" turned into % used (12000 tokens are its baseline)
     $b = 12000; if ($w -le $b) { return '100' }
@@ -2924,6 +2974,34 @@ function Agent-Guess([string]$cpid, [string]$tool, [string]$dir) { # @(tool, fol
     if ($tool -ceq 'claude-code') { $tool = 'claude' } elseif ($tool -ceq 'pi') { $tool = 'omp' }
     if (-not $dir) { $dir = Proc-Cwd ([int]$cpid) }
     , @($tool, $dir)
+}
+# kit usage: the account's plan usage (the same JSON as unix/kit's): {"claude": U | null, "codex": U | null},
+# U = {"at": ms | null, "windows": [{"id", "pct", "minutes", "resets_at": ms | null}]}. Claude: what kit's statusLine last
+# saw; Codex: the last rate_limits in the newest rollout (primary, secondary). Only numbers are read.
+function Codex-Usage([string]$f) {
+    $o = Ctx-Open $f 1048576; $l = ''
+    if (-not $o) { return '' }
+    try { while ($null -ne ($x = $o[0].ReadLine())) { if ($x.Contains('"rate_limits"') -and $x.Contains('"used_percent"')) { $l = $x } } } finally { $o[0].Dispose() }
+    if (-not $l) { return '' }
+    $r = $l.Substring($l.IndexOf('"rate_limits"')); $parts = @()
+    foreach ($wd in @('primary', 'secondary')) {
+        $k = '"' + $wd + '":{'; $p = $r.IndexOf($k); if ($p -lt 0) { continue }
+        $o2 = $r.Substring($p + $k.Length); $e = $o2.IndexOf('}'); if ($e -ge 0) { $o2 = $o2.Substring(0, $e) }
+        $pm = [regex]::Match($o2, '"used_percent":([0-9.]+)'); if (-not $pm.Success) { continue }
+        $pc = [string][long][Math]::Floor([double]::Parse($pm.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) + 0.5)
+        $mi = [regex]::Match($o2, '"window_minutes":([0-9]+)'); $t = [regex]::Match($o2, '"resets_at":([0-9]+)')
+        $parts += '{"id": "' + $wd + '", "pct": ' + $pc + ', "minutes": ' + $(if ($mi.Success) { $mi.Groups[1].Value } else { 'null' }) + ', "resets_at": ' + $(if ($t.Success) { $t.Groups[1].Value + '000' } else { 'null' }) + '}'
+    }
+    if ($parts.Count -eq 0) { return '' }
+    '{"at": null, "windows": [' + ($parts -join ', ') + ']}'
+}
+function Cmd-Usage($rest) { # kit usage : the account's plan usage, Claude and Codex (JSON)
+    $rest = @($rest | Where-Object { $null -ne $_ })
+    if ($rest.Count -gt 0 -and -not ($rest.Count -eq 1 -and $rest[0] -ceq '--json')) { Die '用法：kit usage' }
+    $c = 'null'; $cf = Join-Path $CtxDir 'claude-usage.json'
+    if (Test-Path -LiteralPath $cf -PathType Leaf) { try { $c1 = @((Read-Text $cf) -split "`n")[0].TrimEnd("`r"); if ($c1.StartsWith('{') -and $c1.EndsWith('}')) { $c = $c1 } } catch { } }
+    $x = ''; $nf = @(Newest-Files (Join-Path $CodexDir 'sessions') 'rollout-*.jsonl'); if ($nf.Count -gt 0) { $x = Codex-Usage $nf[0] }
+    [Console]::Out.Write('{"claude": ' + $c + ', "codex": ' + $(if ($x) { $x } else { 'null' }) + "}`n")
 }
 function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [--detail [--fresh]] : how full that agent's context is (JSON)
     $use = '用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]'
@@ -6241,6 +6319,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit install-deps mcp <名字>       裝 MCP 的套件（固定的版本），之後不用每次啟動時下載
   kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]
                                   那個 agent 的 context 用了多少（JSON；--detail：用在哪些地方）
+  kit usage                       這個帳號的方案用量（Claude、Codex：5 小時、每週用了幾 %、幾點重置；JSON）
   kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
                                   那個 agent 讀過、改過的檔案，新的在前（--json 給程式讀；--git：再加上 git 有變動的）
   kit note ["做了什麼；下一步"]      agent 寫自己做到哪（一兩行，畫面上看得到）；不帶文字：印出現在寫的
@@ -6320,6 +6399,7 @@ try {
         'install-tool' { Cmd-InstallTool $rest }
         'install-deps' { Cmd-InstallDeps $rest }
         'context' { Cmd-Context $rest }
+        'usage' { Cmd-Usage $rest }
         'files' { Cmd-Files $rest }
         'note' { Cmd-Note $rest }
         'pending' { Cmd-Pending $rest }

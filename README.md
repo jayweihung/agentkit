@@ -259,6 +259,8 @@ kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最�
 
 印出 JSON：`used`（用了幾個 token）、`window`（上限）、`pct`（%）、`source`（從哪裡讀的）、`model`。給畫面程式在 agent 窗格上顯示「context 35% 139k/400k」這種數字用。只讀數字，不讀對話內容。
 
+Claude 撞到方案的用量上限停下來（「You've hit your 5-hour limit · resets 12:10am」）、之後還沒有人叫它繼續時，多一個 `limit`：`{"until": <幾點恢復，Unix 毫秒>, "kind": "five_hour" | "seven_day" | …}`。kit 看的是它自己對話紀錄的最後（Claude Code 記下的 `usage_limit_reached` 和恢復時間）；之後它又回話、或有人打了字，就不算。畫面程式拿來提醒「撞到上限，幾點恢復」，時間到了可以替你打「繼續」。沒撞到時沒有這個欄位。Codex、omp 還沒有。
+
 | agent | 從哪裡讀 | % 怎麼算 |
 |---|---|---|
 | Claude | kit 放的 statusLine 每次更新都把 Claude 自己的數字存在 `~/.config/agentkit/ctx/claude-<pid>.json`；沒有的話讀那個資料夾最新的對話紀錄 | Claude 自己的（`/context` 一樣的上限，`autoCompactWindow` 有設就用它） |
@@ -290,6 +292,21 @@ kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最�
 | omp | session 檔，加上 omp 會讀的指示檔、skills、MCP 設定 | 總數和「系統工具」是 omp 自己記的（context 快照）；其他估算，照比例對到總數。指示檔和 skills 照現在的檔案估 |
 
 對話內容只拿來算大小，不印出、不存；問 Claude Code 時它回的帳號資料不留。問的那一次不寫對話紀錄，但 Claude Code 啟動時照常會更新它自己的東西（例如 plugins 的快取，或在 `~/.claude/projects/<資料夾>/` 建一個空的 `memory/`）。紀錄檔超過 32 MB 時只讀第一行和最後 32 MB（`KIT_CTX_DETAIL_TAIL`，byte）。
+
+## 方案用了多少：`kit usage`
+
+    kit usage
+
+一行 JSON，這個帳號的訂閱方案用了多少、幾點重置：
+
+    {"claude": {"at": 1794673527000, "windows": [{"id": "five_hour", "pct": 41, "minutes": 300, "resets_at": 1794700000000},
+                                                 {"id": "seven_day", "pct": 12, "minutes": 10080, "resets_at": 1795000000000}]},
+     "codex": {"at": null, "windows": [{"id": "primary", "pct": 3, "minutes": 43200, "resets_at": 1796913312000}]}}
+
+- Claude：kit 的狀態列（`kit sync` 放的 statusLine）每次更新時 Claude Code 會給它用量（5 小時、每週），kit 存在 `~/.config/agentkit/ctx/claude-usage.json`，`at` 是存的時間。用 API key、Bedrock 這類沒有方案上限的，或你用自己的 statusLine 時，是 `null`。
+- Codex：最新那份 `~/.codex/sessions/**/rollout-*.jsonl` 最後一次的 `rate_limits`（`primary`、`secondary`，`minutes` 是那個時段多長）。
+- `pct` 是用掉幾 %，`resets_at` 是重置的時間（Unix 毫秒）。`resets_at` 已經過了的，那個時段重新算了，`pct` 是之前的數字。
+- 只讀數字，不讀對話內容。Windows 版一樣。
 
 ## agent 讀過、改過的檔案
 
@@ -345,7 +362,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
     kit api        →  1.6
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.6（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.7（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則

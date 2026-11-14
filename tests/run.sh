@@ -1511,6 +1511,36 @@ CX --pid 1 --tool claude --dir "$P7" >/dev/null
 check "context: numbers of a Claude process that is gone are thrown away" '[ ! -e "$H7/.config/agentkit/ctx/claude-999999.json" ]'
 out=$(CX --pid 1)
 check "context: not an agent -> nothing" '[ "$out" = "{\"tool\": \"\", \"used\": null, \"window\": null, \"pct\": null, \"source\": \"\", \"model\": \"\"}" ]'
+# the plan's usage limits: kit statusline keeps what Claude hands over (rate_limits) for kit usage; Codex's from its
+# newest rollout; a Claude stopped at its limit says until when (kit context's "limit"), until it goes on
+out=$(HOME="$T/nousage" kit usage)
+check "usage: nothing seen yet -> null for both" '[ "$out" = "{\"claude\": null, \"codex\": null}" ]'
+printf '{"session_id":"abc","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_window":{"context_window_size":400000,"current_usage":{"input_tokens":2,"cache_read_input_tokens":1000},"used_percentage":1},"rate_limits":{"five_hour":{"used_percentage":40.6,"resets_at":1794700000},"seven_day":{"used_percentage":100,"resets_at":1795000000}}}' > "$T/sl3.json"
+mkdir -p "$T/fb11"; printf '#!/bin/sh\n"%s" statusline < "%s/sl3.json"\n' "$KIT" "$T" > "$T/fb11/claude"; chmod +x "$T/fb11/claude"
+"$T/fb11/claude" >/dev/null
+RL="$H7/.codex/sessions/2026/11/12/rollout-2026-11-12T03-00-00-rl.jsonl"
+printf '{"type":"session_meta","payload":{"id":"rl","cwd":"/elsewhere"}}\n' > "$RL"
+printf '{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","primary":{"used_percent":%s,"window_minutes":300,"resets_at":1794690000},"secondary":{"used_percent":61.5,"window_minutes":10080,"resets_at":1795100000},"credits":{"has_credits":false}}}}\n' 1.0 3.4 >> "$RL"
+printf '{"type":"event_msg","payload":{"type":"agent_message","message":"done"}}\n' >> "$RL"
+USAGE_WANT='{"claude": {"at": 0, "windows": [{"id": "five_hour", "pct": 41, "minutes": 300, "resets_at": 1794700000000}, {"id": "seven_day", "pct": 100, "minutes": 10080, "resets_at": 1795000000000}]}, "codex": {"at": null, "windows": [{"id": "primary", "pct": 3, "minutes": 300, "resets_at": 1794690000000}, {"id": "secondary", "pct": 62, "minutes": 10080, "resets_at": 1795100000000}]}}'
+out=$(kit usage | sed 's/"at": [0-9][0-9]*/"at": 0/')
+check "usage: Claude's 5-hour and weekly use as the status line last saw it; Codex's last rate_limits (the newest rollout, its last one)" '[ "$out" = "$USAGE_WANT" ]'
+printf '{"type":"assistant","apiError":"usage_limit_reached","apiErrorParams":{"rate_limit_info":{"status":"rejected","resetsAt":1794016800,"rateLimitType":"five_hour"}},"message":{"model":"<synthetic>","usage":{"input_tokens":0},"content":[{"type":"text","text":"You hit your limit"}]},"isApiErrorMessage":true}\n{"type":"system","subtype":"stop_hook_summary"}\n{"type":"user","isMeta":true,"message":{"content":"x"}}\n' >> "$C8/t.jsonl"
+out=$(CX --pid 1 --tool claude --dir "$P8")
+check "context (claude): stopped at the usage limit -> until when and which limit (a system line or a meta line after it doesn't count)" '[ "$out" = "{\"tool\": \"claude\", \"used\": 250000, \"window\": 200000, \"pct\": 100, \"source\": \"transcript\", \"model\": \"claude-sonnet-4-5\", \"limit\": {\"until\": 1794016800000, \"kind\": \"five_hour\"}}" ]'
+LIMITED=$(kit context --pid 1 --tool claude --dir "$P8" 2>&1)
+if [ -n "$PWSH" ]; then
+    out=$(kps usage | sed 's/"at": [0-9][0-9]*/"at": 0/'); out2=$(kps context --pid 1 --tool claude --dir "$P8" 2>&1)
+    check "usage, context's limit: kit.ps1 says the same" '[ "$out" = "$USAGE_WANT" ] && [ "$out2" = "$LIMITED" ]'
+    UF="$H7/.config/agentkit/ctx/claude-usage.json"; x=$(sed 's/"at": [0-9][0-9]*/"at": 0/' "$UF"); rm -f "$UF"
+    kps statusline < "$T/sl3.json" >/dev/null; y=$(sed 's/"at": [0-9][0-9]*/"at": 0/' "$UF" 2>/dev/null)
+    check "statusline (kit.ps1): keeps the same usage" '[ -n "$x" ] && [ "$x" = "$y" ]'
+fi
+printf '{"type":"user","message":{"content":"go on"}}\n' >> "$C8/t.jsonl"
+out=$(CX --pid 1 --tool claude --dir "$P8")
+check "context (claude): told to go on after the limit -> no limit any more" '[ "$out" = "{\"tool\": \"claude\", \"used\": 250000, \"window\": 200000, \"pct\": 100, \"source\": \"transcript\", \"model\": \"claude-sonnet-4-5\"}" ]'
+out=$(kit usage x 2>&1); rc=$?
+check "usage: anything after it -> how to use it" '[ $rc -eq 1 ] && echo "$out" | grep -qF "用法：kit usage"'
 # the statusLine in settings.json: kit's when there is none, never over your own, gone again on uninstall
 cp "$H7/.claude/settings.json" "$T/s7.orig"
 mkdir -p "$T/src7/skills/a"; printf -- '---\nname: a\ndescription: a\n---\nx\n' > "$T/src7/skills/a/SKILL.md"
@@ -1901,10 +1931,10 @@ check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/age
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.6)" '[ $rc -eq 0 ] && [ "$out" = 1.6 ]'
+check "api: one line, major.minor (1.7)" '[ $rc -eq 0 ] && [ "$out" = 1.7 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.6 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.7 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?
