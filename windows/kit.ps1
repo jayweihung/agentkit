@@ -1585,8 +1585,11 @@ function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills
             continue
         }
         if ($null -ne (State-Get 'skipped' $dst)) { State-Del 'skipped' $dst }
-        if ($old -and (Test-Path -LiteralPath $dst) -and (Dir-Hash $dst) -ne $old -and -not $script:Force) {
-            Warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉）"; continue
+        if ($old -and (Test-Path -LiteralPath $dst) -and (Dir-Hash $dst) -ne $old) {
+            if (-not $script:Force) { Warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）"; continue }
+            $b = Backup-Skill $dst $n
+            if (-not $b) { Warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; continue }
+            Say "  你改過的 skill $n 備份在 $b"
         }
         if ($h -eq $old -and (Test-Path -LiteralPath $dst)) { Link-Deps $n $dst; continue }
         if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Item -LiteralPath $dst -Recurse -Force }
@@ -1596,10 +1599,30 @@ function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills
     }
     foreach ($n in State-List $kind) {
         if ($names -contains $n) { continue }
-        $dst = Join-Path $dir $n
+        $dst = Join-Path $dir $n; $old = State-Get $kind $n
+        if ((Test-Path -LiteralPath $dst -PathType Container) -and (Dir-Hash $dst) -ne $old) {
+            # you changed it: never deleted. --force keeps a backup; without it the copy stays and is yours from now on
+            if ($script:Force) {
+                $b = Backup-Skill $dst $n
+                if (-not $b) { Warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有刪"; continue }
+                Say "  removed skill $n ← $dir（你改過的那份備份在 $b）"
+            } else {
+                Warn "skill ${n}（${dir}）被手動改過，沒有刪；kit 之後不再管它，不要了請自己刪"
+            }
+            State-Del $kind $n; continue
+        }
         if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Item -LiteralPath $dst -Recurse -Force }
         State-Del $kind $n; Say "  removed skill $n ← $dir"
     }
+}
+function Backup-Skill([string]$dst, [string]$n) { # move a hand-edited skill copy to kit's backups (not a skills folder); returns where, or nothing
+    $d = Join-Path (Join-Path $KitConf 'backups') 'skills'
+    $t = Get-Date -Format 'yyyyMMdd-HHmmss'; $b = Join-Path $d "$n-$t"; $i = 1
+    while (Test-Path -LiteralPath $b) { $b = Join-Path $d "$n-$t-$i"; $i++ }
+    try {
+        Drop-DepsLink $dst                                   # kit's links, not your files
+        Ensure-Dir $d; Move-Item -LiteralPath $dst -Destination $b -ErrorAction Stop; return $b
+    } catch { return $null }
 }
 function Sync-McpJson([string]$f, [string]$kind, $names) { # wanted MCP -> FILE's mcpServers
     # A server the user already has under that name (not kit's) is never replaced, so never removed either.

@@ -117,11 +117,26 @@ out=$(kit sync 2>&1)
 check "hand-edited skill not overwritten" 'grep -q "my change" "$HOME/.claude/skills/gerrit-review/SKILL.md" && echo "$out" | grep -q 手動改過'
 kit sync --force >/dev/null 2>&1
 check "--force overwrites" 'grep -q "team change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
+check "--force keeps your edit as a backup (outside the skills folder)" 'grep -q "my change" "$HOME"/.config/agentkit/backups/skills/gerrit-review-*/SKILL.md'
 mkdir -p "$TEAM/skills/team-build"; printf -- '---\nname: team-build\ndescription: b\n---\nx\n' > "$TEAM/skills/team-build/SKILL.md"
 out=$(kit sync 2>&1)
 check "new item announced" 'echo "$out" | grep -q "新： skill:team-build"'
 out=$(kit sync 2>&1)
 check "announced only once" '! echo "$out" | grep -q "新："'
+# a skill you changed is never deleted: kit rm keeps it (yours from then on), sync --force backs it up first
+kit add skill team-build >/dev/null 2>&1
+echo "my build" >> "$HOME/.claude/skills/team-build/SKILL.md"
+out=$(kit rm skill team-build 2>&1)
+check "rm of a hand-edited skill: kept, kit says so" 'grep -q "my build" "$HOME/.claude/skills/team-build/SKILL.md" && echo "$out" | grep -q 沒有刪'
+out=$(kit sync --force 2>&1)
+check "... yours from then on: sync --force leaves it, says nothing" 'grep -q "my build" "$HOME/.claude/skills/team-build/SKILL.md" && ! echo "$out" | grep -q team-build'
+rm -rf "$HOME/.claude/skills/team-build"
+kit add skill team-build >/dev/null 2>&1
+echo "my build 2" >> "$HOME/.claude/skills/team-build/SKILL.md"
+M="$HOME/.config/agentkit/machine.yaml"; cp "$M" "$T/m.bak"
+awk '/^added:/ { gsub(/, skill:team-build|skill:team-build, |skill:team-build/, "") } { print }' "$T/m.bak" > "$M"
+out=$(kit sync --force 2>&1)
+check "taken out + sync --force: the copy goes, your edit kept as a backup" '[ ! -e "$HOME/.claude/skills/team-build" ] && grep -q "my build 2" "$HOME"/.config/agentkit/backups/skills/team-build-*/SKILL.md && echo "$out" | grep -q 備份在'
 
 # ---------- a skill folder that is not kit's ----------
 mkdir -p "$TEAM/skills/clash" "$HOME/.claude/skills/clash"

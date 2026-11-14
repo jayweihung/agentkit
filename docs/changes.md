@@ -4,6 +4,15 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.5.3（2026-11-14）
+
+更新後要做：`kit self-update`。
+
+**你改過的 skill 不會被刪掉**
+- 以前 `kit rm`、或 agent 不再要某個 skill 時，kit 直接刪掉那個資料夾，你改過的也一起刪。現在你改過的會留著，說一次「沒有刪」，之後 kit 不再管它，不要了自己刪。
+- `kit sync --force` 蓋掉你改過的 skill 前，先把你那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/`（不在 skills 資料夾裡，agent 不會讀到），畫面會說備份在哪。
+- 沒改過的照舊：直接更新、直接刪。
+
 ## 0.5.2（2026-11-13）
 
 更新後要做：`kit self-update`、`kit sync`（放過 agent 的資料夾會重寫 Claude 的工具限制）。

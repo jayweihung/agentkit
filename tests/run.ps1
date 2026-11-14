@@ -142,11 +142,27 @@ Kit sync
 Check 'hand-edited skill not overwritten' { (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('my change') -and $out.Contains('手動改過') }
 Kit sync --force
 Check '--force overwrites' { (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('team change') }
+function BackupHas([string]$name, [string]$text) { @(Get-ChildItem -Path "$H/.config/agentkit/backups/skills" -Filter "$name-*" -Directory -ErrorAction SilentlyContinue | Where-Object { (ReadT (Join-Path $_.FullName 'SKILL.md')).Contains($text) }).Count -gt 0 }
+Check '--force keeps your edit as a backup (outside the skills folder)' { BackupHas 'gerrit-review' 'my change' }
 W "$TEAM/skills/team-build/SKILL.md" "---`nname: team-build`ndescription: b`n---`nx`n"
 Kit sync
 Check 'new item announced' { $out.Contains('新： skill:team-build') }
 Kit sync
 Check 'announced only once' { -not $out.Contains('新：') }
+# a skill you changed is never deleted: kit rm keeps it (yours from then on), sync --force backs it up first
+Kit add skill team-build
+[IO.File]::AppendAllText("$H/.claude/skills/team-build/SKILL.md", "my build`n")
+Kit rm skill team-build
+Check 'rm of a hand-edited skill: kept, kit says so' { (ReadT "$H/.claude/skills/team-build/SKILL.md").Contains('my build') -and $out.Contains('沒有刪') }
+Kit sync --force
+Check '... yours from then on: sync --force leaves it, says nothing' { (ReadT "$H/.claude/skills/team-build/SKILL.md").Contains('my build') -and -not $out.Contains('team-build') }
+Remove-Item -LiteralPath "$H/.claude/skills/team-build" -Recurse -Force
+Kit add skill team-build
+[IO.File]::AppendAllText("$H/.claude/skills/team-build/SKILL.md", "my build 2`n")
+$M = "$H/.config/agentkit/machine.yaml"
+W $M (((ReadT $M) -split "`n" | ForEach-Object { if ($_ -like 'added:*') { $_ -replace ', skill:team-build|skill:team-build, |skill:team-build', '' } else { $_ } }) -join "`n")
+Kit sync --force
+Check 'taken out + sync --force: the copy goes, your edit kept as a backup' { -not (Test-Path "$H/.claude/skills/team-build") -and (BackupHas 'team-build' 'my build 2') -and $out.Contains('備份在') }
 
 # ---------- a skill folder that is not kit's ----------
 W "$TEAM/skills/clash/SKILL.md" "---`nname: clash`ndescription: team`n---`nteam clash`n"; W "$H/.claude/skills/clash/SKILL.md" "mine`n"

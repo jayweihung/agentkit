@@ -16,6 +16,7 @@ KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
 STATE="$KIT_CONF/state.tsv"
+FORCE=   # only kit sync --force sets it (never taken from the environment)
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
     CLAUDE_DIR=$CLAUDE_CONFIG_DIR; CLAUDE_JSON=$CLAUDE_CONFIG_DIR/.claude.json
 else
@@ -547,7 +548,7 @@ apply_rules() { # apply_rules WANTED : the account's instructions (Claude, Codex
 }
 
 sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin) into DIR
-    local dir=$1 kind=$2 names n p dst h old
+    local dir=$1 kind=$2 names n p dst h old b
     names=$(cat)
     [ -n "$names" ] && mkdir -p "$dir"
     for n in $names; do
@@ -560,8 +561,10 @@ sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin
             continue
         fi
         state_del skipped "$dst"
-        if [ -n "$old" ] && [ -d "$dst" ] && [ "$(dir_hash "$dst")" != "$old" ] && [ -z "${FORCE:-}" ]; then
-            warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉）"; continue
+        if [ -n "$old" ] && [ -d "$dst" ] && [ "$(dir_hash "$dst")" != "$old" ]; then
+            [ -n "${FORCE:-}" ] || { warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）"; continue; }
+            b=$(backup_skill "$dst" "$n") || { warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; continue; }
+            say "  你改過的 skill $n 備份在 $b"
         fi
         [ "$h" = "$old" ] && [ -d "$dst" ] && { link_deps "$n" "$dst"; continue; }
         rm -rf "$dst"; cp -R "$p" "$dst" || { warn "沒辦法複製 skill $n 到 $dir"; rm -rf "$dst"; continue; }
@@ -570,8 +573,27 @@ sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin
     done
     for n in $(state_list "$kind"); do
         printf '%s\n' "$names" | grep -qxF "$n" && continue
-        rm -rf "$dir/$n"; state_del "$kind" "$n"; say "  removed skill $n ← $dir"
+        dst="$dir/$n"; old=$(state_get "$kind" "$n")
+        if [ -d "$dst" ] && [ "$(dir_hash "$dst")" != "$old" ]; then
+            # you changed it: never deleted. --force keeps a backup; without it the copy stays and is yours from now on
+            if [ -n "${FORCE:-}" ]; then
+                b=$(backup_skill "$dst" "$n") || { warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有刪"; continue; }
+                say "  removed skill $n ← ${dir}（你改過的那份備份在 ${b}）"
+            else
+                warn "skill ${n}（${dir}）被手動改過，沒有刪；kit 之後不再管它，不要了請自己刪"
+            fi
+            state_del "$kind" "$n"; continue
+        fi
+        rm -rf "$dst"; state_del "$kind" "$n"; say "  removed skill $n ← $dir"
     done
+}
+
+backup_skill() { # backup_skill DST NAME : move a hand-edited skill copy to kit's backups (not a skills folder); prints where
+    local d="$KIT_CONF/backups/skills" t b x i=1
+    t=$(date +%Y%m%d-%H%M%S); b="$d/$2-$t"
+    while [ -e "$b" ]; do b="$d/$2-$t-$i"; i=$((i + 1)); done
+    for x in node_modules .venv; do [ -L "$1/$x" ] && rm -f "$1/$x"; done   # kit's links, not your files
+    mkdir -p "$d" && mv "$1" "$b" && printf '%s\n' "$b"
 }
 
 sync_mcp_json() { # sync_mcp_json FILE STATEKIND : wanted MCP names on stdin -> FILE's mcpServers

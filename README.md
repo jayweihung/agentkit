@@ -56,7 +56,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | Codex | `~/.codex/AGENTS.md`（標記之間，內容直接放進去） | `~/.agents/skills/` | `~/.codex/config.toml`（標記之間） | MCP 工具 → `disabled_tools` |
 | omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | 不支援 |
 
-改 JSON 前會留一份 `.kit-backup`。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。
+改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。
 
 **Claude 沒在存對話紀錄時提醒你**：在另一個 Claude 的終端機裡開的 Claude（例如 Claude 幫你開新視窗）會帶著 `CLAUDE_CODE_CHILD_SESSION=1`，
 這樣它不寫對話紀錄，關掉後 `/resume` 找不回來。kit 的 SessionStart hook（就是上面那個自動同步）每次 Claude 開啟時會看
