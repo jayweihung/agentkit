@@ -185,7 +185,8 @@ Kit sync
 Check '... and warned only once' { -not $out.Contains('不是 kit 放的') }
 Remove-Item -Recurse -Force "$H/.claude/skills/clash"; Kit sync
 Check '... kit puts it there once the folder is gone' { (ReadT "$H/.claude/skills/clash/SKILL.md").Contains('team clash') }
-Kit rm skill clash; Remove-Item -Recurse -Force "$TEAM/skills/clash"
+Remove-Item -Recurse -Force "$TEAM/skills/clash"; Kit rm skill clash
+Check 'rm: one the account has, though no source has it any more' { $rc -eq 0 -and -not $out.Contains('找不到') }
 
 # ---------- list ----------
 Kit list
@@ -322,7 +323,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.10)' { $rc -eq 0 -and $out -ceq '1.10' }
+Check 'api: one line, major.minor (1.11)' { $rc -eq 0 -and $out -ceq '1.11' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -878,6 +879,8 @@ Kit add --dir $H skill gerrit-review
 Check 'add --dir: refuses the home folder' { $rc -ne 0 -and $out.Contains('家目錄') -and -not (Test-Path "$H/.agentkit") }
 Kit rm --dir $FP skill gerrit-workflow
 Check 'rm --dir: only what the folder added' { $rc -ne 0 -and $out.Contains('沒有加') }
+Kit rm rule gerrit-flow
+Check "rm: the account hasn't it, a folder has: says which folder and --dir" { $rc -ne 0 -and $out.Contains($FP) -and $out.Contains('kit rm --dir') }
 Kit rm --dir $FP skill gerrit-review; Kit rm --dir $FP rule gerrit-flow; Kit rm --dir $FP mcp gerrit
 Check 'rm --dir all: the folder exactly as before' { (SameBytes "$T/fp.claude" "$FP/CLAUDE.md") -and (SameBytes "$T/fp.mcp" "$FP/.mcp.json") -and ((@(Get-ChildItem -LiteralPath $FP -Force | ForEach-Object { $_.Name } | Sort-Object) -join ' ') -eq '.mcp.json CLAUDE.md sub') }
 Check 'rm --dir all: Codex config byte-identical to after init, kit forgets the folder' { (SameBytes "$T/codex5.init" "$H/.codex/config.toml") -and -not (Test-Path "$H/.config/agentkit/dirs") }
@@ -1973,6 +1976,7 @@ Kit list
 Check 'plugins: kit list shows a plugin' { $out -match '(?m)^ +plugin:demo$' }
 KitJ list --json
 Check 'plugins: list --json, kind plugin with its description and the programs its hooks run' { $p = @(($out | ConvertFrom-Json).items | Where-Object { $_.kind -eq 'plugin' }); $p.Count -eq 1 -and $p[0].status -eq 'unused' -and $p[0].description -eq 'A demo plugin' -and @($p[0].needs | ForEach-Object { $_.tool }) -contains 'node' }
+Check 'plugins: list --json, what it brings (parts), as unix/kit prints it' { $out -cmatch '"parts": \{"skills": \["demo"\], "commands": \[\], "agents": \[\], "mcp": \[\], "hooks": true\}' }
 Kit add plugin demo
 Check "plugins: add copies it to kit's marketplace (the same files as unix/kit)" { $rc -eq 0 -and (Test-Path "$PC/demo/hooks/h.json") -and (Test-Path "$PC/demo/.claude-plugin/plugin.json") -and
     (ReadT "$PC/.claude-plugin/marketplace.json") -ceq "{`"name`":`"kit`",`"owner`":{`"name`":`"kit`"},`"plugins`":[{`"name`":`"demo`",`"source`":`"./demo`"}]}`n" -and

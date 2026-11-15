@@ -405,10 +405,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.10
+    kit api        →  1.11
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.10（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.11（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -474,7 +474,8 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 - `sources[].push`：`pr`（送出要開 PR）或 `direct`（直接推）。`sources[].changed`：`kit push --to <name>` 會送的檔案（相對來源資料夾，`/` 分隔；改過的 rule、skill、mcp、agent、外掛、`third_party.lock`、`descriptions-zh.txt`，加上只改了 `collect_sources` 的 `kit.yaml`）；沒有就是 `[]`，不是 git repo 也是 `[]`。
 - `items[].kind`：`rule`、`skill`、`mcp`、`agent`、`plugin`（1.9 起）。`description`：skill、agent 是 frontmatter 的、mcp 是 yaml 的 `description:`、外掛是 `plugin.json` 的、規則是檔案第一行 `# ` 標題（1.9 起）。`description_zh`（1.9 起）：有人用 `kit describe` 寫了這個說明的中文版才有，畫面程式優先顯示它（見「中文說明」）。`status`：`required`（團隊必備）、`used`、`unused`、`agent`。`new`：還沒在 `kit list` 看過。`changed`：`kit push` 會送它（skill：它資料夾裡任何一個檔案）。
-- `needs`、`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。
+- `needs` 只有 skill、mcp 和外掛有（外掛的是它的 hook 要跑的程式），`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。
+- 外掛（1.11 起）一定有 `"parts": {"skills": ["…"], "commands": ["…"], "agents": ["…"], "mcp": ["…"], "hooks": true}`：裡面帶了什麼（`skills/<名字>/SKILL.md`、`commands/*.md`、`agents/*.md`、`.mcp.json` 的 `mcpServers`、`hooks/*.json` 或 `plugin.json` 的 `hooks`），名字照 C 語系排序；畫面程式寫成一行「裡面有：…」。
 - mcp（1.3 起）一定有：`"type"`（`stdio`、`http`、`sse`）、`"vars": [{"name": "GITHUB_TOKEN", "set": false}]`（它要的環境變數，這台電腦有沒有設）、`"needs"`（同 skill）、`"packages"`：沒有套件是 `[]`，有的話一個
   `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
 - `sign`（1.8 起）：這台電腦簽過核准（`kit approve` 記下的核准紀錄還在）才有：`{"approvals": "<核准紀錄的 clone>", "serial": 19, "approved": [{"name": "team", "commit": "<40 字的 commit>"}]}`，畫面程式拿它說「已經簽了，等那台同步」、給簽章的指令。

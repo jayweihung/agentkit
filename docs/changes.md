@@ -4,6 +4,15 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.12（2026-11-16）
+
+更新後要做：`kit self-update`。
+
+- `kit rm`：拿得掉只在某個資料夾清單裡的項目。整個帳號沒有、只有資料夾清單有時，會說是哪些資料夾，和要打的 `kit rm --dir <資料夾> …`。
+- `kit push`：送外掛、`third_party.lock`、`descriptions-zh.txt` 時 commit 訊息不再是空的；刪掉的檔案也送得出去（以前 `git add` 一個不存在的檔案會整個失敗）。
+- `kit list --json`：外掛多了 `parts`（裡面帶了哪些 skill、指令、agent、MCP，有沒有 hook）。`kit api` 是 1.11。Kit 面板的外掛那一列會寫「裡面有：6 個 skill（…）、hook」。
+- Windows 版一樣。
+
 ## 0.6.11（2026-11-16）
 
 更新後要做：`kit self-update`，再 `kit sync`。

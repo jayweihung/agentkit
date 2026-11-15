@@ -186,7 +186,8 @@ out=$(kit sync 2>&1)
 check "... and warned only once" '! echo "$out" | grep -q "不是 kit 放的"'
 rm -rf "$HOME/.claude/skills/clash"; kit sync >/dev/null 2>&1
 check "... kit puts it there once the folder is gone" 'grep -q "team clash" "$HOME/.claude/skills/clash/SKILL.md"'
-kit rm skill clash >/dev/null 2>&1; rm -rf "$TEAM/skills/clash"
+rm -rf "$TEAM/skills/clash"; out=$(kit rm skill clash 2>&1); rc=$?
+check "rm: one the account has, though no source has it any more" '[ $rc -eq 0 ] && ! kit sync 2>&1 | grep -q "clash not found"'
 
 # ---------- list ----------
 out=$(kit list 2>&1)
@@ -821,7 +822,19 @@ printf '#!/bin/sh\necho "hook: no thanks" >&2\nexit 1\n' > .git/hooks/pre-commit
 echo "Mine, blocked." > rules/mine.md; h=$(git rev-parse HEAD)
 out=$(kit push 2>&1); rc=$?
 check "push direct: a commit hook refusing: its words shown, nothing committed or left staged" '[ $rc -ne 0 ] && echo "$out" | grep -q "hook: no thanks" && [ "$(git rev-parse HEAD)" = "$h" ] && [ -z "$(git diff --cached --name-only)" ] && [ "$(git status --porcelain rules)" = " M rules/mine.md" ]'
-rm -f .git/hooks/pre-commit
+rm -f .git/hooks/pre-commit; git checkout -q -- rules/mine.md
+# only the Chinese descriptions changed: the commit still says what it sends
+printf 'rule:mine\t%s\t我的\n' "$(git hash-object rules/mine.md | cut -c1-12)" > descriptions-zh.txt
+out=$(kit push --dry-run --json 2>/dev/null)
+check "push direct: only descriptions-zh.txt: the commit names it" 'echo "$out" | grep -qF "\"commit\": \"kit: add descriptions-zh.txt\"" && { [ -z "$PWSH" ] || [ "$(kps push --dry-run --json 2>/dev/null)" = "$out" ]; }'
+kit push >/dev/null 2>&1
+# a deletion you already staged (git rm) goes along
+echo "Other." > rules/other.md; git rm -q rules/mine.md   # (other first: git rm takes the folder with its last file)
+out=$(kit push --dry-run --json 2>/dev/null)
+[ -z "$PWSH" ] || check "push direct: a deletion already staged: kit.ps1 says the same" '[ "$(kps push --dry-run --json 2>/dev/null)" = "$out" ]'
+out=$(kit push 2>&1); rc=$?
+check "push direct: a deletion already staged (git rm) goes along" '[ $rc -eq 0 ] && [ "$(git log -1 --format=%s)" = "kit: add rule:other; remove rule:mine" ] && [ -z "$(git status --porcelain rules)" ] && [ "$(git --git-dir="$R1" rev-parse main)" = "$(git rev-parse HEAD)" ]'
+echo "Mine, back." > rules/mine.md   # (a change waiting, for what follows)
 
 # ---------- a source set up through a link (on macOS /tmp is really /private/tmp): still one source ----------
 LH="$T/home-linked"; mkdir -p "$LH"; ln -s "$D" "$T/pd-link"; LW="$T/pd-link/work"; DWP=$(cd "$DW" && pwd -P)
@@ -1021,6 +1034,10 @@ out=$(kit add --dir "$T" skill gerrit-review 2>&1); rc=$?
 check "add --dir: refuses a folder the home folder is in" '[ $rc -ne 0 ] && [ ! -e "$T/.agentkit" ]'
 out=$(kit rm --dir "$P" skill gerrit-workflow 2>&1); rc=$?
 check "rm --dir: only what the folder added" '[ $rc -ne 0 ] && echo "$out" | grep -q "沒有加"'
+out=$(kit rm rule gerrit-flow 2>&1); rc=$?
+check "rm: the account hasn't it, a folder has: says which folder and --dir" '[ $rc -ne 0 ] && echo "$out" | grep -qF "$P" && echo "$out" | grep -qF "kit rm --dir"'
+[ -z "$PWSH" ] || { out=$(kps rm rule gerrit-flow 2>&1); rc=$?
+    check "rm: kit.ps1 says the same" '[ $rc -ne 0 ] && echo "$out" | grep -qF "$P" && echo "$out" | grep -qF "kit rm --dir"'; }
 printf 'review v2\n' >> "$TEAM/skills/gerrit-review/SKILL.md"; kit sync >/dev/null 2>&1
 check "sync updates the folder's copy" 'grep -q "review v2" "$P/.claude/skills/gerrit-review/SKILL.md" && grep -q "review v2" "$P/.agents/skills/gerrit-review/SKILL.md"'
 kit rm --dir "$P" skill gerrit-review >/dev/null 2>&1; kit rm --dir "$P" rule gerrit-flow >/dev/null 2>&1; kit rm --dir "$P" mcp gerrit >/dev/null 2>&1
@@ -2276,10 +2293,10 @@ check "list --json: sign, the approvals this computer signs with" 'printf "%s" "
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.10)" '[ $rc -eq 0 ] && [ "$out" = 1.10 ]'
+check "api: one line, major.minor (1.11)" '[ $rc -eq 0 ] && [ "$out" = 1.11 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.10 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.11 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?
@@ -2778,6 +2795,7 @@ check "plugins: kit list shows a plugin" 'echo "$out" | grep -qE "^ +plugin:demo
 out=$(pk list --json 2>/dev/null)
 check "plugins: list --json, kind plugin with its description" 'echo "$out" | mj /dev/stdin "assert [(x[\"status\"], x[\"description\"]) for x in d[\"items\"] if x[\"kind\"]==\"plugin\"]==[(\"unused\",\"A demo plugin\")]"'
 check "plugins: list --json, the programs its hooks run (needs)" 'echo "$out" | mj /dev/stdin "assert [n[\"tool\"] for x in d[\"items\"] if x[\"kind\"]==\"plugin\" for n in x[\"needs\"]]==[\"node\"]"'
+check "plugins: list --json, what it brings (parts)" 'echo "$out" | mj /dev/stdin "assert [x[\"parts\"] for x in d[\"items\"] if x[\"kind\"]==\"plugin\"]==[{\"skills\": [\"demo\"], \"commands\": [], \"agents\": [], \"mcp\": [], \"hooks\": True}]"'
 out=$(pk add plugin demo 2>&1); rc=$?
 PC="$PH/.config/agentkit/plugins"
 check "plugins: add copies it to kit's marketplace" '[ $rc -eq 0 ] && [ -f "$PC/demo/hooks/h.json" ] && grep -qF "\"name\":\"demo\",\"source\":\"./demo\"" "$PC/.claude-plugin/marketplace.json" && grep -qF "\"path\":\"./demo\"" "$PC/.agents/plugins/marketplace.json"'

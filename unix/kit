@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.10
+KIT_API=1.11
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -1296,6 +1296,7 @@ dir_marks() { [ -f "$1/$DIR_FILE" ] && awk '{ sub(/\r$/, "") } /^(agent|tool):[^
 dir_mark() { dir_marks "$1" | sed -n "s/^$2://p" | head -n 1; }   # dir_mark DIR agent|tool : the agent kit place put there, its tool
 dir_kind() { printf 'dir:%s:%s' "$1" "$2"; }       # dir_kind DIR KIND : state.tsv kind for a folder's own (kit keeps it with the rest)
 dirs_registered() { [ -f "$DIRS_LIST" ] && awk 'NF && !seen[$0]++' "$DIRS_LIST"; }
+dirs_with() { local d; dirs_registered | while IFS= read -r d; do [ -d "$d" ] && dir_items "$d" | grep -qxF -- "$1" && printf '%s\n' "$d"; done; return 0; }   # dirs_with KIND:NAME : the folders whose list has it
 dirs_set() { # dirs_set DIR add|rm : the list of folders kit has to keep up to date
     local t; mkdir -p "$KIT_CONF"; touch "$DIRS_LIST"
     [ "$2" = add ] || rm -f "$(placed_copy "$1")"
@@ -1659,6 +1660,16 @@ tool_cache() { # every program kit has a recipe for: its title, what this machin
         [ -z "$mp" ] || eval "TC_INST_$c=\$(tool_argv install \$mp | words); TC_UPG_$c=\$(tool_argv upgrade \$mp | words)"
     done
     TC_DONE=1
+}
+parts_json() { # parts_json PLUGINDIR -> {"skills", "commands", "agents", "mcp": [names], "hooks": bool}: what a plugin brings
+    local d=$1 f h=false
+    for f in "$d"/hooks/*.json; do [ -f "$f" ] && h=true; done
+    [ $h = true ] || { json_get "$d/.claude-plugin/plugin.json" hooks >/dev/null && h=true; }
+    printf '{"skills": %s, "commands": %s, "agents": %s, "mcp": %s, "hooks": %s}' \
+        "$(for f in "$d"/skills/*/SKILL.md; do [ -f "$f" ] && basename "$(dirname "$f")"; done | LC_ALL=C sort | json_arr)" \
+        "$(for f in "$d"/commands/*.md; do [ -f "$f" ] && basename "$f" .md; done | LC_ALL=C sort | json_arr)" \
+        "$(for f in "$d"/agents/*.md; do [ -f "$f" ] && basename "$f" .md; done | LC_ALL=C sort | json_arr)" \
+        "$( [ -f "$d/.mcp.json" ] && json_keys "$d/.mcp.json" mcpServers | json_arr || printf '[]')" "$h"
 }
 needs_json() { # needs_json SKILLDIR SOURCEDIR -> [{"tool", "title", "min", "have", "ok", "install"}] (after tool_cache)
     local n m h t i ok first=1 c
@@ -4149,7 +4160,7 @@ EOF
         printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "changed": %s, "source": %s, "description": %s%s, "path": %s%s}' \
             "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$changed" "$(json_s "$(basename "$d")")" "$(json_s "$desc")" "$(zh=$(desc_zh "${d%/}" "$i" "$desc"); [ -z "$zh" ] || printf ', "description_zh": %s' "$(json_s "$zh")")" "$(json_s "$p")" \
             "$(case $k in (skill) printf ', "needs": %s%s' "$(needs_json "$(dirname "$p")" "${d%/}")" "$(packages_json "$(dirname "$p")" "$n")";;
-                         (plugin) printf ', "needs": %s' "$(needs_json "${p%/.claude-plugin/plugin.json}" "${d%/}")";;
+                         (plugin) printf ', "needs": %s, "parts": %s' "$(needs_json "${p%/.claude-plugin/plugin.json}" "${d%/}")" "$(parts_json "${p%/.claude-plugin/plugin.json}")";;
                          (mcp) mcp_list_json "$p" "$n";; esac)"
     done
     printf '\n  ],\n  "kit_version_wanted": %s' "$(json_s "$(wanted_version)")"
@@ -4213,7 +4224,15 @@ cmd_add_rm() {
     case " rule skill mcp plugin " in *" $k "*) ;; *) die "種類只能是 rule、skill、mcp、plugin";; esac
     [ -z "$dir" ] || [ "$k" != plugin ] || die "外掛只能加到整個帳號（不能 --dir）"
     if [ -n "$dir" ]; then dir_add_rm "$verb" "$dir" "$k" "$1"; return; fi
-    for n in "$@"; do find_item "$k" "$n" > /dev/null || die "找不到 $k:${n}（打 kit list 看有哪些）"; done
+    local acct; acct=$(wanted)
+    for n in "$@"; do
+        # taking one out: one the account has goes even when no source has it any more
+        [ "$verb" = rm ] && printf '%s\n' "$acct" | grep -qxF "$k:$n" && continue
+        # the account hasn't it but a folder has: say how to take it out there
+        [ "$verb" = rm ] && i=$(dirs_with "$k:$n") && [ -n "$i" ] &&
+            die "整個帳號沒有 $k:${n}，是這些資料夾的清單有：$(printf '%s\n' "$i" | paste -sd ' ' -)。要拿掉打 kit rm --dir <資料夾> $k $n"
+        find_item "$k" "$n" > /dev/null || die "找不到 $k:${n}（打 kit list 看有哪些）"
+    done
     [ "$verb" = add ] || for n in "$@"; do required_items | grep -qxF "$k:$n" && die "$k:$n 是團隊必備，拿不掉"; done
     added=$(m_added); removed=$(m_removed)
     for n in "$@"; do
@@ -5059,11 +5078,13 @@ push_items() { # changed item files (one per line) -> verb<TAB>kind:name, one pe
             skills/*/*) k=skill; n=${f#skills/}; n=${n%%/*}; p=skills/$n/SKILL.md;;
             mcp/*.yaml) k=mcp; n=${f#mcp/}; n=${n%.yaml}; p=$f;;
             agents/*.md) k=agent; n=${f#agents/}; n=${n%.md}; p=$f;;
+            plugins/*/*) k=plugin; n=${f#plugins/}; n=${n%%/*}; p=plugins/$n/.claude-plugin/plugin.json;;
+            third_party.lock|descriptions-zh.txt) k=""; n=$f; p=$f;;   # (named as they are)
             *) continue;;
         esac
         if git cat-file -e "HEAD:$p" 2>/dev/null; then
-            if [ -e "$p" ]; then printf 'update\t%s:%s\n' "$k" "$n"; else printf 'remove\t%s:%s\n' "$k" "$n"; fi
-        else printf 'add\t%s:%s\n' "$k" "$n"; fi
+            if [ -e "$p" ]; then printf 'update\t%s%s\n' "${k:+$k:}" "$n"; else printf 'remove\t%s%s\n' "${k:+$k:}" "$n"; fi
+        else printf 'add\t%s%s\n' "${k:+$k:}" "$n"; fi
     done | awk -F'\t' '!seen[$2]++'
 }
 ITEM_RE='^(rules/[^/]+\.md|skills/[^/]+/.+|plugins/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock|descriptions-zh\.txt)$'   # the files kit push sends
@@ -5083,8 +5104,11 @@ changed_files() { # changed files here, one per line, exactly as named (a rename
 }
 git_add_commit() { # git_add_commit MSG FILE... : commit exactly these files (names taken literally, not as patterns)
     # if git (or a commit hook) says no, the files go back to how they were before: nothing staged
-    local msg=$1; shift
-    GIT_LITERAL_PATHSPECS=1 git add -A -- "$@" && GIT_LITERAL_PATHSPECS=1 git commit -q -m "$msg" -- "$@" && return 0
+    local msg=$1 f add=(); shift
+    # a deletion you already staged (git rm) is in neither the folder nor the index: git add would refuse it, commit takes it
+    for f; do { [ -e "$f" ] || [ -L "$f" ] || [ -n "$(GIT_LITERAL_PATHSPECS=1 git ls-files -- "$f")" ]; } && add+=("$f"); done
+    { [ ${#add[@]} = 0 ] || GIT_LITERAL_PATHSPECS=1 git add -A -- "${add[@]}"; } &&
+        GIT_LITERAL_PATHSPECS=1 git commit -q -m "$msg" -- "$@" && return 0
     GIT_LITERAL_PATHSPECS=1 git reset -q -- "$@" 2>/dev/null
     return 1
 }

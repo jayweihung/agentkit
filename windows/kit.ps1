@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.10'
+$script:KitApi = '1.11'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -2310,6 +2310,7 @@ function Dir-Marks([string]$d) { # kit place's lines (agent:NAME, tool:TOOL)
 function Dir-Mark([string]$d, [string]$k) { foreach ($l in @(Dir-Marks $d)) { if ($l.StartsWith("${k}:")) { return $l.Substring($k.Length + 1) } }; '' }   # the agent kit place put there, its tool
 function Dir-Kind([string]$d, [string]$k) { "dir:${d}:$k" }   # state.tsv kind for a folder's own (kit keeps it with the rest)
 function Dirs-Registered { if (Test-Path -LiteralPath $DirsList) { Uniq @((Read-Text $DirsList) -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ }) } else { @() } }
+function Dirs-With([string]$i) { @(Dirs-Registered | Where-Object { (Test-Path -LiteralPath $_ -PathType Container) -and (@(Dir-Items $_) -contains $i) }) }   # the folders whose list has KIND:NAME
 function Dirs-Set([string]$d, [string]$how) { # the list of folders kit has to keep up to date
     if ($how -ne 'add') { $c = Placed-Copy $d; if (Test-Path -LiteralPath $c) { Remove-Item -LiteralPath $c -Force } }
     $rows = @(Dirs-Registered | Where-Object { $_ -ne $d }); if ($how -eq 'add') { $rows += $d }
@@ -2726,6 +2727,16 @@ function Tool-Cache { # every program kit has a recipe for: its title, what this
         if ($mp.Count -gt 0) { $c.install = (Tool-Argv 'install' $mp[0][0] $mp[0][1]) -join ' '; $c.upgrade = (Tool-Argv 'upgrade' $mp[0][0] $mp[0][1]) -join ' ' }
         $script:ToolCache[$n] = $c
     }
+}
+function Parts-Json([string]$d) { # {"skills", "commands", "agents", "mcp": [names], "hooks": bool}: what a plugin brings
+    $names = { param($glob, [bool]$dirs) # sorted as bash's LC_ALL=C sort
+        [string[]]$a = @(Get-ChildItem -Path (Join-Path $d $glob) -ErrorAction SilentlyContinue | ForEach-Object { if ($dirs) { $_.Directory.Name } else { $_.BaseName } })
+        [Array]::Sort($a, [StringComparer]::Ordinal); $a }
+    $hooks = @(Get-ChildItem -Path (Join-Path $d 'hooks/*.json') -File -ErrorAction SilentlyContinue).Count -gt 0
+    if (-not $hooks) { $pj = Join-Path $d '.claude-plugin/plugin.json'; if (Test-Path -LiteralPath $pj) { $hooks = $null -ne (Json-Get $pj 'hooks') } }
+    $mcp = if (Test-Path -LiteralPath (Join-Path $d '.mcp.json')) { Json-Keys (Join-Path $d '.mcp.json') @('mcpServers') } else { @() }
+    '{"skills": ' + (Json-Arr (& $names 'skills/*/SKILL.md' $true)) + ', "commands": ' + (Json-Arr (& $names 'commands/*.md' $false)) +
+        ', "agents": ' + (Json-Arr (& $names 'agents/*.md' $false)) + ', "mcp": ' + (Json-Arr $mcp) + ', "hooks": ' + $(if ($hooks) { 'true' } else { 'false' }) + '}'
 }
 function Needs-Json([string]$d, [string]$src) { # [{"tool", "title", "min", "have", "ok", "install"}]
     Tool-Cache
@@ -5793,7 +5804,7 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
         $desc = Item-Desc $k $p; $zh = Desc-Zh $dir $i $desc; $zj = if ($zh) { ', "description_zh": ' + (Json-S $zh) } else { '' }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
         $nj = if ($k -eq 'skill') { ', "needs": ' + (Needs-Json (Split-Path -Parent $p) $dir) + (Packages-Json (Split-Path -Parent $p) $n) }
-              elseif ($k -eq 'plugin') { ', "needs": ' + (Needs-Json (Split-Path -Parent (Split-Path -Parent $p)) $dir) } elseif ($k -eq 'mcp') { Mcp-ListJson $p $n } else { '' }
+              elseif ($k -eq 'plugin') { $pd = Split-Path -Parent (Split-Path -Parent $p); ', "needs": ' + (Needs-Json $pd $dir) + ', "parts": ' + (Parts-Json $pd) } elseif ($k -eq 'mcp') { Mcp-ListJson $p $n } else { '' }
         [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"changed`": $changed, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S $desc)$zj, `"path`": $(Json-S $p)$nj}")
     }
     [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))")
@@ -5851,7 +5862,15 @@ function Cmd-AddRm([string]$verb, $rest) {
     if (@('rule', 'skill', 'mcp', 'plugin') -notcontains $k) { Die '種類只能是 rule、skill、mcp、plugin' }
     if ($dir -and $k -eq 'plugin') { Die '外掛只能加到整個帳號（不能 --dir）' }
     if ($dir) { Dir-AddRm $verb $dir $k $names[0]; return }
-    foreach ($n in $names) { if (-not (Find-Item $k $n)) { Die "找不到 ${k}:${n}（打 kit list 看有哪些）" } }
+    $acct = @(Wanted)
+    foreach ($n in $names) {
+        # taking one out: one the account has goes even when no source has it any more
+        if ($verb -eq 'rm' -and $acct -contains "${k}:$n") { continue }
+        # the account hasn't it but a folder has: say how to take it out there
+        $in = @(if ($verb -eq 'rm') { Dirs-With "${k}:$n" })
+        if ($in.Count) { Die "整個帳號沒有 ${k}:${n}，是這些資料夾的清單有：$($in -join ' ')。要拿掉打 kit rm --dir <資料夾> $k $n" }
+        if (-not (Find-Item $k $n)) { Die "找不到 ${k}:${n}（打 kit list 看有哪些）" }
+    }
     if ($verb -ne 'add') { $req = Kit-Items 'required'; foreach ($n in $names) { if ($req -contains "${k}:$n") { Die "${k}:$n 是團隊必備，拿不掉" } } }
     $added = @(M-Added); $removed = @(M-Removed)
     foreach ($n in $names) {
@@ -6640,11 +6659,14 @@ function Push-Items([string]$dir, $files) { # changed item files -> @(verb, kind
         elseif ($f -match '^skills/([^/]+)/') { $k = 'skill'; $n = $Matches[1]; $p = "skills/$n/SKILL.md" }
         elseif ($f -match '^mcp/([^/]+)\.yaml$') { $k = 'mcp'; $n = $Matches[1]; $p = $f }
         elseif ($f -match '^agents/([^/]+)\.md$') { $k = 'agent'; $n = $Matches[1]; $p = $f }
+        elseif ($f -match '^plugins/([^/]+)/') { $k = 'plugin'; $n = $Matches[1]; $p = "plugins/$n/.claude-plugin/plugin.json" }
+        elseif ($f -ceq 'third_party.lock' -or $f -ceq 'descriptions-zh.txt') { $k = ''; $n = $f; $p = $f }   # (named as they are)
         else { continue }
-        if ($seen.ContainsKey("${k}:$n")) { continue }; $seen["${k}:$n"] = 1
+        $i = if ($k) { "${k}:$n" } else { $n }
+        if ($seen.ContainsKey($i)) { continue }; $seen[$i] = 1
         [void](Git-Q -C $dir cat-file -e "HEAD:$p")
         $v = if ($LASTEXITCODE -ne 0) { 'add' } elseif (Test-Path -LiteralPath (Join-Path $dir $p)) { 'update' } else { 'remove' }
-        , @($v, "${k}:$n")
+        , @($v, $i)
     }
 }
 $script:ItemRe = '^(rules/[^/]+\.md|skills/[^/]+/.+|plugins/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock|descriptions-zh\.txt)$'   # the files kit push sends
@@ -6669,7 +6691,9 @@ function Changed-Files([string]$dir) { # changed files in DIR, exactly as named 
 function Git-AddCommit([string]$dir, [string]$msg, $files) { # commit exactly these files (names taken literally, not as patterns)
     $env:GIT_LITERAL_PATHSPECS = '1'
     try {
-        [void](Git-Q -C $dir add -A '--' @files); if ($LASTEXITCODE -ne 0) { return $false }
+        # a deletion you already staged (git rm) is in neither the folder nor the index: git add would refuse it, commit takes it
+        $add = @($files | Where-Object { (Test-Path -LiteralPath (Join-Path $dir $_)) -or @(Git-Q -C $dir ls-files '--' $_).Count })
+        if ($add.Count) { [void](Git-Q -C $dir add -A '--' @add); if ($LASTEXITCODE -ne 0) { return $false } }
         $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         try { $o = @(& git -C $dir commit -q -m $msg '--' @files 2>&1 | ForEach-Object { "$_" }) } finally { $ErrorActionPreference = $old }
         if ($LASTEXITCODE -eq 0) { return $true }
