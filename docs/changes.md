@@ -4,6 +4,12 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.11（2026-11-16）
+
+更新後要做：`kit self-update`，再 `kit sync`。
+
+- Codex 的 hook：kit 放進 `~/.codex/hooks.json` 的 hook（`kit sync --hook`、`handoff-hook`、`codex-guard`）新增或改過時，kit 先問 Codex 信任了沒有。已經信任就不再叫你打 `/hooks`；還沒信任才用 `kit pending` 提醒，你在 Codex 打 `/hooks` 信任之後，下一次 `kit sync` 收掉提醒。Windows 版一樣。
+
 ## 0.6.10（2026-11-15）
 
 更新後要做：`kit self-update`。

@@ -1920,6 +1920,29 @@ function Codex-TrustAsk([string]$n) { # codex app-server: hooks/list, trust NAME
     } catch { '' }
     finally { if ($p) { try { $p.StandardInput.Close() } catch { }; Ctx-Kill $p; try { $p.Dispose() } catch { } } }
 }
+function Codex-OwnHooks([string]$text) { # hooks/list's answer -> @(listed, untrusted): kit's own hooks in ~/.codex/hooks.json
+    # (kit sync --hook, handoff-hook, codex-guard), and how many of them Codex has not trusted yet (new or changed)
+    $l = 0; $u = 0
+    foreach ($line in ($text -split "`n")) {
+        $a = $line -split '\{"key":'
+        for ($i = 1; $i -lt $a.Count; $i++) {
+            $x = $a[$i]
+            if ($x -cnotmatch '"source":"user"' -or $x -cnotmatch '"command":"([^"\\]|\\.)*( sync --hook| handoff-hook| codex-guard)"') { continue }
+            $l++; if ($x -cnotmatch '"trustStatus":"trusted"') { $u++ }
+        }
+    }
+    @($l, $u)
+}
+function Codex-OwnTrust([bool]$changed) { # after kit's hooks in ~/.codex/hooks.json were written ($changed: something new in
+    # them) or while kit still waits for you to trust them: Codex trusts them all -> nothing to do; else (new or changed,
+    # or Codex did not answer) once: type /hooks in Codex
+    $c = Codex-OwnHooks (Codex-TrustAsk '')                                     # no plugin named: only the list
+    if ($c[0] -gt 0 -and $c[1] -eq 0) { Kit-PendingDone 'codex-hooks'; State-Set 'told' 'codex-guard' 1; return }
+    if (-not $changed) { return }
+    # Codex listed them, not trusted yet: look again on the next syncs; it did not (an older Codex, no answer): once
+    State-Set 'told' 'codex-guard' $(if ($c[0] -gt 0) { 'ask' } else { 1 })
+    Kit-PendingAsk 'codex-hooks' '要你同意：在 Codex 打 /hooks 信任 kit 的 hook（kit sync、context 快滿的提醒、agent 的工具限制）'
+}
 function Codex-PluginTrust([string]$n) { # after codex plugin add ($script:PluginSaid names Codex's copy): Codex trusts the plugin's
     # hooks only for a version signed in the approvals (Plugin-Signed) that Codex copied as kit has it; else kit pending asks you
     $copy = @(@("$($script:PluginSaid)" -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.StartsWith('Installed plugin root: ') }) | Select-Object -Last 1)
@@ -1994,11 +2017,13 @@ function Codex-Hooks {
     # the team's tools.deny, kept for kit codex-guard (it runs before each shell command: reading the sources' kit.yaml each time is slow)
     $rd = Join-Path $CtxDir 'required-deny.txt'; $want = (@(Required-Deny) -join "`n") + "`n"
     if (-not ((Test-Path -LiteralPath $rd) -and (Read-Text $rd) -eq $want)) { Ensure-Dir $CtxDir; Write-Text $rd $want }
-    if ($changed.Count -eq 0) { return }
-    if (-not (Test-Path -LiteralPath $f)) { State-Set 'made' $f 1 }
-    Json-Edit $f $ops.ToArray()
-    foreach ($c in $changed) { State-Set 'hook.codex' $c[0] $c[1] }
-    if ($null -eq (State-Get 'told' 'codex-guard')) { Say '  Codex：kit 的 hook 放進 ~/.codex/hooks.json 了，下次開 Codex 打 /hooks 信任它（kit sync、context 快滿的提醒、agent 的工具限制）'; State-Set 'told' 'codex-guard' 1 }
+    if ($changed.Count -gt 0) {
+        if (-not (Test-Path -LiteralPath $f)) { State-Set 'made' $f 1 }
+        Json-Edit $f $ops.ToArray()
+        foreach ($c in $changed) { State-Set 'hook.codex' $c[0] $c[1] }
+    }
+    # Codex runs a new or changed hook only after you trust it (/hooks): ask only when it has not
+    if ($changed.Count -gt 0 -or (State-Get 'told' 'codex-guard') -eq 'ask') { Codex-OwnTrust ($changed.Count -gt 0) }
 }
 # What kit holds back in Codex (the same as unix/kit's codex-guard). Codex hands its PreToolUse hook the shell command
 # it is about to run (tool Bash) and its patches (apply_patch: adding a file is Write; changing, moving or deleting one

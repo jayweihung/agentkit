@@ -1935,11 +1935,17 @@ if ($tool -eq 'codex' -and $rest[0] -eq 'plugin' -and $rest[1] -eq 'add') {
     if (Test-Path -LiteralPath (Join-Path $env:FAKE_DIR 'cxchange')) { [IO.File]::AppendAllText((Join-Path $c 'x'), "changed`n") }
     "Installed plugin root: $c"
 }
+function Own-Hooks { # kit's own hooks in hooks.json, trusted or not as $FAKE_DIR/cxown says (none without it)
+    $f = Join-Path $env:FAKE_DIR 'cxown'; if (-not (Test-Path -LiteralPath $f)) { return '' }
+    $ts = ([IO.File]::ReadAllText($f)).Trim()
+    (@('session_start|sync --hook', 'user_prompt_submit|handoff-hook', 'pre_tool_use|codex-guard') | ForEach-Object { $e, $c = $_ -split '\|'
+        ',{"key":"/h/.codex/hooks.json:' + $e + ':0:0","source":"user","pluginId":null,"command":"kit ' + $c + '","trustStatus":"' + $ts + '"}' }) -join ''
+}
 if ($tool -eq 'codex' -and $rest[0] -eq 'app-server') {   # Codex's JSON-RPC on stdin/stdout: hooks/list, config/batchWrite
     while ($null -ne ($l = [Console]::In.ReadLine())) {
         if ($l.Contains('"method":"hooks/list"')) {
             $i = [regex]::Match($l, '"id":([0-9]+)').Groups[1].Value; $st = if (Test-Path -LiteralPath (Join-Path $env:FAKE_DIR 'cxtrusted')) { 'trusted' } else { 'untrusted' }
-            [Console]::Out.WriteLine('{"id":' + $i + ',"result":{"data":[{"cwd":"/","hooks":[{"key":"demo@kit:hooks/h.json:session_start:0:0","eventName":"sessionStart","pluginId":"demo@kit","currentHash":"sha256:aa/sha256:bb","trustStatus":"' + $st + '"},{"key":"/x/hooks.json:stop:0:0","pluginId":null,"currentHash":"sha256:cc","trustStatus":"untrusted"}]}]}}')
+            [Console]::Out.WriteLine('{"id":' + $i + ',"result":{"data":[{"cwd":"/","hooks":[{"key":"demo@kit:hooks/h.json:session_start:0:0","eventName":"sessionStart","pluginId":"demo@kit","currentHash":"sha256:aa/sha256:bb","trustStatus":"' + $st + '"},{"key":"/x/hooks.json:stop:0:0","pluginId":null,"currentHash":"sha256:cc","trustStatus":"untrusted"}' + $(Own-Hooks) + ']}]}}')
         } elseif ($l.Contains('config/batchWrite')) {
             [IO.File]::WriteAllText((Join-Path $env:FAKE_DIR 'cxwrite'), "$l`n"); [IO.File]::WriteAllText((Join-Path $env:FAKE_DIR 'cxtrusted'), '')
             [Console]::Out.WriteLine('{"id":3,"result":{"status":"ok"}}')
@@ -1962,6 +1968,7 @@ G -C "$PG/src" init -q; G -C "$PG/src" config user.name t; G -C "$PG/src" config
 function PLog { if (Test-Path -LiteralPath "$PG/log") { @((ReadT "$PG/log") -split "`n" | ForEach-Object { $_.TrimEnd("`r") }) } else { @() } }
 $PC = "$H/.config/agentkit/plugins"; $PCj = $PC.Replace('\', '/'); $PD = "$H/.config/agentkit/notes/pending"
 Kit init "$PG/src"
+$cxAt = @(PLog | Where-Object { $_ -like 'codex app-server*' }).Count   # kit's own hooks in hooks.json: asked Codex once
 Kit list
 Check 'plugins: kit list shows a plugin' { $out -match '(?m)^ +plugin:demo$' }
 KitJ list --json
@@ -1972,7 +1979,7 @@ Check "plugins: add copies it to kit's marketplace (the same files as unix/kit)"
     (ReadT "$PC/.agents/plugins/marketplace.json") -ceq "{`"name`":`"kit`",`"interface`":{`"displayName`":`"kit`"},`"plugins`":[{`"name`":`"demo`",`"source`":{`"source`":`"local`",`"path`":`"./demo`"},`"policy`":{`"installation`":`"AVAILABLE`",`"authentication`":`"ON_INSTALL`"},`"category`":`"Productivity`"}]}`n" }
 $l = PLog
 Check "plugins: each tool installs it from kit's marketplace" { @($l | Where-Object { $_.Replace('\', '/') -ceq "claude plugin marketplace add $PCj --scope user" }).Count -eq 1 -and ($l -ccontains 'claude plugin install demo@kit --scope user') -and ($l -ccontains 'codex plugin add demo@kit') -and ($l -ccontains 'omp plugin install demo@kit --scope user --force') }
-Check "plugins: not signed -> Codex's hooks not trusted by kit, asked instead" { -not @($l | Where-Object { $_ -like 'codex app-server*' }) -and -not (Test-Path "$PG/cxwrite") -and (ReadT "$PD/codex-hooks-demo").Contains('/hooks') -and $out.Contains('沒有簽章') }
+Check "plugins: not signed -> Codex's hooks not trusted by kit, asked instead" { @($l | Where-Object { $_ -like 'codex app-server*' }).Count -eq $cxAt -and -not (Test-Path "$PG/cxwrite") -and (ReadT "$PD/codex-hooks-demo").Contains('/hooks') -and $out.Contains('沒有簽章') }
 Check 'plugins: the pending item is kept until done (no agent)' { $x = @((ReadT "$PD/codex-hooks-demo") -split "`n"); $x[0] -eq '' -and $x[1] -eq '' }
 [IO.File]::WriteAllText("$PG/log", ''); Kit sync
 Check 'plugins: sync with nothing changed installs nothing again' { -not @(PLog | Where-Object { $_ -match 'install|plugin add' }) }
@@ -2040,6 +2047,16 @@ Remove-Item -Recurse -Force "$CL/skills/up"
 Kit collect (FileUrl $PU) --skip ../x
 Check 'collect --skip: a path outside the plugin refused' { $rc -ne 0 -and $out.Contains('--skip 後面要接') }
 Pop-Location
+# Codex runs a new hook only after you trust it (/hooks): kit asks only while Codex has not
+foreach ($x in 'untrusted', 'trusted') {
+    W "$PG/cxown" "$x`n"; Set-Home (Join-Path $PG "cx-$x"); New-Item -ItemType Directory -Force -Path "$H/.codex" | Out-Null
+    Kit init "$PG/src"; Set-Variable "cx_$x" $out
+}
+Check 'codex hooks new, Codex has not trusted them: asked once (/hooks)' { $cx_untrusted.Contains('/hooks') -and (Test-Path (Join-Path $PG 'cx-untrusted/.config/agentkit/notes/pending/codex-hooks')) }
+Check 'codex hooks new, Codex already trusts them: not asked' { -not $cx_trusted.Contains('/hooks') -and -not (Test-Path (Join-Path $PG 'cx-trusted/.config/agentkit/notes/pending/codex-hooks')) }
+W "$PG/cxown" "trusted`n"; Set-Home (Join-Path $PG 'cx-untrusted'); Kit sync
+Check 'codex hooks trusted later (/hooks): the reminder goes, not asked again' { -not $out.Contains('/hooks') -and -not (Test-Path (Join-Path $PG 'cx-untrusted/.config/agentkit/notes/pending/codex-hooks')) }
+Remove-Item -LiteralPath "$PG/cxown" -Force
 $env:PATH = $savedP; Set-Home $savedHome
 
 # ---------- the script files themselves ----------

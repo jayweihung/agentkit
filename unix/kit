@@ -727,6 +727,37 @@ codex_hooks_untrusted() { # codex_hooks_untrusted NAME < hooks/list's answer -> 
             printf "%s\"%s\":{\"trusted_hash\":\"%s\",\"trusted_content_hash\":\"%s\"}", (c++ ? "," : ""), k, substr(h, 1, index(h, "/") - 1), substr(h, index(h, "/") + 1)
         } }'
 }
+codex_own_hooks() { # codex_own_hooks < hooks/list's answer -> "LISTED UNTRUSTED": kit's own hooks in ~/.codex/hooks.json
+    # (kit sync --hook, handoff-hook, codex-guard), and how many of them Codex has not trusted yet (new or changed)
+    awk '{ n = split($0, a, /\{"key":/)
+        for (i = 2; i <= n; i++) {
+            if (a[i] !~ /"source":"user"/ || a[i] !~ /"command":"([^"\\]|\\.)*( sync --hook| handoff-hook| codex-guard)"/) continue
+            l++; if (a[i] ~ /"trustStatus":"(untrusted|modified)"/ || a[i] !~ /"trustStatus":"trusted"/) u++
+        } } END { printf "%d %d\n", l, u }'
+}
+codex_hooks_list() { # codex_hooks_list : Codex's hooks/list answer (a line; nothing when Codex ended or did not answer in 30 s)
+    local out fifo pid w=0
+    out=$(mktemp "${TMPDIR:-/tmp}/kit-codex.XXXXXX"); fifo="$out.in"; mkfifo "$fifo" || { rm -f "$out"; return 0; }
+    codex app-server < "$fifo" > "$out" 2>/dev/null & pid=$!
+    exec 8> "$fifo"
+    printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"kit","version":%s}}}\n{"jsonrpc":"2.0","method":"initialized"}\n' "$(json_s "$KIT_VERSION")" >&8 2>/dev/null
+    printf '{"jsonrpc":"2.0","id":2,"method":"hooks/list","params":{"cwds":[%s]}}\n' "$(json_s "$HOME")" >&8 2>/dev/null
+    while ! grep -q '^{"id":2,' "$out" && kill -0 $pid 2>/dev/null && [ $w -lt 150 ]; do sleep 0.2; w=$((w + 1)); done
+    exec 8>&-; kill $pid 2>/dev/null; wait $pid 2>/dev/null
+    grep '^{"id":2,' "$out"; rm -f "$out" "$fifo"
+}
+codex_own_trust() { # codex_own_trust CHANGED : after kit's hooks in ~/.codex/hooks.json were written (CHANGED: something
+    # new in them) or while kit still waits for you to trust them: Codex trusts them all -> nothing to do; else (new or
+    # changed, or Codex did not answer) once: type /hooks in Codex
+    local c; c=$(codex_hooks_list | codex_own_hooks)
+    if [ -n "$c" ] && [ "${c%% *}" -gt 0 ] && [ "${c#* }" = 0 ]; then
+        kit_pending_done codex-hooks; state_set told codex-guard 1; return 0
+    fi
+    [ -n "$1" ] || return 0
+    # Codex listed them, not trusted yet: look again on the next syncs; it did not (an older Codex, no answer): once
+    if [ -n "$c" ] && [ "${c%% *}" -gt 0 ]; then state_set told codex-guard ask; else state_set told codex-guard 1; fi
+    kit_pending_ask codex-hooks "要你同意：在 Codex 打 /hooks 信任 kit 的 hook（kit sync、context 快滿的提醒、agent 的工具限制）"
+}
 codex_plugin_trust() { # codex_plugin_trust NAME : after codex plugin add (PLUGIN_SAID names Codex's copy)
     local n=$1 copy out w i
     copy=$(printf '%s\n' "$PLUGIN_SAID" | sed -n 's/^Installed plugin root: //p' | tail -n 1)
@@ -988,8 +1019,9 @@ codex_hooks() {
         [ -f "$f" ] || state_set made "$f" 1
         json_edit "$f" "$ops"
         for e in $changed; do state_set hook.codex $e "$(codex_hook_json $e)"; done
-        [ -n "$(state_get told codex-guard)" ] || { say "  Codex：kit 的 hook 放進 ~/.codex/hooks.json 了，下次開 Codex 打 /hooks 信任它（kit sync、context 快滿的提醒、agent 的工具限制）"; state_set told codex-guard 1; }
     fi
+    # Codex runs a new or changed hook only after you trust it (/hooks): ask only when it has not
+    if [ -n "$changed" ] || [ "$(state_get told codex-guard)" = ask ]; then codex_own_trust "$changed"; fi
     rm -f "$ops"
     # the team's tools.deny, kept for kit codex-guard (it runs before each shell command: reading the sources' kit.yaml each time is slow)
     local want rd="$CTX_DIR/required-deny.txt"; want=$(required_deny)

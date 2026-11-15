@@ -14,6 +14,17 @@ KIT="$HERE/../unix/kit"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 T=$(cd "$T" && pwd -P)   # links resolved, as kit names source folders (macOS: /var is /private/var)
 export HOME="$T/home"; mkdir -p "$HOME"
+# a Codex installed here is not run by the tests (kit asks it with codex app-server whether it trusts kit's hooks):
+# this one says it does; tests that need another Codex put theirs first in PATH
+if command -v codex >/dev/null 2>&1; then
+    mkdir -p "$T/stubcx"; cat > "$T/stubcx/codex" <<'SH'
+#!/bin/sh
+[ "$1" = app-server ] || exit 0
+while IFS= read -r l; do case $l in *'"method":"hooks/list"'*)
+  printf '{"id":2,"result":{"data":[{"cwd":"/","hooks":[{"key":"k1","source":"user","pluginId":null,"command":"kit sync --hook","trustStatus":"trusted"},{"key":"k2","source":"user","pluginId":null,"command":"kit handoff-hook","trustStatus":"trusted"},{"key":"k3","source":"user","pluginId":null,"command":"kit codex-guard","trustStatus":"trusted"}]}]}}\n';; esac; done
+SH
+    chmod +x "$T/stubcx/codex"; export PATH="$T/stubcx:$PATH"
+fi
 unset CLAUDE_CONFIG_DIR AGENTKIT_CONFIG AGENTKIT_SOURCES
 export KIT_TRANSCRIPT_CHECK=0   # (kit sync --hook does not look at the Claude these tests may run in)
 pass=0; fail=0
@@ -937,6 +948,23 @@ if command -v node >/dev/null 2>&1; then
 fi
 kit sync >/dev/null 2>&1
 check "codex hooks once, after another sync" '[ "$(jget "$H4/.codex/hooks.json" hooks.SessionStart | grep -c "sync --hook")" = 1 ]'
+# Codex runs a new hook only after you trust it (/hooks): kit asks only while Codex has not
+mkdir -p "$T/cxtrust"; cat > "$T/cxtrust/codex" <<'SH'
+#!/bin/sh
+[ "$1" = app-server ] || exit 0
+h() { printf '{"key":"%s/.codex/hooks.json:%s:0:0","source":"user","pluginId":null,"command":"'"'"'/k/kit'"'"' %s","trustStatus":"%s"}' "$HOME" "$1" "$2" "$(cat "$HOME/cxtrust")"; }
+while IFS= read -r l; do case $l in *'"method":"hooks/list"'*)
+  printf '{"id":2,"result":{"data":[{"cwd":"/","hooks":[%s,%s,%s]}]}}\n' "$(h session_start 'sync --hook')" "$(h user_prompt_submit handoff-hook)" "$(h pre_tool_use codex-guard)";; esac; done
+SH
+chmod +x "$T/cxtrust/codex"
+for x in untrusted trusted; do
+    mkdir -p "$T/cx-$x/.codex"; echo $x > "$T/cx-$x/cxtrust"
+    out=$(HOME="$T/cx-$x" PATH="$T/cxtrust:$PATH" kit init "$TEAM" 2>&1); eval "cx_$x=\$out"
+done
+check "codex hooks new, Codex has not trusted them: asked once (/hooks)" 'echo "$cx_untrusted" | grep -qF "/hooks" && [ -f "$T/cx-untrusted/.config/agentkit/notes/pending/codex-hooks" ]'
+check "codex hooks new, Codex already trusts them: not asked" '! echo "$cx_trusted" | grep -qF "/hooks" && [ ! -f "$T/cx-trusted/.config/agentkit/notes/pending/codex-hooks" ]'
+echo trusted > "$T/cx-untrusted/cxtrust"; out=$(HOME="$T/cx-untrusted" PATH="$T/cxtrust:$PATH" kit sync 2>&1)
+check "codex hooks trusted later (/hooks): the reminder goes, not asked again" '! echo "$out" | grep -qF "/hooks" && [ ! -f "$T/cx-untrusted/.config/agentkit/notes/pending/codex-hooks" ]'
 # a server the user already has in config.toml is left alone
 printf '\n[mcp_servers.gerrit]\ncommand = "theirs"\n' > "$T/extra"; cp "$H4/.codex/config.toml" "$T/c2"
 awk '/^# agentkit:begin/{exit} {print}' "$T/c2" > "$H4/.codex/config.toml"; cat "$T/extra" >> "$H4/.codex/config.toml"
