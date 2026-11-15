@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.9'
+$script:KitApi = '1.10'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -4457,16 +4457,20 @@ function Omp-DetailScan([string]$f, [string]$total, [string]$window, $files, $sk
     $R.Add("G`tattachments`t`t1")
     foreach ($k in $at.Keys) { $R.Add("I`tattachments`t$k`t" + (Ctx-Num (Ctx-Rnd ($at[$k] * $f))) + "`t`t`t") }
 }
-function Omp-Detail([string]$opid, [string]$dir, $R) { # the rows for an omp
-    foreach ($x in @("H`ttool`tomp", "H`tcompact`t/compact", "H`twith_text`t1", "H`tclear`t/new", "H`tsource`tsession", "H`texact`t0")) { $R.Add($x) }
-    $f = Omp-Session $opid $dir; if (-not $f) { $R.Add("H`terror`t找不到這個 omp 的 session（~/.omp/agent/sessions）"); return }
-    $c = Omp-Ctx $opid $dir
-    foreach ($x in @(("H`tmodel`t" + (Str-Of 'model' $c)), ("H`tused`t" + (Num-Of 'used' $c)), ("H`twindow`t" + (Num-Of 'window' $c)))) { $R.Add($x) }
+function Omp-McpNames([string]$dir) { # the MCP servers omp has there (its own, the folder's, the folder's Codex ones)
     $mcp = New-List; $mf = @(Ctx-Join $OmpDir 'mcp.json'); if ($dir) { $mf += @((Ctx-Join (Ctx-Join $dir '.omp') 'mcp.json'), (Ctx-Join $dir '.mcp.json'), (Ctx-Join $dir 'mcp.json'), (Ctx-Join (Ctx-Join $dir '.claude') 'mcp.json'), (Ctx-Join (Ctx-Join $dir '.claude') '.mcp.json')) }
     foreach ($x in $mf) { if (Test-Path -LiteralPath $x -PathType Leaf) { foreach ($k in @(Json-Keys $x @('mcpServers'))) { $mcp.Add($k) } } }
     if ($dir) { $x = Ctx-Join (Ctx-Join $dir '.codex') 'config.toml'
         if ((Test-Path -LiteralPath $x -PathType Leaf) -and -not (Ctx-SamePath (Ctx-Join $dir '.codex') $CodexDir)) {
             foreach ($l in (Read-Text $x) -split "`n") { if ($l.TrimEnd("`r") -cmatch '^[ \t]*\[mcp_servers\.([^\].]*)\][ \t]*$') { $mcp.Add($Matches[1].Replace('"', '')) } } } }
+    , $mcp
+}
+function Omp-Detail([string]$opid, [string]$dir, $R) { # the rows for an omp
+    foreach ($x in @("H`ttool`tomp", "H`tcompact`t/compact", "H`twith_text`t1", "H`tclear`t/new", "H`tsource`tsession", "H`texact`t0")) { $R.Add($x) }
+    $f = Omp-Session $opid $dir; if (-not $f) { $R.Add("H`terror`t找不到這個 omp 的 session（~/.omp/agent/sessions）"); return }
+    $c = Omp-Ctx $opid $dir
+    foreach ($x in @(("H`tmodel`t" + (Str-Of 'model' $c)), ("H`tused`t" + (Num-Of 'used' $c)), ("H`twindow`t" + (Num-Of 'window' $c)))) { $R.Add($x) }
+    $mcp = Omp-McpNames $dir
     Omp-DetailScan $f (Num-Of 'used' $c) (Num-Of 'window' $c) (Omp-InstrFiles $dir) (Omp-SkillFiles $dir) $mcp $R
     $R.Add("H`tnote`t總數和「系統工具」是 omp 自己記的（最後一次回覆的 context 快照）；其他分類和細項是從檔案和對話紀錄估的（大小 ÷ 4），照比例對到 omp 的數字。指示檔和 skills 是照現在的檔案估的。")
 }
@@ -4601,12 +4605,26 @@ function Files-Ptxt([string]$s, [int]$lv) { # the path after "*** Add File: " up
     }
     $o.ToString().TrimEnd([char]' ', [char]"`t")
 }
-function Files-Scan([string]$tool, [string]$f, [int]$fi, [bool]$main, $Keys, $Vals) { # the rows of one log: a sort key (time, file, n) in
-    # KEYS, in VALS @(tag, path, turn) (turn: the main log's turn number, - for a sub-agent's) or a turn's start @('turn', '', n, at, text)
-    $o = Ctx-Open $f $CtxTail; if (-not $o) { return }
+function Files-Scan([string]$tool, [string]$f, [int]$fi, [bool]$main, $Keys, $Vals, [bool]$used = $false, $mcps = @()) { # the rows of one
+    # log: a sort key (time, file, n) in KEYS, in VALS @(tag, path, turn) (turn: the main log's turn number, - for a sub-agent's) or a
+    # turn's start @('turn', '', n, at, text); USED (kit used): the whole log, only the lines that can matter, and @(skill|mcp, name, turn)
+    $o = Ctx-Open $f $(if ($used) { 0 } else { $CtxTail }); if (-not $o) { return }
     $t = ''; $r = 0; $tn = 0; $last = ''; $touched = $false
     try {
         while ($null -ne ($l = $o[0].ReadLine())) {
+            if ($used) {
+                if (-not $UsedPick[$tool].IsMatch($l)) { continue }
+                $ua = Used-Line $tool $l $mcps
+                if ($ua.Count -gt 0) {
+                    if ($tool -ceq 'claude') {
+                        $ms = $FilesTsRx.Matches($l)
+                        $x = ''; if ($ms.Count -gt 0) { $x = $ms[$ms.Count - 1].Value; $x = $x.Substring(13, $x.Length - 14) }
+                        if ($x) { $t = (($x -creplace '[^0-9]', '') + $FilesZero).Substring(0, 17) } elseif (-not $t) { $t = $FilesZero }
+                    } else { $t = $FilesZero }
+                    $tu = if ($main) { [string]$tn } else { '-' }
+                    foreach ($e in $ua) { $r++; $Keys.Add($t + $fi.ToString('D6', $Inv) + $r.ToString('D10', $Inv)); $Vals.Add(@($e[0], $e[1], $tu)) }
+                }
+            }
             $add = New-Object 'System.Collections.Generic.List[object]'; $traw = $null; $tat = ''
             if ($tool -ceq 'claude') {
                 if ($l.StartsWith('{"type":"api-request', $Ord)) { continue }
@@ -4692,7 +4710,8 @@ function Files-Scan([string]$tool, [string]$f, [int]$fi, [bool]$main, $Keys, $Va
         }
     } finally { $o[0].Dispose() }
 }
-function Files-Rows([string]$tool, [string]$log) { # @(tag, path, turn) of every file the log (and, Claude, its sub-agents) shows, and the turns' starts, oldest first
+function Files-Rows([string]$tool, [string]$log, [bool]$used = $false, $mcps = @()) { # @(tag, path, turn) of every file the log (and, Claude, its
+    # sub-agents) shows, and the turns' starts, oldest first (USED: kit used's rows too)
     if (@('claude', 'codex', 'omp') -cnotcontains $tool -or -not $log -or -not (Test-Path -LiteralPath $log -PathType Leaf)) { return , @() }
     $fs = @($log); $mf = $log
     if ($tool -ceq 'claude') {   # the oldest file first (as ls -tr)
@@ -4702,7 +4721,7 @@ function Files-Rows([string]$tool, [string]$log) { # @(tag, path, turn) of every
         $fs = @($all | Sort-Object @{ Expression = { $_.LastWriteTimeUtc }; Ascending = $true }, @{ Expression = { $_.FullName }; Descending = $true } | ForEach-Object { $_.FullName })
     }
     $K = New-List; $V = New-Object 'System.Collections.Generic.List[object]'; $fi = 0
-    foreach ($f in $fs) { if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }; $fi++; Files-Scan $tool $f $fi ($f -ceq $mf) $K $V }
+    foreach ($f in $fs) { if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }; $fi++; Files-Scan $tool $f $fi ($f -ceq $mf) $K $V $used $mcps }
     $ka = $K.ToArray(); $ix = New-Object 'int[]' $ka.Length; for ($i = 0; $i -lt $ix.Length; $i++) { $ix[$i] = $i }
     [Array]::Sort($ka, $ix, [StringComparer]::Ordinal)   # (an index: PowerShell may hand Sort a copy of an object[])
     $out = New-Object 'System.Collections.Generic.List[object]'; foreach ($i in $ix) { $out.Add($V[$i]) }
@@ -5014,6 +5033,125 @@ function Cmd-Pending($rest) { # kit pending | kit pending add "<what>" [--id ID]
     catch { Die-C no-write "寫不進 $PendDir" }
     Say "記下了：${id}（等到了跑 kit pending done ${id}）"
 }
+# kit used: the skills and MCP servers an agent's conversation used (as in unix/kit: USED_CLAUDE, USED_CODEX, USED_OMP)
+$script:UsedPick = @{
+    claude = [regex]'"message":\{"role":"user","content":("|\[\{"type":"text")|"type":"tool_use","id":"[^"]*","name":"mcp__'
+    codex = [regex]'"user_message"|"UserMessage"|SKILL\.md|"McpToolCall"|"mcp_tool_call_end"'
+    omp = [regex]'"role":"user"|skill://|SKILL\.md|mcp__'
+}
+$script:UsedMcpRx = [regex]'"type":"tool_use","id":"[^"]*","name":"mcp__((?:[^"\\]|\\.)*)"'
+$script:UsedSkillRx = [regex]'[/\\]skills[/\\]([^/\\"* ]+)[/\\]SKILL\.md'
+$script:UsedOmpSkillRx = [regex]'[/\\]skills[/\\]([^/\\]+)[/\\]SKILL\.md(:[0-9,-]*)?\z'
+$script:UsedBase = '[{"type":"text","text":"Base directory for this skill: '
+function Used-OmpMcp([string]$x, $mcps) { # the server of an omp tool name (after mcp__): the longest MCP server it starts with, else up to the last _
+    $lx = $x.ToLowerInvariant(); $b = $null; $bu = ''
+    foreach ($m in $mcps) {
+        $u = ([string]$m).ToLowerInvariant() -creplace '[^a-z0-9_]', '_'
+        if ($u -and $lx.StartsWith($u + '_', $Ord) -and ($null -eq $b -or $u.Length -gt $bu.Length)) { $b = [string]$m; $bu = $u }
+    }
+    if ($null -ne $b) { return $b }
+    $x -creplace '_[^_]*\z', ''
+}
+function Used-Line([string]$tool, [string]$l, $mcps) { # @(skill|mcp, name) for each use one log line shows
+    $ua = New-Object 'System.Collections.Generic.List[object]'
+    if ($tool -ceq 'claude') {
+        if ($l.StartsWith('{"type":"api-request', $Ord)) { return , $ua }
+        if ($l.Contains('"type":"user"') -and ($k = $l.IndexOf($UsedBase, $Ord)) -ge 0) {
+            $s = $l.Substring($k + $UsedBase.Length); $i = $s.IndexOf('\n', $Ord); if ($i -ge 0) { $s = $s.Substring(0, $i) }
+            $s = (Ctx-Unesc $s) -creplace '[/\\]+\z', ''; $s = $s -creplace '^.*[/\\]', ''
+            if ($s) { $ua.Add(@('skill', $s)) }
+        }
+        if ($l.Contains('"type":"assistant"') -and $l.Contains('"name":"mcp__') -and $l.Contains('"type":"tool_use"')) {
+            foreach ($m in $UsedMcpRx.Matches($l)) { $n = $m.Groups[1].Value; $i = $n.IndexOf('__', $Ord); if ($i -gt 0) { $ua.Add(@('mcp', (Ctx-Unesc $n.Substring(0, $i)))) } }
+        }
+    } elseif ($tool -ceq 'codex') {
+        if (($l.Contains('"type":"custom_tool_call"') -or $l.Contains('"type":"function_call"')) -and -not $l.Contains('*** Begin Patch')) {
+            $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+            foreach ($m in $UsedSkillRx.Matches($l)) { if ($seen.Add($m.Groups[1].Value)) { $ua.Add(@('skill', $m.Groups[1].Value)) } }
+        }
+        $i = -1; if ($l.Contains('"type":"item_completed"')) { $i = $l.IndexOf('"item":{"type":"McpToolCall"', $Ord) }
+        if ($i -ge 0) { $n = Ctx-Unesc (Ctx-Strv $l.Substring($i) 'server'); if ($n) { $ua.Add(@('mcp', $n)) } }
+        $i = -1; if ($l.Contains('"type":"mcp_tool_call_end"')) { $i = $l.IndexOf('"invocation":{', $Ord) }
+        if ($i -ge 0) { $n = Ctx-Unesc (Ctx-Strv $l.Substring($i) 'server'); if ($n) { $ua.Add(@('mcp', $n)) } }
+    } elseif ($tool -ceq 'omp' -and $l.Contains('"role":"assistant"') -and $l.Contains('{"type":"toolCall"')) {
+        $s = $l; $i = $s.IndexOf('{"type":"toolCall"', $Ord)
+        while ($i -ge 0) {
+            $s = $s.Substring($i + 18); $i = $s.IndexOf('{"type":"toolCall"', $Ord)
+            $seg = if ($i -ge 0) { $s.Substring(0, $i) } else { $s }
+            $n = Ctx-Strv $seg 'name'; $k = $seg.IndexOf('"arguments":{', $Ord); $p = if ($k -ge 0) { Ctx-Unesc (Ctx-Strv $seg.Substring($k + 12) 'path') } else { '' }
+            if ($n -ceq 'read' -and $p.StartsWith('skill://', $Ord)) { $p = $p.Substring(8) -creplace '[/:?#].*', ''; if ($p) { $ua.Add(@('skill', $p)) } }
+            elseif ($n -ceq 'read' -and ($m = $UsedOmpSkillRx.Match($p)).Success) { $ua.Add(@('skill', $m.Groups[1].Value)) }
+            elseif ($n.StartsWith('mcp__', $Ord)) { $ua.Add(@('mcp', (Used-OmpMcp $n.Substring(5) $mcps))) }
+            elseif ($n -ceq 'write' -and $p.StartsWith('xd://mcp__', $Ord)) { $ua.Add(@('mcp', (Used-OmpMcp $p.Substring(10) $mcps))) }
+        }
+    }
+    , $ua
+}
+function Used-Plugin([string]$name) { # the kit plugin whose skills/ has a skill NAME (in any source), else ''
+    foreach ($d in Src-Dirs) {
+        $pd = Join-Path $d 'plugins'; if (-not (Test-Path -LiteralPath $pd -PathType Container)) { continue }
+        foreach ($p in @(Get-ChildItem -LiteralPath $pd -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            if (Test-Path -LiteralPath (Join-Path (Join-Path $p.FullName 'skills') $name) -PathType Container) { return $p.Name }
+        }
+    }
+    ''
+}
+function Cmd-Used($rest) { # kit used --pid PID [--tool claude|codex|omp] [--dir DIR] [--json] : the skills and MCP servers that conversation used
+    $use = '用法：kit used --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--json]'
+    $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $json = $false
+    for ($i = 0; $i -lt $rest.Count; $i++) {
+        $a = [string]$rest[$i]
+        if ($a -ceq '--json') { $json = $true; continue }
+        if ($a -cne '--pid' -and $a -cne '--tool' -and $a -cne '--dir') { Die-C usage $use }
+        if ($i + 1 -ge $rest.Count) { Die-C usage $use }
+        $v = [string]$rest[++$i]
+        if ($a -ceq '--pid') { $cpid = $v } elseif ($a -ceq '--tool') { $tool = $v } else { $dir = $v }
+    }
+    if ($cpid -cnotmatch '^[0-9]+\z') { Die-C usage $use }
+    $g = Agent-Guess $cpid $tool $dir; $tool = [string]$g[0]; $dir = [string]$g[1]
+    $al = Agent-Log $cpid $tool $dir; $log = $al[0]; $note = $al[1]
+    $mcps = if ($tool -ceq 'omp') { Omp-McpNames $dir } else { @() }
+    # the last turn; for each skill and MCP server how many times and its last turn (a sub-agent's: the turn that started last before it)
+    $cur = 0; $top = 0; $order = New-List; $cnt = @{}; $lt = @{}; $ord = @{}; $seq = 0
+    foreach ($v in (Files-Rows $tool $log $true $mcps)) {
+        if ($v[0] -ceq 'turn') { $cur = [int]$v[2]; if ($cur -gt $top) { $top = $cur }; continue }
+        if ($v[0] -cne 'skill' -and $v[0] -cne 'mcp') { continue }
+        $k = $v[0] + "`t" + $v[1]; $u = if ($v[2] -ceq '-') { $cur } else { [int]$v[2] }
+        if (-not $cnt.ContainsKey($k)) { $order.Add($k); $cnt[$k] = 0; $lt[$k] = 0 }
+        $cnt[$k]++; if ($u -ge $lt[$k]) { $lt[$k] = $u }; $ord[$k] = ++$seq
+    }
+    $ks = @($order); for ($i = 0; $i -lt $ks.Count; $i++) { for ($j = $i + 1; $j -lt $ks.Count; $j++) {
+        if ($lt[$ks[$j]] -gt $lt[$ks[$i]] -or ($lt[$ks[$j]] -eq $lt[$ks[$i]] -and $ord[$ks[$j]] -gt $ord[$ks[$i]])) { $x = $ks[$i]; $ks[$i] = $ks[$j]; $ks[$j] = $x } } }
+    $sk = New-List; $mc = New-List; $human = New-List
+    foreach ($k in $ks) {
+        $kind, $n = $k -split "`t", 2; $c = $cnt[$k]; $u = $lt[$k]
+        if ($kind -ceq 'skill') {
+            $pl = Used-Plugin $n
+            $sk.Add('{"name": ' + (Json-S $n) + ',' + $(if ($pl) { ' "plugin": ' + (Json-S $pl) + ',' } else { '' }) + ' "count": ' + $c + ', "turn": ' + $u + '}')
+            $human.Add("skill ${n}" + $(if ($pl) { "（外掛 ${pl}）" } else { '' }) + "  ${c} 次，第 ${u} 輪")
+        } else {
+            $mc.Add('{"name": ' + (Json-S $n) + ', "count": ' + $c + ', "turn": ' + $u + '}')
+            $human.Add("MCP ${n}  ${c} 次，第 ${u} 輪")
+        }
+    }
+    if ($json) {
+        $j = '{"tool": ' + (Json-S $tool) + ', "log": ' + (Json-S $log) + ', "dir": ' + (Json-S $dir) + ', "turn": ' + $top + ', "skills": [' + ($sk -join ', ') + '], "mcp": [' + ($mc -join ', ') + ']'
+        if ($note) { $j += ', "note": ' + (Json-S $note) }
+        Out-Json ($j + '}')
+    } else {
+        if ($note) { Warn $note }
+        if ($human.Count -gt 0) { foreach ($h in $human) { Say $h } } else { Warn '這次對話還沒用到 skill 或 MCP' }
+    }
+}
+function Agent-Log([string]$cpid, [string]$tool, [string]$dir) { # @(that agent's conversation log, why there is none)
+    $log = ''; $note = ''
+    if ($tool -ceq 'claude') { $s = Claude-Where $cpid $dir; if ($s) { $log = $s[2] }; if (-not $log) { $note = '找不到這個 Claude 的對話紀錄（~/.claude/projects）' } }
+    elseif ($tool -ceq 'codex') { $log = Codex-Rollout $dir $cpid; if (-not $log) { $note = '找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）' } }
+    elseif ($tool -ceq 'omp') { $log = Omp-Session $cpid $dir; if (-not $log) { $note = '找不到這個 omp 的 session（~/.omp/agent/sessions）' } }
+    elseif (-not $tool) { $note = '看不出是哪種 agent（用 --tool claude|codex|omp 指定）' }
+    else { $note = "不認得這種 agent：${tool}（只認得 claude、codex、omp）" }
+    , @([string]$log, $note)
+}
 function Cmd-Files($rest) { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git] [--json] : the files that agent read or changed
     $use = '用法：kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]'
     $rest = @($rest); $cpid = ''; $tool = ''; $dir = ''; $git = $false; $json = $false
@@ -5028,12 +5166,7 @@ function Cmd-Files($rest) { # kit files --pid PID [--tool claude|codex|omp] [--d
     }
     if ($cpid -cnotmatch '^[0-9]+\z') { Die-C usage $use }
     $g = Agent-Guess $cpid $tool $dir; $tool = [string]$g[0]; $dir = [string]$g[1]
-    $log = ''; $note = ''
-    if ($tool -ceq 'claude') { $s = Claude-Where $cpid $dir; if ($s) { $log = $s[2] }; if (-not $log) { $note = '找不到這個 Claude 的對話紀錄（~/.claude/projects）' } }
-    elseif ($tool -ceq 'codex') { $log = Codex-Rollout $dir $cpid; if (-not $log) { $note = '找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）' } }
-    elseif ($tool -ceq 'omp') { $log = Omp-Session $cpid $dir; if (-not $log) { $note = '找不到這個 omp 的 session（~/.omp/agent/sessions）' } }
-    elseif (-not $tool) { $note = '看不出是哪種 agent（用 --tool claude|codex|omp 指定）' }
-    else { $note = "不認得這種 agent：${tool}（只認得 claude、codex、omp）" }
+    $al = Agent-Log $cpid $tool $dir; $log = $al[0]; $note = $al[1]
     $gits = if ($git) { Files-Git $dir } else { @() }
     $items = New-List; $human = New-List; $n = 0; $rows = Files-Rows $tool $log
     foreach ($e in (Files-Pick $rows $gits $dir)) {
@@ -7309,6 +7442,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit usage                       這個帳號的方案用量（Claude、Codex：5 小時、每週用了幾 %、幾點重置；JSON）
   kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
                                   那個 agent 讀過、改過的檔案，新的在前（--json 給程式讀；--git：再加上 git 有變動的）
+  kit used --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--json]
+                                  那個 agent 這次對話用了哪些 skill、MCP，幾次、第幾輪（--json 給程式讀）
   kit note ["做了什麼；下一步"]      agent 寫自己做到哪（一兩行，畫面上看得到）；不帶文字：印出現在寫的
   kit note --history [--dir 資料夾]   這個資料夾最近的進度（包括已經關掉的 agent），交接時先看
   kit note --pid <pid> [--json]     某個 agent 的進度（--json 給程式讀）；--clear 清掉自己的
@@ -7361,7 +7496,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 $cmd = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
 $rest = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
 # programs read JSON: list/agents/push/files --json, status, and collect/new --look print only JSON on stdout (errors too)
-if ((@('list', 'ls', 'agents', 'push', 'files', 'place') -ccontains $cmd -and @($rest) -ccontains '--json') -or (@('collect', 'new') -ccontains $cmd -and @($rest) -ccontains '--look') -or $cmd -ceq 'status') { $script:JsonOut = $true }
+if ((@('list', 'ls', 'agents', 'push', 'files', 'used', 'place') -ccontains $cmd -and @($rest) -ccontains '--json') -or (@('collect', 'new') -ccontains $cmd -and @($rest) -ccontains '--look') -or $cmd -ceq 'status') { $script:JsonOut = $true }
 try {
     # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook / --bg take it themselves)
     if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent', 'install-deps', 'place') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
@@ -7390,6 +7525,7 @@ try {
         'context' { Cmd-Context $rest }
         'usage' { Cmd-Usage $rest }
         'files' { Cmd-Files $rest }
+        'used' { Cmd-Used $rest }
         'note' { Cmd-Note $rest }
         'describe' { Cmd-Describe $rest }
         'pending' { Cmd-Pending $rest }

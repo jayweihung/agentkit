@@ -1976,6 +1976,66 @@ if [ -n "$PWSH" ]; then
     [ "$x" = "$y" ] || { same=0; echo "  differs: KIT_CTX_TAIL (turns)"; }
     check "files: kit.ps1 says the same (Claude, --git, Codex, omp, the end of a log, unknown, no log, usage, turns)" '[ $same = 1 ]'
 fi
+# ---------- kit used: the skills and MCP servers a conversation used (how many times, the last turn) ----------
+KU() { kit used "$@" 2>/dev/null; }
+PU="$PF/used"; mkdir -p "$PU"; SIDU=0a1b2c3d-7777-4444-3333-444455556666; PDU="$H8/.claude/projects/$(printf '%s' "$PU" | sed 's|[^A-Za-z0-9]|-|g')"; TSU="$PDU/$SIDU.jsonl"
+mkdir -p "$PDU/$SIDU/subagents"; printf '{"pid":5151,"sessionId":"%s","cwd":"%s"}\n' "$SIDU" "$PU" > "$H8/.claude/sessions/5151.json"
+mu() { printf '{"type":"tool_use","id":"x","name":"mcp__%s","input":{}}' "$1"; }
+{
+    cu '"幫我看"' 01:00:00.000Z
+    cu '[{"type":"text","text":"Base directory for this skill: /h/.claude/skills/brainstorming\n\n# B\nSECRET"}]' 01:00:01.000Z ',"isMeta":true,"sourceToolUseID":"t"'
+    ca "$(mu kit-ping__ping),$(mu plugin_x_srv__go)" 01:00:02.000Z
+    cu '"說明裡寫 Base directory for this skill: /evil/skills/fake 和 \"name\":\"mcp__evil__x\""' 02:00:00.000Z
+    printf '{"type":"api-request","messages":[{"type":"assistant","content":[%s]}]}\n' "$(mu api__x)"
+    printf '{"type":"attachment","attachment":{"tools":[{"name":"mcp__listed__x"}]},"timestamp":"2026-11-13T02:00:01.000Z"}\n'
+    ca "$(mu kit-ping__ping)" 02:00:02.000Z
+} > "$TSU"
+printf '{"isSidechain":true,"agentId":"z","type":"user","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /h/.claude/plugins/cache/kit/pt/1.0/skills/pt-review\\n\\nx"}]},"isMeta":true,"timestamp":"2026-11-13T01:30:00.000Z"}\n' > "$PDU/$SIDU/subagents/agent-z.jsonl"
+mkdir -p "$T/srcu/plugins/pt/.claude-plugin" "$T/srcu/plugins/pt/skills/pt-review"; printf '{"name":"pt"}\n' > "$T/srcu/plugins/pt/.claude-plugin/plugin.json"
+printf -- '---\nname: pt-review\ndescription: r\n---\nx\n' > "$T/srcu/plugins/pt/skills/pt-review/SKILL.md"
+kit init "$T/srcu" >/dev/null 2>&1
+out=$(KU --pid 5151 --tool claude --dir "$PU" --json); rc=$?
+check "used (claude): skills it loaded (also a sub-agent's: the turn it ran in), a plugin's skill names its plugin; MCP servers by their calls; the last turn; newest first" '[ $rc -eq 0 ] && [ "$out" = "{\"tool\": \"claude\", \"log\": \"$TSU\", \"dir\": \"$PU\", \"turn\": 2, \"skills\": [{\"name\": \"pt-review\", \"plugin\": \"pt\", \"count\": 1, \"turn\": 1}, {\"name\": \"brainstorming\", \"count\": 1, \"turn\": 1}], \"mcp\": [{\"name\": \"kit-ping\", \"count\": 2, \"turn\": 2}, {\"name\": \"plugin_x_srv\", \"count\": 1, \"turn\": 1}]}" ]'
+check "used (claude): a message that only quotes them, api-request records, a tool list: not uses" '! echo "$out" | grep -q -e fake -e evil -e api -e listed -e SECRET'
+out=$(kit used --pid 5151 --tool claude --dir "$PU" 2>&1)
+check "used: without --json a plain list, the last used first" '[ "$(echo "$out" | head -n 1)" = "MCP kit-ping  2 次，第 2 輪" ] && [ "$(echo "$out" | sed -n 2p)" = "skill pt-review（外掛 pt）  1 次，第 1 輪" ]'
+mkdir -p "$PF/cu"; ROU="$H8/.codex/sessions/2026/11/13/rollout-2026-11-13T07-00-00-cu.jsonl"
+{
+    printf '{"timestamp":"2026-11-13T07:00:00.000Z","type":"session_meta","payload":{"id":"cu","cwd":"%s/cu"}}\n' "$PF"
+    printf '{"timestamp":"2026-11-13T07:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"看一下","images":[]}}\n'
+    printf '{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"const r = await tools.exec_command({cmd:\\"cat /h/.codex/plugins/cache/kit/pt/1.0/skills/pt-review/SKILL.md; wc -l /h/.codex/plugins/cache/kit/pt/1.0/skills/pt-review/SKILL.md\\"});","call_id":"c1"}}\n'
+    printf '{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\\"cmd\\":\\"sed -n 1,80p /h/.agents/skills/foo/SKILL.md\\"}","call_id":"c2"}}\n'
+    printf '{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\\n*** Update File: /h/.agents/skills/bar/SKILL.md\\n+x\\n*** End Patch\\n","call_id":"c3"}}\n'
+    printf '{"type":"event_msg","payload":{"type":"item_started","item":{"type":"McpToolCall","id":"m0","server":"kit-ping","tool":"ping","arguments":{}}}}\n'
+    printf '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","id":"m1","server":"kit-ping","tool":"ping","arguments":{},"status":"completed"}}}\n'
+    printf '{"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"m2","invocation":{"server":"old-srv","tool":"t","arguments":{}},"result":{}}}\n'
+    printf '{"timestamp":"2026-11-13T07:10:00.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"n","content":[{"type":"text","text":"再一次","text_elements":[]}]}}}\n'
+    printf '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"McpToolCall","id":"m3","server":"kit-ping","tool":"ping","arguments":{},"status":"failed"}}}\n'
+} > "$ROU"
+out=$(KU --pid 1 --tool codex --dir "$PF/cu" --json)
+check "used (codex): .../skills/<name>/SKILL.md in its tool calls (once a call; a patch is not a use), McpToolCall items and mcp_tool_call_end events" '[ "$out" = "{\"tool\": \"codex\", \"log\": \"$ROU\", \"dir\": \"$PF/cu\", \"turn\": 2, \"skills\": [{\"name\": \"foo\", \"count\": 1, \"turn\": 1}, {\"name\": \"pt-review\", \"plugin\": \"pt\", \"count\": 1, \"turn\": 1}], \"mcp\": [{\"name\": \"kit-ping\", \"count\": 2, \"turn\": 2}, {\"name\": \"old-srv\", \"count\": 1, \"turn\": 1}]}" ]'
+mkdir -p "$PF/ou"; printf '{"mcpServers":{"kit-ping":{"command":"x"},"my.srv":{"command":"y"}}}\n' > "$PF/ou/.mcp.json"; OSU="$H8/.omp/agent/sessions/z/s13.jsonl"
+{
+    printf '{"type":"session","version":3,"id":"s13","cwd":"%s/ou"}\n' "$PF"
+    printf '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"一"}]}}\n'
+    printf '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"1","name":"read","arguments":{"path":"skill://foo"}},{"type":"toolCall","id":"2","name":"read","arguments":{"path":"skill://foo/ref.md"}},{"type":"toolCall","id":"3","name":"read","arguments":{"path":"/h/.agents/skills/bar/SKILL.md:1-5"}}]}}\n'
+    printf '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"二"}]}}\n'
+    printf '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"4","name":"read","arguments":{"path":"xd://mcp__kit_ping_ping"}},{"type":"toolCall","id":"5","name":"write","arguments":{"path":"xd://mcp__kit_ping_ping","content":"{}"}},{"type":"toolCall","id":"6","name":"mcp__my_srv_do_it","arguments":{}},{"type":"toolCall","id":"7","name":"mcp__other_tool","arguments":{}}]}}\n'
+} > "$OSU"
+out=$(KU --pid 1 --tool omp --dir "$PF/ou" --json)
+check "used (omp): reads of skill://<name> and .../skills/<name>/SKILL.md; mcp__ calls (by name or written to xd://) matched to its MCP servers" '[ "$out" = "{\"tool\": \"omp\", \"log\": \"$OSU\", \"dir\": \"$PF/ou\", \"turn\": 2, \"skills\": [{\"name\": \"bar\", \"count\": 1, \"turn\": 1}, {\"name\": \"foo\", \"count\": 2, \"turn\": 1}], \"mcp\": [{\"name\": \"other\", \"count\": 1, \"turn\": 2}, {\"name\": \"my.srv\", \"count\": 1, \"turn\": 2}, {\"name\": \"kit-ping\", \"count\": 1, \"turn\": 2}]}" ]'
+out=$(KU --pid 1 --tool claude --dir "$T" --json); out2=$(kit used --pid 1 --tool omp --dir "$PF/mt" 2>&1)
+check "used: no log -> a note; nothing used -> says so" '[ "$out" = "{\"tool\": \"claude\", \"log\": \"\", \"dir\": \"$T\", \"turn\": 0, \"skills\": [], \"mcp\": [], \"note\": \"找不到這個 Claude 的對話紀錄（~/.claude/projects）\"}" ] && [ "$out2" = "kit: 這次對話還沒用到 skill 或 MCP" ]'
+out=$(kit used --json 2>/dev/null); rc=$?
+check "used: wrong arguments -> exit 1, error usage" '[ $rc -eq 1 ] && [ "$out" = "{\"error\": {\"code\": \"usage\", \"message\": \"用法：kit used --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--json]\"}}" ]'
+if [ -n "$PWSH" ]; then
+    same=1
+    for a in "--pid 5151 --tool claude --dir $PU --json" "--pid 5151 --tool claude --dir $PU" "--pid 1 --tool codex --dir $PF/cu --json" "--pid 1 --tool omp --dir $PF/ou --json" "--pid 1 --tool claude --dir $T --json" "--pid 1 --tool omp --dir $PF/mt" "--json"; do
+        x=$(kit used $a 2>&1; echo "rc=$?"); y=$(kps used $a 2>&1; echo "rc=$?")
+        [ "$x" = "$y" ] || { same=0; echo "  differs: $a"; printf '%s\n' "$x" | tr ',' '\n' > "$T/dx"; printf '%s\n' "$y" | tr ',' '\n' > "$T/dy"; diff "$T/dx" "$T/dy" | head -n 6; }
+    done
+    check "used: kit.ps1 says the same (Claude, Codex, omp, no log, nothing used, usage)" '[ $same = 1 ]'
+fi
 echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"
@@ -2188,10 +2248,10 @@ check "list --json: sign, the approvals this computer signs with" 'printf "%s" "
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.9)" '[ $rc -eq 0 ] && [ "$out" = 1.9 ]'
+check "api: one line, major.minor (1.10)" '[ $rc -eq 0 ] && [ "$out" = 1.10 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.9 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.10 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?

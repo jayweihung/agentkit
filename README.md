@@ -336,6 +336,16 @@ Claude 撞到方案的用量上限停下來（「You've hit your 5-hour limit ·
 - 相對路徑接在 agent 的資料夾後面。檔案已經不在的：讀過的不列，寫過、改過的還是列（`exists: false`）。
 - `--git`：再加上那個資料夾所在的 git repo 裡 `git status` 有變動的檔案（標 `git`，排在後面，已經列過的不重複，只列還在的檔案；改名的列新名字）。不是 git repo 就不加。
 
+
+## 這次對話用了哪些 skill、MCP
+
+    kit used --pid <agent 的 pid> [--tool claude|codex|omp] [--dir 資料夾] [--json]
+
+列出那個 agent 這次對話用過的 skill 和 MCP（伺服器），各用了幾次、最後一次在第幾則訊息之後，最近用的在前面。規則每次對話一開始就全部讀進去，不列。
+`--pid`、`--tool`、`--dir` 跟 `kit files` 一樣。給畫面程式在 Kit 面板標「這次用了 N 次」（`--json`）。
+
+- 怎麼算「用了」：Claude：載入 skill（Skill 工具，或你打 `/名字`）、呼叫 `mcp__<伺服器>__<工具>`。Codex：它的指令裡讀了 `…/skills/<名字>/SKILL.md`（Codex 用 shell 讀 skill；改 skill 的 patch 不算），呼叫 MCP 工具。omp：讀 `skill://<名字>` 或 `…/skills/<名字>/SKILL.md`，呼叫 `mcp__<伺服器>_<工具>`（直接呼叫或寫到 `xd://`）。sub-agent 用的也算。
+- 從 agent 自己的紀錄檔讀，只拿 skill 和伺服器的名字，不印也不存對話內容。讀整個紀錄檔（只挑可能有關的行，長的也只要一兩秒）。
 ## agent 寫自己做到哪：`kit note`
 
     kit note "改好 parser；下一步跑整套測試"     agent 在自己的 shell 跑：記下一兩行進度
@@ -395,10 +405,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.9
+    kit api        →  1.10
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.9（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.10（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -572,6 +582,21 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
   - `text` 是 kit 第一個從紀錄裡拿出「說了什麼」的欄位：只有每則訊息開頭這最多 30 個字，其他的對話內容還是不拿、不印、不存。
 - 找不到紀錄檔（或不認得那種 agent）不算失敗：`files` 是 `[]`（`--git` 的照樣有）、`turns` 是 `[]`、`log` 是 `""`，最後另外有 `"note"`（給人看的原因）。
 - 參數不對：exit 1，`{"error": {"code": "usage", ...}}`。
+
+### `kit used --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] --json`（1.10 起）
+
+一行：
+
+    {"tool": "claude", "log": "<紀錄檔>", "dir": "<agent 的資料夾>", "turn": 12,
+     "skills": [{"name": "ponytail-review", "plugin": "ponytail", "count": 2, "turn": 12},
+                {"name": "brainstorming", "count": 1, "turn": 3}],
+     "mcp": [{"name": "kit-ping", "count": 4, "turn": 9}]}
+
+- `tool`、`log`、`dir`：跟 `kit files` 一樣。`turn`：最後一則人送出的訊息是第幾則（從紀錄檔的開頭算，怎麼算一則跟 `kit files` 的 `turns` 一樣；沒有是 `0`）。
+- `skills`、`mcp`：用過的，`turn` 大的（最近用的）在前面，一樣的話後用的在前面。`name`：skill 的名字（Claude 的外掛 skill 去掉 `外掛:`）；MCP 伺服器的名字（Claude、Codex 照它們寫的；omp 把名字裡不是英數字和 `_` 的換成 `_`，kit 拿它設定裡的 MCP 對回原本的名字，對不到的取到最後一個 `_` 之前）。`count`：幾次。`turn`：最後一次用是在第幾則訊息之後（sub-agent 用的算在那個時間點之前最後一則；第一則之前的是 `0`）。
+- `plugin`：這個 skill 是 kit 哪個外掛的（來源的 `plugins/<外掛>/skills/<名字>/`）；不是外掛的沒有這個欄位。
+- 畫面程式：`turn` 跟最上面的 `turn` 一樣就是「剛剛」（最後一則訊息之後用的）。
+- 找不到紀錄檔不算失敗：`skills`、`mcp` 是 `[]`、`turn` 是 `0`，最後另外有 `"note"`。參數不對：exit 1，`usage`。
 
 ### `kit note --pid <pid> --json`（1.4 起）
 

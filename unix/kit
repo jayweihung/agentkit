@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.9
+KIT_API=1.10
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -3495,14 +3495,22 @@ END {
         print "T\t" u "\t" at[u] "\t" tx[u]; for (i = 1; i <= tc[u]; i++) print "P\t" tl[u, i]
     }
 }'
-files_rows() { # files_rows TOOL LOG : the rows of every file the log (and, Claude, its sub-agents) shows, oldest first
-    local f i=0 m prog
-    case $1 in claude) prog=$FILES_CLAUDE;; codex) prog=$FILES_CODEX;; omp) prog=$FILES_OMP;; *) return 0;; esac
+files_rows() { # files_rows TOOL LOG [used] : the rows of every file the log (and, Claude, its sub-agents) shows, oldest first
+    local f i=0 m prog pat=""
+    case ${3:-}$1 in
+        claude) prog=$FILES_CLAUDE;; codex) prog=$FILES_CODEX;; omp) prog=$FILES_OMP;;
+        usedclaude) prog=$USED_CLAUDE$FILES_CLAUDE; pat='"message":\{"role":"user","content":("|\[\{"type":"text")|"type":"tool_use","id":"[^"]*","name":"mcp__';;
+        usedcodex) prog=$USED_CODEX$FILES_CODEX; pat='"user_message"|"UserMessage"|SKILL\.md|"McpToolCall"|"mcp_tool_call_end"';;
+        usedomp) prog=$USED_OMP$FILES_OMP; pat='"role":"user"|skill://|SKILL\.md|mcp__';;
+        *) return 0;;
+    esac
     [ -n "$2" ] && [ -f "$2" ] || return 0
     { if [ "$1" = claude ]; then ls -tr "$2" "${2%.jsonl}/subagents/"*.jsonl 2>/dev/null; else printf '%s\n' "$2"; fi; } |
     while IFS= read -r f; do
         [ -f "$f" ] || continue; i=$((i + 1)); m=0; [ "$f" = "$2" ] && m=1
-        ctx_scan "$f" "BEGIN { fi = $i; main = $m }$CTX_AWK$FILES_AWK$prog"
+        if [ -n "${3:-}" ]; then             # used: the whole log, only the lines that can matter (a long one is big)
+            LC_ALL=C grep -E -- "$pat" "$f" | LC_ALL=C awk -v cut=0 "BEGIN { fi = $i; main = $m }$CTX_AWK$FILES_AWK$prog"
+        else ctx_scan "$f" "BEGIN { fi = $i; main = $m }$CTX_AWK$FILES_AWK$prog"; fi
     done | LC_ALL=C sort -t "$TAB" -k1,1 -k2,2n -k3,3n
 }
 files_git() { # files_git DIR : "git TAB path" for what git status shows in the repo DIR is in (a rename: its new name)
@@ -3512,6 +3520,17 @@ files_git() { # files_git DIR : "git TAB path" for what git status shows in the 
     GIT_OPTIONAL_LOCKS=0 "$g" -C "$1" status --porcelain -z --ignore-submodules=all 2>/dev/null | tr '\0' '\n' |
         FILES_TOP=$top LC_ALL=C awk 'BEGIN { top = ENVIRON["FILES_TOP"] } skip { skip = 0; next }
             length($0) > 3 { if (substr($0, 1, 2) ~ /[RC]/) skip = 1; print "git\t" top "/" substr($0, 4) }'
+}
+agent_log() { # agent_log PID TOOL DIR : A_LOG (that agent's conversation log) or A_NOTE (why there is none)
+    local s; A_LOG=""; A_NOTE=""
+    case $2 in
+        claude) s=$(claude_where "$1" "$3") && A_LOG=${s##*"$TAB"}
+                [ -n "$A_LOG" ] || A_NOTE="找不到這個 Claude 的對話紀錄（~/.claude/projects）";;
+        codex) A_LOG=$(codex_rollout "$3" "$1") || A_NOTE="找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）";;
+        omp) A_LOG=$(omp_session "$1" "$3"); [ -n "$A_LOG" ] || A_NOTE="找不到這個 omp 的 session（~/.omp/agent/sessions）";;
+        "") A_NOTE="看不出是哪種 agent（用 --tool claude|codex|omp 指定）";;
+        *) A_NOTE="不認得這種 agent：${2}（只認得 claude、codex、omp）";;
+    esac
 }
 cmd_files() { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git] [--json] : the files that agent read or changed
     local pid="" tool="" dir="" git="" json="" log="" note="" s picked tag p e n=0 out="" human="" k th tf=0 tl="" tn=0 turns=""
@@ -3528,14 +3547,7 @@ cmd_files() { # kit files --pid PID [--tool claude|codex|omp] [--dir DIR] [--git
     done
     case $pid in ""|*[!0-9]*) die_c usage "$use";; esac
     agent_guess "$pid" "$tool" "$dir"; tool=$A_TOOL; dir=$A_DIR
-    case $tool in
-        claude) s=$(claude_where "$pid" "$dir") && log=${s##*"$TAB"}
-                [ -n "$log" ] || note="找不到這個 Claude 的對話紀錄（~/.claude/projects）";;
-        codex) log=$(codex_rollout "$dir" "$pid") || note="找不到這個資料夾的 Codex 對話紀錄（~/.codex/sessions）";;
-        omp) log=$(omp_session "$pid" "$dir"); [ -n "$log" ] || note="找不到這個 omp 的 session（~/.omp/agent/sessions）";;
-        "") note="看不出是哪種 agent（用 --tool claude|codex|omp 指定）";;
-        *) note="不認得這種 agent：${tool}（只認得 claude、codex、omp）";;
-    esac
+    agent_log "$pid" "$tool" "$dir"; log=$A_LOG; note=$A_NOTE
     picked=$( { files_rows "$tool" "$log" | cut -f 1,4-; [ -z "$git" ] || { echo --git--; files_git "$dir"; }; } |
         FILES_DIR=$dir LC_ALL=C awk -F '\t' "$FILES_PICK")
     while IFS= read -r p; do
@@ -3565,6 +3577,127 @@ EOF
     else
         [ -z "$note" ] || warn "$note"
         if [ -n "$human" ]; then printf '%s' "$human"; else warn "沒有看到讀過或改過的檔案"; fi
+    fi
+}
+
+# kit used: the skills and MCP servers an agent's conversation used, how many times and in which turn (the files_rows
+# producers, with these rows put in front: "time TAB file TAB n TAB turn TAB skill|mcp TAB name").
+# Claude: a skill it loaded (the "Base directory for this skill: ..." record, for the Skill tool and for /name alike),
+#   its mcp__<server>__<tool> calls. Codex: .../skills/<name>/SKILL.md in its tool calls (it reads a skill through the
+#   shell; a patch is not a use), McpToolCall items (mcp_tool_call_end in older versions). omp: a read of skill://<name>
+#   or .../skills/<name>/SKILL.md, mcp__<server>_<tool> calls (by name, or written to xd://): <server> with what is not
+#   a letter, digit or _ made _, matched against the MCP servers it has (USED_MCP).
+USED_CLAUDE='
+!/^\{"type":"api-request/ && index($0, "\"type\":\"user\"") && (k = index($0, "[{\"type\":\"text\",\"text\":\"Base directory for this skill: ")) {
+    x = lastts($0); if (x != "") t = sortt(x); else if (t == "") t = "00000000000000000"
+    s = substr($0, k + 55); i = index(s, "\\n"); if (i) s = substr(s, 1, i - 1)
+    s = unesc(s); sub(/[\/\\]+$/, "", s); sub(/.*[\/\\]/, "", s)
+    if (s != "") print t "\t" fi "\t" (++r) "\t" tno() "\tskill\t" s
+}
+!/^\{"type":"api-request/ && index($0, "\"type\":\"assistant\"") && index($0, "\"name\":\"mcp__") && index($0, "\"type\":\"tool_use\"") {
+    x = lastts($0); if (x != "") t = sortt(x); else if (t == "") t = "00000000000000000"
+    s = $0
+    while (match(s, /"type":"tool_use","id":"[^"]*","name":"mcp__([^"\\]|\\.)*"/)) {
+        n = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH); n = substr(n, index(n, "\"name\":\"mcp__") + 13); n = substr(n, 1, length(n) - 1)
+        if ((i = index(n, "__")) > 1) print t "\t" fi "\t" (++r) "\t" tno() "\tmcp\t" unesc(substr(n, 1, i - 1))
+    }
+}'
+USED_CODEX='
+function uskills(s,   n, seen) {
+    if (index(s, "*** Begin Patch")) return
+    while (match(s, /[\/\\]skills[\/\\][^\/\\"* ]+[\/\\]SKILL\.md/)) {
+        n = substr(s, RSTART + 8, RLENGTH - 17); s = substr(s, RSTART + RLENGTH)
+        if (!(n in seen)) { seen[n] = 1; print "00000000000000000\t" fi "\t" (++r) "\t" tno() "\tskill\t" n }
+    }
+}
+index($0, "\"type\":\"custom_tool_call\"") || index($0, "\"type\":\"function_call\"") { uskills($0) }
+index($0, "\"type\":\"item_completed\"") && (i = index($0, "\"item\":{\"type\":\"McpToolCall\"")) {
+    n = unesc(strv(substr($0, i), "server")); if (n != "") print "00000000000000000\t" fi "\t" (++r) "\t" tno() "\tmcp\t" n
+}
+index($0, "\"type\":\"mcp_tool_call_end\"") && (i = index($0, "\"invocation\":{")) {
+    n = unesc(strv(substr($0, i), "server")); if (n != "") print "00000000000000000\t" fi "\t" (++r) "\t" tno() "\tmcp\t" n
+}'
+USED_OMP='
+BEGIN { unm = split(ENVIRON["USED_MCP"], um, "\n"); for (i = 1; i <= unm; i++) { us[i] = tolower(um[i]); gsub(/[^a-z0-9_]/, "_", us[i]) } }
+function useen(k, n) { print "00000000000000000\t" fi "\t" (++r) "\t" tno() "\t" k "\t" n }
+function umcp(x,   i, b, lx) { # the server of a tool name (after mcp__): the longest MCP server it starts with, else up to the last _
+    lx = tolower(x); b = 0
+    for (i = 1; i <= unm; i++) if (us[i] != "" && index(lx, us[i] "_") == 1 && (!b || length(us[i]) > length(us[b]))) b = i
+    if (b) return um[b]
+    sub(/_[^_]*$/, "", x); return x
+}
+index($0, "\"role\":\"assistant\"") && index($0, "{\"type\":\"toolCall\"") {
+    s = $0
+    while ((i = index(s, "{\"type\":\"toolCall\"")) > 0) {
+        s = substr(s, i + 18); seg = s; j = index(seg, "{\"type\":\"toolCall\""); if (j) seg = substr(seg, 1, j - 1)
+        n = strv(seg, "name"); k = index(seg, "\"arguments\":{"); p = k ? unesc(strv(substr(seg, k + 12), "path")) : ""
+        if (n == "read" && substr(p, 1, 8) == "skill://") { p = substr(p, 9); sub(/[\/:?#].*/, "", p); if (p != "") useen("skill", p) }
+        else if (n == "read" && match(p, /[\/\\]skills[\/\\][^\/\\]+[\/\\]SKILL\.md(:[0-9,-]*)?$/)) { p = substr(p, RSTART + 8); sub(/[\/\\].*/, "", p); useen("skill", p) }
+        else if (index(n, "mcp__") == 1) useen("mcp", umcp(substr(n, 6)))
+        else if (n == "write" && index(p, "xd://mcp__") == 1) useen("mcp", umcp(substr(p, 11)))
+    }
+}'
+# the rows (stdin: "turn TAB tag TAB ..." from files_rows) -> "turn TAB N" (the last turn), then "tag TAB name TAB count TAB
+# turn" for each skill and MCP server, the last used first (a sub-agent's: the turn that started last before it)
+USED_SUM='
+$2 == "turn" { cur = $1; if ($1 > top) top = $1; next }
+$2 == "skill" || $2 == "mcp" {
+    k = $2 "\t" $3; u = $1 == "-" ? cur + 0 : $1 + 0
+    if (!(k in c)) o[++n] = k; c[k]++; if (u >= l[k]) l[k] = u; ord[k] = ++seq
+}
+END {
+    print "turn\t" top + 0
+    for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (l[o[j]] > l[o[i]] || (l[o[j]] == l[o[i]] && ord[o[j]] > ord[o[i]])) { x = o[i]; o[i] = o[j]; o[j] = x }
+    for (i = 1; i <= n; i++) print o[i] "\t" c[o[i]] "\t" l[o[i]]
+}'
+used_plugin() { # used_plugin NAME : the kit plugin whose skills/ has a skill NAME (in any source), else nothing
+    local d p
+    while IFS= read -r d; do
+        for p in "$d"/plugins/*/skills/"$1"; do [ -d "$p" ] && { p=${p%/skills/*}; printf '%s' "${p##*/}"; return 0; }; done
+    done <<EOF
+$(src_dirs)
+EOF
+    return 0
+}
+omp_mcp_names() { # omp_mcp_names DIR : the MCP servers omp has there (its own, the folder's, the folder's Codex ones)
+    local x
+    for x in "$OMP_DIR/mcp.json" ${1:+"$1/.omp/mcp.json" "$1/.mcp.json" "$1/mcp.json" "$1/.claude/mcp.json" "$1/.claude/.mcp.json"}; do [ -f "$x" ] && json_keys "$x" mcpServers; done
+    [ -n "$1" ] && [ -f "$1/.codex/config.toml" ] && [ "$1/.codex" != "$CODEX_DIR" ] && sed -n 's/^[[:space:]]*\[mcp_servers\.\([^].]*\)\][[:space:]]*$/\1/p' "$1/.codex/config.toml" | tr -d '"'
+    return 0
+}
+cmd_used() { # kit used --pid PID [--tool claude|codex|omp] [--dir DIR] [--json] : the skills and MCP servers that conversation used
+    local pid="" tool="" dir="" json="" log note k n c u pl turn=0 sk="" mc="" human="" mcps="" prog="" e
+    local use="用法：kit used --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--json]"
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --pid|--tool|--dir) [ $# -ge 2 ] || die_c usage "$use"
+                case $1 in --pid) pid=$2;; --tool) tool=$2;; *) dir=$2;; esac; shift 2;;
+            --json) json=1; shift;;
+            *) die_c usage "$use";;
+        esac
+    done
+    case $pid in ""|*[!0-9]*) die_c usage "$use";; esac
+    agent_guess "$pid" "$tool" "$dir"; tool=$A_TOOL; dir=$A_DIR
+    agent_log "$pid" "$tool" "$dir"; log=$A_LOG; note=$A_NOTE
+    [ "$tool" != omp ] || mcps=$(omp_mcp_names "$dir")
+    while IFS="$TAB" read -r k n c u; do
+        case $k in
+            turn) turn=${n:-0};;
+            skill) pl=$(used_plugin "$n")
+                e="{\"name\": $(json_s "$n"),$( [ -z "$pl" ] || printf ' "plugin": %s,' "$(json_s "$pl")") \"count\": $c, \"turn\": $u}"
+                sk="$sk${sk:+, }$e"; human="${human}skill ${n}$( [ -z "$pl" ] || printf '（外掛 %s）' "$pl")  ${c} 次，第 ${u} 輪$LF";;
+            mcp) mc="$mc${mc:+, }{\"name\": $(json_s "$n"), \"count\": $c, \"turn\": $u}"
+                human="${human}MCP ${n}  ${c} 次，第 ${u} 輪$LF";;
+        esac
+    done <<EOF
+$(USED_MCP=$mcps files_rows "$tool" "$log" used | cut -f 4- | LC_ALL=C awk -F '\t' "$USED_SUM")
+EOF
+    if [ -n "$json" ]; then
+        printf '{"tool": %s, "log": %s, "dir": %s, "turn": %s, "skills": [%s], "mcp": [%s]%s}\n' "$(json_s "$tool")" "$(json_s "$log")" "$(json_s "$dir")" "$turn" "$sk" "$mc" \
+            "$( [ -z "$note" ] || printf ', "note": %s' "$(json_s "$note")")" >&3
+    else
+        [ -z "$note" ] || warn "$note"
+        if [ -n "$human" ]; then printf '%s' "$human"; else warn "這次對話還沒用到 skill 或 MCP"; fi
     fi
 }
 
@@ -5726,6 +5859,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit usage                       這個帳號的方案用量（Claude、Codex：5 小時、每週用了幾 %、幾點重置；JSON）
   kit files --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--git] [--json]
                                   那個 agent 讀過、改過的檔案，新的在前（--json 給程式讀；--git：再加上 git 有變動的）
+  kit used --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--json]
+                                  那個 agent 這次對話用了哪些 skill、MCP，幾次、第幾輪（--json 給程式讀）
   kit note ["做了什麼；下一步"]      agent 寫自己做到哪（一兩行，畫面上看得到）；不帶文字：印出現在寫的
   kit note --history [--dir 資料夾]   這個資料夾最近的進度（包括已經關掉的 agent），交接時先看
   kit note --pid <pid> [--json]     某個 agent 的進度（--json 給程式讀）；--clear 清掉自己的
@@ -5777,7 +5912,7 @@ EOF
 
 # programs read JSON: list/agents/push/files --json, status, and collect/new --look print only JSON on stdout (errors too)
 case ${1:-} in
-    list|ls|agents|push|files|place) for a in "$@"; do [ "$a" = --json ] && { json_mode; break; }; done;;
+    list|ls|agents|push|files|used|place) for a in "$@"; do [ "$a" = --json ] && { json_mode; break; }; done;;
     collect|new) for a in "$@"; do [ "$a" = --look ] && { json_mode; break; }; done;;
     status) json_mode;;
 esac
@@ -5822,6 +5957,7 @@ case ${1:-} in
     context)   shift; cmd_context "$@";;
     usage)     shift; cmd_usage "$@";;
     files)     shift; cmd_files "$@";;
+    used)      shift; cmd_used "$@";;
     note)      shift; cmd_note "$@";;
     describe)  shift; cmd_describe "$@";;
     pending)   shift; cmd_pending "$@";;

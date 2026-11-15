@@ -4,6 +4,13 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.10（2026-11-15）
+
+更新後要做：`kit self-update`。
+
+- `kit used --pid <pid> [--json]`：那個 agent 這次對話用了哪些 skill、MCP，各幾次、最後一次在第幾則訊息之後。Claude、Codex、omp 都可以，Windows 版一樣。`kit api` 是 1.10。
+- 畫面程式：Kit 面板「這個 agent 在用的」上面一行寫這次對話用了什麼，用過的那一列標「這次用了 N 次」，最後一則訊息之後用的再標「剛剛」。
+
 ## 0.6.9（2026-11-15）
 
 更新後要做：`kit self-update`，再 `kit sync`。
