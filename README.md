@@ -28,7 +28,7 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
 
     kit init <團隊來源的網址>     第一次
     kit list [--json]             有哪些、在用哪些
-    kit add skill <名字>          開始用（整個帳號：每個資料夾、每個 agent 都有）
+    kit add skill <名字>...       開始用（整個帳號：每個資料夾、每個 agent 都有；一次可以給好幾個）
     kit rm  skill <名字>          不用了
     kit add --dir <資料夾> skill <名字>   只加到這個資料夾（在這裡和子資料夾開的 agent 才有）
     kit rm  --dir <資料夾> skill <名字>
@@ -371,10 +371,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.6
+    kit api        →  1.8
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.7（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.8（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -443,6 +443,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - `needs`、`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。
 - mcp（1.3 起）一定有：`"type"`（`stdio`、`http`、`sse`）、`"vars": [{"name": "GITHUB_TOKEN", "set": false}]`（它要的環境變數，這台電腦有沒有設）、`"needs"`（同 skill）、`"packages"`：沒有套件是 `[]`，有的話一個
   `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
+- `sign`（1.8 起）：這台電腦簽過核准（`kit approve` 記下的核准紀錄還在）才有：`{"approvals": "<核准紀錄的 clone>", "serial": 19, "approved": [{"name": "team", "commit": "<40 字的 commit>"}]}`，畫面程式拿它說「已經簽了，等那台同步」、給簽章的指令。
 - `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items", "agent"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。`here.folder.agent`（1.3 起）：那個資料夾是 `kit place` 放的 agent 時是它的名字，不是就 `null`；這時 `here.folder.items` 是 agent 的規則、skill、MCP（不含用 `kit rm --dir` 拿掉的）再加上另外加的。
 
 ### `kit agents --json`
@@ -469,10 +470,22 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### `kit collect <網址> --look [--path 資料夾] [--ref 分支] [--to 來源]`
 
-    {"source", "dir", "push", "url", "id", "commit", "allowed", "can_allow",
+    {"source", "dir", "push", "url", "ref", "id", "commit", "allowed", "can_allow",
      "skills": [{"path", "name", "valid", "description", "license", "scripts", "skipped", "exists", "dest"}]}
 
-只下載來看、什麼都不寫。`allowed`：作者在 `collect_sources`；`can_allow`：不在，但自己的來源可以用 `--allow` 加。`exists`：`collected`（之前收過）、`own`（自己寫的同名 skill）、`""`。
+只下載來看、什麼都不寫。`url`、`ref`：repo 的網址和分支（給的是網頁網址時是拆出來的，`ref` 1.8 起；空字串＝預設分支），收的時候照這兩個給。`allowed`：作者在 `collect_sources`；`can_allow`：不在，但自己的來源可以用 `--allow` 加。`exists`：`collected`（之前收過）、`own`（自己寫的同名 skill）、`""`。
+
+### `kit outdated [--to 來源] --json`（1.8 起）
+
+收來的 skill 原作者現在是哪個 commit（每個都用 `git ls-remote` 問，不下載）。沒給 `--to`：你所在資料夾的來源（有 `kit.yaml` 的話）和每個來源；
+只列你是維護者的來源（`kit.yaml` 沒列 `maintainers` 的都算），不是的就略過，不報錯。
+
+    {"kit": "0.6.8", "api": "1.8", "at": 1763190000,
+     "skills": [{"source": "my-lib", "name": "tdd", "url": "https://git.example.org/a/r", "path": "skills/tdd", "ref": "",
+                 "commit": "<收的時候的 commit>", "now": "<原作者現在的 commit，連不到是空字串>", "state": "new"}]}
+
+`state`：`latest`（一樣）、`new`（原作者有新的：`kit collect <name> --to <source>` 收新版）、`unreachable`（連不到：repo 不見了、改名、
+改成私人，或這台沒網路）、`skipped`（作者已經不在 `collect_sources`，沒去問）。`ref` 空字串＝原作者的預設分支。原作者只把那個資料夾刪掉，`kit collect` 時才會知道。
 
 ### `kit new mcp [名字] --config <檔案|-> [--to 來源] --look`（1.3 起）
 
@@ -560,7 +573,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
       "approvals": {"serial": 7, "used": 7, "valid": true},
       "pending": [
         {"kind": "sign", "name": "team", "what": "team 有 3 個新 commit 等核准", "commits": 3, "head": "<40 字的 commit>", "since": 1763000000000, "machine": "server"},
-        {"kind": "owner", "id": "core-0001", "what": "要你同意：裝伺服器的 core 0001", "since": 1763000300000, "machine": "server", "dir": "/srv/app", "pid": 4242}
+        {"kind": "owner", "id": "core-0001", "what": "要你同意：裝伺服器的 core 0001", "since": 1763000300000, "machine": "server", "dir": "/srv/app", "pid": 4242, "up": [4242, 4100, 3988]}
       ],
       "sources": [
         {"name": "team", "source": "<網址或資料夾>", "dir": "<clone 的資料夾>", "commit": "<40 字的 commit>", "approved": "<40 字的 commit>"}
@@ -577,7 +590,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
   - `kind` 是 `"sign"`：用核准紀錄的帳號，某個來源（或 kit 本身）上次 `kit sync` 抓到的遠端最新 commit，比 `approved.txt` 核准的新，在等簽核的人簽。`name`：來源名字（`approved.txt` 用的）；`what`：給人看的一句話；`commits`：還沒核准的 commit 數；`head`：遠端最新的 commit；`since`：最早那個還沒核准的 commit 的時間（Unix 毫秒）；`machine`：這台的主機名稱。從來沒核准過的來源，`what` 是「X 還沒核准過」。
   - 只在核准清單有效（`valid` 是 `true`）時算；跟其他欄位一樣不連網，看的是上次 `kit sync` 抓到的。簽章還是在簽核的電腦上親手做（`kit approve`），畫面程式只顯示。
   - 沒用核准紀錄的帳號、Windows 版：沒有 `"sign"`。
-  - `kind` 是 `"owner"`：agent 或服務用 `kit pending add` 記的、在等你同意的事（上面「在等你同意的事」）。`id`：`kit pending done` 用的名字；`what`：那句話；`since`：第一次記的時間（Unix 毫秒）；`machine`：這台的主機名稱；`dir`：記的 agent 所在的資料夾（`--keep` 時是跑指令的資料夾）；`pid`：記在哪個程式名下，`--keep` 時 `null`。記的 agent 已經結束的不列。Windows 版也有。
+  - `kind` 是 `"owner"`：agent 或服務用 `kit pending add` 記的、在等你同意的事（上面「在等你同意的事」）。`id`：`kit pending done` 用的名字；`what`：那句話；`since`：第一次記的時間（Unix 毫秒）；`machine`：這台的主機名稱；`dir`：記的 agent 所在的資料夾（`--keep` 時是跑指令的資料夾）；`pid`：記在哪個程式名下，`--keep` 時 `null`；`up`（1.8 起）：那個程式和它上面的程式（最多 12 個，`--keep` 時從跑指令的程式算起），畫面程式拿它找 agent 在哪個終端機（中間隔著 `sudo`、`ssh` 也找得到）。記的 agent 已經結束的不列。Windows 版也有。
   - 之後可能多別的 `kind`，畫面程式看不懂的 `kind` 照 `what` 顯示就好。
 - `sources`：跟 `kit list --json` 的 `sources` 同樣順序，同樣的 `name`、`source`、`dir`；沒有來源時是 `[]`。`commit`：那個資料夾現在的 commit，不是 git repo（或還沒 clone）就是 `null`。
 - `approved`（`self` 和每個來源都有）：`approved.txt` 裡那個名字的 commit。只有 `valid` 是 `true` 才有；沒用核准紀錄、簽章不對、清單裡沒有這個名字都是 `null`。`commit` 和 `approved` 一樣＝在用核准的那一版。
@@ -625,9 +638,10 @@ README 會一起帶過去（它就是使用說明），跟其他檔案一樣要�
 收別人寫好的 skill（例如開源專案裡的；公司內只能從 `allowed_hosts` 列的主機收）：
 
     kit collect <原作者 repo 網址> [--to 來源]   收進來（帶原作者的 LICENSE，記在 third_party.lock）
-    kit outdated                             看原作者有沒有新版
+    kit outdated [--json]                    看原作者有沒有新版
     kit collect <名字>                        再收一次＝整份換成新版
 
+- 可以直接貼瀏覽器上的網址：`https://git.example.org/作者/repo/tree/main/skills/tdd`（GitHub 的 `tree`／`blob`、GitLab 的 `/-/tree/`、Gitea 的 `/src/branch/`）會拆成 repo 網址、`--ref main`、`--path skills/tdd`。
 - 沒給 `--path` 時：repo 最外層有 `SKILL.md` 就收它；不然 repo 裡只有一個 `SKILL.md` 就收那個資料夾；有好幾個就列出來讓你用 `--path` 選。
 - 只收 `kit.yaml` 的 `collect_sources` 裡的作者。自己的來源（`push: direct`）可以加 `--allow`，收的時候一起把作者加進清單；團隊來源要維護者改清單。
   `kit push` 平常不送 `kit.yaml`；但它只改了 `collect_sources` 時（`--allow` 加的）會一起送。
@@ -635,6 +649,7 @@ README 會一起帶過去（它就是使用說明），跟其他檔案一樣要�
 - `--look`：只下載來看、什麼都不寫，用 JSON 列出找到的 skill、授權、會執行的檔案（見「給程式讀的介面」）。
   只下載 `kit collect` 真的能收的：主機要在 `allowed_hosts`，作者要在 `collect_sources`，或是自己的來源可以用 `--allow` 加的；團隊來源不在清單的作者，直接說不能收，不下載。
 - 沒有 LICENSE 的不收；只收文字檔，不收捷徑、圖片和 `.github/` 這類資料夾。
+- 下載的東西照 commit 留 60 分鐘（`~/.config/agentkit/cache/collect`，最後一次用到起算）：`--look` 之後一個一個收、或同一個 repo 收好幾個，只下載一次。原作者那邊有新 commit 就重新下載（先用 `git ls-remote` 問，很快）。
 
 `kit push` 只送改過的 rule、skill、mcp、agent，只 push `kit/...` 分支，不動 main。
 來源的 `kit.yaml` 寫 `push: direct`（只有自己用的來源）時，改成直接 commit 到現在的分支、推到它所有的 remote，不開 PR。
@@ -661,6 +676,9 @@ kit 只會用 `approved.txt` 裡寫的 commit，而且 `approved.txt` 要有對�
     git -C <核准紀錄的 clone> push
 
 它會列出每個來源從上次核准到現在改了什麼，問你要不要核准，再簽章、commit。
+kit 會記住這次用的核准紀錄和金鑰（0.6.8 起），之後只要給來源，加 `--push` 連推一起做：
+
+    kit approve <來源的 clone>... --push
 （目前只有 Linux／Mac 版有這個功能。）
 
 看一個帳號現在用的是不是核准的版本（不連網、不改東西）：`kit status --json`，比每個 `commit` 和 `approved`（見「給程式讀的介面」）。

@@ -4,6 +4,23 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.8（2026-11-15）
+
+更新後要做：`kit self-update`，再 `kit sync`。
+
+**收別人的 skill：同一個 repo 只下載一次**
+- `kit outdated --json`：每個收來的 skill 原作者有沒有新版、連不連得到（`latest`／`new`／`unreachable`），畫面程式拿它一天查一次、標出來。
+- `kit add skill a b c`、`kit rm skill a b c`：一次加（拿掉）好幾個；有一個名字不對就整個不做。`--dir` 還是一次一個。
+- `kit collect` 可以直接貼瀏覽器上的網址（例如 `https://git.example.org/作者/repo/tree/main/skills/tdd`）：拆成 repo、分支和資料夾。之前會說找不到 repo。
+- `kit collect` 下載的東西照 commit 留 60 分鐘（`~/.config/agentkit/cache/collect`）。`--look` 看過再一個一個收、一次收好幾個，都不再每個重新下載；原作者有新 commit 就重新下載（先用 `git ls-remote` 問）。
+
+**簽章少打字**
+- `kit approve` 記住上次用的核准紀錄和金鑰：之後打 `kit approve <來源的 clone>... --push` 就好，`--push` 連推一起做。
+- `kit list --json` 多一個 `sign`：這台電腦簽過的核准紀錄、serial、核准了哪些 commit。畫面程式拿它說「已經簽了，等那台同步」。
+
+**等你同意的事：找得到是哪一格**
+- `kit pending add` 多記 agent 和它上面的程式（`kit status --json` 的 `up`），畫面程式拿它找 agent 在哪個終端機。用 `sudo` 開的（例如 root 的服務）也找得到。
+
 ## 0.6.7（2026-11-15）
 
 更新後要做：`kit self-update`，再 `kit sync`。用 Codex 的話，下次開 Codex 打 `/hooks` 信任 kit 的 hook。

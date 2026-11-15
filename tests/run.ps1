@@ -299,7 +299,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.7)' { $rc -eq 0 -and $out -ceq '1.7' }
+Check 'api: one line, major.minor (1.8)' { $rc -eq 0 -and $out -ceq '1.8' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -1471,9 +1471,17 @@ Check 'collect will not replace your own skill without --force' { $rc -ne 0 -and
 Remove-Item -Recurse -Force "$CO/skills/own"
 Kit outdated
 Check 'outdated: up to date' { $out -match 'foo：最新' }
+$src = [IO.File]::ReadAllText($Kit); $i = $src.IndexOf('function Web-Repo'); Invoke-Expression $src.Substring($i, $src.IndexOf('function Cmd-Collect') - $i)
+Check "a repo page's address: the repo, its branch and folder (GitHub tree / blob, GitLab, Gitea); a repo URL: nothing" { ((Web-Repo 'https://git.example.org/a/r/tree/main/skills/tdd/') -join '|') -eq 'https://git.example.org/a/r|main|skills/tdd' -and ((Web-Repo 'https://git.example.org/a/r/blob/v1/x/SKILL.md?plain=1') -join '|') -eq 'https://git.example.org/a/r|v1|x' -and ((Web-Repo 'https://gitlab.com/a/r/-/tree/dev') -join '|') -eq 'https://gitlab.com/a/r|dev|' -and ((Web-Repo 'https://git.example.org/a/r/src/branch/main/s') -join '|') -eq 'https://git.example.org/a/r|main|s' -and $null -eq (Web-Repo 'https://git.example.org/a/r') }
 Add-Content -LiteralPath "$UP/skills/foo/SKILL.md" 'foo v2'; G -C $UP commit -qam v2
 Kit outdated
 Check 'outdated: new version upstream' { $out -match 'foo：有新版本' -and $out -match 'kit collect foo' }
+Kit outdated --json
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check 'outdated --json: foo new, both commits' { $rc -eq 0 -and $j -and @($j.skills).Count -eq 1 -and $j.skills[0].name -eq 'foo' -and $j.skills[0].source -eq 'collector' -and $j.skills[0].path -eq 'skills/foo' -and $j.skills[0].commit -eq $v1 -and $j.skills[0].now -eq "$(& git -C $UP rev-parse HEAD)".Trim() -and $j.skills[0].state -eq 'new' }
+Rename-Item -LiteralPath $UP 'upstream-away'; Kit outdated --json; Rename-Item -LiteralPath (Join-Path $T 'upstream-away') 'upstream'
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check 'outdated --json: an author gone is unreachable' { $j -and $j.skills[0].state -eq 'unreachable' -and $j.skills[0].now -eq '' }
 Add-Content -LiteralPath "$CO/skills/foo/SKILL.md" 'local edit'
 Kit collect foo
 $v2 = "$(& git -C $UP rev-parse HEAD)".Trim()
@@ -1483,9 +1491,15 @@ Kit collect foo --ref v1.0
 Check 'collect --ref takes a tag' { $rc -eq 0 -and (ReadT "$CO/skills/foo/SKILL.md") -notmatch 'foo v3' }
 Kit outdated
 Check 'outdated follows the tag, not the branch' { $out -match 'foo：最新' }
+Kit outdated --json
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check 'outdated --json: the tag, latest' { $j -and $j.skills[0].ref -eq 'v1.0' -and $j.skills[0].state -eq 'latest' }
 Add-Content -LiteralPath "$CO/kit.yaml" 'maintainers: [someone-else]'
 Kit collect foo
 Check 'only maintainers may collect' { $rc -ne 0 -and $out -match '維護者' }
+Kit outdated --json
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check 'outdated --json: not a maintainer, nothing listed (no error)' { $rc -eq 0 -and $j -and @($j.skills).Count -eq 0 }
 Pop-Location
 # no --path: the only SKILL.md in the repo; several: kit lists them; --look says it all as JSON without writing anything
 $U2 = Join-Path $T 'up-two'; $U1 = Join-Path $T 'up-one'

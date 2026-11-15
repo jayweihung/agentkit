@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.7'
+$script:KitApi = '1.8'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -4627,18 +4627,23 @@ function Cmd-Note($rest) { # kit note [text...] | --clear | --pid PID [--json] [
 # ---------- kit pending: what an agent (or a service) waits on its owner for (the same files as unix/kit) ----------
 $script:PendDir = Join-Path $NoteDir 'pending'
 $script:PendMax = 300
-function Pend-Read([string]$id) { # @(pid, dir, at, what) of that item, or $null (none, or its agent is gone)
+function Proc-Up([string]$p) { # that process and the ones above it (at most 12, space separated), as unix/kit's proc_up
+    $out = New-List; $i = 0
+    while ($i -lt 12 -and $p -match '^[0-9]+$' -and [int]$p -gt 1) { $out.Add($p); $p = [string](Proc-Parent ([int]$p)); $i++ }
+    $out.ToArray() -join ' '
+}
+function Pend-Read([string]$id) { # @(pid, dir, at, what, up) of that item, or $null (none, or its agent is gone)
     $f = Join-Path $PendDir $id
     if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
     $l = @([IO.File]::ReadAllText($f, $Utf8) -split "`n")
-    while ($l.Count -lt 5) { $l += '' }
+    while ($l.Count -lt 6) { $l += '' }
     $p = $l[1]
     if ($p) {                                                    # gone: no such process, or another process has that pid
         if (-not (Proc-Alive $p)) { return $null }
         $st = Proc-Start $p; if ($st -and $l[0] -cne $st) { return $null }
     }
     if (-not $l[4]) { return $null }
-    , @($p, $l[2], $l[3], $l[4])
+    , @($p, $l[2], $l[3], $l[4], ($l[5] -replace '[^0-9 ]', ''))
 }
 function Pend-Ids { # the items' names, in byte order (as unix/kit lists them)
     if (-not (Test-Path -LiteralPath $PendDir -PathType Container)) { return }
@@ -4650,7 +4655,7 @@ function Pend-Json { # one {"kind": "owner", ...} per item that still waits
     $m = Host-Short
     foreach ($id in @(Pend-Ids)) {
         $r = Pend-Read $id; if (-not $r) { continue }
-        '{"kind": "owner", "id": ' + (Json-S $id) + ', "what": ' + (Json-S $r[3]) + ', "since": ' + $(if ($r[2]) { $r[2] } else { '0' }) + '000, "machine": ' + (Json-S $m) + ', "dir": ' + (Json-OrNull $r[1]) + ', "pid": ' + $(if ($r[0]) { $r[0] } else { 'null' }) + '}'
+        '{"kind": "owner", "id": ' + (Json-S $id) + ', "what": ' + (Json-S $r[3]) + ', "since": ' + $(if ($r[2]) { $r[2] } else { '0' }) + '000, "machine": ' + (Json-S $m) + ', "dir": ' + (Json-OrNull $r[1]) + ', "pid": ' + $(if ($r[0]) { $r[0] } else { 'null' }) + ', "up": [' + ((@($r[4] -split ' ' | Where-Object { $_ }) | ForEach-Object { [string][long]$_ }) -join ', ') + ']}'
     }
 }
 function Pend-Prune { foreach ($id in @(Pend-Ids)) { if (-not (Pend-Read $id)) { Remove-Item -LiteralPath (Join-Path $PendDir $id) -Force -ErrorAction SilentlyContinue } } }
@@ -4703,7 +4708,8 @@ function Cmd-Pending($rest) { # kit pending | kit pending add "<what>" [--id ID]
     $since = [string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()); $old = Pend-Read $id; if ($old) { $since = $old[2] }   # the same item again: it has waited since then
     $dir = if ($cpid) { Proc-Cwd ([int]$cpid) } else { (Get-Location).ProviderPath }
     $f = Join-Path $PendDir $id
-    try { Write-Text "$f.tmp" ($(if ($cpid) { Proc-Start $cpid } else { '' }) + "`n$cpid`n$dir`n$since`n$text`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force }
+    $up = Proc-Up $(if ($cpid) { $cpid } else { [string](Proc-Parent $PID) })
+    try { Write-Text "$f.tmp" ($(if ($cpid) { Proc-Start $cpid } else { '' }) + "`n$cpid`n$dir`n$since`n$text`n$up`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force }
     catch { Die-C no-write "寫不進 $PendDir" }
     Say "記下了：${id}（等到了跑 kit pending done ${id}）"
 }
@@ -5224,6 +5230,18 @@ function Here-Json([string]$dir, [string]$hpid) { # the "here" part of kit list 
     $out + "`n  ]}"
 }
 function Push-Mode([string]$dir) { $m = @(YGet (Join-Path $dir 'kit.yaml') 'push'); if ($m.Count -gt 0 -and $m[0]) { [string]$m[0] } else { 'pr' } }   # pr (the default) or direct
+function Sign-Json { # ,"sign": the approvals repo this computer signs with (kit approve remembered it), as unix/kit's sign_json
+    $d = State-Get 'sign' 'approvals'; if (-not $d) { return '' }
+    $f = Join-Path $d 'approved.txt'; if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return '' }
+    $serial = $null; $ap = New-List
+    foreach ($l in @([IO.File]::ReadAllText($f, $Utf8) -split "`n")) {
+        $w = @("$l".Trim() -split '\s+' | Where-Object { $_ })
+        if ($w.Count -ge 2 -and $w[0] -ceq 'serial:' -and $null -eq $serial) { $serial = $w[1]; continue }
+        if ($w.Count -eq 2 -and -not $w[0].StartsWith('#') -and $w[0] -cne 'serial:') { $ap.Add('{"name": ' + (Json-S $w[0]) + ', "commit": ' + (Json-S $w[1]) + '}') }
+    }
+    $sj = if ("$serial" -match '^[0-9]+$') { [string][long]$serial } else { 'null' }
+    ",`n  `"sign`": {`"approvals`": $(Json-S $d), `"serial`": $sj, `"approved`": [$($ap.ToArray() -join ', ')]}"
+}
 function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit list shows, as JSON for programs (a screen like a kit panel); unix/kit prints the same
     $want = Wanted; $req = Kit-Items 'required'
     $sb = New-Object System.Text.StringBuilder
@@ -5257,6 +5275,7 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
         [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"changed`": $changed, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p)), `"path`": $(Json-S $p)$nj}")
     }
     [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))")
+    [void]$sb.Append((Sign-Json))
     if ($hereDir) { [void]$sb.Append((Here-Json $hereDir $herePid)) }
     [void]$sb.Append("`n}")
     Out-Json $sb.ToString()
@@ -5304,18 +5323,18 @@ function Cmd-AddRm([string]$verb, $rest) {
         if ($rest.Count -lt 2) { Die '--dir 後面要接資料夾' }
         $dir = $rest[1]; $rest = @(if ($rest.Count -gt 2) { $rest[2..($rest.Count - 1)] })
     }
-    if ($rest.Count -ne 2) { Die "用法：kit $verb [--dir 資料夾] rule|skill|mcp <名字>" }
+    if ($rest.Count -lt 2 -or ($dir -and $rest.Count -ne 2)) { Die "用法：kit $verb [--dir 資料夾] rule|skill|mcp <名字>（整個帳號可以一次給好幾個名字）" }
     Need-Init
-    $k = $rest[0]; $n = $rest[1]; $i = "${k}:$n"
+    $k = $rest[0]; $names = @($rest[1..($rest.Count - 1)])
     if (@('rule', 'skill', 'mcp') -notcontains $k) { Die '種類只能是 rule、skill、mcp' }
-    if ($dir) { Dir-AddRm $verb $dir $k $n; return }
-    if (-not (Find-Item $k $n)) { Die "找不到 ${i}（打 kit list 看有哪些）" }
+    if ($dir) { Dir-AddRm $verb $dir $k $names[0]; return }
+    foreach ($n in $names) { if (-not (Find-Item $k $n)) { Die "找不到 ${k}:${n}（打 kit list 看有哪些）" } }
+    if ($verb -ne 'add') { $req = Kit-Items 'required'; foreach ($n in $names) { if ($req -contains "${k}:$n") { Die "${k}:$n 是團隊必備，拿不掉" } } }
     $added = @(M-Added); $removed = @(M-Removed)
-    if ($verb -eq 'add') {
-        $added = Uniq ($added + $i); $removed = @($removed | Where-Object { $_ -ne $i })
-    } else {
-        if ((Kit-Items 'required') -contains $i) { Die "$i 是團隊必備，拿不掉" }
-        $added = @($added | Where-Object { $_ -ne $i }); $removed = Uniq ($removed + $i)
+    foreach ($n in $names) {
+        $i = "${k}:$n"
+        if ($verb -eq 'add') { $added = Uniq ($added + $i); $removed = @($removed | Where-Object { $_ -ne $i }) }
+        else { $added = @($added | Where-Object { $_ -ne $i }); $removed = Uniq ($removed + $i) }
     }
     Write-Machine (M-Sources) $added $removed
     Apply-All
@@ -6331,12 +6350,16 @@ function Collect-Allowed([string]$url, [string]$dir) {
     }
     $false
 }
-function Check-Maintainer([string]$dir) {
+function Is-Maintainer([string]$dir) { # kit.yaml lists no maintainers, or you are one
     $m = @(YGet (Join-Path $dir 'kit.yaml') 'maintainers' | Where-Object { $_ })
-    if ($m.Count -eq 0) { return }
+    if ($m.Count -eq 0) { return $true }
     $me = "$(& git -C $dir config user.email 2>$null)"
     $who = @($me, ($me -replace '@.*$', ''), $env:USERNAME, $env:USER) | Where-Object { $_ }
-    foreach ($w in $who) { if ($m -contains $w) { return } }
+    foreach ($w in $who) { if ($m -contains $w) { return $true } }
+    $false
+}
+function Check-Maintainer([string]$dir) {
+    if (Is-Maintainer $dir) { return }
     Die-C not_maintainer '只有維護者能用 collect／outdated（kit.yaml 的 maintainers）'
 }
 function License-Kind([string]$f) {
@@ -6421,6 +6444,44 @@ function Yaml-ListAdd([string]$f, [string]$k, [string]$v) { # VALUE goes into th
     Write-Text $f (($lines -join $nl) + $nl)
     if (@(YGet $f $k) -notcontains $v) { Die "加進 $f 的 $k 沒成功，請自己把 $v 加進去" }
 }
+# A download is kept $CollectKeep minutes (since last used) under $KitConf/cache/collect, by its commit (as unix/kit)
+$script:CollectKeep = 60
+function Remote-Sha([string]$url, [string]$ref) { # the commit the remote has for REF (a branch, or a tag's commit), or HEAD
+    if (-not $ref) { foreach ($l in @(Git-Safe ls-remote $url HEAD)) { $p = "$l".Split("`t"); if ($p.Count -ge 2 -and $p[1] -eq 'HEAD') { return $p[0] } }; return '' }
+    $b = ''; $t = ''; $pe = ''
+    foreach ($l in @(Git-Safe ls-remote $url "refs/heads/$ref" "refs/tags/$ref" "refs/tags/$ref^{}")) {
+        $p = "$l".Split("`t"); if ($p.Count -lt 2) { continue }
+        if ($p[1] -eq "refs/heads/$ref") { $b = $p[0] } elseif ($p[1] -eq "refs/tags/$ref^{}") { $pe = $p[0] } elseif ($p[1] -eq "refs/tags/$ref") { $t = $p[0] }
+    }
+    if ($b) { $b } elseif ($pe) { $pe } else { $t }
+}
+function Collect-Cached([string]$url, [string]$ref) { # the kept download of what the remote has now (refreshed), or ''
+    $c = Join-Path $KitConf 'cache/collect'
+    if (-not (Test-Path -LiteralPath $c -PathType Container)) { return '' }
+    $old = (Get-Date).AddMinutes(-$CollectKeep)
+    foreach ($x in @(Get-ChildItem -LiteralPath $c -Force -ErrorAction SilentlyContinue)) { if ($x.LastWriteTime -lt $old) { Remove-Tree $x.FullName } }
+    $sha = Remote-Sha $url $ref; if (-not $sha) { return '' }
+    $k = Join-Path $c $sha; $r = Join-Path $k 'repo'
+    if (-not (Test-Path -LiteralPath $r -PathType Container) -or "$(& git -C $r rev-parse -q --verify HEAD 2>$null)".Trim() -ne $sha) { return '' }
+    try { (Get-Item -LiteralPath $k -Force).LastWriteTime = Get-Date } catch { }
+    Full-Path $r
+}
+function Collect-Keep([string]$repo) { # REPO kept for next time (moved there; its new place), else REPO itself
+    $sha = "$(& git -C $repo rev-parse -q --verify HEAD 2>$null)".Trim(); if (-not $sha) { return $repo }
+    $c = Join-Path $KitConf 'cache/collect'; $k = Join-Path $c $sha; $n = "$k.$PID"
+    try {
+        Ensure-Dir $c; foreach ($x in @($k, $n)) { if (Test-Path -LiteralPath $x) { Remove-Tree $x } }
+        Ensure-Dir $n; Move-Item -LiteralPath $repo -Destination (Join-Path $n 'repo') -ErrorAction Stop; Move-Item -LiteralPath $n -Destination $k -ErrorAction Stop
+        Join-Path $k 'repo'
+    } catch { if (Test-Path -LiteralPath $repo) { $repo } else { Join-Path $n 'repo' } }
+}
+function Web-Repo([string]$u) { # a repo page's address (GitHub /tree/<ref>/<folder>, /blob/…; GitLab /-/tree/…; Gitea /src/branch/<ref>/…) -> @(repo URL, ref, folder), or $null
+    $u = $u -replace '[?#].*$', ''
+    if ($u -match '^(https?://[^/]+/[^/]+/[^/]+?)(?:/-)?/(?:tree|blob)/([^/]+)/?(.*)$' -or $u -match '^(https?://[^/]+/[^/]+/[^/]+?)/src/(?:branch|tag|commit)/([^/]+)/?(.*)$') {
+        return @($Matches[1], $Matches[2], (($Matches[3] -replace '/?SKILL\.md$', '').TrimEnd('/')))
+    }
+    $null
+}
 function Cmd-Collect($rest) {
     $arg = ''; $path = ''; $name = ''; $ref = ''; $to = ''; $force = $false; $allow = $false; $look = $false
     $r = @($rest | Where-Object { $_ })
@@ -6439,7 +6500,10 @@ function Cmd-Collect($rest) {
     if (-not $arg) { Die-C usage '用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag] [--allow]，或 kit collect <名字>（再收一次）' }
     $dir = Target-Dir $to
     Check-Maintainer $dir
-    if (Is-Url $arg) { $url = $arg }
+    if (Is-Url $arg) {
+        $url = $arg; $w = Web-Repo $url   # a page's address, as copied from the browser: the repo, its branch and folder
+        if ($w) { $url = $w[0]; if (-not $ref) { $ref = $w[1] }; if (-not $path) { $path = $w[2] } }
+    }
     else {
         $line = Lock-Get $dir $arg; if (-not $line) { Die "$(Split-Path -Leaf $dir) 的 third_party.lock 裡沒有 ${arg}（第一次收要給網址）" }
         $f = $line.Split("`t"); $name = $arg; $url = $f[1]
@@ -6479,11 +6543,15 @@ function Cmd-Collect($rest) {
 
     $tmp = New-TempDir 'kit-collect.'
     try {
-        $repo = Join-Path $tmp 'repo'
-        if (-not $look) { Say "從 $(Url-Id $url) 下載$(if ($ref) { "（$ref）" })…" }
-        $ga = @('clone', '-q', '--depth', '1', '--no-recurse-submodules'); if ($ref) { $ga += @('--branch', $ref) }
-        $out = Git-Safe @($ga + @($url, $repo))
-        if ($LASTEXITCODE -ne 0) { foreach ($l in @($out)) { Warn "  $l" }; Die-C download_failed "沒辦法下載 $url" }
+        $repo = Collect-Cached $url $ref
+        if (-not $repo) {
+            $repo = Join-Path $tmp 'repo'
+            if (-not $look) { Say "從 $(Url-Id $url) 下載$(if ($ref) { "（$ref）" })…" }
+            $ga = @('clone', '-q', '--depth', '1', '--no-recurse-submodules'); if ($ref) { $ga += @('--branch', $ref) }
+            $out = Git-Safe @($ga + @($url, $repo))
+            if ($LASTEXITCODE -ne 0) { foreach ($l in @($out)) { Warn "  $l" }; Die-C download_failed "沒辦法下載 $url" }
+            $repo = Collect-Keep $repo
+        }
         $sha = "$(& git -C $repo rev-parse HEAD)".Trim()
         $repo = Full-Path $repo
         # which folder: --path, else the top if it has a SKILL.md, else the only folder in the repo that has one
@@ -6508,7 +6576,7 @@ function Cmd-Collect($rest) {
             }
             $canAllow = (-not $ok) -and $own -and -not $moved
             [Console]::Out.Write('{"source": ' + (Json-Str (Split-Path -Leaf $dir)) + ', "dir": ' + (Json-Str $dir.Replace('\', '/')) + ', "push": ' + (Json-Str (Push-Mode $dir)) +
-                ', "url": ' + (Json-Str $url) + ', "id": ' + (Json-Str (Url-Id $url)) + ', "commit": ' + (Json-Str $sha) +
+                ', "url": ' + (Json-Str $url) + ', "ref": ' + (Json-Str $ref) + ', "id": ' + (Json-Str (Url-Id $url)) + ', "commit": ' + (Json-Str $sha) +
                 ', "allowed": ' + $(if ($ok) { 'true' } else { 'false' }) + ', "can_allow": ' + $(if ($canAllow) { 'true' } else { 'false' }) +
                 ', "skills": [' + "`n  " + ($sk -join ",`n  ") + "`n]}`n")
             return
@@ -6547,9 +6615,27 @@ function Cmd-Collect($rest) {
     if ($own) { Say "下一步：用 git diff 看收進來的檔案；沒問題就  kit push  送出，要用它就  kit add skill $name" }
     else { Say '下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR' }
 }
+function Outdated-Json([string]$one) { # every collected skill (ONE's, else the folder you are in and every source) and what its author has now
+    $dirs = if ($one) { @($one) } else {
+        $seen = @{}; @(@($(if (Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) { Canon-Dir (Get-Location).ProviderPath }) + $(if (Test-Path -LiteralPath $Machine) { Src-Dirs })) |
+            Where-Object { $_ -and -not $seen.ContainsKey($_) } | ForEach-Object { $seen[$_] = 1; $_ }) }
+    $rows = New-Object System.Collections.Generic.List[string]
+    foreach ($d in $dirs) {
+        if (-not (Test-Path -LiteralPath (Join-Path $d 'third_party.lock')) -or -not (Is-Maintainer $d)) { continue }
+        foreach ($row in Lock-Rows $d) {
+            $f = $row.Split("`t"); $url = $f[1]; $ref = if ($f[3] -ne '-') { $f[3] } else { '' }; $sha = $f[4]; $now = ''
+            if (-not (Collect-Allowed $url $d)) { $st = 'skipped' }
+            else { $now = "$(Remote-Sha $url $ref)"; $st = if (-not $now) { 'unreachable' } elseif ($now -eq $sha) { 'latest' } else { 'new' } }
+            $rows.Add("    {`"source`": $(Json-S (Split-Path -Leaf $d)), `"name`": $(Json-S $f[0]), `"url`": $(Json-S $url), `"path`": $(Json-S $f[2]), `"ref`": $(Json-S $ref), `"commit`": $(Json-S $sha), `"now`": $(Json-S $now), `"state`": $(Json-S $st)}")
+        }
+    }
+    $sk = if ($rows.Count) { "`n" + ($rows -join ",`n") + "`n  ]" } else { ']' }
+    Out-Json "{`n  `"kit`": $(Json-S $KitVersion),`n  `"api`": $(Json-S $KitApi),`n  `"at`": $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),`n  `"skills`": [$sk`n}"
+}
 function Cmd-Outdated($rest) {
-    $to = ''; $r = @($rest | Where-Object { $_ })
-    for ($i = 0; $i -lt $r.Count; $i++) { if ($r[$i] -eq '--to' -and $i + 1 -lt $r.Count) { $i++; $to = $r[$i] } else { Die '用法：kit outdated [--to 來源]' } }
+    $to = ''; $json = $false; $r = @($rest | Where-Object { $_ })
+    for ($i = 0; $i -lt $r.Count; $i++) { if ($r[$i] -eq '--to' -and $i + 1 -lt $r.Count) { $i++; $to = $r[$i] } elseif ($r[$i] -eq '--json') { $json = $true } else { Die '用法：kit outdated [--to 來源] [--json]' } }
+    if ($json) { $one = if ($to) { Target-Dir $to } else { '' }; Outdated-Json $one; return }
     $dir = Target-Dir $to
     Check-Maintainer $dir
     if (-not (Test-Path -LiteralPath (Join-Path $dir 'third_party.lock'))) { Say "$(Split-Path -Leaf $dir) 沒有 third_party.lock（還沒用 kit collect 收過東西）"; return }
@@ -6557,17 +6643,7 @@ function Cmd-Outdated($rest) {
     foreach ($row in Lock-Rows $dir) {
         $f = $row.Split("`t"); $n = $f[0]; $url = $f[1]; $ref = $f[3]; $sha = $f[4]
         if (-not (Collect-Allowed $url $dir)) { Warn "${n}：$(Url-Id $url) 已經不在 collect_sources，不檢查"; continue }
-        $now = ''
-        if ($ref -eq '-') {
-            foreach ($l in @(Git-Safe ls-remote $url HEAD)) { $p = "$l".Split("`t"); if ($p.Count -ge 2 -and $p[1] -eq 'HEAD') { $now = $p[0]; break } }
-        } else {
-            $b = ''; $t = ''; $pe = ''
-            foreach ($l in @(Git-Safe ls-remote $url "refs/heads/$ref" "refs/tags/$ref" "refs/tags/$ref^{}")) {
-                $p = "$l".Split("`t"); if ($p.Count -lt 2) { continue }
-                if ($p[1] -eq "refs/heads/$ref") { $b = $p[0] } elseif ($p[1] -eq "refs/tags/$ref^{}") { $pe = $p[0] } elseif ($p[1] -eq "refs/tags/$ref") { $t = $p[0] }
-            }
-            $now = if ($b) { $b } elseif ($pe) { $pe } else { $t }
-        }
+        $now = Remote-Sha $url $(if ($ref -ne '-') { $ref } else { '' })
         if (-not $now) { Warn "${n}：連不到 $(Url-Id $url)" }
         elseif ($now -eq $sha) { Say "  ${n}：最新（$($sha.Substring(0, 12))）" }
         else { Say "  ${n}：有新版本 $($sha.Substring(0, 12)) → $($now.Substring(0, 12))，打  kit collect $n  收新的"; $new++ }
@@ -6755,7 +6831,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit collect <名字>                再收一次＝整份換成原作者的新版
   kit collect <原作者 repo 網址> --look [--path 資料夾] [--ref 分支] [--to 來源]
                                     只下載來看、什麼都不寫：找到的 skill、授權、會執行的檔案（JSON，給程式讀）
-  kit outdated                      看收過的 skill 原作者有沒有新版
+  kit outdated [--json]             看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml

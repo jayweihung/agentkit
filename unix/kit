@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.7
+KIT_API=1.8
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -3038,11 +3038,19 @@ cmd_note() { # kit note [text...] | --clear | --pid PID [--json] [text...] | --h
 # writes. Read only by status: a gone agent's file is removed by kit pending / kit pending add, never by status.
 PEND_DIR="$NOTE_DIR/pending"
 PEND_MAX=300           # bytes; one line
-pend_read() { # pend_read ID : P_PID P_DIR P_AT P_WHAT of that item; 1 when there is none or its agent is gone
+proc_up() { # proc_up PID : that process and the ones above it (at most 12, space separated): a screen program finds
+    # the terminal it runs in by the terminal's own process among them (sudo, ssh in between included)
+    local p=$1 i=0 out=""
+    while [ $i -lt 12 ] && [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+        out="$out${out:+ }$p"; p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' '); i=$((i+1))
+    done
+    printf '%s' "$out"
+}
+pend_read() { # pend_read ID : P_PID P_DIR P_AT P_WHAT P_UP of that item; 1 when there is none or its agent is gone
     local f="$PEND_DIR/$1" st
-    P_PID=; P_DIR=; P_AT=; P_WHAT=
+    P_PID=; P_DIR=; P_AT=; P_WHAT=; P_UP=
     [ -f "$f" ] || return 1
-    P_PID=$(sed -n 2p "$f"); P_DIR=$(sed -n 3p "$f"); P_AT=$(sed -n 4p "$f"); P_WHAT=$(sed -n 5p "$f")
+    P_PID=$(sed -n 2p "$f"); P_DIR=$(sed -n 3p "$f"); P_AT=$(sed -n 4p "$f"); P_WHAT=$(sed -n 5p "$f"); P_UP=$(sed -n 6p "$f" | tr -cd '0-9 ')
     if [ -n "$P_PID" ]; then                                 # gone: no such process, or another process has that pid
         kill -0 "$P_PID" 2>/dev/null || [ -n "$(proc_start "$P_PID")" ] || return 1
         st=$(proc_start "$P_PID"); [ -z "$st" ] || [ "$(sed -n 1p "$f")" = "$st" ] || return 1
@@ -3055,8 +3063,8 @@ pend_json() { # one {"kind": "owner", ...} line per item that still waits
     m=$(hostname -s 2>/dev/null || uname -n)
     pend_ids | while IFS= read -r id; do
         pend_read "$id" || continue
-        printf '{"kind": "owner", "id": %s, "what": %s, "since": %s000, "machine": %s, "dir": %s, "pid": %s}\n' "$(json_s "$id")" "$(json_s "$P_WHAT")" \
-            "${P_AT:-0}" "$(json_s "$m")" "$(json_or_null "$P_DIR")" "$(json_uint "$P_PID")"
+        printf '{"kind": "owner", "id": %s, "what": %s, "since": %s000, "machine": %s, "dir": %s, "pid": %s, "up": [%s]}\n' "$(json_s "$id")" "$(json_s "$P_WHAT")" \
+            "${P_AT:-0}" "$(json_s "$m")" "$(json_or_null "$P_DIR")" "$(json_uint "$P_PID")" "$(printf '%s' "$P_UP" | awk '{ for (i = 1; i <= NF; i++) printf "%s%d", (i > 1 ? ", " : ""), $i }')"
     done
 }
 pend_prune() { local id; pend_ids | while IFS= read -r id; do pend_read "$id" || rm -f "$PEND_DIR/$id"; done; }
@@ -3106,7 +3114,7 @@ cmd_pending() { # kit pending | kit pending add "<what>" [--id ID] [--pid PID | 
     mkdir -p "$PEND_DIR" 2>/dev/null; [ -w "$PEND_DIR" ] || die_c no-write "寫不進 $PEND_DIR"
     pend_prune
     since=$(date +%s); pend_read "$id" && since=$P_AT              # the same item again: it has waited since then
-    { printf '%s\n' "$( [ -z "$pid" ] || proc_start "$pid")"; printf '%s\n%s\n%s\n%s\n' "$pid" "$( [ -z "$pid" ] && printf '%s' "$PWD" || proc_cwd "$pid")" "$since" "$text"; } \
+    { printf '%s\n' "$( [ -z "$pid" ] || proc_start "$pid")"; printf '%s\n%s\n%s\n%s\n%s\n' "$pid" "$( [ -z "$pid" ] && printf '%s' "$PWD" || proc_cwd "$pid")" "$since" "$text" "$(proc_up "${pid:-$PPID}")"; } \
         > "$PEND_DIR/$id.tmp" && mv "$PEND_DIR/$id.tmp" "$PEND_DIR/$id" || die_c no-write "寫不進 $PEND_DIR"
     say "記下了：${id}（等到了跑 kit pending done ${id}）"
 }
@@ -3757,6 +3765,13 @@ $(here_rows "$dir")
 EOF
     printf '\n  ]}'
 }
+sign_json() { # ,"sign": the approvals repo this computer signs with (kit approve remembered it): its serial and what it
+    # approved ({name, commit}); nothing when this computer hasn't signed
+    local d f; d=$(state_get sign approvals); f="$d/approved.txt"
+    [ -n "$d" ] && [ -f "$f" ] || return 0
+    printf ',\n  "sign": {"approvals": %s, "serial": %s, "approved": [%s]}' "$(json_s "$d")" "$(json_uint "$(awk '$1 == "serial:" { print $2; exit }' "$f")")" \
+        "$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:" { print $1 "\t" $2 }' "$f" | while IFS="$TAB" read -r n s; do printf '%s{"name": %s, "commit": %s}' "${c:+, }" "$(json_s "$n")" "$(json_s "$s")"; c=1; done)"
+}
 cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a kit panel); kit.ps1 prints the same
     local want req i k n p d status new first s tools sf chg="" changed rel f
     want=$(wanted); req=$(required_items)
@@ -3795,6 +3810,7 @@ EOF
                          (mcp) mcp_list_json "$p" "$n";; esac)"
     done
     printf '\n  ],\n  "kit_version_wanted": %s' "$(json_s "$(wanted_version)")"
+    sign_json
     [ -n "${HERE_DIR:-}" ] && here_json "$HERE_DIR" "${HERE_PID:-}"
     printf '\n}\n'
 }
@@ -3848,21 +3864,24 @@ cmd_add_rm() {
     local verb=$1; shift
     local dir=""
     if [ "${1:-}" = --dir ]; then [ $# -ge 2 ] || die "--dir 後面要接資料夾"; dir=$2; shift 2; fi
-    [ $# -eq 2 ] || die "用法：kit $verb [--dir 資料夾] rule|skill|mcp <名字>"
+    [ $# -ge 2 ] && { [ -z "$dir" ] || [ $# -eq 2 ]; } || die "用法：kit $verb [--dir 資料夾] rule|skill|mcp <名字>（整個帳號可以一次給好幾個名字）"
     need_init
-    local k=$1 n=$2 i="$1:$2" added removed
+    local k=$1 n i added removed; shift
     case " rule skill mcp " in *" $k "*) ;; *) die "種類只能是 rule、skill、mcp";; esac
-    if [ -n "$dir" ]; then dir_add_rm "$verb" "$dir" "$k" "$n"; return; fi
-    find_item "$k" "$n" > /dev/null || die "找不到 ${i}（打 kit list 看有哪些）"
+    if [ -n "$dir" ]; then dir_add_rm "$verb" "$dir" "$k" "$1"; return; fi
+    for n in "$@"; do find_item "$k" "$n" > /dev/null || die "找不到 $k:${n}（打 kit list 看有哪些）"; done
+    [ "$verb" = add ] || for n in "$@"; do required_items | grep -qxF "$k:$n" && die "$k:$n 是團隊必備，拿不掉"; done
     added=$(m_added); removed=$(m_removed)
-    if [ "$verb" = add ]; then
-        added=$(printf '%s\n%s\n' "$added" "$i" | awk 'NF && !seen[$0]++')
-        removed=$(printf '%s\n' "$removed" | grep -vxF "$i")
-    else
-        required_items | grep -qxF "$i" && die "$i 是團隊必備，拿不掉"
-        added=$(printf '%s\n' "$added" | grep -vxF "$i")
-        removed=$(printf '%s\n%s\n' "$removed" "$i" | awk 'NF && !seen[$0]++')
-    fi
+    for n in "$@"; do
+        i="$k:$n"
+        if [ "$verb" = add ]; then
+            added=$(printf '%s\n%s\n' "$added" "$i" | awk 'NF && !seen[$0]++')
+            removed=$(printf '%s\n' "$removed" | grep -vxF "$i")
+        else
+            added=$(printf '%s\n' "$added" | grep -vxF "$i")
+            removed=$(printf '%s\n%s\n' "$removed" "$i" | awk 'NF && !seen[$0]++')
+        fi
+    done
     write_machine "$(m_sources)" "$added" "$removed"
     apply_claude
 }
@@ -4932,11 +4951,14 @@ collect_allowed() { # collect_allowed URL DIR : the URL must be (inside) one of 
     done
     return 1
 }
-check_maintainer() { # check_maintainer DIR : when kit.yaml lists maintainers, you must be one
+is_maintainer() { # is_maintainer DIR : kit.yaml lists no maintainers, or you are one
     local m me; m=$(yget "$1/kit.yaml" maintainers)
     [ -n "$m" ] || return 0
     me=$(git -C "$1" config user.email 2>/dev/null)
-    printf '%s\n' "$m" | grep -qxF -e "$me" -e "${me%%@*}" -e "${USER:-}" -e "$(id -un 2>/dev/null)" && return 0
+    printf '%s\n' "$m" | grep -qxF -e "$me" -e "${me%%@*}" -e "${USER:-}" -e "$(id -un 2>/dev/null)"
+}
+check_maintainer() { # check_maintainer DIR : when kit.yaml lists maintainers, you must be one
+    is_maintainer "$1" && return 0
     die_c not_maintainer "只有維護者能用 collect／outdated（kit.yaml 的 maintainers）"
 }
 license_kind() { # license_kind FILE -> short name
@@ -5013,6 +5035,41 @@ yaml_list_add() { # yaml_list_add FILE KEY VALUE : VALUE goes into the list KEY 
     yget "$f" "$k" | grep -qxF "$v" || die "加進 $f 的 $k 沒成功，請自己把 $v 加進去"
 }
 
+# A download is kept COLLECT_KEEP minutes (since last used) under $KIT_CONF/cache/collect, by its commit: --look, then
+# collecting several of its skills one by one, downloads once. Used only while the remote still is at that commit
+# (git ls-remote, much faster than a download); nothing in it is run.
+COLLECT_KEEP=60
+remote_sha() { # remote_sha URL REF : the commit the remote has for REF (a branch, or a tag's commit), or HEAD
+    if [ -z "$2" ]; then git_safe ls-remote "$1" HEAD 2>/dev/null | awk '$2 == "HEAD" { print $1; exit }'
+    else git_safe ls-remote "$1" "refs/heads/$2" "refs/tags/$2" "refs/tags/$2^{}" 2>/dev/null |
+        awk -v r="$2" '$2 == "refs/heads/" r { b = $1 } $2 == "refs/tags/" r { t = $1 } $2 == "refs/tags/" r "^{}" { p = $1 }
+                       END { print (b != "" ? b : (p != "" ? p : t)) }'; fi
+}
+collect_cache() { printf '%s/cache/collect\n' "$KIT_CONF"; }
+collect_cached() { # collect_cached URL REF : the kept download of what the remote has now (refreshed), or 1
+    local c sha k; c=$(collect_cache)
+    [ -d "$c" ] || return 1
+    find "$c" -mindepth 1 -maxdepth 1 -mmin +"$COLLECT_KEEP" -exec rm -rf {} + 2>/dev/null
+    sha=$(remote_sha "$1" "$2"); [ -n "$sha" ] || return 1
+    k="$c/$sha"
+    [ -d "$k/repo" ] && [ "$(git -C "$k/repo" rev-parse -q --verify HEAD 2>/dev/null)" = "$sha" ] || return 1
+    touch "$k"; printf '%s\n' "$k/repo"
+}
+collect_keep() { # collect_keep URL DIR : DIR kept for next time (moved there; its new place printed), else DIR itself
+    local c sha k; c=$(collect_cache); sha=$(git -C "$2" rev-parse -q --verify HEAD 2>/dev/null)
+    [ -n "$sha" ] && mkdir -p "$c" 2>/dev/null || { printf '%s\n' "$2"; return 0; }
+    k="$c/$sha"; rm -rf "$k" "$k.$$"
+    if mkdir -p "$k.$$" && mv "$2" "$k.$$/repo" && mv "$k.$$" "$k"; then printf '%s\n' "$k/repo"
+    else rm -rf "$k.$$"; printf '%s\n' "$2"; fi
+}
+web_repo() { # web_repo URL : a repo page's address (GitHub /tree/<ref>/<folder>, /blob/…; GitLab /-/tree/…; Gitea
+    # /src/branch/<ref>/…) -> "repo URL<TAB>ref<TAB>folder" (a SKILL.md link: its folder), or nothing
+    printf '%s\n' "$1" | awk '{ sub(/[?#].*$/, "") }
+        match($0, /\/-\/(tree|blob)\/[^\/]+/) || match($0, /\/(tree|blob)\/[^\/]+/) || match($0, /\/src\/(branch|tag|commit)\/[^\/]+/) {
+            repo = substr($0, 1, RSTART - 1); n = split(substr($0, RSTART + 1, RLENGTH - 1), a, "/"); tail = substr($0, RSTART + RLENGTH)
+            sub(/^\//, "", tail); sub(/\/?SKILL\.md$/, "", tail); sub(/\/+$/, "", tail)
+            if (repo ~ /^https?:\/\/[^\/]+\/[^\/]+\/[^\/]+$/) print repo "\t" a[n] "\t" tail }'
+}
 cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to SOURCE] [--force] [--allow] [--look]
     local arg="" path="" name="" ref="" to="" force="" allow="" look=""
     while [ $# -gt 0 ]; do
@@ -5032,6 +5089,8 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
     local dir url line add=""; dir=$(target_dir "$to") || exit 1
     check_maintainer "$dir"
     if is_url "$arg"; then url=$arg
+        local w; w=$(web_repo "$url")   # a page's address, as copied from the browser: the repo, its branch and folder
+        if [ -n "$w" ]; then url=${w%%"$TAB"*}; w=${w#*"$TAB"}; [ -n "$ref" ] || ref=${w%%"$TAB"*}; [ -n "$path" ] || path=${w#*"$TAB"}; fi
     else # collect again what the lock says
         line=$(lock_get "$dir" "$arg"); [ -n "$line" ] || die "$(basename "$dir") 的 third_party.lock 裡沒有 ${arg}（第一次收要給網址）"
         name=$arg; url=$(printf '%s' "$line" | cut -f2)
@@ -5067,10 +5126,14 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
     path=${path#/}; path=${path%/}
     case /$path/ in */../*|*/./*) die "--path 不能有 .. 或 .";; esac
 
-    local tmp repo src sha lic kind d; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-collect.XXXXXX"); repo="$tmp/repo"
-    [ -n "$look" ] || say "從 $(url_id "$url") 下載${ref:+（${ref}）}…"
-    if ! git_safe -c protocol.file.allow=always clone -q --depth 1 --no-recurse-submodules ${ref:+--branch "$ref"} "$url" "$repo" 2>"$tmp/err"; then
-        sed 's/^/  /' "$tmp/err" >&2; rm -rf "$tmp"; die_c download_failed "沒辦法下載 $url"
+    local tmp repo src sha lic kind d cached; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-collect.XXXXXX"); repo="$tmp/repo"
+    if cached=$(collect_cached "$url" "$ref"); then repo=$cached
+    else
+        [ -n "$look" ] || say "從 $(url_id "$url") 下載${ref:+（${ref}）}…"
+        if ! git_safe -c protocol.file.allow=always clone -q --depth 1 --no-recurse-submodules ${ref:+--branch "$ref"} "$url" "$repo" 2>"$tmp/err"; then
+            sed 's/^/  /' "$tmp/err" >&2; rm -rf "$tmp"; die_c download_failed "沒辦法下載 $url"
+        fi
+        repo=$(collect_keep "$url" "$repo")
     fi
     sha=$(git -C "$repo" rev-parse HEAD)
     repo=$(cd "$repo" && pwd -P)
@@ -5082,8 +5145,8 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
 
     if [ -n "$look" ]; then # what kit would collect, as JSON (a screen program shows it before you collect)
         local first=1 n desc fm ex out
-        out=$(printf '{"source": %s, "dir": %s, "push": %s, "url": %s, "id": %s, "commit": %s, "allowed": %s, "can_allow": %s, "skills": [' \
-            "$(json_s "$(basename "$dir")")" "$(json_s "$dir")" "$(json_s "$(push_mode "$dir")")" "$(json_s "$url")" "$(json_s "$(url_id "$url")")" "$(json_s "$sha")" \
+        out=$(printf '{"source": %s, "dir": %s, "push": %s, "url": %s, "ref": %s, "id": %s, "commit": %s, "allowed": %s, "can_allow": %s, "skills": [' \
+            "$(json_s "$(basename "$dir")")" "$(json_s "$dir")" "$(json_s "$(push_mode "$dir")")" "$(json_s "$url")" "$(json_s "$ref")" "$(json_s "$(url_id "$url")")" "$(json_s "$sha")" \
             "$( [ $ok = 1 ] && echo true || echo false)" "$( [ $ok = 0 ] && [ $own = 1 ] && [ -z "$real" -o "$real" = "$url" ] && echo true || echo false)")
         while IFS= read -r d; do
             [ -n "$d" ] || continue
@@ -5142,9 +5205,33 @@ $(printf '%s\n' "$found" | sed 's/^/  /')"
     else say "下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR"; fi
 }
 
-cmd_outdated() { # kit outdated [--to SOURCE]
-    local to=""
-    while [ $# -gt 0 ]; do case $1 in --to) to=${2:-}; shift 2 || die "--to 後面要接來源";; *) die "用法：kit outdated [--to 來源]";; esac; done
+outdated_json() { # outdated_json [DIR] : every collected skill (DIR's, else the folder you are in and every source) and what its author has now
+    local d dirs n url path ref sha lic day now st first=1
+    if [ -n "${1:-}" ]; then dirs=$1
+    else dirs=$( { [ -f kit.yaml ] && pwd -P; [ -f "$MACHINE" ] && src_dirs; } | awk 'NF && !seen[$0]++'); fi
+    printf '{\n  "kit": %s,\n  "api": %s,\n  "at": %s,\n  "skills": [' "$(json_s "$KIT_VERSION")" "$(json_s "$KIT_API")" "$(date +%s)"
+    while IFS= read -r d; do
+        [ -n "$d" ] && [ -f "$d/third_party.lock" ] && is_maintainer "$d" || continue
+        while IFS="$TAB" read -r n url path ref sha lic day; do
+            case $n in ""|\#*) continue;; esac
+            now=""
+            if ! collect_allowed "$url" "$d"; then st=skipped
+            else now=$(remote_sha "$url" "$( [ "$ref" = - ] || printf '%s' "$ref")")
+                if [ -z "$now" ]; then st=unreachable; elif [ "$now" = "$sha" ]; then st=latest; else st=new; fi; fi
+            [ $first = 1 ] || printf ','; first=0
+            printf '\n    {"source": %s, "name": %s, "url": %s, "path": %s, "ref": %s, "commit": %s, "now": %s, "state": %s}' \
+                "$(json_s "$(basename "$d")")" "$(json_s "$n")" "$(json_s "$url")" "$(json_s "$path")" "$(json_s "$( [ "$ref" = - ] || printf '%s' "$ref")")" \
+                "$(json_s "$sha")" "$(json_s "$now")" "$(json_s "$st")"
+        done < "$d/third_party.lock"
+    done <<EOF
+$dirs
+EOF
+    [ $first = 1 ] && printf ']\n}\n' || printf '\n  ]\n}\n'
+}
+cmd_outdated() { # kit outdated [--to SOURCE] [--json]
+    local to="" json=""
+    while [ $# -gt 0 ]; do case $1 in --to) to=${2:-}; shift 2 || die "--to 後面要接來源";; --json) json=1; shift;; *) die "用法：kit outdated [--to 來源] [--json]";; esac; done
+    if [ -n "$json" ]; then local one=""; [ -z "$to" ] || one=$(target_dir "$to") || exit 1; outdated_json "$one"; return 0; fi
     local dir; dir=$(target_dir "$to") || exit 1
     check_maintainer "$dir"
     [ -f "$dir/third_party.lock" ] || { say "$(basename "$dir") 沒有 third_party.lock（還沒用 kit collect 收過東西）"; return 0; }
@@ -5152,12 +5239,7 @@ cmd_outdated() { # kit outdated [--to SOURCE]
     while IFS="$TAB" read -r n url path ref sha lic day; do
         case $n in ""|\#*) continue;; esac
         if ! collect_allowed "$url" "$dir"; then warn "${n}：$(url_id "$url") 已經不在 collect_sources，不檢查"; continue; fi
-        if [ "$ref" = - ]; then now=$(git_safe ls-remote "$url" HEAD 2>/dev/null | awk '$2 == "HEAD" { print $1; exit }')
-        else # a branch, or a tag (the commit it points to: ^{})
-            now=$(git_safe ls-remote "$url" "refs/heads/$ref" "refs/tags/$ref" "refs/tags/$ref^{}" 2>/dev/null |
-                  awk -v r="$ref" '$2 == "refs/heads/" r { b = $1 } $2 == "refs/tags/" r { t = $1 } $2 == "refs/tags/" r "^{}" { p = $1 }
-                                   END { print (b != "" ? b : (p != "" ? p : t)) }')
-        fi
+        now=$(remote_sha "$url" "$( [ "$ref" = - ] || printf '%s' "$ref")")
         if [ -z "$now" ]; then warn "${n}：連不到 $(url_id "$url")"
         elif [ "$now" = "$sha" ]; then say "  ${n}：最新（$(printf %.12s "$sha")）"
         else say "  ${n}：有新版本 $(printf %.12s "$sha") → $(printf %.12s "$now")，打  kit collect $n  收新的"; new=$((new+1)); fi
@@ -5165,16 +5247,24 @@ cmd_outdated() { # kit outdated [--to SOURCE]
     [ $new = 0 ] || say "kit：$new 個有新版本"
 }
 
-cmd_approve() { # kit approve <approvals repo> <source clone>... --key <ssh key> [--yes]
-    local dir="" key="" yes="" repos=() r n sha prev f tmp serial
+cmd_approve() { # kit approve [<approvals repo>] <source clone>... [--key <ssh key>] [--yes] [--push]
+    # The approvals repo and key of the last approve are remembered (state "sign"): kit approve <clone>... then uses them.
+    local dir="" key="" yes="" push="" args=() repos=() r n sha prev f tmp serial was
     while [ $# -gt 0 ]; do
         case $1 in
             --key) key=${2:-}; shift 2 || die "--key 後面要接簽章用的 ssh 金鑰";;
             --yes) yes=1; shift;;
-            *) if [ -z "$dir" ]; then dir=$1; else repos+=("$1"); fi; shift;;
+            --push) push=1; shift;;
+            *) args+=("$1"); shift;;
         esac
     done
-    [ -n "$dir" ] && [ ${#repos[@]} -ge 1 ] && [ -n "$key" ] || die "用法：kit approve <核准紀錄的 repo> <來源的 clone>... --key <ssh 金鑰>"
+    was=$(state_get sign approvals)
+    # the first one is the approvals repo when it is one (approved.txt in it, or the one remembered), or none is remembered
+    if [ ${#args[@]} -ge 1 ] && { [ -z "$was" ] || [ -f "${args[0]}/approved.txt" ] || [ "$(real_dir "${args[0]}" 2>/dev/null)" = "$was" ]; }; then
+        dir=${args[0]}; [ ${#args[@]} -lt 2 ] || repos=("${args[@]:1}")
+    else dir=$was; [ ${#args[@]} -eq 0 ] || repos=("${args[@]}"); fi
+    [ -n "$key" ] || key=$(state_get sign key)
+    [ -n "$dir" ] && [ ${#repos[@]} -ge 1 ] && [ -n "$key" ] || die "用法：kit approve [核准紀錄的 repo] <來源的 clone>... [--key ssh 金鑰] [--push]（核准紀錄和金鑰沒給就用上次的）"
     [ -d "$dir/.git" ] || die "$dir 要是一個 git repo（放核准紀錄）"
     [ -f "$key" ] || die "找不到金鑰 $key"
     f="$dir/approved.txt"; tmp=$(mktemp "${TMPDIR:-/tmp}/kit-approve.XXXXXX")
@@ -5206,7 +5296,11 @@ cmd_approve() { # kit approve <approvals repo> <source clone>... --key <ssh key>
     rm -f "$tmp" "$f.sig"
     ssh-keygen -Y sign -q -f "$key" -n agentkit "$f" || die "簽章失敗"
     git -C "$dir" add approved.txt approved.txt.sig && git -C "$dir" commit -q -m "approve serial $serial" || die "commit 失敗"
-    say "kit：已核准並簽章（serial ${serial}）。下一步：git -C $dir push"
+    state_set sign approvals "$(real_dir "$dir")"; state_set sign key "$(cd "$(dirname "$key")" && pwd)/$(basename "$key")"
+    if [ -n "$push" ]; then
+        { git -C "$dir" push -q 2>/dev/null || git -C "$dir" push -q origin HEAD; } || die "已簽好 serial ${serial}，但推不上去：修好再打  git -C $dir push"
+        say "kit：已核准並簽章（serial ${serial}），推上去了。用簽過版本的機器 kit sync 後就會用到"
+    else say "kit：已核准並簽章（serial ${serial}）。下一步：git -C $dir push"; fi
 }
 
 # ---------- status --json: the kit, api and commits this account uses, for a panel (kit.ps1 prints the same) ----------
@@ -5403,7 +5497,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit collect <名字>                再收一次＝整份換成原作者的新版
   kit collect <原作者 repo 網址> --look [--path 資料夾] [--ref 分支] [--to 來源]
                                     只下載來看、什麼都不寫：找到的 skill、授權、會執行的檔案（JSON，給程式讀）
-  kit outdated                      看收過的 skill 原作者有沒有新版
+  kit outdated [--json]             看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml

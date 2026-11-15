@@ -101,6 +101,15 @@ check "no temp files left" '[ -z "$(ls -a "$HOME" | grep kit\\.)" ]'
 check "mcp env not expanded" 'jget "$HOME/.claude.json" mcpServers.gerrit.env | grep -qF "\${HOME}/.config/gerrit"'
 check "claude.json other data kept" 'jget "$HOME/.claude.json" projects | grep -qF "中文 \\\"q\\\""'
 out=$(kit add skill nope 2>&1); rc=$?; check "add unknown fails with a message" '[ $rc -ne 0 ] && echo "$out" | grep -q "找不到 skill:nope"'
+MY="$HOME/.config/agentkit/machine.yaml"; cp "$MY" "$T/my.keep"
+out=$(kit add skill gerrit-review nope 2>&1); rc=$?
+check "add several: one not found, none added" '[ $rc -ne 0 ] && echo "$out" | grep -q "找不到 skill:nope" && cmp -s "$MY" "$T/my.keep"'
+kit rm skill gerrit-review >/dev/null 2>&1; kit rm skill gerrit-workflow >/dev/null 2>&1
+out=$(kit add skill gerrit-review gerrit-workflow 2>&1); rc=$?
+check "add several at once (the whole account)" '[ $rc -eq 0 ] && [ -f "$HOME/.claude/skills/gerrit-review/SKILL.md" ] && [ -f "$HOME/.claude/skills/gerrit-workflow/SKILL.md" ] && ! grep -q "^removed:.*gerrit" "$MY"'
+out=$(kit add --dir "$T" skill gerrit-review gerrit-workflow 2>&1); rc=$?
+check "add --dir: one at a time" '[ $rc -ne 0 ] && echo "$out" | grep -q 用法'
+cp "$T/my.keep" "$MY"; kit sync >/dev/null 2>&1
 
 # ---------- rm ----------
 out=$(kit rm rule security 2>&1); rc=$?
@@ -1978,9 +1987,15 @@ check "collect will not replace your own skill without --force" '[ $rc -ne 0 ] &
 rm -rf "$CO/skills/own"
 out=$(kit outdated 2>&1)
 check "outdated: up to date" 'echo "$out" | grep -q "foo：最新"'
+TAB=$(printf '\t'); eval "$(sed -n '/^web_repo()/,/^}/p' "$KIT")"
+check "a repo page's address: the repo, its branch and folder (GitHub tree / blob, GitLab, Gitea); a repo URL: nothing" '[ "$(web_repo https://git.example.org/a/r/tree/main/skills/tdd/)" = "https://git.example.org/a/r${TAB}main${TAB}skills/tdd" ] && [ "$(web_repo "https://git.example.org/a/r/blob/v1/x/SKILL.md?plain=1")" = "https://git.example.org/a/r${TAB}v1${TAB}x" ] && [ "$(web_repo https://gitlab.com/a/r/-/tree/dev)" = "https://gitlab.com/a/r${TAB}dev${TAB}" ] && [ "$(web_repo https://git.example.org/a/r/src/branch/main/s)" = "https://git.example.org/a/r${TAB}main${TAB}s" ] && [ -z "$(web_repo https://git.example.org/a/r)" ]'
 ( cd "$UP" && echo "foo v2" >> skills/foo/SKILL.md && git commit -qam v2 )
 out=$(kit outdated 2>&1)
 check "outdated: new version upstream" 'echo "$out" | grep -q "foo：有新版本" && echo "$out" | grep -q "kit collect foo"'
+kit outdated --json > "$T/outd.json" 2> "$T/outd.err"; rc=$?
+check "outdated --json: valid JSON, foo new, both commits, nothing on stderr" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/outd.json" > /dev/null && [ ! -s "$T/outd.err" ] && grep -qF "\"name\": \"foo\", \"url\": \"file://$UP\", \"path\": \"skills/foo\", \"ref\": \"\", \"commit\": \"$v1\", \"now\": \"$(git -C "$UP" rev-parse HEAD)\", \"state\": \"new\"" "$T/outd.json" && grep -q "\"source\": \"collector\"" "$T/outd.json"'
+mv "$UP" "$UP.away"; out=$(kit outdated --json 2>/dev/null); mv "$UP.away" "$UP"
+check "outdated --json: an author gone is unreachable" 'echo "$out" | grep -q "\"now\": \"\", \"state\": \"unreachable\""'
 echo "local edit" >> "$CO/skills/foo/SKILL.md"
 out=$(kit collect foo 2>&1); rc=$?
 check "collect <name> replaces the whole copy with the new version" '[ $rc -eq 0 ] && grep -q "foo v2" "$CO/skills/foo/SKILL.md" && ! grep -q "local edit" "$CO/skills/foo/SKILL.md" && grep -q "$(git -C "$UP" rev-parse HEAD)" "$CO/third_party.lock" && [ "$(grep -c "^foo" "$CO/third_party.lock")" = 1 ]'
@@ -1989,9 +2004,13 @@ out=$(kit collect foo --ref v1.0 2>&1); rc=$?
 check "collect --ref takes a tag" '[ $rc -eq 0 ] && ! grep -q "foo v3" "$CO/skills/foo/SKILL.md"'
 out=$(kit outdated 2>&1)
 check "outdated follows the tag, not the branch" 'echo "$out" | grep -q "foo：最新"'
+out=$(kit outdated --json 2>/dev/null)
+check "outdated --json: the tag, latest" 'echo "$out" | grep -q "\"ref\": \"v1.0\".*\"state\": \"latest\""'
 printf 'maintainers: [someone-else]\n' >> "$CO/kit.yaml"
 out=$(kit collect foo 2>&1); rc=$?
 check "only maintainers may collect" '[ $rc -ne 0 ] && echo "$out" | grep -q 維護者'
+out=$(kit outdated --json 2>&1); rc=$?
+check "outdated --json: not a maintainer, nothing listed (no error)" '[ $rc -eq 0 ] && echo "$out" | grep -q "\"skills\": \[\]"'
 sed -i.bak "/^maintainers:/d" "$CO/kit.yaml"; rm -f "$CO/kit.yaml.bak"
 # no --path: the only SKILL.md in the repo; several: kit lists them; --look says it all as JSON without writing anything
 U2="$T/up-two"; mkdir -p "$U2/a" "$U2/b" "$U2/.hidden/c" "$U2/node_modules/d"
@@ -2011,6 +2030,14 @@ out=$(kit collect "file://$U2" --look 2>/dev/null); rc=$?
 v=$(printf '%s' "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["allowed"],d["can_allow"],";".join(s["path"]+","+s["name"]+","+s["description"]+","+s["license"]+","+s["scripts"]+","+s["exists"] for s in d["skills"]))' 2>&1)
 check "collect --look: every skill, as JSON" '[ $rc -eq 0 ] && [ "$v" = "True False a,a,say \"a\" now,MIT,run.sh,;b,b,say \"b\" now,MIT,," ]'
 check "collect --look writes nothing" '[ "$before" = "$(cd "$CO" && find . -type f | sort | xargs cksum)" ]'
+# the download --look made is kept: collecting one of its skills right after downloads nothing; a new commit upstream does
+cp "$CO/third_party.lock" "$T/lock.keep"
+out=$(kit collect "file://$U2" --path a 2>&1); rc=$?
+check "collect after --look: the kept download, nothing downloaded again" '[ $rc -eq 0 ] && [ -f "$CO/skills/a/SKILL.md" ] && ! echo "$out" | grep -q 下載 && ls -d "$HOME/.config/agentkit/cache/collect/"*/repo >/dev/null 2>&1'
+( cd "$U2" && echo news > NEWS && git add NEWS && git commit -qm news )
+out=$(kit collect "file://$U2" --path a 2>&1); rc=$?
+check "collect: a new commit upstream is downloaded (the kept one is not used)" '[ $rc -eq 0 ] && echo "$out" | grep -q 下載 && grep -q "^a	.*	$(git -C "$U2" rev-parse HEAD)	" "$CO/third_party.lock"'
+rm -rf "$CO/skills/a"; cp "$T/lock.keep" "$CO/third_party.lock"
 out=$(kit collect "file://$UP" --look 2>&1); rc=$?
 check "collect --look on an author not on the list of a team source (no --allow): says so, downloads nothing" '[ $rc -ne 0 ] && echo "$out" | grep -q "不在 collect_sources" && echo "$out" | grep -q 不下載 && ! echo "$out" | grep -q "\"skills\""'
 out=$(kit collect "file://$UP" --look 2>/dev/null); rc=$?
@@ -2127,13 +2154,24 @@ out=$(rk status --json 2>/dev/null)
 check "status --json: approved and synced: nothing pending" 'echo "$out" | grep -qxF "  \"pending\": []," && [ "$(git -C "$RH/agentkit/srcA" rev-parse HEAD)" = "$v3" ]'
 out=$(HOME="$RH" AGENTKIT_CONFIG="$RH/.config/agentkit" AGENTKIT_SOURCES="$RH/agentkit2" "$KIT" init "file://$SA/srcA.git" --approvals "$SA/nowhere" --signers "$SA/allowed_signers" 2>&1); rc=$?
 check "signed init without a valid list stops" '[ $rc -ne 0 ] && [ ! -e "$RH/agentkit2/srcA/rules" ]'
+# the approvals repo and key are remembered: kit approve <clone> --push; kit list --json says what this computer signs
+( cd "$SA/work/srcA" && echo "v4." > rules/ar.md && git commit -qam v4 && git push -q origin HEAD 2>/dev/null )
+out=$(kit approve "$SA/work/srcA" --yes --push 2>&1); rc=$?
+check "approve <clone>: the approvals repo and key of last time; --push pushes it" '[ $rc -eq 0 ] && echo "$out" | grep -q 推上去了 &&
+    [ "$(git -C "$SA/approvals.git" show HEAD:approved.txt | awk "\$1 == \"srcA\" { print \$2 }")" = "$(git -C "$SA/work/srcA" rev-parse HEAD)" ]'
+out=$(kit approve 2>&1); rc=$?
+check "approve with no clone: usage" '[ $rc -ne 0 ] && echo "$out" | grep -q 用法'
+SC="$T/signconf"; mkdir -p "$SC"; cp "$HOME/.config/agentkit/state.tsv" "$SC/"   # (this HOME has no kit init: its own config, the same state)
+AGENTKIT_CONFIG="$SC" AGENTKIT_SOURCES="$T/signsrc" kit init "$SA/work/srcA" >/dev/null 2>&1
+out=$(AGENTKIT_CONFIG="$SC" AGENTKIT_SOURCES="$T/signsrc" kit list --json 2>/dev/null)
+check "list --json: sign, the approvals this computer signs with" 'printf "%s" "$out" | python3 -c "import json,sys;s=json.load(sys.stdin)[\"sign\"];assert s[\"approvals\"].endswith(\"/appr-work\") and s[\"serial\"]>=4 and s[\"approved\"]==[{\"name\":\"srcA\",\"commit\":\"$(git -C "$SA/work/srcA" rev-parse HEAD)\"}], s"'
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.7)" '[ $rc -eq 0 ] && [ "$out" = 1.7 ]'
+check "api: one line, major.minor (1.8)" '[ $rc -eq 0 ] && [ "$out" = 1.8 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.7 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.8 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?
@@ -2564,6 +2602,7 @@ PD="$NT/conf/notes/pending"
 sleep 0.5
 out=$(note_sh "$KIT" pending add --pid $CP --id core-0001 "要你同意：裝伺服器的 core 0001" 2>&1); rc=$?
 check "pending add --pid: kept under its id, tied to that agent" '[ $rc -eq 0 ] && echo "$out" | grep -qF "記下了：core-0001（等到了跑 kit pending done core-0001）" && [ "$(sed -n 2p "$PD/core-0001")" = "$CP" ]'
+check "pending add: the agent's process and the ones above it (for finding its terminal)" '[ "$(sed -n 6p "$PD/core-0001" | cut -d" " -f1)" = "$CP" ] && [ "$(sed -n 6p "$PD/core-0001" | wc -w | tr -d " ")" -ge 2 ]'
 note_sh "$KIT" pending add --keep --id svc "服務在等你：換金鑰" >/dev/null 2>&1
 check "pending add --keep: no agent (until kit pending done)" '[ -f "$PD/svc" ] && [ -z "$(sed -n 2p "$PD/svc")" ] && [ "$(sed -n 5p "$PD/svc")" = "服務在等你：換金鑰" ]'
 note_sh "$NT/bin/claude" "$KIT" pending add --id auto "等一下" >/dev/null 2>&1
