@@ -364,6 +364,30 @@ agent 停下來等你點頭（例如要你同意才能裝、才能上線）時�
 - 一句話，最多 300 bytes。存在 `~/.config/agentkit/notes/pending/`（在 notes 裡，Codex 的沙箱也寫得進去）。
 - 畫面程式問不到的帳號（例如伺服器上的 root）把 `kit status --json` 寫到你讀得到的檔案時，裡面就有它的 `pending`。
 
+## 中文說明：`kit describe`
+
+skill 的說明常常是英文。中文說明只給面板看，agent 還是讀原本的說明：說明是 agent 判斷什麼時候叫這個 skill 用的，每次開對話都會讀，改成中文不會省 token，還可能讓它比較不會被叫到。
+
+    kit describe --todo                         # 還沒有中文說明的（一行一個：種類:名字 TAB 原本的說明；本來就是中文的不列）
+    kit describe skill brainstorming "<中文>"   # 寫一個；再寫一次就換掉
+
+寫在那個項目所在來源的 `descriptions-zh.txt`（一行一個：`種類:名字 TAB 原本說明的雜湊 TAB 中文`），跟著 `kit push` 送出、簽章，別台不用再翻。翻譯只做一次：原作者改了說明（例如收新版），那一行就不算數，面板改回顯示原文，`kit describe --todo` 又會列出它。kit 自己不叫模型：請一個 agent 跑 `--todo`，翻好一個一個寫回去。
+
+## 外掛（plugin）
+
+外掛是一包一起用的東西：skill、hook（agent 開始、送出訊息時自動跑的程式）、MCP、指令。它是來源裡的 `plugins/<名字>/`，裡面有 `.claude-plugin/plugin.json`（可能還有 `.codex-plugin/plugin.json`，和 `package.json` 的 `pi` 或 `omp` 寫 omp 的擴充）。
+
+    kit collect <原作者 repo 網址> [--skip 不要的檔案或資料夾]...   收進來（只收各家會讀的部分）
+    kit add plugin <名字>                                             整個帳號都用（不能 --dir）
+    kit rm  plugin <名字>
+
+- **跟原作者的裝法一樣**：kit 照 Claude、Codex、omp 自己裝外掛的方式裝（`claude plugin install`、`codex plugin add`、`omp plugin install`），所以每次自動開、記等級、子 agent 套用這些都跟原版一樣。
+- **不從原作者那邊裝、不自動更新**：kit 在這台做一個自己的外掛清單（`~/.config/agentkit/plugins`，名字叫 `kit`），放來源裡的那份（用核准紀錄的話就是簽過的版本）。來源換版本，`kit sync` 才重裝。
+- **收的時候只收用得到的**：manifest、`skills/`、`commands/`、`agents/`、`hooks/`、`.mcp.json`、`package.json` 和它寫的擴充資料夾、LICENSE；不收說明文件、圖片、範例、`.github`。`--skip` 再拿掉不要的（例如資訊列），`plugin.json` 裡指到它的 hook 也一起拿掉；`third_party.lock` 記住，`kit collect <名字>` 再收時照樣不收。會跑的程式都會列出來，送出前請看過。
+- **Codex 的 hook 要信任**：Codex 第一次看到外掛的 hook（每個版本一次）要你在 Codex 打 `/hooks` 信任。用核准紀錄的電腦（`kit init … --approvals`），和簽章的那台（打過 `kit approve`，用它記住的核准紀錄和金鑰驗）上，kit 只對**簽過的版本**、而且 Codex 那份跟 kit 那份一模一樣時，自己請 Codex 信任（hash 是 Codex 自己算、自己寫進 `~/.codex/config.toml`，寫完再問 Codex 一次確認）。其他情況 kit 不碰，用 `kit pending` 提醒你打 `/hooks`。先裝、後簽也可以：簽好後下一次 `kit sync` 就請 Codex 信任。
+- hook 要 node（或 python）的話，`kit list --json` 的 `needs` 會列出來，畫面程式提醒這台要裝。
+- 外掛和 skill 不能同名。已經單獨加了外掛裡的 skill，先 `kit rm skill …`，不然會有兩份。
+
 ## 給程式讀的介面
 
 kit 本身只有指令。想用按的（例如在終端機程式裡加一個 kit 面板），那個程式跑下面這些指令。**這一節是唯一的清單**：沒列在這裡的輸出（給人看的字）隨時會改，程式不要去解析。
@@ -371,10 +395,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.8
+    kit api        →  1.9
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.8（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.9（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -438,8 +462,8 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
       "kit_version_wanted": ""
     }
 
-- `sources[].push`：`pr`（送出要開 PR）或 `direct`（直接推）。`sources[].changed`：`kit push --to <name>` 會送的檔案（相對來源資料夾，`/` 分隔；改過的 rule、skill、mcp、agent、`third_party.lock`，加上只改了 `collect_sources` 的 `kit.yaml`）；沒有就是 `[]`，不是 git repo 也是 `[]`。
-- `items[].kind`：`rule`、`skill`、`mcp`、`agent`。`status`：`required`（團隊必備）、`used`、`unused`、`agent`。`new`：還沒在 `kit list` 看過。`changed`：`kit push` 會送它（skill：它資料夾裡任何一個檔案）。
+- `sources[].push`：`pr`（送出要開 PR）或 `direct`（直接推）。`sources[].changed`：`kit push --to <name>` 會送的檔案（相對來源資料夾，`/` 分隔；改過的 rule、skill、mcp、agent、外掛、`third_party.lock`、`descriptions-zh.txt`，加上只改了 `collect_sources` 的 `kit.yaml`）；沒有就是 `[]`，不是 git repo 也是 `[]`。
+- `items[].kind`：`rule`、`skill`、`mcp`、`agent`、`plugin`（1.9 起）。`description`：skill、agent 是 frontmatter 的、mcp 是 yaml 的 `description:`、外掛是 `plugin.json` 的、規則是檔案第一行 `# ` 標題（1.9 起）。`description_zh`（1.9 起）：有人用 `kit describe` 寫了這個說明的中文版才有，畫面程式優先顯示它（見「中文說明」）。`status`：`required`（團隊必備）、`used`、`unused`、`agent`。`new`：還沒在 `kit list` 看過。`changed`：`kit push` 會送它（skill：它資料夾裡任何一個檔案）。
 - `needs`、`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。
 - mcp（1.3 起）一定有：`"type"`（`stdio`、`http`、`sse`）、`"vars": [{"name": "GITHUB_TOKEN", "set": false}]`（它要的環境變數，這台電腦有沒有設）、`"needs"`（同 skill）、`"packages"`：沒有套件是 `[]`，有的話一個
   `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
@@ -472,6 +496,8 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
     {"source", "dir", "push", "url", "ref", "id", "commit", "allowed", "can_allow",
      "skills": [{"path", "name", "valid", "description", "license", "scripts", "skipped", "exists", "dest"}]}
+
+外掛（repo 最外層或 `--path` 有 `.claude-plugin/plugin.json`）：`skills` 只有一項，多一個 `"kind": "plugin"`，`dest` 是 `plugins/<名字>/.claude-plugin/plugin.json`，`scripts` 是外掛裡會跑的程式（`--skip` 的不算）。
 
 只下載來看、什麼都不寫。`url`、`ref`：repo 的網址和分支（給的是網頁網址時是拆出來的，`ref` 1.8 起；空字串＝預設分支），收的時候照這兩個給。`allowed`：作者在 `collect_sources`；`can_allow`：不在，但自己的來源可以用 `--allow` 加。`exists`：`collected`（之前收過）、`own`（自己寫的同名 skill）、`""`。
 

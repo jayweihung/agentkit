@@ -4,6 +4,22 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.9（2026-11-15）
+
+更新後要做：`kit self-update`，再 `kit sync`。
+
+**外掛（plugin）：跟原作者的裝法一樣，但從自己簽過的那份裝**
+- `kit collect` 認得外掛（有 `.claude-plugin/plugin.json`）：整包收進 `plugins/<名字>/`，只收各家會讀的部分。`--skip` 拿掉不要的檔案（`plugin.json` 裡指到它的也拿掉），`third_party.lock` 記住，再收時照樣不收。
+- `kit add plugin <名字>`、`kit rm plugin <名字>`：照 Claude、Codex、omp 自己裝外掛的方式裝到整個帳號，來源是 kit 在這台的外掛清單（`~/.config/agentkit/plugins`），不從原作者那邊裝，不自動更新。
+- Codex 的外掛 hook：簽過的版本 kit 自己請 Codex 信任（Codex 算 hash、Codex 寫設定），不用再打 `/hooks`；沒簽的版本用 `kit pending` 提醒你。先裝後簽也行：簽好後下一次 `kit sync` 補做。簽章的那台（打過 `kit approve`）用它記住的核准紀錄和金鑰驗，不用另外設定。
+- Windows 版的 kit 也讀核准紀錄了：`kit init … --approvals --signers`、只用簽過的版本、`kit status --json` 的 `approvals`／`approved`，跟 macOS、Linux 一樣。
+- `kit list --json`：`kind` 多了 `plugin`，有 `needs`（hook 要的 node、python）。
+- 畫面程式：Kit 面板多一個「外掛」分頁。
+- 規則的說明：`kit list --json` 的 `description` 是規則檔第一行 `# ` 標題（以前是空的）。`kit new mcp` 的範本多一行 `description:`，寫這個 MCP 做什麼。
+- 畫面程式：Kit 面板點一下 skill、規則、MCP、外掛那一列，展開完整說明，再點一下收起。
+- 中文說明：`kit describe <種類> <名字> "<中文>"` 寫在來源的 `descriptions-zh.txt`，`kit list --json` 多了 `description_zh`，面板優先顯示中文（agent 還是讀原本的說明）。原本的說明改了就改回顯示原文，`kit describe --todo` 列出還沒翻的。`kit api` 是 1.9。
+- `kit push` 也送收進來的外掛（`plugins/`）和 `descriptions-zh.txt`。
+
 ## 0.6.8（2026-11-15）
 
 更新後要做：`kit self-update`，再 `kit sync`。

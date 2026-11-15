@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.8'
+$script:KitApi = '1.9'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -62,7 +62,9 @@ function Say([string]$msg) {
     else { [Console]::Out.WriteLine($msg) }
 }
 function Out-Json([string]$s) { [Console]::Out.WriteLine($s) }   # the JSON programs read, on stdout
+$script:WarnOff = $false
 function Warn([string]$msg) {
+    if ($script:WarnOff) { return }
     if ($script:LogPath) { [IO.File]::AppendAllText($script:LogPath, "kit: $msg`n", $Utf8) } else { [Console]::Error.WriteLine("kit: $msg") }
 }
 function Die([string]$msg, [string]$code = 'error') {
@@ -430,6 +432,14 @@ function State-Del([string]$k, [string]$n) { if (Test-Path -LiteralPath $State) 
 function M-Sources { YGet $Machine 'sources' }
 function M-Added { YGet $Machine 'added' }
 function M-Removed { YGet $Machine 'removed' }
+$script:MAppr = $null; $script:MSigners = ''
+function M-Approvals { # machine.yaml's approvals (kit init --approvals; '' when none), and $script:MSigners its signers file
+    if ($null -eq $script:MAppr) {
+        $script:MAppr = "$(@(YGet $Machine 'approvals' | Where-Object { $_ }) | Select-Object -First 1)"
+        $script:MSigners = "$(@(YGet $Machine 'signers' | Where-Object { $_ }) | Select-Object -First 1)"
+    }
+    $script:MAppr
+}
 function Write-Machine($sources, $added, $removed) {
     Ensure-Dir $KitConf
     $t = "# written by kit - use kit add / kit rm instead of editing`n"
@@ -437,6 +447,7 @@ function Write-Machine($sources, $added, $removed) {
     foreach ($s in $sources) { if ($s) { $t += "  - $s`n" } }
     $t += 'added: [' + ((@($added) | Where-Object { $_ }) -join ', ') + "]`n"
     $t += 'removed: [' + ((@($removed) | Where-Object { $_ }) -join ', ') + "]    # kit rm; sync will not add these back`n"
+    if (M-Approvals) { $t += "# only signed, approved versions of the sources are used (kit approve)`napprovals: $($script:MAppr)`nsigners: $($script:MSigners)`n" }
     $tmp = Temp-Next $Machine; Write-Text $tmp $t; Move-Item -LiteralPath $tmp -Destination $Machine -Force
 }
 
@@ -553,6 +564,7 @@ function Fetch-Source([string]$s) { # clone or fast-forward one source
     if (-not (Is-Url $s)) { if (-not (Test-Path -LiteralPath $s -PathType Container)) { Die "找不到來源資料夾：$s" }; return }
     Check-Host $s
     $d = Src-Dir $s
+    if (M-Approvals) { Fetch-Approved $s $d; return }
     if (Test-Path -LiteralPath (Join-Path $d '.git')) {
         $o = @(Git-Safe -C $d pull --ff-only --quiet --no-recurse-submodules)
         if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 $(Src-Name $s)（$(Pull-Why $d)）"; Git-Err $o }
@@ -563,13 +575,102 @@ function Fetch-Source([string]$s) { # clone or fast-forward one source
     }
 }
 
+# ---------- approvals (kit init --approvals): only signed, approved versions of the sources (the same as unix/kit) ----------
+# approved.txt (in the approvals repo) lists "<repo name> <commit>" lines and "serial: N";
+# approved.txt.sig is an ssh signature (namespace agentkit) checked against the signers file.
+$script:ApprovedRead = $false; $script:Approved = @()
+function Approvals-Dir { Join-Path $KitSrc '.approvals' }
+function Ssh-Keygen($a, [string]$in) { # ssh-keygen ARGS with file IN on its stdin byte for byte: @(exit code, what it said); exit -1 when it can't run
+    $c = @(Get-Command ssh-keygen -CommandType Application -ErrorAction SilentlyContinue); if ($c.Count -eq 0) { return @(-1, '') }
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = [string]$c[0].Path; $psi.Arguments = (@(foreach ($x in $a) { Ctx-Arg "$x" }) -join ' ')
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $Utf8
+    $p = $null
+    try {
+        $p = [Diagnostics.Process]::Start($psi)
+        $out = $p.StandardOutput.ReadToEndAsync(); [void]$p.StandardError.ReadToEndAsync()
+        try { if ($in) { $b = [IO.File]::ReadAllBytes($in); $p.StandardInput.BaseStream.Write($b, 0, $b.Length) }; $p.StandardInput.BaseStream.Close() } catch { }
+        if (-not $p.WaitForExit(30000)) { Ctx-Kill $p; return @(-1, '') }
+        $p.WaitForExit()
+        @($p.ExitCode, [string]$out.Result)
+    } catch { if ($p) { Ctx-Kill $p }; @(-1, '') }
+    finally { if ($p) { try { $p.Dispose() } catch { } } }
+}
+function Approvals-Parse([string]$f) { # approved.txt -> @{ serial = the "serial:" line's number ('' when none); lines = "name sha" }
+    $serial = $null; $ls = New-List
+    foreach ($l in @([IO.File]::ReadAllText($f, $Utf8) -split "`n")) {
+        $w = @("$l".Trim() -split '\s+' | Where-Object { $_ })
+        if ($w.Count -ge 1 -and $w[0] -ceq 'serial:' -and $null -eq $serial) { $serial = if ($w.Count -ge 2) { $w[1] } else { '' } }
+        if ($w.Count -eq 2 -and -not $w[0].StartsWith('#') -and $w[0] -cne 'serial:') { $ls.Add("$($w[0]) $($w[1])") }
+    }
+    @{ serial = "$serial"; lines = $ls.ToArray() }
+}
+function Appr-Sha($lines, [string]$n) { foreach ($l in @($lines)) { $w = "$l" -split ' '; if ($w[0] -ceq $n) { return $w[1] } }; $null }   # NAME's commit in "name sha" lines
+function Approvals-SigOk([string]$f) { # FILE.sig is a good signature of FILE by the signers file (only reads files)
+    $s = $script:MSigners
+    $r = Ssh-Keygen @('-Y', 'find-principals', '-s', "$f.sig", '-f', $s) ''
+    $ps = @(); if ($r[0] -eq 0) { $ps = @(@("$($r[1])" -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Select-Object -First 1) }
+    if ($ps.Count -eq 0) {   # an ssh-keygen without find-principals: each name the signers file lists
+        $ps = @(foreach ($l in @([IO.File]::ReadAllText($s, $Utf8) -split "`n")) {
+            $l = $l.Trim(); if (-not $l -or $l.StartsWith('#')) { continue }
+            foreach ($x in (($l -split '\s+')[0] -split ',')) { if ($x) { $x } }
+        })
+    }
+    foreach ($p in $ps) { if ((Ssh-Keygen @('-Y', 'verify', '-f', $s, '-I', $p, '-n', 'agentkit', '-s', "$f.sig") $f)[0] -eq 0) { return $true } }
+    $false
+}
+function Read-Approvals { # sets $script:Approved ("name sha" lines); $false when there is no valid signed list
+    if ($script:ApprovedRead) { return $script:Approved.Count -gt 0 }
+    $script:ApprovedRead = $true
+    $a = M-Approvals; $d = Approvals-Dir
+    if (Is-Url $a) {
+        Check-Host $a
+        if (Test-Path -LiteralPath (Join-Path $d '.git')) { [void](Git-Safe -C $d pull --ff-only -q --no-recurse-submodules); if ($LASTEXITCODE -ne 0) { Warn '沒辦法更新核准紀錄（沒網路？）' } }
+        else { Ensure-Dir $KitSrc; [void](Git-Safe clone -q --no-recurse-submodules $a $d); if ($LASTEXITCODE -ne 0) { Warn "沒辦法 clone 核准紀錄 $a"; return $false } }
+    } else { $d = $a }
+    $f = Join-Path $d 'approved.txt'
+    if (-not ((Test-Path -LiteralPath $f -PathType Leaf) -and (Test-Path -LiteralPath "$f.sig" -PathType Leaf))) { Warn '核准紀錄裡沒有 approved.txt 和 approved.txt.sig'; return $false }
+    if (-not (Test-Path -LiteralPath $script:MSigners -PathType Leaf)) { Warn "找不到 signers 檔：$($script:MSigners)"; return $false }
+    if (-not (Approvals-SigOk $f)) { Warn '核准紀錄的簽章不對，不換版本（有人改過 approved.txt？）'; return $false }
+    $ap = Approvals-Parse $f; $serial = $ap.serial; $old = "$(State-Get 'approvals' 'serial')"
+    if ($serial -notmatch '^[0-9]+\z') { Warn '核准紀錄沒有 serial'; return $false }
+    if ($old -match '^[0-9]+\z' -and [decimal]$serial -lt [decimal]$old) { Warn "核准紀錄比上次用的舊（serial ${serial} < ${old}），不換版本"; return $false }
+    State-Set 'approvals' 'serial' $serial
+    $script:Approved = @($ap.lines)
+    $script:Approved.Count -gt 0
+}
+function Approved-Sha([string]$n) { if (-not (Read-Approvals)) { return $null }; Appr-Sha $script:Approved $n }
+function Short-Sha([string]$h) { $h.Substring(0, [Math]::Min(12, $h.Length)) }
+function Fetch-Approved([string]$s, [string]$d) { # check out the approved commit of a source, never anything else
+    $n = Src-Name $s; $sha = Approved-Sha $n
+    if (-not $sha) {
+        if (Test-Path -LiteralPath (Join-Path $d '.git')) { Warn "$n 沒有有效的核准，繼續用現在的版本"; return }
+        Die "$n 還沒核准，不能用（先在簽核的機器上 kit approve）"
+    }
+    if (Test-Path -LiteralPath (Join-Path $d '.git')) { [void](Git-Safe -C $d fetch -q --no-recurse-submodules origin); if ($LASTEXITCODE -ne 0) { Warn "沒辦法更新 ${n}（沒網路？）" } }
+    else { Ensure-Dir $KitSrc; [void](Git-Safe clone -q --no-checkout --no-recurse-submodules $s $d); if ($LASTEXITCODE -ne 0) { Die "沒辦法 clone $s" } }
+    $cur = "$(@(Git-Q -C $d rev-parse -q --verify HEAD) -join '')".Trim()
+    if ($cur -eq $sha -and @(Git-Q -C $d status --porcelain | Where-Object { $_ }).Count -eq 0) { return }
+    [void](Git-Q -C $d -c advice.detachedHead=false checkout -q -f --detach $sha)
+    if ($LASTEXITCODE -ne 0) { Warn "$n 找不到核准的版本 $(Short-Sha $sha)（還沒 push？），繼續用現在的版本"; return }
+    [void](Git-Q -C $d clean -qfdx)
+    Say "kit：$n 換到核准的版本 $(Short-Sha $sha)"
+}
+
 function Item-Path([string]$dir, [string]$kind, [string]$name) {
     switch ($kind) {
         'rule' { Join-Path $dir "rules/$name.md" }
         'skill' { Join-Path $dir "skills/$name/SKILL.md" }
         'mcp' { Join-Path $dir "mcp/$name.yaml" }
         'agent' { Join-Path $dir "agents/$name.md" }
+        'plugin' { Join-Path $dir "plugins/$name/.claude-plugin/plugin.json" }
     }
+}
+function Item-Src([string]$kind, [string]$name) { # the first source folder that has it (Find-Item's)
+    foreach ($d in Src-Dirs) { if (Test-Path -LiteralPath (Item-Path $d $kind $name) -PathType Leaf) { return $d } }
+    $null
 }
 function Find-Item([string]$kind, [string]$name) { # path in the first source that has it
     foreach ($d in Src-Dirs) { $p = Item-Path $d $kind $name; if (Test-Path -LiteralPath $p -PathType Leaf) { return $p } }
@@ -587,10 +688,11 @@ function Available { # all kind:name in all sources
         foreach ($n in Names-In (Join-Path $d 'skills') '' -Dirs) { "skill:$n" }
         foreach ($n in Names-In (Join-Path $d 'mcp') '*.yaml') { "mcp:$n" }
         foreach ($n in Names-In (Join-Path $d 'agents') '*.md') { "agent:$n" }
+        foreach ($n in Plugin-Names $d) { "plugin:$n" }
     })
 }
 function Kit-Items([string]$section) {
-    Uniq @(foreach ($d in Src-Dirs) { foreach ($k in 'rule', 'skill', 'mcp') { foreach ($n in YGet (Join-Path $d 'kit.yaml') "$section.${k}s") { "${k}:$n" } } })
+    Uniq @(foreach ($d in Src-Dirs) { foreach ($k in 'rule', 'skill', 'mcp', 'plugin') { foreach ($n in YGet (Join-Path $d 'kit.yaml') "$section.${k}s") { "${k}:$n" } } })
 }
 function Required-Deny { Uniq @(foreach ($d in Src-Dirs) { YGet (Join-Path $d 'kit.yaml') 'required.tools.deny' }) }
 function Wanted { # required + added - removed
@@ -1679,6 +1781,192 @@ function Sync-McpJson([string]$f, [string]$kind, $names) { # wanted MCP -> FILE'
     }
 }
 
+# ---------- plugins ----------
+# (the same as unix/kit's; its comment says more) A plugin (plugins/<name>/ in a source, with .claude-plugin/plugin.json)
+# goes to each tool the way the tool installs a plugin, from kit's own marketplace on this machine: $KitConf/plugins holds
+# a copy of each wanted plugin as the source has it (never the author's site, so never an update nobody looked at).
+# Codex asks once per version to trust a plugin's hooks (/hooks): kit does that itself (Codex's own app-server) only for a
+# version signed in the approvals and copied by Codex as kit has it; else kit pending asks you to.
+function Kit-PendingAsk([string]$id, [string]$text) { # a kit pending item kept until done (kit pending add --keep), and said
+    try {
+        Ensure-Dir $PendDir
+        $f = Join-Path $PendDir $id; $since = [string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()); $old = Pend-Read $id; if ($old) { $since = $old[2] }
+        Write-Text "$f.tmp" ("`n`n$((Get-Location).ProviderPath)`n$since`n$text`n$(Proc-Up ([string](Proc-Parent $PID)))`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force
+    } catch { }
+    Warn $text
+}
+function Kit-PendingDone([string]$id) { Remove-Item -LiteralPath (Join-Path $PendDir $id) -Force -ErrorAction SilentlyContinue }
+function Plugin-Root { Join-Path $KitConf 'plugins' }
+function Plugin-Tools { @(foreach ($t in 'claude', 'codex', 'omp') { if (Has-Command $t) { $t } }) }
+function Plugin-Names([string]$d) { # the plugins in a source (folders under plugins/ with .claude-plugin/plugin.json)
+    $p = Join-Path $d 'plugins'; if (-not (Test-Path -LiteralPath $p -PathType Container)) { return @() }
+    $a = [string[]]@(Get-ChildItem -LiteralPath $p -Directory -Force | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName '.claude-plugin/plugin.json') -PathType Leaf } | ForEach-Object { $_.Name })
+    [Array]::Sort($a, [StringComparer]::Ordinal); $a
+}
+function Plugin-Market($names) { # kit's marketplace lists them (Claude and omp read .claude-plugin, Codex .agents); $true when written
+    $r = Plugin-Root; $c = @(); $a = @()
+    foreach ($n in @($names | Where-Object { $_ })) {
+        $c += '{"name":"' + $n + '","source":"./' + $n + '"}'
+        $a += '{"name":"' + $n + '","source":{"source":"local","path":"./' + $n + '"},"policy":{"installation":"AVAILABLE","authentication":"ON_INSTALL"},"category":"Productivity"}'
+    }
+    try {
+        Ensure-Dir (Join-Path $r '.claude-plugin'); Ensure-Dir (Join-Path $r '.agents/plugins')
+        Write-Text (Join-Path $r '.claude-plugin/marketplace.json') ('{"name":"kit","owner":{"name":"kit"},"plugins":[' + ($c -join ',') + "]}`n")
+        Write-Text (Join-Path $r '.agents/plugins/marketplace.json') ('{"name":"kit","interface":{"displayName":"kit"},"plugins":[' + ($a -join ',') + "]}`n")
+        $true
+    } catch { $false }
+}
+function Plugin-Run([string]$tool, $a, [switch]$Quiet) { # the tool's own plugin command; its words in $script:PluginSaid; $true when it worked
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; $ok = $false
+    try { $script:PluginSaid = (& $tool @a 2>&1 | ForEach-Object { "$_" }) -join "`n"; $ok = ($LASTEXITCODE -eq 0) }
+    catch { $script:PluginSaid = "$_" } finally { $ErrorActionPreference = $old }
+    if ($ok) { return $true }
+    if (-not $Quiet) { Warn "$tool $($a[0]) $($a[1]) 沒成功：$(@($script:PluginSaid -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' ')" }
+    $false
+}
+function Plugin-Install([string]$t, [string]$n) { # install (again) NAME@kit, adding kit's marketplace first; $true when it worked
+    $r = Plugin-Root
+    switch ($t) {
+        'claude' { return (Plugin-Run claude @('plugin', 'marketplace', 'add', $r, '--scope', 'user')) -and (Plugin-Run claude @('plugin', 'marketplace', 'update', 'kit')) -and
+                          (Plugin-Run claude @('plugin', 'install', "$n@kit", '--scope', 'user')) }
+        'codex' { return (Plugin-Run codex @('plugin', 'marketplace', 'add', $r)) -and (Plugin-Run codex @('plugin', 'add', "$n@kit")) -and (Codex-PluginTrust $n) }
+        'omp' { return ((Plugin-Run omp @('plugin', 'marketplace', 'update', 'kit') -Quiet) -or (Plugin-Run omp @('plugin', 'marketplace', 'add', $r))) -and
+                       (Plugin-Run omp @('plugin', 'install', "$n@kit", '--scope', 'user', '--force')) }
+    }
+    $false
+}
+function Plugin-Uninstall([string]$t, [string]$n) {
+    switch ($t) {
+        'claude' { return Plugin-Run claude @('plugin', 'uninstall', "$n@kit", '--scope', 'user') }
+        'codex' { return Plugin-Run codex @('plugin', 'remove', "$n@kit") }
+        'omp' { return Plugin-Run omp @('plugin', 'uninstall', "$n@kit", '--scope', 'user') }
+    }
+    $false
+}
+function Plugin-Signed([string]$n) { # the source's folder for it is what the signed approvals say (kit approve): this machine's
+    # approvals (kit init --approvals), else, on the computer that signs, the approvals and key kit approve remembered (signed by that key)
+    $p = Find-Item 'plugin' $n; if (-not $p) { return $false }
+    $d = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $p)))
+    if (M-Approvals) {
+        $script:WarnOff = $true; try { $sha = Approved-Sha (Src-Name $d) } finally { $script:WarnOff = $false }
+    } else {
+        $ad = State-Get 'sign' 'approvals'; $k = State-Get 'sign' 'key'
+        if (-not $ad -or -not $k) { return $false }
+        $f = Join-Path $ad 'approved.txt'
+        if (-not ((Test-Path -LiteralPath $f -PathType Leaf) -and (Test-Path -LiteralPath "$f.sig" -PathType Leaf) -and (Test-Path -LiteralPath "$k.pub" -PathType Leaf))) { return $false }
+        $s = [IO.Path]::GetTempFileName(); $ok = $false
+        try {
+            Write-Text $s ('me namespaces="agentkit" ' + (Read-Text "$k.pub").TrimEnd("`r", "`n") + "`n")
+            $ok = (Ssh-Keygen @('-Y', 'verify', '-f', $s, '-I', 'me', '-n', 'agentkit', '-s', "$f.sig") $f)[0] -eq 0
+        } catch { } finally { Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue }
+        if (-not $ok) { return $false }
+        $sha = Appr-Sha (Approvals-Parse $f).lines (Src-Name $d)
+    }
+    if (-not $sha) { return $false }
+    [void](Git-Q -C $d diff --quiet $sha -- "plugins/$n"); if ($LASTEXITCODE -ne 0) { return $false }
+    @(Git-Q -C $d status --porcelain -- "plugins/$n" | Where-Object { $_ }).Count -eq 0
+}
+function Codex-HooksUntrusted([string]$n, [string]$text) { # hooks/list's answer -> "KEY":{"trusted_hash":..} for NAME@kit's untrusted or modified hooks
+    $id = '"pluginId":"' + $n + '@kit"'; $out = New-List
+    foreach ($line in ($text -split "`n")) {
+        $a = $line -split '\{"key":'
+        for ($i = 1; $i -lt $a.Count; $i++) {
+            $x = $a[$i]
+            if (-not $x.Contains($id) -or $x -cnotmatch '"trustStatus":"(untrusted|modified)"') { continue }
+            $k = ($x -creplace '^"', '') -creplace '(?s)".*', ''
+            $h = ($x -creplace '(?s).*"currentHash":"', '') -creplace '(?s)".*', ''
+            $j = $h.IndexOf('/'); if (-not $k -or $j -lt 0) { continue }
+            $out.Add('"' + $k + '":{"trusted_hash":"' + $h.Substring(0, $j) + '","trusted_content_hash":"' + $h.Substring($j + 1) + '"}')
+        }
+    }
+    $out.ToArray() -join ','
+}
+function Codex-TrustAsk([string]$n) { # codex app-server: hooks/list, trust NAME@kit's untrusted hooks (config/batchWrite), hooks/list
+    # again -> the last list's answer ('' when Codex did not answer in 30 s)
+    $b = App-Bin 'codex'; if (-not $b) { return '' }
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $b[0]; $a = 'app-server'
+    $psi.Arguments = if ($b[1] -eq '') { $a } elseif ($b[1] -eq 'cmd') { '/d /s /c "' + (Ctx-Arg $b[2]) + ' ' + $a + '"' } else { $b[1] + ' ' + (Ctx-Arg $b[2]) + ' ' + $a }
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $Utf8
+    $end = [DateTime]::UtcNow.AddSeconds(30); $p = $null; $st = @{ t = $null }; $lines = New-List
+    $send = { param($s) $x = $Utf8.GetBytes($s + "`n"); $p.StandardInput.BaseStream.Write($x, 0, $x.Length); $p.StandardInput.BaseStream.Flush() }
+    $wait = { param($i) # Codex's answer to request I (a line), '' when none came in time
+        $pre = '{"id":' + $i + ','
+        foreach ($l in $lines) { if ($l.StartsWith($pre)) { return $l } }
+        while ($true) {
+            if ($null -eq $st.t) { $st.t = $p.StandardOutput.ReadLineAsync() }
+            $left = ($end - [DateTime]::UtcNow).TotalMilliseconds
+            if ($left -le 0 -or -not $st.t.Wait([int][Math]::Min($left, 2147483647))) { return '' }
+            $l = $st.t.Result; $st.t = $null
+            if ($null -eq $l) { return '' }
+            $lines.Add($l); if ($l.StartsWith($pre)) { return $l }
+        }
+    }
+    try {
+        $p = [Diagnostics.Process]::Start($psi)
+        [void]$p.StandardError.ReadToEndAsync()                                   # read, never shown
+        & $send ('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"kit","version":' + (Json-S $KitVersion) + '}}}')
+        & $send '{"jsonrpc":"2.0","method":"initialized"}'
+        $list = '{"jsonrpc":"2.0","id":ID,"method":"hooks/list","params":{"cwds":[' + (Json-S $UserHome) + ']}}'
+        & $send $list.Replace('ID', '2')
+        $w = & $wait 2; if (-not $w) { return '' }
+        $v = Codex-HooksUntrusted $n (($lines.ToArray()) -join "`n"); if (-not $v) { return $w }
+        & $send ('{"jsonrpc":"2.0","id":3,"method":"config/batchWrite","params":{"edits":[{"keyPath":"hooks.state","mergeStrategy":"upsert","value":{' + $v + '}}]}}')
+        [void](& $wait 3)
+        & $send $list.Replace('ID', '4')
+        $w4 = & $wait 4; if ($w4) { $w4 } else { $w }
+    } catch { '' }
+    finally { if ($p) { try { $p.StandardInput.Close() } catch { }; Ctx-Kill $p; try { $p.Dispose() } catch { } } }
+}
+function Codex-PluginTrust([string]$n) { # after codex plugin add ($script:PluginSaid names Codex's copy): Codex trusts the plugin's
+    # hooks only for a version signed in the approvals (Plugin-Signed) that Codex copied as kit has it; else kit pending asks you
+    $copy = @(@("$($script:PluginSaid)" -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_.StartsWith('Installed plugin root: ') }) | Select-Object -Last 1)
+    $copy = if ($copy.Count -gt 0) { $copy[0].Substring(23) } else { '' }
+    if (-not (Plugin-Signed $n) -or -not $copy -or -not (Test-Path -LiteralPath $copy -PathType Container) -or (Dir-Hash (Join-Path (Plugin-Root) $n)) -ne (Dir-Hash $copy)) {
+        Kit-PendingAsk "codex-hooks-$n" "要你同意：外掛 $n 的 hook 在 Codex 打 /hooks 信任一次（這個版本沒有簽章，kit 不自己信任）"; return $true
+    }
+    $w = Codex-TrustAsk $n
+    if ($w -and -not (Codex-HooksUntrusted $n $w)) { Kit-PendingDone "codex-hooks-$n"; Say "  外掛 $n 的 hook：Codex 已信任（簽過的版本）"; return $true }
+    Kit-PendingAsk "codex-hooks-$n" "要你同意：外掛 $n 的 hook 在 Codex 打 /hooks 信任一次（kit 沒辦法讓 Codex 記住）"
+    $true
+}
+function Sync-Plugins($names) { # wanted plugins -> kit's copies, and each tool installs them
+    $names = @($names | Where-Object { $_ }); $r = Plugin-Root
+    if ($names.Count -eq 0 -and @(State-List 'plugin').Count -eq 0) { return }
+    foreach ($n in $names) {
+        $p = Find-Item 'plugin' $n; if (-not $p) { Warn "plugin $n not found in any source"; continue }
+        $p = Split-Path -Parent (Split-Path -Parent $p); $h = Dir-Hash $p; $dst = Join-Path $r $n
+        if ($h -eq (State-Get 'plugin' $n) -and (Test-Path -LiteralPath $dst -PathType Container)) { continue }
+        try { Ensure-Dir $r; Remove-Tree $dst; Copy-Item -LiteralPath $p -Destination $dst -Recurse -Force }
+        catch { Warn "沒辦法複製外掛 $n 到 $r"; try { Remove-Tree $dst } catch { }; continue }
+        State-Set 'plugin' $n $h; Say "  plugin $n → $r"
+    }
+    if (-not (Plugin-Market @(State-List 'plugin'))) { Warn "沒辦法寫 kit 的外掛清單（$r）"; return }
+    foreach ($t in Plugin-Tools) {
+        foreach ($n in @(State-List 'plugin')) {
+            if ($names -cnotcontains $n) { continue }
+            $h = State-Get 'plugin' $n
+            # installed: done, unless Codex still asks to trust its hooks and the version is signed by now
+            if ((State-Get "plugin.$t" $n) -eq $h -and -not ($t -eq 'codex' -and (Test-Path -LiteralPath (Join-Path $PendDir "codex-hooks-$n") -PathType Leaf) -and (Plugin-Signed $n))) { continue }
+            if (Plugin-Install $t $n) { State-Set "plugin.$t" $n $h; Say "  plugin $n → $t" }
+        }
+        foreach ($n in @(State-List "plugin.$t")) {
+            if ($names -ccontains $n) { continue }
+            if (Plugin-Uninstall $t $n) { State-Del "plugin.$t" $n; Say "  removed plugin $n ← $t" }
+        }
+    }
+    # codex plugin puts its tables at the end of config.toml, inside kit's block: out of it now, quietly
+    if (Has-Codex) { $q = $script:Quiet; $script:Quiet = $true; try { Codex-Keep $(if (Test-Path -LiteralPath $CodexLast) { Read-Text $CodexLast } else { '' }) } finally { $script:Quiet = $q } }
+    foreach ($n in @(State-List 'plugin')) {                 # kit's copy goes once no tool has it any more
+        if ($names -ccontains $n) { continue }
+        $any = $false; foreach ($t in 'claude', 'codex', 'omp') { if ($null -ne (State-Get "plugin.$t" $n)) { $any = $true } }
+        if (-not $any) { Remove-Tree (Join-Path $r $n); State-Del 'plugin' $n; Kit-PendingDone "codex-hooks-$n" }
+    }
+    [void](Plugin-Market @(State-List 'plugin'))
+}
+
 function Hook-Json([string]$args1 = 'sync --hook', [string]$timeout = '10') { # a hook entry kit adds to settings.json (default: SessionStart's)
     '{"hooks":[{"type":"command","command":' + (Json-Str (Hook-Cmd $args1)) + ',"timeout":' + $timeout + '}]}'
 }
@@ -1830,7 +2118,7 @@ function Flat-Json([string]$s) { if ($null -eq $s) { '' } else { $s -replace '[ 
 
 function Apply-All {
     $want = Wanted
-    $rules = Of-Kind $want 'rule'; $skills = Of-Kind $want 'skill'; $mcps = Of-Kind $want 'mcp'
+    $rules = Of-Kind $want 'rule'; $skills = Of-Kind $want 'skill'; $mcps = Of-Kind $want 'mcp'; $plugins = Of-Kind $want 'plugin'
 
     # Claude: rules as @imports (Codex and omp: AGENTS.md gets the rule text itself), skills, MCP in ~/.claude.json
     Apply-Rules $want
@@ -1849,6 +2137,7 @@ function Apply-All {
     }
     if ($codex) { Codex-Hooks }                              # the same two hooks as Claude's, for Codex and omp
     if ($omp) { Omp-Hook }
+    Sync-Plugins $plugins
 
     # tool deny rules and the auto-sync hook -> ~/.claude/settings.json
     # (state.tsv only after settings.json was written)
@@ -2385,6 +2674,15 @@ function Skill-Needs([string]$d, [string]$src = '') { # @(name, min) per program
     $pj = Join-Path $d 'package.json'
     if (Test-Path -LiteralPath $pj -PathType Leaf) { $e = Json-Get $pj 'engines.node'; if ($e) { $m = [regex]::Match($e, '[0-9]+(\.[0-9]+)*'); if ($m.Success) { $low['node'] = $m.Value } } }
     if ((Test-Path -LiteralPath (Join-Path $d 'requirements.txt')) -or (Test-Path -LiteralPath (Join-Path $d 'pyproject.toml'))) { $raw.Add('python') }
+    $hd = Join-Path $d 'hooks'                               # a plugin's hooks: the program each one runs
+    if (Test-Path -LiteralPath $hd -PathType Container) {
+        $hf = [string[]]@(Get-ChildItem -LiteralPath $hd -File -Force -Filter '*.json' | ForEach-Object { $_.Name }); [Array]::Sort($hf, [StringComparer]::Ordinal)
+        foreach ($f in $hf) {
+            $ls = @((Read-Text (Join-Path $hd $f)) -split "`n")
+            if (@($ls | Where-Object { $_ -cmatch '"(command|bash)"[ \t\f\v\r]*:[ \t\f\v\r]*"node[ \\]' }).Count -gt 0) { $raw.Add('node') }
+            if (@($ls | Where-Object { $_ -cmatch '"(command|bash)"[ \t\f\v\r]*:[ \t\f\v\r]*"python3?[ \\]' }).Count -gt 0) { $raw.Add('python') }
+        }
+    }
     $ord = New-Object System.Collections.Generic.List[string]; $min = @{}
     foreach ($r in $raw) {
         $parts = $r -split '>=', 2; $n = ($parts[0] -replace '\s', ''); $m = if ($parts.Count -gt 1) { $parts[1] -replace '\s', '' } else { '' }
@@ -3634,10 +3932,13 @@ function Ctx-Kill($p) { # the process and what it started
     } catch { }
 }
 function Claude-Bin { # how to start Claude Code: @(program, its arguments before claude's, claude), else $null
-    $c = @(Get-Command claude -CommandType Application -ErrorAction SilentlyContinue)
-    if ($c.Count -eq 0) { $c = @(Get-Command claude -CommandType ExternalScript -ErrorAction SilentlyContinue) }
+    App-Bin 'claude' (Join-Path (Join-Path (Join-Path $UserHome '.local') 'bin') $(if ($OnWindows) { 'claude.exe' } else { 'claude' }))
+}
+function App-Bin([string]$name, [string]$also = '') { # how to start NAME (else the file ALSO): @(program, its arguments before NAME's, NAME), else $null
+    $c = @(Get-Command $name -CommandType Application -ErrorAction SilentlyContinue)
+    if ($c.Count -eq 0) { $c = @(Get-Command $name -CommandType ExternalScript -ErrorAction SilentlyContinue) }
     $p = if ($c.Count -gt 0) { [string]$c[0].Path } else { '' }
-    if (-not $p) { $x = Join-Path (Join-Path (Join-Path $UserHome '.local') 'bin') $(if ($OnWindows) { 'claude.exe' } else { 'claude' }); if (Test-Path -LiteralPath $x -PathType Leaf) { $p = $x } }
+    if (-not $p -and $also -and (Test-Path -LiteralPath $also -PathType Leaf)) { $p = $also }
     if (-not $p) { return $null }
     $e = [IO.Path]::GetExtension($p).ToLowerInvariant()
     if ($e -eq '.cmd' -or $e -eq '.bat') { return , @($(if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }), 'cmd', $p) }
@@ -4794,7 +5095,23 @@ function Version-Nag { # tell once when a source's kit.yaml wants a newer kit (n
 }
 
 function Cmd-Init($srcs) {
-    if (@($srcs).Count -lt 1) { Die '用法：kit init <網址或資料夾> [更多來源...]' }
+    $script:MAppr = ''; $script:MSigners = ''; $a = @($srcs); $srcs = @()
+    for ($i = 0; $i -lt $a.Count; $i++) {
+        if ($a[$i] -ceq '--approvals') { if ($i + 1 -ge $a.Count) { Die '--approvals 後面要接核准紀錄的 repo' }; $i++; $script:MAppr = "$($a[$i])"; continue }
+        if ($a[$i] -ceq '--signers') { if ($i + 1 -ge $a.Count) { Die '--signers 後面要接 allowed_signers 檔' }; $i++; $script:MSigners = "$($a[$i])"; continue }
+        $srcs += $a[$i]
+    }
+    if (@($srcs).Count -lt 1) { Die '用法：kit init <網址或資料夾> [更多來源...] [--approvals <repo> --signers <檔>]' }
+    if ($script:MAppr -or $script:MSigners) {
+        if (-not ($script:MAppr -and $script:MSigners)) { Die '--approvals 和 --signers 要一起給' }
+        $sd = Split-Path -Parent $script:MSigners; if (-not $sd) { $sd = '.' }
+        if (-not (Test-Path -LiteralPath $sd -PathType Container)) { Die "找不到 $($script:MSigners)" }
+        $script:MSigners = Join-Path (Resolve-Path -LiteralPath $sd).ProviderPath (Split-Path -Leaf $script:MSigners)
+        if (-not (Is-Url $script:MAppr)) {
+            if (-not (Test-Path -LiteralPath $script:MAppr -PathType Container)) { Die "找不到 $($script:MAppr)" }
+            $script:MAppr = (Resolve-Path -LiteralPath $script:MAppr).ProviderPath
+        }
+    }
     $list = @(foreach ($s in $srcs) {
         if (Has-Creds $s) { Die "網址裡有帳號或 token（$(Url-Safe $s)）：不要把密碼放進網址，先用 git clone 登入一次（Git 的認證管理會記住），再用不含帳號的網址" }
         if (Is-Url $s) { $s }
@@ -4998,12 +5315,59 @@ function Json-S([string]$s) { # a JSON string: \ " TAB LF CR escaped, other cont
     $s = [regex]::Replace($s, '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')
     Json-Str $s
 }
-function Item-Desc([string]$kind, [string]$f) { # the description of a skill or agent (frontmatter) or of an MCP yaml
+# Chinese descriptions for the panel (kit describe), the same as unix/kit: descriptions-zh.txt in each source, one line
+# per item: "<kind>:<name> TAB <hash of the description it translates> TAB <中文>". Only the panel reads them; agents
+# keep reading the item's own description. A changed description makes its line stale (not shown) until translated again.
+$script:DescZh = 'descriptions-zh.txt'
+function Desc-Hash([string]$t) { # git hash-object of the text (as unix/kit's desc_hash), its first 12
+    $b = $Utf8.GetBytes($t); $h = [Text.Encoding]::ASCII.GetBytes("blob $($b.Length)`0")
+    $sha = [Security.Cryptography.SHA1]::Create()
+    try { $x = $sha.ComputeHash([byte[]]($h + $b)) } finally { $sha.Dispose() }
+    (-join ($x | ForEach-Object { $_.ToString('x2') })).Substring(0, 12)
+}
+function Has-Cjk([string]$t) { $t -match '[　-鿿]' }   # already Chinese (or Japanese): nothing to translate
+function Desc-Zh([string]$dir, [string]$key, [string]$desc) { # its Chinese description, when written for this very description
+    $f = Join-Path $dir $script:DescZh
+    if (-not $desc -or -not (Test-Path -LiteralPath $f -PathType Leaf)) { return '' }
+    foreach ($l in ((Read-Text $f) -split "`n")) {
+        $c = $l.TrimEnd("`r").Split("`t", 3)
+        if ($c[0] -ceq $key) { if ($c.Count -eq 3 -and $c[1] -ceq (Desc-Hash $desc)) { return $c[2] }; return '' }
+    }
+    ''
+}
+function Cmd-Describe($rest) { # kit describe --todo | kit describe KIND NAME "<中文說明>"
+    $rest = @($rest | Where-Object { $null -ne $_ })
+    if ($rest.Count -eq 1 -and $rest[0] -eq '--todo') {
+        foreach ($i in Available) {
+            $c = $i.IndexOf(':'); $k = $i.Substring(0, $c); $n = $i.Substring($c + 1)
+            $d = Item-Src $k $n; if (-not $d) { continue }
+            $t = Item-Desc $k (Item-Path $d $k $n); if (-not $t -or (Has-Cjk $t)) { continue }
+            if (-not (Desc-Zh $d $i $t)) { Out-Json "$i`t$($t.Replace("`t", ' '))" }
+        }
+        return
+    }
+    if ($rest.Count -ne 3) { Die-C 'usage' '用法：kit describe --todo（還沒有中文說明的，一行一個：種類:名字 TAB 原本的說明）；kit describe <種類> <名字> "<中文說明>"' }
+    $k = "$($rest[0])"; $n = "$($rest[1])"
+    if (@('rule', 'skill', 'mcp', 'agent', 'plugin') -notcontains $k) { Die-C 'usage' '種類要是 rule、skill、mcp、agent、plugin' }
+    $d = Item-Src $k $n; if (-not $d) { Die "找不到 ${k}:${n}（kit 的來源裡沒有）" }
+    $orig = Item-Desc $k (Item-Path $d $k $n); if (-not $orig) { Die "${k}:${n} 沒有說明可以翻" }
+    $t = ("$($rest[2])" -replace "[`t`r`n]", ' ').Trim(' '); if (-not $t) { Die '中文說明是空的' }
+    $f = Join-Path $d $script:DescZh
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($l in ((Read-Text $f) -split "`n")) { $l = $l.TrimEnd("`r"); if ($l -and $l.Split("`t")[0] -cne "${k}:${n}") { $lines.Add($l) } } }
+    $lines.Add("${k}:${n}`t$(Desc-Hash $orig)`t$t")
+    $a = $lines.ToArray(); [Array]::Sort($a, [StringComparer]::Ordinal)
+    try { Write-Text $f (($a -join "`n") + "`n") } catch { Die "寫不進 $f" }
+    Say "已寫好 ${k}:${n} 的中文說明（${f}；只給面板看，agent 還是讀原本的說明）。要給別台用：kit push --to $(Split-Path -Leaf $d)"
+}
+function Item-Desc([string]$kind, [string]$f) { # the description of a skill or agent (frontmatter), of an MCP yaml, or a rule's first "# " heading
     try {
         if ($kind -eq 'skill' -or $kind -eq 'agent') {
             if (((Read-Text $f) -split "`n")[0].TrimEnd("`r") -ne '---') { return '' }
             $v = @(YGet-From (Yaml-Lines $f -Frontmatter) 'description')
         } elseif ($kind -eq 'mcp') { $v = @(YGet $f 'description') }
+        elseif ($kind -eq 'plugin') { return (Ctx-Unjs (Npm-Unq "$(Json-Get $f 'description')")) }
+        elseif ($kind -eq 'rule') { $h = @((Read-Text $f) -split "`n" | Where-Object { $_.StartsWith('# ') } | Select-Object -First 1); return $(if ($h.Count) { ($h[0] -replace '^# *', '').TrimEnd("`r") } else { '' }) }
         else { return '' }
     } catch { return '' }
     if ($v.Count -gt 0) { [string]$v[0] } else { '' }
@@ -5220,10 +5584,7 @@ function Here-Json([string]$dir, [string]$hpid) { # the "here" part of kit list 
     $first = $true
     foreach ($r in Here-Rows $dir) {
         $d = ''
-        if ($r[1] -eq 'skill') { $d = Item-Desc 'skill' $r[3] }
-        elseif ($r[1] -eq 'rule') {
-            try { $h = @((Read-Text $r[3]) -split "`n" | Where-Object { $_.StartsWith('# ') } | Select-Object -First 1); if ($h.Count) { $d = $h[0] -replace '^# *', '' } } catch { }
-        }
+        if ($r[1] -eq 'skill' -or $r[1] -eq 'rule') { $d = Item-Desc $r[1] $r[3] }
         if (-not $first) { $out += ',' }; $first = $false
         $out += "`n    {`"scope`": $(Json-S $r[0]), `"kind`": $(Json-S $r[1]), `"name`": $(Json-S $r[2]), `"path`": $(Json-S $r[3]), `"tools`": $(Json-S $r[4]), `"description`": $(Json-S $d)}"
     }
@@ -5269,10 +5630,13 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
         # changed: kit push would send it (a skill: any file in its folder)
         $sf = @($chg[$dir]); $changed = 'false'
         if ($k -eq 'skill') { if (@($sf | Where-Object { $_.StartsWith("skills/$n/", [StringComparison]::Ordinal) }).Count -gt 0) { $changed = 'true' } }
+        elseif ($k -eq 'plugin') { if (@($sf | Where-Object { $_.StartsWith("plugins/$n/", [StringComparison]::Ordinal) }).Count -gt 0) { $changed = 'true' } }
         else { $rel = @{ rule = "rules/$n.md"; mcp = "mcp/$n.yaml"; agent = "agents/$n.md" }[$k]; if ($sf -ccontains $rel) { $changed = 'true' } }
+        $desc = Item-Desc $k $p; $zh = Desc-Zh $dir $i $desc; $zj = if ($zh) { ', "description_zh": ' + (Json-S $zh) } else { '' }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
-        $nj = if ($k -eq 'skill') { ', "needs": ' + (Needs-Json (Split-Path -Parent $p) $dir) + (Packages-Json (Split-Path -Parent $p) $n) } elseif ($k -eq 'mcp') { Mcp-ListJson $p $n } else { '' }
-        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"changed`": $changed, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S (Item-Desc $k $p)), `"path`": $(Json-S $p)$nj}")
+        $nj = if ($k -eq 'skill') { ', "needs": ' + (Needs-Json (Split-Path -Parent $p) $dir) + (Packages-Json (Split-Path -Parent $p) $n) }
+              elseif ($k -eq 'plugin') { ', "needs": ' + (Needs-Json (Split-Path -Parent (Split-Path -Parent $p)) $dir) } elseif ($k -eq 'mcp') { Mcp-ListJson $p $n } else { '' }
+        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"changed`": $changed, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S $desc)$zj, `"path`": $(Json-S $p)$nj}")
     }
     [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))")
     [void]$sb.Append((Sign-Json))
@@ -5323,10 +5687,11 @@ function Cmd-AddRm([string]$verb, $rest) {
         if ($rest.Count -lt 2) { Die '--dir 後面要接資料夾' }
         $dir = $rest[1]; $rest = @(if ($rest.Count -gt 2) { $rest[2..($rest.Count - 1)] })
     }
-    if ($rest.Count -lt 2 -or ($dir -and $rest.Count -ne 2)) { Die "用法：kit $verb [--dir 資料夾] rule|skill|mcp <名字>（整個帳號可以一次給好幾個名字）" }
+    if ($rest.Count -lt 2 -or ($dir -and $rest.Count -ne 2)) { Die "用法：kit $verb [--dir 資料夾] rule|skill|mcp|plugin <名字>（整個帳號可以一次給好幾個名字）" }
     Need-Init
     $k = $rest[0]; $names = @($rest[1..($rest.Count - 1)])
-    if (@('rule', 'skill', 'mcp') -notcontains $k) { Die '種類只能是 rule、skill、mcp' }
+    if (@('rule', 'skill', 'mcp', 'plugin') -notcontains $k) { Die '種類只能是 rule、skill、mcp、plugin' }
+    if ($dir -and $k -eq 'plugin') { Die '外掛只能加到整個帳號（不能 --dir）' }
     if ($dir) { Dir-AddRm $verb $dir $k $names[0]; return }
     foreach ($n in $names) { if (-not (Find-Item $k $n)) { Die "找不到 ${k}:${n}（打 kit list 看有哪些）" } }
     if ($verb -ne 'add') { $req = Kit-Items 'required'; foreach ($n in $names) { if ($req -contains "${k}:$n") { Die "${k}:$n 是團隊必備，拿不掉" } } }
@@ -5552,6 +5917,11 @@ function Cmd-Uninstall($rest) {
     Sync-Skills $AgentsSkills 'skill.agents' @()
     Sync-McpJson $ClaudeJson 'mcp' @()
     Sync-McpJson (Join-Path $OmpDir 'mcp.json') 'mcp.omp' @()
+    Sync-Plugins @()
+    if (Test-Path -LiteralPath (Plugin-Root)) {               # kit's marketplace, once nothing of it is installed
+        foreach ($t in Plugin-Tools) { if (@(State-List "plugin.$t").Count -eq 0) { [void](Plugin-Run $t @('plugin', 'marketplace', 'remove', 'kit') -Quiet) } }
+        if (@(State-List 'plugin').Count -eq 0) { Remove-Tree (Plugin-Root) }
+    }
     $script:Quiet = $false
     $ops = New-Object System.Collections.Generic.List[object]
     foreach ($r in State-Rows) {
@@ -5596,10 +5966,17 @@ function Cmd-SelfUpdate { # pull the clone kit was installed from, then reinstal
     $repo = (Read-Text $rp).Trim()
     if (-not (Test-Path -LiteralPath (Join-Path $repo '.git'))) { Die "找不到 clone：$repo" }
     $url = (Git-Safe -C $repo remote get-url origin | Select-Object -First 1)
-    if ($LASTEXITCODE -eq 0 -and $url) { Check-Host $url }
+    if ($LASTEXITCODE -eq 0 -and $url) { Check-Host $url } else { $url = '' }
     $before = "$(& git -C $repo rev-parse --short=12 HEAD 2>$null)".Trim()
-    [void](Git-Safe -C $repo pull --ff-only -q)
-    if ($LASTEXITCODE -ne 0) { Die "沒辦法更新 ${repo}（沒網路，或 clone 裡有自己的改動？）" }
+    if (M-Approvals) {
+        if (-not $url) { Die "$repo 沒有 origin" }
+        $sha = Approved-Sha (Src-Name $url); if (-not $sha) { Die "kit 本身（$(Src-Name $url)）沒有有效的核准，不更新" }
+        [void](Git-Safe -C $repo fetch -q --no-recurse-submodules origin); if ($LASTEXITCODE -ne 0) { Die "沒辦法 fetch $repo" }
+        [void](Git-Q -C $repo -c advice.detachedHead=false checkout -q -f --detach $sha); if ($LASTEXITCODE -ne 0) { Die "找不到核准的版本 $sha" }
+    } else {
+        [void](Git-Safe -C $repo pull --ff-only -q)
+        if ($LASTEXITCODE -ne 0) { Die "沒辦法更新 ${repo}（沒網路，或 clone 裡有自己的改動？）" }
+    }
     $exe = (Get-Process -Id $PID).Path
     & $exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'windows/install.ps1') -Quiet
     if ($LASTEXITCODE -ne 0) { Die '重新安裝失敗' }
@@ -5681,6 +6058,8 @@ $script:McpSkeleton = @'
 # 一個 MCP server。兩種寫法選一種，另一種刪掉。
 # 密碼、token 不要寫在這裡：寫成 ${變數名}，值放在每台電腦自己的環境變數。
 # 別人給的設定（JSON、claude mcp add …）：存成檔案，用  kit new mcp --config 檔案  帶進來比較快。
+
+description: （這個 MCP 做什麼：Kit 面板會顯示這一行）
 
 # 1. 在這台電腦跑一個程式：
 command: （啟動 MCP server 的程式，例如 npx 或 uvx）
@@ -5811,7 +6190,8 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
         $items = @(foreach ($n in Names-In (Join-Path $d 'rules') '*.md') { "rule:$n" }
                    foreach ($n in Names-In (Join-Path $d 'skills') '' -Dirs) { "skill:$n" }
                    foreach ($n in Names-In (Join-Path $d 'mcp') '*.yaml') { "mcp:$n" }
-                   foreach ($n in Names-In (Join-Path $d 'agents') '*.md') { "agent:$n" })
+                   foreach ($n in Names-In (Join-Path $d 'agents') '*.md') { "agent:$n" }
+                   foreach ($n in Plugin-Names $d) { "plugin:$n" })
         foreach ($i in $items) { if (-not $where.Contains($i)) { $where[$i] = New-Object System.Collections.Generic.List[string] }; $where[$i].Add($d) }
     }
     foreach ($k in $where.Keys) { if ($where[$k].Count -gt 1) { Problem "名字重複：$k 在 $($where[$k] -join ' ')" } }
@@ -5840,6 +6220,7 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
                 if ($loud -and @(YGet-From $fm 'tools.only').Count -gt 0) { Warn "${rel}: tools.only 在 Claude 是把其他內建工具寫進 deny：Claude 之後新加的內建工具擋不到（要擋就寫進 tools.deny）" }
             }
         }
+        foreach ($n in Plugin-Names $d) { if (-not (Valid-Name $n)) { Problem "plugins/${n}: 名字只能用小寫英文、數字和 -" } }
         foreach ($n in Names-In (Join-Path $d 'rules') '*.md') {
             if (-not (Valid-Name $n)) { Problem "rules/${n}.md: 名字只能用小寫英文、數字和 -" }
             if ((Get-Item -LiteralPath (Join-Path $d "rules/$n.md")).Length -eq 0) { Problem "rules/${n}.md: 是空的" }
@@ -5871,7 +6252,7 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
         }
         if (Test-Path -LiteralPath $kitYaml -PathType Leaf) {
             if (@('pr', 'direct') -cnotcontains (Push-Mode $d)) { Problem 'kit.yaml: push 只能是 pr 或 direct' }
-            foreach ($k in 'rule', 'skill', 'mcp') {
+            foreach ($k in 'rule', 'skill', 'mcp', 'plugin') {
                 foreach ($r in @(YGet $kitYaml "required.${k}s") + @(YGet $kitYaml "recommended.${k}s")) {
                     if (-not $r -or $where.Contains("${k}:$r")) { continue }
                     if ($script:CheckCi -and @(YGet $kitYaml 'include').Count -gt 0) { Warn "kit.yaml: ${k}:$r 不在這個 repo（應該在 include 的來源）" } else { Problem "kit.yaml: 找不到 ${k}:$r" }
@@ -6108,7 +6489,7 @@ function Push-Items([string]$dir, $files) { # changed item files -> @(verb, kind
         , @($v, "${k}:$n")
     }
 }
-$script:ItemRe = '^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$'   # the files kit push sends
+$script:ItemRe = '^(rules/[^/]+\.md|skills/[^/]+/.+|plugins/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock|descriptions-zh\.txt)$'   # the files kit push sends
 function Send-Files([string]$dir) { # what kit push would send from DIR: the changed item files, and kit.yaml when all that
     # changed in it is collect_sources (kit collect --allow added an author); nothing else
     $all = @(Changed-Files $dir)
@@ -6334,7 +6715,7 @@ function Cmd-Push($rest) {
 
 # ---------- collect / outdated: other people's skills, from their own repos ----------
 # third_party.lock: name<TAB>url<TAB>path<TAB>ref<TAB>commit<TAB>license<TAB>date
-$script:LockHead = '# third_party.lock - written by kit collect; name url path ref commit license date'
+$script:LockHead = '# third_party.lock - written by kit collect; name url path ref commit license date [skip]'
 function Url-Id([string]$u) { # host/path of a git URL, without scheme, user, .git or trailing /
     ((($u -replace '^[a-z+]+://', '') -replace '^[^@/]*@', '') -replace '^([^/:]+):', '$1/').TrimEnd('/') -replace '\.git$', ''
 }
@@ -6483,7 +6864,7 @@ function Web-Repo([string]$u) { # a repo page's address (GitHub /tree/<ref>/<fol
     $null
 }
 function Cmd-Collect($rest) {
-    $arg = ''; $path = ''; $name = ''; $ref = ''; $to = ''; $force = $false; $allow = $false; $look = $false
+    $arg = ''; $path = ''; $name = ''; $ref = ''; $to = ''; $force = $false; $allow = $false; $look = $false; $skip = ''
     $r = @($rest | Where-Object { $_ })
     for ($i = 0; $i -lt $r.Count; $i++) {
         switch -CaseSensitive ($r[$i]) {
@@ -6494,6 +6875,12 @@ function Cmd-Collect($rest) {
             '--force' { $force = $true }
             '--allow' { $allow = $true }
             '--look' { $look = $true }
+            '--skip' {
+                $sm = '--skip 後面要接外掛裡不要的檔案或資料夾（相對路徑）'
+                if ($i + 1 -ge $r.Count) { Die $sm }; $i++; $v = [string]$r[$i]
+                if (-not $v -or $v.StartsWith('/') -or $v.Contains('..') -or $v.Contains(',')) { Die $sm }
+                if ($v.EndsWith('/')) { $v = $v.Substring(0, $v.Length - 1) }; $skip = $skip + $(if ($skip) { ',' }) + $v
+            }
             default { if ($r[$i].StartsWith('-')) { Die-C usage "不認得 $($r[$i])" }; if ($arg) { Die-C usage "多了一個參數：$($r[$i])" }; $arg = $r[$i] }
         }
     }
@@ -6509,6 +6896,7 @@ function Cmd-Collect($rest) {
         $f = $line.Split("`t"); $name = $arg; $url = $f[1]
         if (-not $path) { $path = $f[2] }
         if (-not $ref -and $f[3] -ne '-') { $ref = $f[3] }
+        if (-not $skip -and $f.Count -gt 7 -and $f[7] -ne '-') { $skip = $f[7] }
     }
     if ($path -eq '.') { $path = '' }
     # collect_sources: who may be collected from. --allow adds this author to it, only in your own source (push: direct);
@@ -6554,6 +6942,8 @@ function Cmd-Collect($rest) {
         }
         $sha = "$(& git -C $repo rev-parse HEAD)".Trim()
         $repo = Full-Path $repo
+        # a plugin (.claude-plugin/plugin.json at the top, or in --path): the whole plugin, not its skills one by one
+        if (Test-Path -LiteralPath (Join-Path $(if ($path) { Join-Path $repo $path } else { $repo }) '.claude-plugin/plugin.json') -PathType Leaf) { Collect-Plugin; return }
         # which folder: --path, else the top if it has a SKILL.md, else the only folder in the repo that has one
         $found = @(if ($path) { $path } elseif (Test-Path -LiteralPath (Join-Path $repo 'SKILL.md') -PathType Leaf) { '.' } else { Skill-Dirs $repo })
         if ($found.Count -eq 0) { Die-C no_skill "$(Url-Id $url) 裡找不到 SKILL.md" }
@@ -6613,6 +7003,84 @@ function Cmd-Collect($rest) {
     $script:Quiet2 = $true
     if (-not (Check-Dirs @($dir) $false)) { Warn 'kit check 有問題，送出前請先打  kit check  看看' }
     if ($own) { Say "下一步：用 git diff 看收進來的檔案；沒問題就  kit push  送出，要用它就  kit add skill $name" }
+    else { Say '下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR' }
+}
+$script:PluginParts = @('.claude-plugin', '.codex-plugin', 'skills', 'commands', 'agents', 'hooks', '.mcp.json', 'package.json')
+function Collect-Plugin { # (Cmd-Collect's, with its variables) the plugin in $repo/$path -> $dir/plugins/<name>, as unix/kit's
+    # collect_plugin: only what the tools load (the manifests, skills, commands, agents, hooks, MCP, package.json and the
+    # extension folders its pi/omp key names), text only; --skip leaves out more (and takes it out of plugin.json); the
+    # lock remembers --skip
+    $src = Full-Path $(if ($path) { Join-Path $repo $path } else { $repo })
+    if (-not ($src + [IO.Path]::DirectorySeparatorChar).StartsWith($repo + [IO.Path]::DirectorySeparatorChar) -and $src -ne $repo) { Die '--path 要在 repo 裡面' }
+    $pj = Join-Path $src '.claude-plugin/plugin.json'
+    $n = $name; if (-not $n) { try { $n = Npm-Unq "$(Json-Get $pj 'name')" } catch { $n = '' } }
+    $desc = ''; try { $desc = Ctx-Unjs (Npm-Unq "$(Json-Get $pj 'description')") } catch { }
+    $lic = Collect-License $src $repo; $kind = if ($lic) { License-Kind $lic } else { '' }
+    $skips = @(if ($skip) { $skip.Split(',') })
+    $parts = New-Object System.Collections.Generic.List[string]; foreach ($e in $PluginParts) { $parts.Add($e) }
+    foreach ($x in 'pi', 'omp') {                # the extension folders package.json names (./pi-extension/index.js -> pi-extension)
+        $ex = $null; try { $ex = Json-Get (Join-Path $src 'package.json') "$x.extensions" } catch { }
+        foreach ($l in @("$ex" -split "`n")) { $m = [regex]::Match($l, '^ *"\./([^/"]*)'); if ($m.Success -and -not $parts.Contains($m.Groups[1].Value)) { $parts.Add($m.Groups[1].Value) } }
+    }
+    $outDir = Join-Path $tmp 'out'; Ensure-Dir $outDir
+    $scripts = New-Object System.Collections.Generic.List[string]; $skipped = 0
+    foreach ($e in $parts) {
+        $s = Join-Path $src $e
+        if (-not (Test-Path -LiteralPath $s)) { continue }
+        if ($skips -ccontains $e) { continue }
+        $it = Get-Item -LiteralPath $s -Force
+        if ($it.PSIsContainer -and -not (Is-Link $it)) {
+            $sc = Collect-Scan $s $(if ($look) { '' } else { Join-Path $outDir $e })
+            foreach ($x in @("$($sc.scripts)" -split ' ' | Where-Object { $_ })) { $scripts.Add("$e/$x") }; $skipped += $sc.skipped
+        } elseif (-not $it.PSIsContainer -and -not (Is-Link $it) -and ($it.Length -eq 0 -or -not (Is-Binary $s))) {
+            if (-not $look) { Copy-Item -LiteralPath $s -Destination (Join-Path $outDir $e) }
+        } else { $skipped++ }
+    }
+    $ops = New-Object System.Collections.Generic.List[object]; $pjo = Join-Path $outDir '.claude-plugin/plugin.json'
+    foreach ($x in $skips) {                         # --skip: out, and out of plugin.json's hooks
+        $sx = Join-Path $outDir $x; if (Test-Path -LiteralPath $sx -PathType Container) { Remove-Tree $sx } elseif (Test-Path -LiteralPath $sx) { Remove-Item -LiteralPath $sx -Force }   # (Remove-Tree: folders only)
+        $keep = @($scripts | Where-Object { $_ -cne $x -and -not $_.StartsWith("$x/", [StringComparison]::Ordinal) }); $scripts.Clear(); foreach ($k in $keep) { $scripts.Add($k) }
+        if (-not $look -and (Test-Path -LiteralPath $pjo -PathType Leaf)) {
+            $ops.Add(@('rmstr', 'hooks', "./$x"))      # and a key whose value is a file in it ("types": "./x/..")
+            foreach ($m in [regex]::Matches((Read-Text $pjo), '"([A-Za-z]+)"[ \t\f\v\r]*:[ \t\f\v\r]*"\./[^"\n]*"')) {
+                $v = "$(Json-Get $pjo $m.Groups[1].Value)"
+                if ($v -ceq "`"./$x`"" -or $v.StartsWith("`"./$x/", [StringComparison]::Ordinal)) { $ops.Add(@('del', $m.Groups[1].Value)) }
+            }
+        }
+    }
+    $dst = Join-Path (Join-Path $dir 'plugins') $n
+    $exists = if (Test-Path -LiteralPath $dst) { if (Lock-Get $dir $n) { 'collected' } else { 'own' } } else { '' }
+    if ($look) {
+        $canAllow = (-not $ok) -and $own -and -not $moved
+        [Console]::Out.Write('{"source": ' + (Json-Str (Split-Path -Leaf $dir)) + ', "dir": ' + (Json-Str $dir.Replace('\', '/')) + ', "push": ' + (Json-Str (Push-Mode $dir)) +
+            ', "url": ' + (Json-Str $url) + ', "ref": ' + (Json-Str $ref) + ', "id": ' + (Json-Str (Url-Id $url)) + ', "commit": ' + (Json-Str $sha) +
+            ', "allowed": ' + $(if ($ok) { 'true' } else { 'false' }) + ', "can_allow": ' + $(if ($canAllow) { 'true' } else { 'false' }) +
+            ', "skills": [' + "`n  " + '{"kind": "plugin", "path": ' + (Json-Str $(if ($path) { $path } else { '.' })) + ', "name": ' + (Json-Str $n) +
+            ', "valid": ' + $(if (Valid-Name $n) { 'true' } else { 'false' }) + ', "description": ' + (Json-Str $desc) + ', "license": ' + (Json-Str $kind) +
+            ', "scripts": ' + (Json-Str ($scripts -join ' ')) + ', "skipped": ' + $skipped + ', "exists": ' + (Json-Str $exists) +
+            ', "dest": ' + (Json-Str ((Join-Path $dst '.claude-plugin/plugin.json').Replace('\', '/'))) + "}`n]}`n")
+        return
+    }
+    if (-not (Valid-Name $n)) { Die "名字 $n 不行（只能小寫英文、數字和 -），用 --name 給一個" }
+    if ((Test-Path -LiteralPath $dst) -and -not (Lock-Get $dir $n) -and -not $force) { Die "$(Split-Path -Leaf $dir) 已經有 plugin:${n}，而且不是 collect 收的（要整份換掉加 --force，或用 --name 換名字）" }
+    if (Test-Path -LiteralPath (Join-Path (Join-Path $dir 'skills') $n)) { Die "$(Split-Path -Leaf $dir) 已經有同名的 skill:${n}（外掛和 skill 不能同名：先拿掉那個 skill，或用 --name 換名字）" }
+    if (-not $lic) { Die "$(Url-Id $url) 沒有 LICENSE，不知道能不能用，不收" }
+    $licName = Split-Path -Leaf $lic
+    if (-not (Test-Path -LiteralPath (Join-Path $outDir $licName))) { Copy-Item -LiteralPath $lic -Destination (Join-Path $outDir $licName) }
+    if ($ops.Count -gt 0) { Json-Edit $pjo $ops.ToArray(); Remove-Item -LiteralPath "$pjo.kit-backup" -Force -ErrorAction SilentlyContinue }   # (a copy: nothing of yours to keep)
+    Remove-Item -LiteralPath (Join-Path (Split-Path $pjo) 'marketplace.json') -Force -ErrorAction SilentlyContinue   # the author's own list (where to download it): kit has its own
+    Remove-Tree $dst; Ensure-Dir (Join-Path $dir 'plugins')
+    Copy-Item -LiteralPath $outDir -Destination $dst -Recurse -Force
+    $p2 = if ($path) { $path } else { '.' }; $r2 = if ($ref) { $ref } else { '-' }; $s2 = if ($skip) { $skip } else { '-' }
+    Lock-Set $dir ((@($n, $url, $p2, $r2, $sha, $kind, (Get-Date -Format 'yyyy-MM-dd'), $s2)) -join "`t")
+    if ($add) { Yaml-ListAdd (Join-Path $dir 'kit.yaml') 'collect_sources' (Url-Id $url); Say "已把 $(Url-Id $url) 加進 $(Split-Path -Leaf $dir)/kit.yaml 的 collect_sources" }
+    Say "已收外掛 plugin:$n ← $(Url-Id $url)$(if ($path) { "/$path" }) @ $($sha.Substring(0, 12))（授權 ${kind}$(if ($skip) { "；沒收：$skip" })）"
+    if ($kind -eq 'unknown') { Warn "認不出授權種類，請自己看 plugins/$n/$licName" }
+    if ($kind -eq 'GPL') { Warn 'GPL 類授權：改了再發布要公開原始碼，請確認可以用' }
+    if ($scripts.Count -gt 0) { Warn "這個外掛有會執行的檔案（hook 會在 agent 開始、送出訊息時自動跑），送出前請看過：$($scripts -join ' ')" }
+    $script:Quiet2 = $true
+    if (-not (Check-Dirs @($dir) $false)) { Warn 'kit check 有問題，送出前請先打  kit check  看看' }
+    if ($own) { Say "下一步：用 git diff 看收進來的檔案；沒問題就  kit push  送出，要用它就  kit add plugin $n" }
     else { Say '下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR' }
 }
 function Outdated-Json([string]$one) { # every collected skill (ONE's, else the folder you are in and every source) and what its author has now
@@ -6741,18 +7209,47 @@ function Cmd-Agent($rest) { # kit agent <name> add|rm rule|skill|mcp <item>
 }
 
 # ---------- status --json: the kit, api and commits this account uses, for a panel (unix/kit prints the same) ----------
-# Read only: no network (no clone, pull or fetch), nothing written, no lock. kit for Windows has no approvals:
-# "approvals" and every "approved" are null.
+# Read only: no network (no clone, pull or fetch), nothing written, no lock: the approvals are the ones here already
+# (the clone kit sync keeps, or the folder).
 function Head-Sha([string]$d) { # the commit of DIR when it is a git clone, else $null
     if (-not $d -or -not (Test-Path -LiteralPath (Join-Path $d '.git'))) { return $null }
     $h = "$(@(Git-Q -C $d rev-parse -q --verify HEAD) -join '')".Trim()
     if ($LASTEXITCODE -eq 0 -and $h) { $h } else { $null }
 }
+function Json-Uint([string]$s) { if ($s -match '^[0-9]+\z') { $s.TrimStart('0').PadLeft(1, '0') } else { 'null' } }   # a number, or null
+function Sign-Pending([string]$n, [string]$d, [string]$a) { # {"kind": "sign", ...} when the source's remote (as kit's last fetch
+    # saw it) is past the commit approved.txt names: commits waiting for the signer (signed on the Mac, never here). Nothing else.
+    if (-not (Test-Path -LiteralPath (Join-Path $d '.git'))) { return }
+    $head = ''
+    foreach ($r in 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main', 'refs/remotes/origin/master') {
+        $h = "$(@(Git-Q -C $d rev-parse -q --verify $r) -join '')".Trim(); if ($LASTEXITCODE -eq 0 -and $h) { $head = $h; break }
+    }
+    if (-not $head -or $head -eq $a) { return }
+    $known = $false; if ($a) { [void](Git-Q -C $d cat-file -e "$a^{commit}"); $known = $LASTEXITCODE -eq 0 }
+    if ($known) {
+        $c = "$(@(Git-Q -C $d rev-list --count "$a..$head") -join '')".Trim()
+        if (-not ($c -match '^[0-9]+\z' -and [decimal]$c -gt 0)) { return }   # approved is ahead: nothing to sign
+        $since = "$(@(Git-Q -C $d log --format=%ct "$a..$head") | Select-Object -Last 1)".Trim(); $what = "${n} 有 ${c} 個新 commit 等核准"
+    } else {
+        $c = "$(@(Git-Q -C $d rev-list --count $head) -join '')".Trim(); $since = "$(@(Git-Q -C $d log -1 --format=%ct $head) -join '')".Trim(); $what = "${n} 還沒核准過"
+    }
+    '{"kind": "sign", "name": ' + (Json-S $n) + ', "what": ' + (Json-S $what) + ', "commits": ' + (Json-Uint $c) + ', "head": ' + (Json-S $head) +
+        ', "since": ' + $(if ($since) { "${since}000" } else { 'null' }) + ', "machine": ' + (Json-S ([Environment]::MachineName)) + '}'
+}
 function Cmd-Status($rest) {
     $rest = @($rest | Where-Object { $null -ne $_ })
     if ($rest.Count -ne 1 -or $rest[0] -cne '--json') { Die-C usage '用法：kit status --json' }
-    if (@(YGet $Machine 'approvals' | Where-Object { $_ }).Count -gt 0) { Warn '這台設了只用簽過的版本（approvals），但 Windows 版的 kit 不支援：approvals 和 approved 一律是 null' }
-    $self = 'null'
+    $self = 'null'; $appr = @(); $valid = $false; $approvals = 'null'; $pl = New-List
+    $ma = M-Approvals
+    if ($ma) {
+        $ad = if (Is-Url $ma) { Approvals-Dir } else { $ma }
+        $f = Join-Path $ad 'approved.txt'; $serial = ''
+        if (Test-Path -LiteralPath $f -PathType Leaf) {
+            $ap = Approvals-Parse $f; $serial = $ap.serial
+            if ((Test-Path -LiteralPath "$f.sig" -PathType Leaf) -and (Test-Path -LiteralPath $script:MSigners -PathType Leaf) -and (Approvals-SigOk $f)) { $valid = $true; $appr = @($ap.lines) }
+        }
+        $approvals = "{`"serial`": $(Json-Uint $serial), `"used`": $(Json-Uint (State-Get 'approvals' 'serial')), `"valid`": $(if ($valid) { 'true' } else { 'false' })}"
+    }
     $rp = Join-Path $KitLib '.repo'                          # kit's own clone (the one kit self-update pulls)
     $repo = if (Test-Path -LiteralPath $rp -PathType Leaf) { (Read-Text $rp).Trim() } else { '' }
     if ($repo) {
@@ -6761,18 +7258,25 @@ function Cmd-Status($rest) {
             $url = "$(@(Git-Q -C $repo remote get-url origin) -join '')".Trim()
             if ($LASTEXITCODE -eq 0 -and $url) { $name = Src-Name $url }
         }
-        $self = "{`"name`": $(Json-S $name), `"commit`": $(Json-OrNull (Head-Sha $repo)), `"approved`": null}"
+        $self = "{`"name`": $(Json-S $name), `"commit`": $(Json-OrNull (Head-Sha $repo)), `"approved`": $(Json-OrNull (Appr-Sha $appr $name))}"
+        if ($valid) { $one = Sign-Pending $name $repo (Appr-Sha $appr $name); if ($one) { $pl.Add($one) } }
     }
-    $pl = @(Pend-Json)                                      # what agents (or services) here wait on the owner for (no signing on Windows)
-    $pend = if ($pl.Count -gt 0) { "`n    " + ($pl -join ",`n    ") + "`n  " } else { '' }
+    if ($valid) {                                            # what waits for the signer (a valid list only: else nothing is known)
+        foreach ($s in @(M-Sources)) {
+            if (-not $s -or -not (Is-Url $s)) { continue }
+            $one = Sign-Pending (Src-Name $s) (Src-Dir $s) (Appr-Sha $appr (Src-Name $s)); if ($one) { $pl.Add($one) }
+        }
+    }
+    foreach ($one in @(Pend-Json)) { if ($one) { $pl.Add($one) } }   # what agents (or services) here wait on the owner for
+    $pend = if ($pl.Count -gt 0) { "`n    " + ($pl.ToArray() -join ",`n    ") + "`n  " } else { '' }
     $sb = New-Object System.Text.StringBuilder
-    [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"api`": $(Json-S $KitApi),`n  `"user`": $(Json-S ([Environment]::UserName)),`n  `"at`": $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),`n  `"self`": $self,`n  `"approvals`": null,`n  `"pending`": [$pend],`n  `"sources`": [")
+    [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"api`": $(Json-S $KitApi),`n  `"user`": $(Json-S ([Environment]::UserName)),`n  `"at`": $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),`n  `"self`": $self,`n  `"approvals`": $approvals,`n  `"pending`": [$pend],`n  `"sources`": [")
     $first = $true
     foreach ($s in @(M-Sources)) {
         if (-not $s) { continue }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
         $d = Src-Dir $s
-        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S (Url-Safe $s)), `"dir`": $(Json-S $d), `"commit`": $(Json-OrNull (Head-Sha $d)), `"approved`": null}")
+        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S (Url-Safe $s)), `"dir`": $(Json-S $d), `"commit`": $(Json-OrNull (Head-Sha $d)), `"approved`": $(Json-OrNull (Appr-Sha $appr (Src-Name $s)))}")
     }
     if ($first) { [void]$sb.Append("]`n}") } else { [void]$sb.Append("`n  ]`n}") }
     Out-Json $sb.ToString()
@@ -6790,6 +7294,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
   kit add rule|skill|mcp <名字>     開始用（整個帳號：每個資料夾、每個 agent 都有）
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
+  kit add|rm plugin <名字>          外掛（skill、hook、MCP 一起）：照 Claude、Codex、omp 自己裝外掛的方式裝，
+                                    從這台的來源副本裝、不自動更新；Codex 的 hook 只有簽過的版本 kit 才自己信任
   kit add --dir <資料夾> rule|skill|mcp <名字>
                                     只加到這個資料夾：在這裡（含子資料夾）開的 agent 才有
   kit rm  --dir <資料夾> rule|skill|mcp <名字>
@@ -6824,6 +7330,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit diff   [種類] <名字> --from 本機資料夾   比較
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
+  kit describe --todo               還沒有中文說明的（一行一個：種類:名字 TAB 原本的說明）
+  kit describe <種類> <名字> "<中文>"  寫中文說明，只給面板看（agent 還是讀原本的）；原本的說明改了要再翻
 
 維護者用（只收 kit.yaml 的 collect_sources 列的原作者）：
   kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支] [--allow]   收別人的 skill（保留 LICENSE）
@@ -6841,8 +7349,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
   kit self-update                   更新 kit 本身
   kit uninstall [--self]            拿掉 kit 加的東西（--self 連 kit 也移除）
-  kit status --json                 這個帳號用的 kit 版本、api，kit 本身和每個來源的 commit
-                                    （JSON 給程式讀；不連網、什麼都不寫。Windows 版沒有核准紀錄：approvals 一律是 null）
+  kit status --json                 這個帳號用的 kit 版本、api，kit 本身和每個來源的 commit、核准的 commit
+                                    （JSON 給程式讀；不連網、什麼都不寫：root 這類帳號可以自己存成檔案給畫面程式讀）
   kit --version
   kit api                           給程式讀的介面版本（major.minor，例如 1.2）：給畫面程式確認看得懂 kit 的輸出。
                                     不相容的改變 major 加一；新增欄位或指令 minor 加一（清單看 README 的「給程式讀的介面」）
@@ -6883,6 +7391,7 @@ try {
         'usage' { Cmd-Usage $rest }
         'files' { Cmd-Files $rest }
         'note' { Cmd-Note $rest }
+        'describe' { Cmd-Describe $rest }
         'pending' { Cmd-Pending $rest }
         'statusline' { Cmd-Statusline }
         'handoff-hook' { Cmd-HandoffHook }

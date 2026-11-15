@@ -209,6 +209,28 @@ Check 'list --json: required, used, unused' {
 Check 'list --json: agent with its description' { $lj.Contains('{"kind": "agent", "name": "gerrit", "status": "agent", "new": false, "changed": false, "source": "team", "description": "Gerrit helper", "path": ') }
 Check 'list --json: new item, text escaped (UTF-8 kept)' { $lj.Contains('{"kind": "skill", "name": "quote", "status": "unused", "new": true, "changed": false, "source": "team", "description": "中文 \"引號\" \\ 和\ttab", "path": ') }
 Check 'list --json: tools (Claude only here), no version wanted' { $lj.Contains("`n  `"tools`": [`"claude`"],`n") -and (JGet "$T/list.json" 'kit_version_wanted') -eq '""' }
+W "$TEAM/rules/headed.md" "note`r`n# 標題 one`r`n# second`r`n"
+Kit list --json
+Check 'list --json: a rule says its first # heading (CRLF too)' { $out.Contains('{"kind": "rule", "name": "headed", "status": "unused", "new": true, "changed": false, "source": "team", "description": "標題 one", "path": ') }
+Remove-Item -LiteralPath "$TEAM/rules/headed.md" -Force
+# kit describe: Chinese descriptions for the panel, in the source's descriptions-zh.txt, kept until the description changes
+Kit describe --todo
+Check 'describe --todo: English descriptions without a Chinese one, not the Chinese ones' { $rc -eq 0 -and ($out -split "`n") -ccontains "skill:gerrit-workflow`tupstream" -and -not ($out -match '(?m)^skill:quote\t') }
+Kit describe skill gerrit-workflow "上游`t的`n說明"
+Check 'describe: written in the source that has it, one line (tabs, line breaks made spaces)' { $rc -eq 0 -and (ReadT "$TP/descriptions-zh.txt") -ceq "skill:gerrit-workflow`t2a767e25cb57`t上游 的 說明`n" }
+Kit describe skill gerrit-workflow '上游的說明'
+Kit list --json
+Check 'describe: again replaces its line; list --json has description_zh' { @((ReadT "$TP/descriptions-zh.txt") -split "`n" | Where-Object { $_ }).Count -eq 1 -and $out.Contains('"description": "upstream", "description_zh": "上游的說明", "path": ') }
+Kit describe --todo
+Check 'describe: --todo no longer lists it' { -not $out.Contains('gerrit-workflow') }
+$gw = ReadT "$TP/skills/gerrit-workflow/SKILL.md"; W "$TP/skills/gerrit-workflow/SKILL.md" ($gw.Replace('description: upstream', 'description: upstream v2'))
+Kit list --json; $lz = $out; Kit describe --todo
+Check 'describe: a changed description is not shown in Chinese until translated again' { -not $lz.Contains('description_zh') -and ($out -split "`n") -ccontains "skill:gerrit-workflow`tupstream v2" }
+W "$TP/skills/gerrit-workflow/SKILL.md" $gw; Remove-Item -LiteralPath "$TP/descriptions-zh.txt" -Force
+Kit describe skill nope x
+Check 'describe: unknown item refused' { $rc -ne 0 -and $out.Contains('找不到 skill:nope') }
+Kit describe skill gerrit-workflow '  '
+Check 'describe: no text refused, nothing written' { $rc -ne 0 -and -not (Test-Path -LiteralPath "$TP/descriptions-zh.txt") }
 Kit list --json
 Check 'list --json does not mark items seen' { ([regex]::Matches($out, '"new": true')).Count -eq 1 }
 Kit list --bad
@@ -243,7 +265,8 @@ Check 'status --json before kit init: exit 0, sources [], approvals null, nothin
 $AC = Join-Path $T 'apconf'; W "$AC/machine.yaml" ((ReadT "$H/.config/agentkit/machine.yaml") + "approvals: https://gitea.example/acme/approvals.git`nsigners: $T/allowed_signers`n")
 $env:AGENTKIT_CONFIG = $AC
 Kit status --json
-Check 'status --json with approvals: kit for Windows has none (null) and says so' { $rc -eq 0 -and $out.Contains('Windows 版的 kit 不支援') -and $out.Contains("`n  `"approvals`": null,`n") -and $out.Contains("`"commit`": `"$teamHead`", `"approved`": null}") }
+Check 'status --json with approvals but no clone of them here yet: not valid, nothing approved, nothing fetched' { $rc -eq 0 -and -not $out.Contains('不支援') -and $out.Contains("`n  `"approvals`": {`"serial`": null, `"used`": null, `"valid`": false},`n") -and
+    $out.Contains("`"commit`": `"$teamHead`", `"approved`": null}") -and -not (Test-Path "$H/agentkit/.approvals") }
 Remove-Item env:AGENTKIT_CONFIG
 KitJ status
 Check 'status without --json: usage error as JSON' { $rc -ne 0 -and $out -ceq '{"error": {"code": "usage", "message": "用法：kit status --json"}}' }
@@ -299,7 +322,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.8)' { $rc -eq 0 -and $out -ceq '1.8' }
+Check 'api: one line, major.minor (1.9)' { $rc -eq 0 -and $out -ceq '1.9' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -1794,6 +1817,230 @@ if (-not $OnWindows) {
     $env:PATH = $savedP
 }
 Check 'mcp: the secrets are in no file kit wrote' { @(Get-ChildItem -Recurse -File -Force $H, $MS | Where-Object { $c = [IO.File]::ReadAllText($_.FullName); $c.Contains($S1) -or $c.Contains($S2) -or $c.Contains($S3) }).Count -eq 0 }
+
+# ---------- signed approvals (root uses only versions signed on the Mac): kit.ps1 reads them too ----------
+function SshK([string]$a) { # ssh-keygen with that command line (an empty "" stays an argument); its exit code
+    $c = @(Get-Command ssh-keygen -CommandType Application -ErrorAction SilentlyContinue); if ($c.Count -eq 0) { return 1 }
+    $psi = New-Object Diagnostics.ProcessStartInfo ([string]$c[0].Path), $a
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $p = [Diagnostics.Process]::Start($psi); $p.StandardInput.Close(); $e = $p.StandardError.ReadToEndAsync(); [void]$p.StandardOutput.ReadToEnd(); $p.WaitForExit(); [void]$e.Result; $p.ExitCode
+}
+function ApprSign([string]$dir, [string]$key, [string]$text) { # approved.txt with TEXT, signed by KEY (what kit approve writes)
+    W "$dir/approved.txt" $text; Remove-Item -LiteralPath "$dir/approved.txt.sig" -Force -ErrorAction SilentlyContinue
+    SshK "-Y sign -q -f `"$key`" -n agentkit `"$dir/approved.txt`""
+}
+$SA = Join-Path $T 'signed'; [void](New-Item -ItemType Directory -Force -Path $SA)
+$sshOk = (SshK "-q -t ed25519 -N `"`" -C approver -f `"$SA/key`"") -eq 0 -and (SshK "-q -t ed25519 -N `"`" -C mallory -f `"$SA/badkey`"") -eq 0
+if ($sshOk) { W "$SA/try.txt" "x`n"; $sshOk = (SshK "-Y sign -q -f `"$SA/key`" -n agentkit `"$SA/try.txt`"") -eq 0 -and (Test-Path "$SA/try.txt.sig") }
+$SAs = "$SA/allowed_signers"
+if (-not $sshOk) { [Console]::WriteLine('skipped: signed approvals (no ssh-keygen -Y sign here)') }
+else {
+$savedHome = $H
+W $SAs ('jay namespaces="agentkit" ' + (ReadT "$SA/key.pub").Trim() + "`n")
+$SW = "$SA/work/srcA"
+W "$SW/rules/ar.md" "Approved rule v1.`n"; W "$SW/kit.yaml" "name: srcA`nrequired:`n  rules: [ar]`n"
+G -C $SW init -q; G -C $SW config user.name t; G -C $SW config user.email t@t; G -C $SW add -A; G -C $SW commit -qm v1
+G clone -q --bare $SW "$SA/srcA.git"; G -C $SW remote add origin "$SA/srcA.git"; G -C $SW fetch -q origin
+$v1 = "$(& git -C $SW rev-parse HEAD)".Trim()
+$AW = "$SA/appr-work"; [void](New-Item -ItemType Directory -Force -Path $AW)
+G -C $AW init -q; G -C $AW config user.name t; G -C $AW config user.email t@t
+[void](ApprSign $AW "$SA/key" "serial: 1`nsrcA $v1`n"); G -C $AW add -A; G -C $AW commit -qm s1
+G clone -q --bare $AW "$SA/approvals.git"; G -C $AW remote add origin "$SA/approvals.git"
+Copy-Item "$AW/approved.txt" "$SA/old.txt"; Copy-Item "$AW/approved.txt.sig" "$SA/old.sig"
+function APush([string]$m) { G -C $AW add -A; G -C $AW commit -qm $m; G -C $AW push -q origin HEAD }
+$RH = Join-Path $T 'roothome'; Set-Home $RH
+Kit init (FileUrl "$SA/srcA.git") --approvals (FileUrl "$SA/approvals.git") --signers $SAs
+Check 'signed: init uses the approved commit' { $rc -eq 0 -and "$(& git -C "$RH/agentkit/srcA" rev-parse HEAD)".Trim() -eq $v1 -and (ReadT "$RH/.claude/CLAUDE.md").Contains('ar.md') }
+Check 'signed: machine.yaml keeps approvals and signers' { $m = ReadT "$RH/.config/agentkit/machine.yaml"; $m -match '(?m)^approvals: file://' -and $m -match '(?m)^signers: .' }
+W "$SW/rules/ar.md" "Unapproved v2.`n"; G -C $SW commit -qam v2; G -C $SW push -q origin HEAD
+$v2 = "$(& git -C $SW rev-parse HEAD)".Trim()
+Kit sync
+Check 'signed: an unapproved new commit is not used' { "$(& git -C "$RH/agentkit/srcA" rev-parse HEAD)".Trim() -eq $v1 -and (ReadT "$RH/agentkit/srcA/rules/ar.md").Contains('v1') }
+Kit add skill nothing
+Check 'signed: add/rm keep the approvals setting' { (ReadT "$RH/.config/agentkit/machine.yaml") -match '(?m)^approvals: ' }
+[void](ApprSign $AW "$SA/key" "serial: 2`nsrcA $v2`n"); APush s2
+Copy-Item "$AW/approved.txt" "$SA/v2.txt"; Copy-Item "$AW/approved.txt.sig" "$SA/v2.sig"
+Kit sync
+Check 'signed: approved v2 is used after approve' { "$(& git -C "$RH/agentkit/srcA" rev-parse HEAD)".Trim() -eq $v2 -and $out.Contains('換到核准的版本') }
+W "$AW/approved.txt" "# x`nserial: 9`nsrcA $v1`n"; APush forged       # write access to the approvals repo, but not the key
+Kit sync
+Check 'signed: an edited list without a new signature is refused' { $out.Contains('簽章不對') -and (ReadT "$RH/agentkit/srcA/rules/ar.md").Contains('Unapproved v2') }
+[void](ApprSign $AW "$SA/badkey" "# x`nserial: 9`nsrcA $v1`n"); APush forged2
+Kit sync
+Check 'signed: a list signed by another key is refused' { $out.Contains('簽章不對') -and (ReadT "$RH/agentkit/srcA/rules/ar.md").Contains('Unapproved v2') }
+Copy-Item "$SA/old.txt" "$AW/approved.txt" -Force; Copy-Item "$SA/old.sig" "$AW/approved.txt.sig" -Force; APush replay
+Kit sync
+Check 'signed: an older signed list (serial 1) cannot roll back' { $out.Contains('比上次用的舊') -and (ReadT "$RH/agentkit/srcA/rules/ar.md").Contains('Unapproved v2') }
+[IO.File]::AppendAllText("$RH/agentkit/srcA/rules/ar.md", "local edit`n")
+Copy-Item "$SA/v2.txt" "$AW/approved.txt" -Force; Copy-Item "$SA/v2.sig" "$AW/approved.txt.sig" -Force; APush restore
+Kit sync
+Check 'signed: local edits in the clone are reset to the approved commit' { -not (ReadT "$RH/agentkit/srcA/rules/ar.md").Contains('local edit') }
+# status --json with approvals: only the approvals clone that is here already (never pulled), nothing written
+[void](ApprSign $AW "$SA/key" "serial: 3`nsrcA $v2`n"); APush s3        # not pulled here
+function SnapS([string]$d) { # every file (not PowerShell's own cache, which each kit.ps1 run may touch) with its size and time
+    (@(Get-ChildItem -LiteralPath $d -Recurse -Force -File | Where-Object { $_.FullName -notmatch '[\\/](\.cache|\.local)[\\/]' } | Sort-Object FullName |
+        ForEach-Object { "$($_.FullName) $($_.Length) $($_.LastWriteTimeUtc.Ticks)" })) -join "`n" }
+$snapR = SnapS $RH
+KitJ status --json; $sjA = $out
+$srcJ = "{`"name`": `"srcA`", `"source`": `"$(FileUrl "$SA/srcA.git")`", `"dir`": $((ConvertTo-Json ((Resolve-Path "$RH/agentkit/srcA").ProviderPath)))"
+Check 'signed: status --json: serial, used, valid; the approved commit next to the one in use' { $rc -eq 0 -and $out.Contains("`n  `"approvals`": {`"serial`": 2, `"used`": 2, `"valid`": true},`n") -and $out.Contains("`n    $srcJ, `"commit`": `"$v2`", `"approved`": `"$v2`"}") }
+Check 'signed: status --json: nothing fetched or written' { (SnapS $RH) -ceq $snapR }
+Check 'signed: status --json: nothing waits for the signer (the remote is at the approved commit)' { $out.Contains("`n  `"pending`": [],`n") }
+if (-not $OnWindows) {
+    $bash = (& /bin/sh -c "cd '$Repo' && HOME='$RH' unix/kit status --json 2>/dev/null") -join "`n"
+    Check 'signed: status --json: unix/kit prints the same' { ($bash -replace '"at": [0-9]+,', '"at": 0,') -ceq ($sjA -replace '"at": [0-9]+,', '"at": 0,') }
+}
+[IO.File]::AppendAllText("$RH/agentkit/.approvals/approved.txt", "srcB 0123456789012345678901234567890123456789`n")
+KitJ status --json
+Check 'signed: status --json: an edited approved.txt is not valid, no approved commits' { $rc -eq 0 -and $out.Contains("`n  `"approvals`": {`"serial`": 2, `"used`": 2, `"valid`": false},`n") -and $out.Contains("`n    $srcJ, `"commit`": `"$v2`", `"approved`": null}") }
+G -C "$RH/agentkit/.approvals" checkout -q -- approved.txt
+$NC = Join-Path $T 'noclone'; [void](New-Item -ItemType Directory -Force -Path "$NC/conf"); Copy-Item "$RH/.config/agentkit/machine.yaml" "$NC/conf/"
+$env:AGENTKIT_CONFIG = "$NC/conf"; $env:AGENTKIT_SOURCES = Join-Path $NC 'src'
+KitJ status --json
+Remove-Item env:AGENTKIT_CONFIG, env:AGENTKIT_SOURCES
+Check 'signed: status --json: no approvals clone yet: not valid, none made' { $rc -eq 0 -and $out.Contains("`n  `"approvals`": {`"serial`": null, `"used`": null, `"valid`": false},`n") -and
+    $out.Contains("`"dir`": $(ConvertTo-Json (Join-Path (Join-Path $NC 'src') 'srcA')), `"commit`": null, `"approved`": null}") -and -not (Test-Path "$NC/src") -and @(Get-ChildItem "$NC/conf").Count -eq 1 }
+# a new commit on the source, fetched by kit sync but not approved: kit status says it waits for the signer
+W "$SW/rules/ar.md" "v3, not approved yet.`n"; G -C $SW commit -qam v3; G -C $SW push -q origin HEAD
+$v3 = "$(& git -C $SW rev-parse HEAD)".Trim()
+Kit sync
+KitJ status --json
+Check 'signed: status --json: a new commit kit sync fetched but nobody approved waits for the signer (pending, kind sign)' {
+    $p = @(($out | ConvertFrom-Json).pending)
+    "$(& git -C "$RH/agentkit/srcA" rev-parse HEAD)".Trim() -eq $v2 -and $p.Count -eq 1 -and $p[0].kind -eq 'sign' -and $p[0].name -eq 'srcA' -and $p[0].commits -eq 1 -and $p[0].head -eq $v3 -and
+        $p[0].what -eq 'srcA 有 1 個新 commit 等核准' -and $p[0].since -gt 1e12 -and $p[0].machine }
+[void](ApprSign $AW "$SA/key" "serial: 4`nsrcA $v3`n"); APush s4
+Kit sync
+KitJ status --json
+Check 'signed: status --json: approved and synced: nothing pending' { $out.Contains("`n  `"pending`": [],`n") -and "$(& git -C "$RH/agentkit/srcA" rev-parse HEAD)".Trim() -eq $v3 }
+$env:AGENTKIT_SOURCES = "$RH/agentkit2"
+Kit init (FileUrl "$SA/srcA.git") --approvals "$SA/nowhere" --signers $SAs
+Remove-Item env:AGENTKIT_SOURCES
+Check 'signed: init without a valid list stops' { $rc -ne 0 -and -not (Test-Path "$RH/agentkit2/srcA/rules") }
+Kit init (FileUrl "$SA/srcA.git") --approvals (FileUrl "$SA/approvals.git")
+Check 'signed: --approvals without --signers refused' { $rc -ne 0 -and $out.Contains('要一起給') }
+Set-Home $savedHome
+}
+
+# ---------- plugins: kit's own marketplace, each tool installs it; Codex's hooks trusted only for a signed version ----------
+$PG = Join-Path $T 'plug'; $PB = Join-Path $PG 'bin'; $savedHome = $H; $savedP = $env:PATH
+Set-Home (Join-Path $PG 'home')
+W "$PB/fake.ps1" @'
+$tool = $args[0]; $rest = @($args | Select-Object -Skip 1)
+[IO.File]::AppendAllText($env:FAKE_LOG, "$tool $($rest -join ' ')`n")
+if ($tool -eq 'codex' -and $rest[0] -eq 'plugin' -and $rest[1] -eq 'add') {
+    $n = $rest[2] -replace '@kit$', ''; $c = Join-Path $env:FAKE_DIR "cxcache/$n"
+    if (Test-Path -LiteralPath $c) { Remove-Item -LiteralPath $c -Recurse -Force }
+    Copy-Item -LiteralPath (Join-Path $env:HOME ".config/agentkit/plugins/$n") -Destination $c -Recurse -Force
+    if (Test-Path -LiteralPath (Join-Path $env:FAKE_DIR 'cxchange')) { [IO.File]::AppendAllText((Join-Path $c 'x'), "changed`n") }
+    "Installed plugin root: $c"
+}
+if ($tool -eq 'codex' -and $rest[0] -eq 'app-server') {   # Codex's JSON-RPC on stdin/stdout: hooks/list, config/batchWrite
+    while ($null -ne ($l = [Console]::In.ReadLine())) {
+        if ($l.Contains('"method":"hooks/list"')) {
+            $i = [regex]::Match($l, '"id":([0-9]+)').Groups[1].Value; $st = if (Test-Path -LiteralPath (Join-Path $env:FAKE_DIR 'cxtrusted')) { 'trusted' } else { 'untrusted' }
+            [Console]::Out.WriteLine('{"id":' + $i + ',"result":{"data":[{"cwd":"/","hooks":[{"key":"demo@kit:hooks/h.json:session_start:0:0","eventName":"sessionStart","pluginId":"demo@kit","currentHash":"sha256:aa/sha256:bb","trustStatus":"' + $st + '"},{"key":"/x/hooks.json:stop:0:0","pluginId":null,"currentHash":"sha256:cc","trustStatus":"untrusted"}]}]}}')
+        } elseif ($l.Contains('config/batchWrite')) {
+            [IO.File]::WriteAllText((Join-Path $env:FAKE_DIR 'cxwrite'), "$l`n"); [IO.File]::WriteAllText((Join-Path $env:FAKE_DIR 'cxtrusted'), '')
+            [Console]::Out.WriteLine('{"id":3,"result":{"status":"ok"}}')
+        } elseif ($l.Contains('"id":1,')) { [Console]::Out.WriteLine('{"id":1,"result":{}}') }
+        [Console]::Out.Flush()
+    }
+}
+exit 0
+'@
+foreach ($t in 'claude', 'codex', 'omp') {
+    if ($OnWindows) { W "$PB/$t.cmd" "@`"$Exe`" -NoProfile -ExecutionPolicy Bypass -File `"$PB\fake.ps1`" $t %*`r`n" }
+    else { W "$PB/$t" "#!/bin/sh`nexec '$Exe' -NoProfile -File '$PB/fake.ps1' $t `"`$@`"`n"; & chmod +x "$PB/$t" }
+}
+$env:FAKE_LOG = "$PG/log"; $env:FAKE_DIR = $PG; $env:PATH = $PB + $sep + $env:PATH
+W "$PG/src/rules/pr.md" "Plugin rule.`n"
+W "$PG/src/plugins/demo/.claude-plugin/plugin.json" "{`"name`": `"demo`", `"version`": `"1.0.0`", `"description`": `"A demo plugin`", `"hooks`": [`"./hooks/h.json`"]}`n"
+W "$PG/src/plugins/demo/hooks/h.json" "{`"hooks`": {`"SessionStart`": [{`"hooks`": [{`"type`": `"command`", `"command`": `"node x.js`"}]}]}}`n"
+W "$PG/src/plugins/demo/skills/demo/SKILL.md" "---`nname: demo`ndescription: d`n---`nbody`n"
+G -C "$PG/src" init -q; G -C "$PG/src" config user.name t; G -C "$PG/src" config user.email t@t; G -C "$PG/src" add -A; G -C "$PG/src" commit -qm v1
+function PLog { if (Test-Path -LiteralPath "$PG/log") { @((ReadT "$PG/log") -split "`n" | ForEach-Object { $_.TrimEnd("`r") }) } else { @() } }
+$PC = "$H/.config/agentkit/plugins"; $PCj = $PC.Replace('\', '/'); $PD = "$H/.config/agentkit/notes/pending"
+Kit init "$PG/src"
+Kit list
+Check 'plugins: kit list shows a plugin' { $out -match '(?m)^ +plugin:demo$' }
+KitJ list --json
+Check 'plugins: list --json, kind plugin with its description and the programs its hooks run' { $p = @(($out | ConvertFrom-Json).items | Where-Object { $_.kind -eq 'plugin' }); $p.Count -eq 1 -and $p[0].status -eq 'unused' -and $p[0].description -eq 'A demo plugin' -and @($p[0].needs | ForEach-Object { $_.tool }) -contains 'node' }
+Kit add plugin demo
+Check "plugins: add copies it to kit's marketplace (the same files as unix/kit)" { $rc -eq 0 -and (Test-Path "$PC/demo/hooks/h.json") -and (Test-Path "$PC/demo/.claude-plugin/plugin.json") -and
+    (ReadT "$PC/.claude-plugin/marketplace.json") -ceq "{`"name`":`"kit`",`"owner`":{`"name`":`"kit`"},`"plugins`":[{`"name`":`"demo`",`"source`":`"./demo`"}]}`n" -and
+    (ReadT "$PC/.agents/plugins/marketplace.json") -ceq "{`"name`":`"kit`",`"interface`":{`"displayName`":`"kit`"},`"plugins`":[{`"name`":`"demo`",`"source`":{`"source`":`"local`",`"path`":`"./demo`"},`"policy`":{`"installation`":`"AVAILABLE`",`"authentication`":`"ON_INSTALL`"},`"category`":`"Productivity`"}]}`n" }
+$l = PLog
+Check "plugins: each tool installs it from kit's marketplace" { @($l | Where-Object { $_.Replace('\', '/') -ceq "claude plugin marketplace add $PCj --scope user" }).Count -eq 1 -and ($l -ccontains 'claude plugin install demo@kit --scope user') -and ($l -ccontains 'codex plugin add demo@kit') -and ($l -ccontains 'omp plugin install demo@kit --scope user --force') }
+Check "plugins: not signed -> Codex's hooks not trusted by kit, asked instead" { -not @($l | Where-Object { $_ -like 'codex app-server*' }) -and -not (Test-Path "$PG/cxwrite") -and (ReadT "$PD/codex-hooks-demo").Contains('/hooks') -and $out.Contains('沒有簽章') }
+Check 'plugins: the pending item is kept until done (no agent)' { $x = @((ReadT "$PD/codex-hooks-demo") -split "`n"); $x[0] -eq '' -and $x[1] -eq '' }
+[IO.File]::WriteAllText("$PG/log", ''); Kit sync
+Check 'plugins: sync with nothing changed installs nothing again' { -not @(PLog | Where-Object { $_ -match 'install|plugin add' }) }
+if ($sshOk) {   # signed later on the computer that signs (no approvals of its own: the approvals and key kit approve remembered)
+    [void](ApprSign "$PG/appr" "$SA/key" "serial: 1`nsrc $("$(& git -C "$PG/src" rev-parse HEAD)".Trim())`n")
+    [IO.File]::AppendAllText("$H/.config/agentkit/state.tsv", "sign`tapprovals`t$PG/appr`nsign`tkey`t$SA/key`n")
+    [IO.File]::WriteAllText("$PG/log", ''); Kit sync
+    $l = PLog
+    Check 'plugins: signed after it was installed -> the next sync has Codex trust it (the key that signed here)' { ($l -ccontains 'codex plugin add demo@kit') -and -not @($l | Where-Object { $_ -match '^(claude|omp) plugin install' }) -and (Test-Path "$PG/cxwrite") -and -not (Test-Path "$PD/codex-hooks-demo") -and $out.Contains('Codex 已信任') }
+    [IO.File]::WriteAllText("$PG/log", ''); Kit sync
+    Check 'plugins: trusted, nothing to do at the next sync' { -not @(PLog | Where-Object { $_ -match 'plugin add|install' }) }
+    Remove-Item -LiteralPath "$PG/cxwrite", "$PG/cxtrusted" -Force -ErrorAction SilentlyContinue
+}
+Kit add --dir $PG plugin demo
+Check 'plugins: only for the whole account (no --dir)' { $rc -ne 0 -and $out.Contains('只能加到整個帳號') }
+Kit rm plugin demo
+$l = PLog
+Check "plugins: rm uninstalls from each tool, kit's copy gone" { ($l -ccontains 'claude plugin uninstall demo@kit --scope user') -and ($l -ccontains 'codex plugin remove demo@kit') -and ($l -ccontains 'omp plugin uninstall demo@kit --scope user') -and -not (Test-Path "$PC/demo") -and -not (Test-Path "$PD/codex-hooks-demo") }
+W "$PG/src/plugins/demo/skills/demo/SKILL.md" "---`nname: demo`ndescription: d2`n---`nbody`n"; G -C "$PG/src" commit -qam v2
+Kit add plugin demo
+Check 'plugins: a changed source is copied and installed again' { $rc -eq 0 -and (ReadT "$PC/demo/skills/demo/SKILL.md").Contains('d2') }
+if ($sshOk) {   # this machine's approvals say this commit -> kit has Codex trust the hooks (Codex's own hashes), and asks Codex again
+    Kit rm plugin demo; Remove-Item -LiteralPath "$PG/cxwrite", "$PG/cxtrusted" -Force -ErrorAction SilentlyContinue
+    [void](ApprSign "$PG/appr" "$SA/key" "serial: 2`nsrc $("$(& git -C "$PG/src" rev-parse HEAD)".Trim())`n")
+    [IO.File]::AppendAllText("$H/.config/agentkit/machine.yaml", "approvals: $PG/appr`nsigners: $SAs`n")
+    Kit add plugin demo
+    Check "plugins: signed -> Codex trusts the plugin's hooks (only those), checked with Codex" { $w = ReadT "$PG/cxwrite"; $w.Contains('"keyPath":"hooks.state"') -and $w.Contains('"demo@kit:hooks/h.json:session_start:0:0":{"trusted_hash":"sha256:aa","trusted_content_hash":"sha256:bb"}') -and -not $w.Contains('/x/hooks.json') -and $out.Contains('Codex 已信任') -and -not (Test-Path "$PD/codex-hooks-demo") }
+    Kit rm plugin demo; Remove-Item -LiteralPath "$PG/cxwrite", "$PG/cxtrusted" -Force -ErrorAction SilentlyContinue
+    [IO.File]::AppendAllText("$PG/src/plugins/demo/hooks/h.json", "`n"); G -C "$PG/src" commit -qam v3
+    Kit add plugin demo
+    Check 'plugins: a commit nobody signed -> not trusted' { -not (Test-Path "$PG/cxwrite") -and (Test-Path "$PD/codex-hooks-demo") -and (ReadT "$H/.config/agentkit/machine.yaml").Contains('approvals: ') }
+    Kit rm plugin demo; [void](ApprSign "$PG/appr" "$SA/key" "serial: 3`nsrc $("$(& git -C "$PG/src" rev-parse HEAD)".Trim())`n"); W "$PG/cxchange" "x`n"
+    Kit add plugin demo
+    Check "plugins: Codex's copy not the same as kit's -> not trusted" { -not (Test-Path "$PG/cxwrite") -and (Test-Path "$PD/codex-hooks-demo") }
+    Remove-Item -LiteralPath "$PG/cxchange" -Force
+}
+Kit uninstall
+$l = PLog
+Check "plugins: uninstall takes them out and kit's marketplace with them" { ($l -ccontains 'claude plugin marketplace remove kit') -and ($l -ccontains 'omp plugin marketplace remove kit') -and ($l -ccontains 'codex plugin marketplace remove kit') -and -not (Test-Path $PC) }
+# collect: the whole plugin, only what the tools load; --skip remembered in the lock, out of plugin.json too
+$PU = Join-Path $PG 'upstream'
+W "$PU/.claude-plugin/plugin.json" "{`"name`": `"up`", `"description`": `"Up plugin`", `"hooks`": [`"./hooks/a.json`", `"./hooks/band.json`"], `"types`": `"./hooks/band/t.d.ts`"}`n"
+W "$PU/package.json" "{`"name`": `"up`", `"pi`": {`"extensions`": [`"./pi-ext/index.js`"]}}`n"
+W "$PU/hooks/a.json" "{}`n"; W "$PU/hooks/band.json" "{}`n"; W "$PU/hooks/band/t.d.ts" "x`n"; W "$PU/hooks/run.js" "run()`n"
+W "$PU/pi-ext/index.js" "ext()`n"; W "$PU/docs/d.md" "doc`n"; W "$PU/.github/ci.yml" "ci`n"; W "$PU/LICENSE" "MIT`n"; W "$PU/.claude-plugin/marketplace.json" "{`"name`": `"up`"}`n"
+W "$PU/skills/one/SKILL.md" "---`nname: one`ndescription: o`n---`nb`n"
+G -C $PU init -q; G -C $PU config user.name t; G -C $PU config user.email t@t; G -C $PU add -A; G -C $PU commit -qm up
+$CL = Join-Path $PG 'lib'
+W "$CL/kit.yaml" "push: direct`nmaintainers: [t@t]`ncollect_sources: [$(FileUrl $PU)]`n"
+G -C $CL init -q; G -C $CL config user.name t; G -C $CL config user.email t@t; G -C $CL add -A; G -C $CL commit -qm l
+Push-Location $CL
+KitJ collect (FileUrl $PU) --look --skip hooks/band.json
+Check 'collect --look: a plugin is one item, kind plugin' { $s = @(($out | ConvertFrom-Json).skills); $s.Count -eq 1 -and $s[0].kind -eq 'plugin' -and $s[0].name -eq 'up' -and $s[0].description -eq 'Up plugin' -and $s[0].scripts.Contains('hooks/run.js') }
+Kit collect (FileUrl $PU) --skip hooks/band.json --skip hooks/band
+Check 'collect: a plugin into plugins/<name>, only the parts the tools load' { $rc -eq 0 -and (Test-Path "$CL/plugins/up/hooks/a.json") -and (Test-Path "$CL/plugins/up/pi-ext/index.js") -and (Test-Path "$CL/plugins/up/skills/one/SKILL.md") -and (Test-Path "$CL/plugins/up/LICENSE") -and -not (Test-Path "$CL/plugins/up/docs") -and -not (Test-Path "$CL/plugins/up/.github") -and $out.Contains('kit add plugin up') }
+Check 'collect --skip: left out, and out of plugin.json (hooks, a key naming it); no backup left in the copy' { -not (Test-Path "$CL/plugins/up/hooks/band.json") -and -not (Test-Path "$CL/plugins/up/hooks/band") -and -not (ReadT "$CL/plugins/up/.claude-plugin/plugin.json").Contains('band') -and (ReadT "$CL/plugins/up/.claude-plugin/plugin.json").Contains('./hooks/a.json') -and -not (Test-Path "$CL/plugins/up/.claude-plugin/plugin.json.kit-backup") -and -not (Test-Path "$CL/plugins/up/.claude-plugin/marketplace.json") }
+Check 'collect --skip: the lock remembers it' { @((ReadT "$CL/third_party.lock") -split "`n" | Where-Object { $f = $_.Split("`t"); $f[0] -eq 'up' -and $f.Count -eq 8 -and $f[7] -eq 'hooks/band.json,hooks/band' }).Count -eq 1 -and (ReadT "$CL/third_party.lock").StartsWith('# third_party.lock - written by kit collect; name url path ref commit license date [skip]') }
+G -C $CL add -A; G -C $CL commit -qm up; W "$PU/hooks/band.json.new" "{}`n"; G -C $PU add -A; G -C $PU commit -qm up2
+Kit collect up
+Check 'collect <name> again: the same --skip' { $rc -eq 0 -and -not (Test-Path "$CL/plugins/up/hooks/band.json") -and (Test-Path "$CL/plugins/up/hooks/band.json.new") -and -not (ReadT "$CL/plugins/up/.claude-plugin/plugin.json").Contains('band.json"') }
+W "$CL/skills/up/SKILL.md" "---`nname: up`ndescription: s`n---`nb`n"
+Kit collect up
+Check 'collect: a plugin and a skill may not share a name' { $rc -ne 0 -and $out.Contains('同名的 skill:up') }
+Remove-Item -Recurse -Force "$CL/skills/up"
+Kit collect (FileUrl $PU) --skip ../x
+Check 'collect --skip: a path outside the plugin refused' { $rc -ne 0 -and $out.Contains('--skip 後面要接') }
+Pop-Location
+$env:PATH = $savedP; Set-Home $savedHome
 
 # ---------- the script files themselves ----------
 Check 'kit.ps1 and install.ps1 start with a UTF-8 BOM (needed by PowerShell 5.1)' {

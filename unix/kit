@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.8
+KIT_API=1.9
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -347,6 +347,7 @@ item_path() { # item_path DIR KIND NAME
         skill) printf '%s/skills/%s/SKILL.md\n' "$1" "$3";;
         mcp)   printf '%s/mcp/%s.yaml\n' "$1" "$3";;
         agent) printf '%s/agents/%s.md\n' "$1" "$3";;
+        plugin) printf '%s/plugins/%s/.claude-plugin/plugin.json\n' "$1" "$3";;
     esac
 }
 find_item() { # find_item KIND NAME -> path of the first source that has it
@@ -365,16 +366,17 @@ available() { # all kind:name in all sources
         for f in "$d"/skills/*/SKILL.md;   do [ -f "$f" ] && echo "skill:$(basename "$(dirname "$f")")"; done
         for f in "$d"/mcp/*.yaml;          do [ -f "$f" ] && echo "mcp:$(basename "$f" .yaml)"; done
         for f in "$d"/agents/*.md;         do [ -f "$f" ] && echo "agent:$(basename "$f" .md)"; done
+        for f in "$d"/plugins/*/.claude-plugin/plugin.json; do [ -f "$f" ] && echo "plugin:$(basename "${f%/.claude-plugin/plugin.json}")"; done
     done | awk '!seen[$0]++'
 }
 required_items() {
     src_dirs | while IFS= read -r d; do
-        for k in rule skill mcp; do yget "$d/kit.yaml" "required.${k}s" | sed "s/^/$k:/"; done
+        for k in rule skill mcp plugin; do yget "$d/kit.yaml" "required.${k}s" | sed "s/^/$k:/"; done
     done | awk 'NF && !seen[$0]++'
 }
 recommended_items() {
     src_dirs | while IFS= read -r d; do
-        for k in rule skill mcp; do yget "$d/kit.yaml" "recommended.${k}s" | sed "s/^/$k:/"; done
+        for k in rule skill mcp plugin; do yget "$d/kit.yaml" "recommended.${k}s" | sed "s/^/$k:/"; done
     done | awk 'NF && !seen[$0]++'
 }
 required_deny() { src_dirs | while IFS= read -r d; do yget "$d/kit.yaml" required.tools.deny; done | awk 'NF && !seen[$0]++'; }
@@ -654,6 +656,135 @@ EOF
     rm -f "$ops"
 }
 
+# ---------- plugins ----------
+# A plugin (plugins/<name>/ in a source, with .claude-plugin/plugin.json; maybe .codex-plugin/plugin.json and a
+# package.json whose pi or omp key names omp's extension) goes to each tool the way the tool installs a plugin, from
+# kit's own marketplace on this machine: $KIT_CONF/plugins holds a copy of each wanted plugin as the source has it (never
+# the author's site, so never an update nobody looked at). Claude runs it from there; Codex and omp copy it into their
+# own folder, so a changed copy is installed again. Codex asks once per version to trust a plugin's hooks (/hooks):
+# kit does that itself only for a version signed in the approvals (kit approve) and only when Codex's copy is the same
+# as kit's; Codex works out the hashes and writes them (kit asks its app server). Otherwise kit pending asks you.
+kit_pending_ask() { ( QUIET=1 cmd_pending add "$2" --id "$1" --keep ) >/dev/null 2>&1; warn "$2"; }   # kit_pending_ask ID TEXT
+kit_pending_done() { rm -f "$PEND_DIR/$1" 2>/dev/null; return 0; }
+plugin_root() { printf '%s/plugins\n' "$KIT_CONF"; }
+plugin_tools() { local t; for t in claude codex omp; do command -v "$t" >/dev/null 2>&1 && printf '%s\n' "$t"; done; }
+plugin_market() { # plugin_market NAMES : kit's marketplace lists them (Claude and omp read .claude-plugin, Codex .agents)
+    local r n c="" a=""; r=$(plugin_root)
+    for n in $1; do
+        c="$c${c:+,}{\"name\":\"$n\",\"source\":\"./$n\"}"
+        a="$a${a:+,}{\"name\":\"$n\",\"source\":{\"source\":\"local\",\"path\":\"./$n\"},\"policy\":{\"installation\":\"AVAILABLE\",\"authentication\":\"ON_INSTALL\"},\"category\":\"Productivity\"}"
+    done
+    mkdir -p "$r/.claude-plugin" "$r/.agents/plugins" || return 1
+    printf '{"name":"kit","owner":{"name":"kit"},"plugins":[%s]}\n' "$c" > "$r/.claude-plugin/marketplace.json" &&
+    printf '{"name":"kit","interface":{"displayName":"kit"},"plugins":[%s]}\n' "$a" > "$r/.agents/plugins/marketplace.json"
+}
+plugin_run() { # plugin_run TOOL ARGS... : the tool's own plugin command; its words go to PLUGIN_SAID
+    PLUGIN_SAID=$("$@" 2>&1) && return 0
+    warn "$1 $2 ${3:-}${4:+ $4} 沒成功：$(printf '%s\n' "$PLUGIN_SAID" | awk 'NF' | tail -n 2 | tr '\n' ' ')"; return 1
+}
+plugin_install() { # plugin_install TOOL NAME : install (again) NAME@kit, adding kit's marketplace first
+    local r; r=$(plugin_root)
+    case $1 in
+        claude) plugin_run claude plugin marketplace add "$r" --scope user && plugin_run claude plugin marketplace update kit &&
+                plugin_run claude plugin install "$2@kit" --scope user;;
+        codex)  plugin_run codex plugin marketplace add "$r" && plugin_run codex plugin add "$2@kit" && codex_plugin_trust "$2";;
+        omp)    { omp plugin marketplace update kit >/dev/null 2>&1 || plugin_run omp plugin marketplace add "$r"; } &&
+                plugin_run omp plugin install "$2@kit" --scope user --force;;
+    esac
+}
+plugin_uninstall() { # plugin_uninstall TOOL NAME
+    case $1 in
+        claude) plugin_run claude plugin uninstall "$2@kit" --scope user;;
+        codex)  plugin_run codex plugin remove "$2@kit";;
+        omp)    plugin_run omp plugin uninstall "$2@kit" --scope user;;
+    esac
+}
+plugin_signed() { # plugin_signed NAME : the source's folder for it is what the signed approvals say (kit approve): this
+    # machine's approvals (kit init --approvals), else, on the computer that signs, the approvals and key kit approve
+    # remembered (signed by that key)
+    local p d sha f k s ok=0; p=$(find_item plugin "$1") || return 1; d=${p%/plugins/*}
+    if [ -n "$M_APPROVALS" ]; then
+        read_approvals 2>/dev/null || return 1
+        sha=$(approved_sha "$(src_name "$d")") || return 1
+    else
+        f="$(state_get sign approvals)/approved.txt"; k=$(state_get sign key)
+        [ -f "$f" ] && [ -f "$f.sig" ] && [ -n "$k" ] && [ -f "$k.pub" ] || return 1
+        s=$(mktemp "${TMPDIR:-/tmp}/kit-signer.XXXXXX") || return 1
+        printf 'me namespaces="agentkit" %s\n' "$(cat "$k.pub")" > "$s"
+        ssh-keygen -Y verify -f "$s" -I me -n agentkit -s "$f.sig" < "$f" >/dev/null 2>&1 && ok=1; rm -f "$s"
+        [ $ok = 1 ] || return 1
+        sha=$(awk -v n="$(src_name "$d")" 'NF == 2 && $1 == n { print $2; exit }' "$f"); [ -n "$sha" ] || return 1
+    fi
+    git -C "$d" diff --quiet "$sha" -- "plugins/$1" 2>/dev/null && [ -z "$(git -C "$d" status --porcelain -- "plugins/$1" 2>/dev/null)" ]
+}
+codex_hooks_untrusted() { # codex_hooks_untrusted NAME < hooks/list's answer -> "KEY":{"trusted_hash":..} for NAME@kit's
+    awk -v id="\"pluginId\":\"$1@kit\"" '{ n = split($0, a, /\{"key":/)
+        for (i = 2; i <= n; i++) {
+            if (index(a[i], id) == 0 || a[i] !~ /"trustStatus":"(untrusted|modified)"/) continue
+            k = a[i]; sub(/^"/, "", k); sub(/".*/, "", k)
+            h = a[i]; sub(/.*"currentHash":"/, "", h); sub(/".*/, "", h)
+            if (k == "" || index(h, "/") == 0) continue
+            printf "%s\"%s\":{\"trusted_hash\":\"%s\",\"trusted_content_hash\":\"%s\"}", (c++ ? "," : ""), k, substr(h, 1, index(h, "/") - 1), substr(h, index(h, "/") + 1)
+        } }'
+}
+codex_plugin_trust() { # codex_plugin_trust NAME : after codex plugin add (PLUGIN_SAID names Codex's copy)
+    local n=$1 copy out w i
+    copy=$(printf '%s\n' "$PLUGIN_SAID" | sed -n 's/^Installed plugin root: //p' | tail -n 1)
+    if ! plugin_signed "$n" || [ -z "$copy" ] || ! diff -rq "$(plugin_root)/$n" "$copy" >/dev/null 2>&1; then
+        kit_pending_ask "codex-hooks-$n" "要你同意：外掛 $n 的 hook 在 Codex 打 /hooks 信任一次（這個版本沒有簽章，kit 不自己信任）"; return 0
+    fi
+    out=$(mktemp "${TMPDIR:-/tmp}/kit-codex.XXXXXX")
+    {
+        printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"kit","version":%s}}}\n{"jsonrpc":"2.0","method":"initialized"}\n' "$(json_s "$KIT_VERSION")"
+        for i in 2 3 4; do
+            [ $i = 3 ] && { w=$(codex_hooks_untrusted "$n" < "$out"); [ -n "$w" ] || break
+                printf '{"jsonrpc":"2.0","id":3,"method":"config/batchWrite","params":{"edits":[{"keyPath":"hooks.state","mergeStrategy":"upsert","value":{%s}}]}}\n' "$w"; }
+            [ $i = 3 ] || printf '{"jsonrpc":"2.0","id":%s,"method":"hooks/list","params":{"cwds":[%s]}}\n' $i "$(json_s "$HOME")"
+            w=0; while ! grep -q "^{\"id\":$i," "$out" && [ $w -lt 150 ]; do sleep 0.2; w=$((w + 1)); done
+        done
+    } | codex app-server > "$out" 2>/dev/null
+    w=$(grep '^{"id":4,' "$out"); [ -n "$w" ] || w=$(grep '^{"id":2,' "$out")
+    if [ -n "$w" ] && [ -z "$(printf '%s\n' "$w" | codex_hooks_untrusted "$n")" ]; then
+        rm -f "$out"; kit_pending_done "codex-hooks-$n"; say "  外掛 $n 的 hook：Codex 已信任（簽過的版本）"; return 0
+    fi
+    rm -f "$out"
+    kit_pending_ask "codex-hooks-$n" "要你同意：外掛 $n 的 hook 在 Codex 打 /hooks 信任一次（kit 沒辦法讓 Codex 記住）"
+}
+sync_plugins() { # sync_plugins : wanted plugin names on stdin -> kit's copies, and each tool installs them
+    local names r n p h old t ok
+    names=$(cat); r=$(plugin_root)
+    [ -n "$names$(state_list plugin)" ] || return 0
+    for n in $names; do
+        p=$(find_item plugin "$n") || { warn "plugin $n not found in any source"; continue; }
+        p=${p%/.claude-plugin/plugin.json}; h=$(dir_hash "$p"); old=$(state_get plugin "$n")
+        [ "$h" = "$old" ] && [ -d "$r/$n" ] && continue
+        mkdir -p "$r" && rm -rf "${r:?}/$n" && cp -R "$p" "$r/$n" || { warn "沒辦法複製外掛 $n 到 $r"; rm -rf "${r:?}/$n"; continue; }
+        state_set plugin "$n" "$h"; say "  plugin $n → $r"
+    done
+    plugin_market "$(state_list plugin)" || { warn "沒辦法寫 kit 的外掛清單（${r}）"; return 0; }
+    for t in $(plugin_tools); do
+        for n in $(state_list plugin); do
+            printf '%s\n' "$names" | grep -qxF "$n" || continue
+            h=$(state_get plugin "$n")
+            # installed: done, unless Codex still asks to trust its hooks and the version is signed by now
+            [ "$(state_get "plugin.$t" "$n")" = "$h" ] && { [ "$t" = codex ] && [ -f "$PEND_DIR/codex-hooks-$n" ] && plugin_signed "$n" || continue; }
+            plugin_install "$t" "$n" && { state_set "plugin.$t" "$n" "$h"; say "  plugin $n → $t"; }
+        done
+        for n in $(state_list "plugin.$t"); do
+            printf '%s\n' "$names" | grep -qxF "$n" && continue
+            plugin_uninstall "$t" "$n" && { state_del "plugin.$t" "$n"; say "  removed plugin $n ← $t"; }
+        done
+    done
+    # codex plugin puts its tables at the end of config.toml, inside kit's block: out of it now, quietly
+    has_codex && QUIET=1 codex_keep "$(cat "$CODEX_LAST" 2>/dev/null)"
+    for n in $(state_list plugin); do        # kit's copy goes once no tool has it any more
+        printf '%s\n' "$names" | grep -qxF "$n" && continue
+        ok=1; for t in claude codex omp; do [ -z "$(state_get "plugin.$t" "$n")" ] || ok=0; done
+        [ $ok = 1 ] && { rm -rf "${r:?}/$n"; state_del plugin "$n"; kit_pending_done "codex-hooks-$n"; }
+    done
+    plugin_market "$(state_list plugin)"
+}
+
 toml_user() { # toml_user FILE : FILE without kit's blocks (what the user wrote)
     awk -v b="$TOML_BEGIN" -v e="$TOML_END" -v tb="$TOP_BEGIN" -v te="$TOP_END" \
         '$0 == b || $0 == tb { s = 1 } !s { print } $0 == e || $0 == te { s = 0 }' "$1" 2>/dev/null
@@ -743,11 +874,12 @@ EOF
 }
 
 apply_claude() {
-    local want n p dst h old ops k rules skills mcps
+    local want n p dst h old ops k rules skills mcps plugins
     want=$(wanted)
     rules=$(printf '%s\n' "$want" | sed -n 's/^rule://p')
     skills=$(printf '%s\n' "$want" | sed -n 's/^skill://p')
     mcps=$(printf '%s\n' "$want" | sed -n 's/^mcp://p')
+    plugins=$(printf '%s\n' "$want" | sed -n 's/^plugin://p')
 
     # (no pipelines here: a file kit cannot write stops kit, before state.tsv says it was done)
     # Claude: rules as @imports (Codex and omp: AGENTS.md gets the rule text itself), skills, MCP in ~/.claude.json
@@ -766,6 +898,7 @@ apply_claude() {
     fi
     has_codex && codex_hooks                                 # the same two hooks as Claude's, for Codex and omp
     has_omp && omp_hook
+    sync_plugins <<< "$plugins"
 
     ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
     # tool deny rules -> ~/.claude/settings.json
@@ -1468,6 +1601,11 @@ skill_needs() { # skill_needs SKILLDIR [SOURCEDIR] -> name<TAB>min per program t
             [ -n "$v" ] && echo "node>=$v.min"
         fi
         if [ -f "$d/requirements.txt" ] || [ -f "$d/pyproject.toml" ]; then echo python; fi
+        for v in "$d"/hooks/*.json; do       # a plugin's hooks: the program each one runs
+            [ -f "$v" ] || continue
+            LC_ALL=C grep -qE '"(command|bash)"[[:space:]]*:[[:space:]]*"node[ \\]' "$v" && echo node
+            LC_ALL=C grep -qE '"(command|bash)"[[:space:]]*:[[:space:]]*"python3?[ \\]' "$v" && echo python
+        done
     } | awk -F'>=' '{ n = $1; gsub(/[ \t]/, "", n); m = $2; gsub(/[ \t]/, "", m)
             if (n !~ /^[a-z0-9][a-z0-9-]*$/) next
             only = sub(/\.min$/, "", m)                       # package.json: only a lowest version, not a need by itself
@@ -3583,11 +3721,49 @@ json_s() { # a JSON string: \ " TAB LF CR escaped, other control characters drop
     case $s in *[$'\001'-$'\037']*) s=$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\037');; esac
     printf '"%s"' "$s"
 }
-item_desc() { # item_desc KIND FILE : the description of a skill or agent (frontmatter) or of an MCP yaml
+item_desc() { # item_desc KIND FILE : the description of a skill or agent (frontmatter), of an MCP yaml, or a rule's first "# " heading
     case $1 in
+        rule) grep -m 1 '^# ' "$2" 2>/dev/null | sed 's/^# *//' | tr -d '\r';;
         skill|agent) fm_starts "$2" && fm_val "$(fm_of "$2")" description | head -n 1;;
         mcp) yget "$2" description 2>/dev/null | head -n 1;;
+        plugin) unjs "$(json_get "$2" description | sed 's/^"//; s/"$//')";;
     esac
+}
+# Chinese descriptions for the panel (kit describe): descriptions-zh.txt in each source, one line per item:
+# "<kind>:<name> TAB <hash of the description it translates> TAB <中文>". Only the panel reads them; agents keep reading
+# the item's own description. A changed description makes its line stale (not shown) until it is translated again.
+DESC_ZH=descriptions-zh.txt
+desc_hash() { printf '%s' "$1" | git hash-object --stdin 2>/dev/null | cut -c1-12; }   # the same as kit.ps1's Desc-Hash
+has_cjk() { LC_ALL=C grep -q "$(printf '[\343-\351]')" <<< "$1"; }   # already Chinese (or Japanese): nothing to translate
+desc_zh() { # desc_zh SOURCE_DIR KIND:NAME DESCRIPTION : its Chinese description, when written for this very description
+    local l
+    [ -n "$3" ] && [ -f "$1/$DESC_ZH" ] || return 0
+    l=$(awk -F'\t' -v k="$2" '$1 == k { print; exit }' "$1/$DESC_ZH" | tr -d '\r')
+    [ -n "$l" ] && [ "$(printf '%s\n' "$l" | cut -f2)" = "$(desc_hash "$3")" ] && printf '%s\n' "$l" | cut -f3-
+    return 0
+}
+cmd_describe() { # kit describe --todo | kit describe KIND NAME "<中文說明>"
+    local i k n p d t orig f tmp
+    if [ "${1:-}" = --todo ] && [ $# -eq 1 ]; then
+        for i in $(available); do
+            k=${i%%:*}; n=${i#*:}
+            p=$(find_item "$k" "$n") || continue
+            t=$(item_desc "$k" "$p"); [ -n "$t" ] && ! has_cjk "$t" || continue
+            d=${p%"$(item_path "" "$k" "$n")"}
+            [ -n "$(desc_zh "$d" "$i" "$t")" ] || printf '%s\t%s\n' "$i" "$(printf '%s' "$t" | tr '\t' ' ')"
+        done
+        return 0
+    fi
+    [ $# -eq 3 ] || die_c usage "用法：kit describe --todo（還沒有中文說明的，一行一個：種類:名字 TAB 原本的說明）；kit describe <種類> <名字> \"<中文說明>\""
+    k=$1; n=$2
+    case $k in rule|skill|mcp|agent|plugin) ;; *) die_c usage "種類要是 rule、skill、mcp、agent、plugin";; esac
+    p=$(find_item "$k" "$n") || die "找不到 ${k}:${n}（kit 的來源裡沒有）"
+    orig=$(item_desc "$k" "$p"); [ -n "$orig" ] || die "${k}:${n} 沒有說明可以翻"
+    t=$(printf '%s' "$3" | tr '\t\r\n' '   ' | sed 's/^ *//; s/ *$//'); [ -n "$t" ] || die "中文說明是空的"
+    d=${p%"$(item_path "" "$k" "$n")"}; f="$d/$DESC_ZH"; tmp="$f.kit-tmp"
+    { [ -f "$f" ] && awk -F'\t' -v k="$k:$n" '$1 != k' "$f" | tr -d '\r'
+      printf '%s\t%s\t%s\n' "$k:$n" "$(desc_hash "$orig")" "$t"; } | LC_ALL=C sort > "$tmp" && mv "$tmp" "$f" || { rm -f "$tmp"; die "寫不進 $f"; }
+    say "已寫好 ${k}:${n} 的中文說明（${f}；只給面板看，agent 還是讀原本的說明）。要給別台用：kit push --to $(basename "$d")"
 }
 json_keys() { # json_keys FILE PATH : the keys of the object at PATH (keys joined by TAB), one per line
     LC_ALL=C awk -f "$KIT_LIB/json.awk" -v keys="$2" -v sep="$TAB" "$1" 2>/dev/null
@@ -3754,8 +3930,7 @@ here_json() { # here_json DIR PID : the "here" part of kit list --json --dir
         [ -n "$k" ] || continue
         d=""
         case $k in
-            skill) d=$(item_desc skill "$f");;
-            rule) d=$(grep -m 1 '^# ' "$f" 2>/dev/null | sed 's/^# *//');;
+            skill|rule) d=$(item_desc "$k" "$f");;
         esac
         [ $first = 1 ] || printf ','; first=0
         printf '\n    {"scope": %s, "kind": %s, "name": %s, "path": %s, "tools": %s, "description": %s}' \
@@ -3773,7 +3948,7 @@ sign_json() { # ,"sign": the approvals repo this computer signs with (kit approv
         "$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:" { print $1 "\t" $2 }' "$f" | while IFS="$TAB" read -r n s; do printf '%s{"name": %s, "commit": %s}' "${c:+, }" "$(json_s "$n")" "$(json_s "$s")"; c=1; done)"
 }
 cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a kit panel); kit.ps1 prints the same
-    local want req i k n p d status new first s tools sf chg="" changed rel f
+    local want req i k n p d status new first s tools sf chg="" changed rel f desc
     want=$(wanted); req=$(required_items)
     tool_cache                                               # each program looked at once, not once per skill
     printf '{\n  "kit": %s,\n  "sources": [' "$(json_s "$KIT_VERSION")"
@@ -3802,11 +3977,14 @@ EOF
         # changed: kit push would send it (a skill: any file in its folder)
         changed=false
         case $k in skill) case $chg in *"$TAB$d${rel%/*}/"*) changed=true;; esac;;
+                   plugin) case $chg in *"$TAB$d/plugins/$n/"*) changed=true;; esac;;
                    *) case $chg in *"$TAB$d$rel$LF"*) changed=true;; esac;; esac
+        desc=$(item_desc "$k" "$p")
         [ $first = 1 ] || printf ','; first=0
-        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "changed": %s, "source": %s, "description": %s, "path": %s%s}' \
-            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$changed" "$(json_s "$(basename "$d")")" "$(json_s "$(item_desc "$k" "$p")")" "$(json_s "$p")" \
+        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "changed": %s, "source": %s, "description": %s%s, "path": %s%s}' \
+            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$changed" "$(json_s "$(basename "$d")")" "$(json_s "$desc")" "$(zh=$(desc_zh "${d%/}" "$i" "$desc"); [ -z "$zh" ] || printf ', "description_zh": %s' "$(json_s "$zh")")" "$(json_s "$p")" \
             "$(case $k in (skill) printf ', "needs": %s%s' "$(needs_json "$(dirname "$p")" "${d%/}")" "$(packages_json "$(dirname "$p")" "$n")";;
+                         (plugin) printf ', "needs": %s' "$(needs_json "${p%/.claude-plugin/plugin.json}" "${d%/}")";;
                          (mcp) mcp_list_json "$p" "$n";; esac)"
     done
     printf '\n  ],\n  "kit_version_wanted": %s' "$(json_s "$(wanted_version)")"
@@ -3864,10 +4042,11 @@ cmd_add_rm() {
     local verb=$1; shift
     local dir=""
     if [ "${1:-}" = --dir ]; then [ $# -ge 2 ] || die "--dir 後面要接資料夾"; dir=$2; shift 2; fi
-    [ $# -ge 2 ] && { [ -z "$dir" ] || [ $# -eq 2 ]; } || die "用法：kit $verb [--dir 資料夾] rule|skill|mcp <名字>（整個帳號可以一次給好幾個名字）"
+    [ $# -ge 2 ] && { [ -z "$dir" ] || [ $# -eq 2 ]; } || die "用法：kit $verb [--dir 資料夾] rule|skill|mcp|plugin <名字>（整個帳號可以一次給好幾個名字）"
     need_init
     local k=$1 n i added removed; shift
-    case " rule skill mcp " in *" $k "*) ;; *) die "種類只能是 rule、skill、mcp";; esac
+    case " rule skill mcp plugin " in *" $k "*) ;; *) die "種類只能是 rule、skill、mcp、plugin";; esac
+    [ -z "$dir" ] || [ "$k" != plugin ] || die "外掛只能加到整個帳號（不能 --dir）"
     if [ -n "$dir" ]; then dir_add_rm "$verb" "$dir" "$k" "$1"; return; fi
     for n in "$@"; do find_item "$k" "$n" > /dev/null || die "找不到 $k:${n}（打 kit list 看有哪些）"; done
     [ "$verb" = add ] || for n in "$@"; do required_items | grep -qxF "$k:$n" && die "$k:$n 是團隊必備，拿不掉"; done
@@ -4124,6 +4303,11 @@ EOF
     sync_skills "$AGENTS_SKILLS" skill.agents < /dev/null
     sync_mcp_json "$CLAUDE_JSON" mcp < /dev/null           # stops kit (state.tsv kept) when the file cannot be written
     sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp < /dev/null
+    sync_plugins < /dev/null
+    if [ -d "$(plugin_root)" ]; then                          # kit's marketplace, once nothing of it is installed
+        for k in $(plugin_tools); do [ -n "$(state_list "plugin.$k")" ] || "$k" plugin marketplace remove kit >/dev/null 2>&1; done
+        [ -n "$(state_list plugin)" ] || rm -rf "$(plugin_root)"
+    fi
     QUIET=
     ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX"); : > "$ops"
     while IFS="$TAB" read -r k n v; do
@@ -4227,6 +4411,8 @@ put_item() { # put_item KIND NAME STAGED_FILE TARGET_DIR : replace the item in t
 MCP_SKELETON='# 一個 MCP server。兩種寫法選一種，另一種刪掉。
 # 密碼、token 不要寫在這裡：寫成 ${變數名}，值放在每台電腦自己的環境變數。
 # 別人給的設定（JSON、claude mcp add …）：存成檔案，用  kit new mcp --config 檔案  帶進來比較快。
+
+description: （這個 MCP 做什麼：Kit 面板會顯示這一行）
 
 # 1. 在這台電腦跑一個程式：
 command: （啟動 MCP server 的程式，例如 npx 或 uvx）
@@ -4439,9 +4625,9 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
     # every item name, from the folders checked and the configured sources
     for d in "$@" $( [ -f "$MACHINE" ] && src_dirs ); do
         [ -d "$d" ] || continue
-        for f in "$d"/rules/*.md "$d"/skills/*/SKILL.md "$d"/mcp/*.yaml "$d"/agents/*.md; do
+        for f in "$d"/rules/*.md "$d"/skills/*/SKILL.md "$d"/mcp/*.yaml "$d"/agents/*.md "$d"/plugins/*/.claude-plugin/plugin.json; do
             [ -f "$f" ] || continue
-            case $f in */rules/*) printf 'rule:%s\t%s\n' "$(basename "$f" .md)" "$d";; */skills/*) printf 'skill:%s\t%s\n' "$(basename "$(dirname "$f")")" "$d";;
+            case $f in */.claude-plugin/plugin.json) f=${f%/.claude-plugin/plugin.json}; printf 'plugin:%s\t%s\n' "$(basename "$f")" "$d";; */rules/*) printf 'rule:%s\t%s\n' "$(basename "$f" .md)" "$d";; */skills/*) printf 'skill:%s\t%s\n' "$(basename "$(dirname "$f")")" "$d";;
                         */mcp/*) printf 'mcp:%s\t%s\n' "$(basename "$f" .yaml)" "$d";; *) printf 'agent:%s\t%s\n' "$(basename "$f" .md)" "$d";; esac
         done
     done | awk -F'\t' '!seen[$0]++' > "$names"
@@ -4472,6 +4658,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
                 [ -z "$(fm_val "$fm" tools.only)" ] || warn "$rel: tools.only 在 Claude 是把其他內建工具寫進 deny：Claude 之後新加的內建工具擋不到（要擋就寫進 tools.deny）";;
             esac
         done
+        for f in "$d"/plugins/*/; do [ -f "$f.claude-plugin/plugin.json" ] || continue; rel=${f#"$d"/}; valid_name "$(basename "$f")" || problem "${rel%/}: 名字只能用小寫英文、數字和 -"; done
         for f in "$d"/rules/*.md; do [ -f "$f" ] || continue; valid_name "$(basename "$f" .md)" || problem "${f#"$d"/}: 名字只能用小寫英文、數字和 -"; [ -s "$f" ] || problem "${f#"$d"/}: 是空的"; done
         for f in "$d"/mcp/*.yaml; do
             [ -f "$f" ] || continue; rel=${f#"$d"/}
@@ -4497,7 +4684,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
         done
         if [ -f "$d/kit.yaml" ]; then
             case $(push_mode "$d") in pr|direct) ;; *) problem "kit.yaml: push 只能是 pr 或 direct";; esac
-            for k in rule skill mcp; do
+            for k in rule skill mcp plugin; do
                 for ref in $(yget "$d/kit.yaml" "required.${k}s") $(yget "$d/kit.yaml" "recommended.${k}s"); do
                     grep -q "^$k:$ref$TAB" "$names" || { if [ -n "${CHECK_CI:-}" ] && [ -n "$(yget "$d/kit.yaml" include)" ]; then warn "kit.yaml: $k:$ref 不在這個 repo（應該在 include 的來源）"; else problem "kit.yaml: 找不到 $k:$ref"; fi; }
                 done
@@ -4714,7 +4901,7 @@ push_items() { # changed item files (one per line) -> verb<TAB>kind:name, one pe
         else printf 'add\t%s:%s\n' "$k" "$n"; fi
     done | awk -F'\t' '!seen[$2]++'
 }
-ITEM_RE='^(rules/[^/]+\.md|skills/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock)$'   # the files kit push sends
+ITEM_RE='^(rules/[^/]+\.md|skills/[^/]+/.+|plugins/[^/]+/.+|mcp/[^/]+\.yaml|agents/[^/]+\.md|third_party\.lock|descriptions-zh\.txt)$'   # the files kit push sends
 send_files() { # send_files : (in a source's folder) what kit push would send, one per line: the changed item files, and
     # kit.yaml when all that changed in it is collect_sources (kit collect --allow added an author); nothing else
     local all files
@@ -4936,7 +5123,7 @@ $(printf '%s\n' "$items" | awk -F'\t' '{ print "- " $1 " " $2 }')"
 # ---------- collect / outdated: other people's skills, from their own repos ----------
 # third_party.lock (in the source that keeps them): one line per skill
 #   name<TAB>url<TAB>path<TAB>ref<TAB>commit<TAB>license<TAB>date
-LOCK_HEAD='# third_party.lock - written by kit collect; name url path ref commit license date'
+LOCK_HEAD='# third_party.lock - written by kit collect; name url path ref commit license date [skip]'
 url_id() { # host/path of a git URL, without scheme, user, .git or trailing /
     printf '%s\n' "$1" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#^([^/:]+):#\1/#; s#/+$##; s#\.git$##'
 }
@@ -5070,8 +5257,8 @@ web_repo() { # web_repo URL : a repo page's address (GitHub /tree/<ref>/<folder>
             sub(/^\//, "", tail); sub(/\/?SKILL\.md$/, "", tail); sub(/\/+$/, "", tail)
             if (repo ~ /^https?:\/\/[^\/]+\/[^\/]+\/[^\/]+$/) print repo "\t" a[n] "\t" tail }'
 }
-cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to SOURCE] [--force] [--allow] [--look]
-    local arg="" path="" name="" ref="" to="" force="" allow="" look=""
+cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to SOURCE] [--force] [--allow] [--look] [--skip P]...
+    local arg="" path="" name="" ref="" to="" force="" allow="" look="" skip=""
     while [ $# -gt 0 ]; do
         case $1 in
             --path) path=${2:-}; shift 2 || die "--path 後面要接 repo 裡的資料夾";;
@@ -5081,6 +5268,7 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
             --force) force=1; shift;;
             --allow) allow=1; shift;;
             --look) look=1; shift;;
+            --skip) case ${2:-} in ""|/*|*..*|*,*) die "--skip 後面要接外掛裡不要的檔案或資料夾（相對路徑）";; esac; skip="$skip${skip:+,}${2%/}"; shift 2;;
             -*) die_c usage "不認得 $1";;
             *) [ -z "$arg" ] || die_c usage "多了一個參數：$1"; arg=$1; shift;;
         esac
@@ -5096,6 +5284,7 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
         name=$arg; url=$(printf '%s' "$line" | cut -f2)
         [ -n "$path" ] || path=$(printf '%s' "$line" | cut -f3)
         [ -n "$ref" ] || ref=$(printf '%s' "$line" | cut -f4); [ "$ref" = - ] && ref=""
+        [ -n "$skip" ] || skip=$(printf '%s' "$line" | cut -f8); [ "$skip" = - ] && skip=""
     fi
     [ "$path" = . ] && path=""
     # collect_sources: who may be collected from. --allow adds this author to it, only in your own source (push: direct);
@@ -5137,6 +5326,8 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
     fi
     sha=$(git -C "$repo" rev-parse HEAD)
     repo=$(cd "$repo" && pwd -P)
+    # a plugin (.claude-plugin/plugin.json at the top, or in --path): the whole plugin, not its skills one by one
+    if [ -f "$repo${path:+/$path}/.claude-plugin/plugin.json" ]; then collect_plugin; return; fi
     # which folder: --path, else the top if it has a SKILL.md, else the only folder in the repo that has one
     local found
     if [ -n "$path" ] || [ -f "$repo/SKILL.md" ]; then found=${path:-.}
@@ -5205,6 +5396,70 @@ $(printf '%s\n' "$found" | sed 's/^/  /')"
     else say "下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR"; fi
 }
 
+PLUGIN_PARTS=".claude-plugin .codex-plugin skills commands agents hooks .mcp.json package.json"
+collect_plugin() { # (cmd_collect's, with its variables) the plugin in $repo/$path -> $dir/plugins/<name>: only what the
+    # tools load (the manifests, skills, commands, agents, hooks, MCP, package.json and the extension folders its pi/omp
+    # key names), text only; --skip leaves out more (and takes it out of plugin.json's hooks); the lock remembers --skip
+    local src=$repo${path:+/$path} n desc lic kind e x parts scripts="" skipped=0 dst ex
+    src=$(cd "$src" && pwd -P); case $src/ in "$repo"/*) ;; *) rm -rf "$tmp"; die "--path 要在 repo 裡面";; esac
+    n=$name; [ -n "$n" ] || n=$(json_get "$src/.claude-plugin/plugin.json" name | sed 's/^"//; s/"$//')
+    desc=$(unjs "$(json_get "$src/.claude-plugin/plugin.json" description | sed 's/^"//; s/"$//')")
+    lic=$(collect_license "$src" "$repo"); kind=""; [ -z "$lic" ] || kind=$(license_kind "$lic")
+    parts=$PLUGIN_PARTS
+    for x in pi omp; do                      # the extension folders package.json names (./pi-extension/index.js -> pi-extension)
+        for e in $(json_get "$src/package.json" "$x.extensions" 2>/dev/null | sed -n 's#^ *"\./\([^/"]*\).*#\1#p'); do
+            case " $parts " in *" $e "*) ;; *) parts="$parts $e";; esac
+        done
+    done
+    mkdir -p "$tmp/out"
+    for e in $parts; do
+        [ -e "$src/$e" ] || continue
+        case ",$skip," in *",$e,"*) continue;; esac
+        if [ -d "$src/$e" ] && [ ! -L "$src/$e" ]; then
+            collect_scan "$src/$e" "$( [ -n "$look" ] || printf '%s/out/%s' "$tmp" "$e")"
+            for x in $COL_SCRIPTS; do scripts="$scripts $e/$x"; done; skipped=$((skipped + COL_SKIPPED))
+        elif [ -f "$src/$e" ] && [ ! -L "$src/$e" ] && { [ ! -s "$src/$e" ] || LC_ALL=C grep -qI . "$src/$e"; }; then
+            [ -n "$look" ] || cp "$src/$e" "$tmp/out/$e"
+        else skipped=$((skipped + 1)); fi
+    done
+    IFS=, ; for x in $skip; do              # --skip: out, and out of plugin.json's hooks
+        unset IFS; rm -rf "${tmp:?}/out/$x"; scripts=$(printf '%s\n' $scripts | grep -vxF "$x" | grep -v "^$x/" | tr '\n' ' ')
+        [ -n "$look" ] || [ ! -f "$tmp/out/.claude-plugin/plugin.json" ] || {
+            printf 'rmstr\thooks\t./%s\n' "$x" >> "$tmp/ops"   # and a key whose value is a file in it ("types": "./x/..")
+            for e in $(LC_ALL=C grep -oE '"[A-Za-z]+"[[:space:]]*:[[:space:]]*"\./[^"]*"' "$tmp/out/.claude-plugin/plugin.json" | sed 's/^"//; s/".*//'); do
+                case $(json_get "$tmp/out/.claude-plugin/plugin.json" "$e") in "\"./$x\""|"\"./$x/"*) printf 'del\t%s\n' "$e" >> "$tmp/ops";; esac
+            done; }
+    done; unset IFS
+    scripts=$(printf '%s\n' $scripts | awk 'NF' | tr '\n' ' '); scripts=${scripts% }
+    dst="$dir/plugins/$n"
+    ex=""; if [ -e "$dst" ]; then if [ -n "$(lock_get "$dir" "$n")" ]; then ex=collected; else ex=own; fi; fi
+    if [ -n "$look" ]; then
+        printf '{"source": %s, "dir": %s, "push": %s, "url": %s, "ref": %s, "id": %s, "commit": %s, "allowed": %s, "can_allow": %s, "skills": [\n  {"kind": "plugin", "path": %s, "name": %s, "valid": %s, "description": %s, "license": %s, "scripts": %s, "skipped": %s, "exists": %s, "dest": %s}\n]}\n' \
+            "$(json_s "$(basename "$dir")")" "$(json_s "$dir")" "$(json_s "$(push_mode "$dir")")" "$(json_s "$url")" "$(json_s "$ref")" "$(json_s "$(url_id "$url")")" "$(json_s "$sha")" \
+            "$( [ $ok = 1 ] && echo true || echo false)" "$( [ $ok = 0 ] && [ $own = 1 ] && [ -z "$real" -o "$real" = "$url" ] && echo true || echo false)" \
+            "$(json_s "${path:-.}")" "$(json_s "$n")" "$(valid_name "$n" && echo true || echo false)" "$(json_s "$desc")" "$(json_s "$kind")" \
+            "$(json_s "$scripts")" "$skipped" "$(json_s "$ex")" "$(json_s "$dst/.claude-plugin/plugin.json")" >&3
+        rm -rf "$tmp"; return 0
+    fi
+    valid_name "$n" || { rm -rf "$tmp"; die "名字 $n 不行（只能小寫英文、數字和 -），用 --name 給一個"; }
+    [ -e "$dst" ] && [ -z "$(lock_get "$dir" "$n")" ] && [ -z "$force" ] && { rm -rf "$tmp"; die "$(basename "$dir") 已經有 plugin:${n}，而且不是 collect 收的（要整份換掉加 --force，或用 --name 換名字）"; }
+    [ -e "$dir/skills/$n" ] && { rm -rf "$tmp"; die "$(basename "$dir") 已經有同名的 skill:${n}（外掛和 skill 不能同名：先拿掉那個 skill，或用 --name 換名字）"; }
+    [ -n "$lic" ] || { rm -rf "$tmp"; die "$(url_id "$url") 沒有 LICENSE，不知道能不能用，不收"; }
+    [ -e "$tmp/out/${lic##*/}" ] || cp "$lic" "$tmp/out/${lic##*/}"
+    [ ! -s "$tmp/ops" ] || { json_edit "$tmp/out/.claude-plugin/plugin.json" "$tmp/ops"; rm -f "$tmp/out/.claude-plugin/plugin.json.kit-backup"; }
+    rm -f "$tmp/out/.claude-plugin/marketplace.json"   # the author's own list (where to download it): kit has its own
+    rm -rf "$dst"; mkdir -p "$dir/plugins"; cp -R "$tmp/out" "$dst"
+    lock_set "$dir" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$n" "$url" "${path:-.}" "${ref:--}" "$sha" "$kind" "$(date +%Y-%m-%d)" "${skip:--}")"
+    rm -rf "$tmp"
+    if [ -n "$add" ]; then yaml_list_add "$dir/kit.yaml" collect_sources "$(url_id "$url")"; say "已把 $(url_id "$url") 加進 $(basename "$dir")/kit.yaml 的 collect_sources"; fi
+    say "已收外掛 plugin:$n ← $(url_id "$url")${path:+/$path} @ $(printf %.12s "$sha")（授權 ${kind}${skip:+；沒收：$skip}）"
+    [ "$kind" = unknown ] && warn "認不出授權種類，請自己看 plugins/$n/${lic##*/}"
+    [ "$kind" = GPL ] && warn "GPL 類授權：改了再發布要公開原始碼，請確認可以用"
+    [ -z "$scripts" ] || warn "這個外掛有會執行的檔案（hook 會在 agent 開始、送出訊息時自動跑），送出前請看過：$scripts"
+    check_dirs "$dir" >/dev/null 2>&1 || warn "kit check 有問題，送出前請先打  kit check  看看"
+    if [ "$(push_mode "$dir")" = direct ]; then say "下一步：用 git diff 看收進來的檔案；沒問題就  kit push  送出，要用它就  kit add plugin $n"
+    else say "下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR"; fi
+}
 outdated_json() { # outdated_json [DIR] : every collected skill (DIR's, else the folder you are in and every source) and what its author has now
     local d dirs n url path ref sha lic day now st first=1
     if [ -n "${1:-}" ]; then dirs=$1
@@ -5456,6 +5711,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
   kit add rule|skill|mcp <名字>     開始用（整個帳號：每個資料夾、每個 agent 都有）
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
+  kit add|rm plugin <名字>          外掛（skill、hook、MCP 一起）：照 Claude、Codex、omp 自己裝外掛的方式裝，
+                                    從這台的來源副本裝、不自動更新；Codex 的 hook 只有簽過的版本 kit 才自己信任
   kit add --dir <資料夾> rule|skill|mcp <名字>
                                     只加到這個資料夾：在這裡（含子資料夾）開的 agent 才有
   kit rm  --dir <資料夾> rule|skill|mcp <名字>
@@ -5490,6 +5747,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit diff  [種類] <名字> --from 本機資料夾   比較
   kit update [種類] <名字> --from 本機資料夾   更新；別人改過會停下來（--force 硬蓋）
   kit check [--ci] [資料夾...]      檢查格式、引用、名字重複、網址、不該公開的字
+  kit describe --todo               還沒有中文說明的（一行一個：種類:名字 TAB 原本的說明）
+  kit describe <種類> <名字> "<中文>"  寫中文說明，只給面板看（agent 還是讀原本的）；原本的說明改了要再翻
 
 維護者用（只收 kit.yaml 的 collect_sources 列的原作者）：
   kit collect <原作者 repo 網址> [--path 資料夾] [--name 名字] [--ref 分支] [--allow]   收別人的 skill（保留 LICENSE）
@@ -5564,6 +5823,7 @@ case ${1:-} in
     usage)     shift; cmd_usage "$@";;
     files)     shift; cmd_files "$@";;
     note)      shift; cmd_note "$@";;
+    describe)  shift; cmd_describe "$@";;
     pending)   shift; cmd_pending "$@";;
     statusline) shift; cmd_statusline "$@";;
     handoff-hook) shift; cmd_handoff_hook "$@";;
