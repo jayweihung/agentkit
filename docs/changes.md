@@ -9,7 +9,8 @@
 更新後要做：`kit self-update`，再 `kit sync`。
 
 - 資料夾的 MCP（`kit add --dir`、`kit place`）開 Claude 就直接用，不再問「New MCP server found in this project」。以前 kit 只寫資料夾 `.claude/settings.local.json` 的 `enabledMcpjsonServers`，但 Claude 只在信任「這個資料夾本身」時才算數；只信任上層（例如家目錄）、資料夾又不是 git 時每次都問。現在 kit 也在 `~/.claude.json` 把這個資料夾設成信任（`projects["<資料夾>"].hasTrustDialogAccepted`），跟 Codex 那邊一樣。只給有 kit 放的 MCP 的資料夾；MCP 拿掉、`kit uninstall` 時改回原來的樣子。有人把信任關掉，下一次 `kit sync` 再打開並說一聲。`kit sync` 會補好已經放過的資料夾（例如 `~/gerrit`）。
-- Codex、omp 不用改：Codex 開的時候不問（kit 已經信任資料夾），omp 本來就不問。
+- Codex：kit 放的 MCP（整個帳號的和資料夾的，`kit run` 也是）加上 `default_tools_approval_mode = "approve"`，叫它的工具不再每次問「Allow?」；團隊擋掉的工具照舊在 `disabled_tools`。開的時候本來就不問（kit 已經信任資料夾）。
+- omp 不用改：開的時候和叫工具時本來就不問（`tools.approvalMode` 預設 `yolo`）。
 - Windows 版一樣。
 
 ## 0.6.13（2026-11-16）

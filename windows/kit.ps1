@@ -1467,6 +1467,9 @@ function Codex-Mcp-Toml($names, [string]$cfg = '', $more = @()) { # [mcp_servers
         [void]$sb.Append("[mcp_servers.$(Toml-Key $n)]`n")
         $envs = @()
         foreach ($x in $fl) { if ($x[0].StartsWith('env.')) { $envs += , $x } else { [void]$sb.Append("$($x[0]) = $($x[1])`n") } }
+        # kit's MCP: its tools run without asking each call (jay 11/16; Claude's auto mode and omp's yolo do the same),
+        # except the team's denies below (disabled_tools)
+        [void]$sb.Append("default_tools_approval_mode = `"approve`"`n")
         # team deny rules for this server's tools (mcp__<server>__<tool>) become disabled_tools
         $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Json-Str $d.Substring("mcp__${n}__".Length) } })
         if ($tools.Count -gt 0) { [void]$sb.Append('disabled_tools = [' + ($tools -join ', ') + "]`n") }
@@ -6007,6 +6010,7 @@ function Cmd-Run($rest) {
                     foreach ($x in $fl) { if ($x[0].StartsWith('env.')) { $envs += (Arg-TomlKey $x[0].Substring(4)) + '=' + $x[1] } else { $parts += $x[0] + '=' + $x[1] } }
                     $v = '{' + ($parts -join ',')
                     if ($envs.Count -gt 0) { $v += ',env={' + ($envs -join ',') + '}' }
+                    $v += ',default_tools_approval_mode=' + (Arg-TomlStr 'approve')
                     $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Arg-TomlStr $d.Substring("mcp__${n}__".Length) } })
                     if ($tools.Count -gt 0) { $v += ',disabled_tools=[' + ($tools -join ',') + ']' }
                     $a.Add('-c'); $a.Add("mcp_servers.$(Arg-TomlKey $n)=$v}")

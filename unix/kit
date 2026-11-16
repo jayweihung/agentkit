@@ -899,6 +899,9 @@ codex_mcp_toml() { # wanted MCP names on stdin -> [mcp_servers.x] tables for Cod
         done <<EOF
 $fields
 EOF
+        # kit's MCP: its tools run without asking each call (jay 11/16; Claude's auto mode and omp's yolo do the same),
+        # except the team's denies below (disabled_tools)
+        printf 'default_tools_approval_mode = "approve"\n'
         # team deny rules for this server's tools (mcp__<server>__<tool>) become disabled_tools
         tools=""; first=1
         for t in $( { required_deny; printf '%s\n' "${DENY_MORE:-}"; } | awk 'NF && !seen[$0]++' | sed -n "s/^mcp__${n}__//p"); do [ $first = 1 ] || tools="$tools, "; first=0; tools="$tools$(json_str "$t")"; done
@@ -4329,7 +4332,7 @@ mcp_toml_inline() { # mcp_toml_inline FILE NAME -> {command="..", args=[..], env
 $fields
 EOF
     [ -n "$env" ] && out="$out, env={$env}"
-    printf '{%s}' "$out"
+    printf '{%s, default_tools_approval_mode="approve"}' "$out"
 }
 
 cmd_run() {

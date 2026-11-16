@@ -444,7 +444,7 @@ tmp=$(echo "$out" | sed -n 's/^tmp=//p')
 dev=$(echo "$out" | sed -n 's/^developer_instructions=//p')
 srv=$(echo "$out" | sed -n 's/^mcp_servers\.gerrit=//p')
 check "codex run: instructions have rule, body, skill path" 'echo "$dev" | grep -q "Only comment" && echo "$dev" | grep -q "Gerrit helper" && echo "$dev" | grep -qF "$tmp/skills/gerrit-review/SKILL.md"'
-check "codex run: values are valid TOML" 'printf "a = %s\nb = %s\n" "$dev" "$srv" | python3 -c "import sys,tomllib; d=tomllib.loads(sys.stdin.read()); assert d[\"b\"][\"command\"]==\"uvx\"" 2>/dev/null'
+check "codex run: values are valid TOML" 'printf "a = %s\nb = %s\n" "$dev" "$srv" | python3 -c "import sys,tomllib; d=tomllib.loads(sys.stdin.read()); assert d[\"b\"][\"command\"]==\"uvx\" and d[\"b\"][\"default_tools_approval_mode\"]==\"approve\"" 2>/dev/null'
 check "codex run: what kit codex-guard cannot hold back, said" 'echo "$out" | grep -qF "Codex 的 tools.only 只管得到 shell（Bash）和改檔（Edit、Write）：Codex 其他的內建工具照樣能用" && echo "$out" | grep -qF "tools.only 沒有 Bash：Codex 讀檔、找檔也是用 shell，所以在 Codex 裡也不能讀檔"'
 mkdir -p "$T/fakecx"; printf '#!/bin/sh\nprintf "%%s|%%s\\n" "$KIT_CODEX_ONLY" "$KIT_CODEX_DENY" > "%s/cxenv"\n' "$T" > "$T/fakecx/codex"; chmod +x "$T/fakecx/codex"
 PATH="$T/fakecx:$PATH" kit run gerrit --tool codex >/dev/null 2>&1
@@ -941,6 +941,7 @@ check "omp AGENTS.md has rule text" 'grep -q "Never paste secrets." "$H4/.omp/ag
 check "skills in ~/.agents/skills" '[ -f "$H4/.agents/skills/gerrit-review/SKILL.md" ] && [ -f "$H4/.agents/skills/gerrit-workflow/LICENSE" ]'
 check "codex toml keeps user part" 'head -4 "$H4/.codex/config.toml" | grep -q "^\[mcp_servers.mine\]"'
 check "codex toml has kit server" 'grep -q "^\[mcp_servers.gerrit\]" "$H4/.codex/config.toml" && grep -q "^command = \"uvx\"" "$H4/.codex/config.toml"'
+check "codex toml: kit's MCP tools run without asking" 'grep -q "^default_tools_approval_mode = \"approve\"" "$H4/.codex/config.toml"'
 check "codex toml args" 'grep -qF "args = [\"--index-url\", \"https://pypi.example/simple\", \"gerrit-mcp-server==1.0\"]" "$H4/.codex/config.toml"'
 check "codex team deny -> disabled_tools" 'grep -qF "disabled_tools = [\"submit_change\"]" "$H4/.codex/config.toml"'
 check "codex env table, not expanded" 'grep -q "^\[mcp_servers.gerrit.env\]" "$H4/.codex/config.toml" && grep -qF "GERRIT_CONFIG = \"\${HOME}/.config" "$H4/.codex/config.toml"'
