@@ -1324,7 +1324,10 @@ function Mcp-MapJson($lines, [string]$key) { # ,"KEY":{..} when the yaml has tha
 }
 function Mcp-Argv($y) { # command + args of an MCP yaml; on Windows a .cmd / .bat (npx, npm, pnpm, yarn ...) runs through cmd /c
     $cmd = @(YGet-From $y 'command'); if ($cmd.Count -eq 0 -or -not $cmd[0]) { return $null }
-    Mcp-Shim (@([string]$cmd[0]) + @(YGet-From $y 'args'))
+    Mcp-Shim (Mcp-Home (@([string]$cmd[0]) + @(YGet-From $y 'args')))
+}
+function Mcp-Home($a) { # ${HOME} in them made this machine's home (on Windows ${USERPROFILE} too): omp and Codex do not expand it; other ${VAR} stay
+    , @(foreach ($x in @($a)) { $s = ([string]$x).Replace('${HOME}', $UserHome); if ($script:OnWindows) { $s = $s.Replace('${USERPROFILE}', $UserHome) }; $s })
 }
 function Mcp-Shim($argv) {
     $c = [string]$argv[0]; $a = @(if ($argv.Count -gt 1) { $argv[1..($argv.Count - 1)] })
@@ -1375,7 +1378,7 @@ function Mcp-Run([string]$f, $y) { # command + args (the package kit installed, 
     $pk = Mcp-Pkg (Mcp-Info $f)
     $x = Mcp-Installed (Mcp-Name $f) $pk
     if ($x) {
-        $a = @(YGet-From $y 'args'); $first = [int]$pk[5]
+        $a = Mcp-Home @(YGet-From $y 'args'); $first = [int]$pk[5]
         $rest = @(for ($i = $first; $i -le $a.Count; $i++) { $a[$i - 1] })
         if ($pk[0] -eq 'npm') { return , (@('node', $x) + $rest) }
         return , (@($x) + $rest)
@@ -2340,11 +2343,13 @@ function Drop-Made([string]$f) { # a JSON file kit made that is empty again goes
     if (-not (Test-Path -LiteralPath $f)) { State-Del 'made' $f }
 }
 function Dir-ClaudeAllow([string]$dir, $names) { # MCP names -> .claude/settings.local.json enabledMcpjsonServers
+    # (one turned off in Claude's /mcp is in disabledMcpjsonServers, which wins: kit takes it out of there, says so)
     $f = Join-Path (Join-Path $dir '.claude') 'settings.local.json'
-    $km = Dir-Kind $dir 'mcp'; $ka = Dir-Kind $dir 'allow'
-    $names = @($names | Where-Object { $_ }); $ops = New-Object System.Collections.Generic.List[object]; $add = @(); $del = @()
+    $km = Dir-Kind $dir 'mcp'; $ka = Dir-Kind $dir 'allow'; $off = @(Json-Strs $f 'disabledMcpjsonServers')
+    $names = @($names | Where-Object { $_ }); $ops = New-Object System.Collections.Generic.List[object]; $add = @(); $del = @(); $on = @()
     foreach ($n in $names) {
         if ($null -eq (State-Get $km $n)) { continue }       # only the servers kit put in .mcp.json
+        if ($off -ccontains (Json-Str $n)) { $ops.Add(@('rmstr', 'disabledMcpjsonServers', $n)); $on += $n }
         if ($null -ne (State-Get $ka $n)) { continue }
         $ops.Add(@('addstr', 'enabledMcpjsonServers', $n)); $add += $n
     }
@@ -2354,9 +2359,10 @@ function Dir-ClaudeAllow([string]$dir, $names) { # MCP names -> .claude/settings
     }
     if ($ops.Count -gt 0) {
         if (-not (Test-Path -LiteralPath $f)) { State-Set 'made' $f 1 }
-        Json-Edit $f $ops.ToArray(); Prune-Empty $f @('enabledMcpjsonServers')
+        Json-Edit $f $ops.ToArray(); Prune-Empty $f @('enabledMcpjsonServers', 'disabledMcpjsonServers')
         foreach ($n in $add) { State-Set $ka $n 1 }
         foreach ($n in $del) { State-Del $ka $n }
+        foreach ($n in $on) { Say "  $dir 的 Claude 設定把 MCP $n 關掉了，kit 已經重新打開（這個資料夾要用它）" }
     }
     Drop-Made $f
 }

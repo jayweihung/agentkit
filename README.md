@@ -105,6 +105,9 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 | Codex | ✅ | ✅ | ✅ | 只管 shell（Bash）和改檔（Edit、Write） | MCP 工具、`Bash`、`Bash(...)`、`Edit`、`Write` |
 | omp | ✅ | ✅ | ✅（資料夾的 `.mcp.json`；omp 只在這個資料夾本身開時讀，子資料夾裡開的讀不到） | ✅（`.omp/hooks/pre/kit.js`） | ✅（同一個檔） |
 
+資料夾的 MCP（`kit add --dir`、`kit place`）kit 寫進資料夾 `.claude/settings.local.json` 的 `enabledMcpjsonServers`，Claude 就不會每次問。
+有人在 Claude 的 `/mcp` 把它關掉（記在 `disabledMcpjsonServers`，關掉的優先），下一次 `kit sync` 把它從那裡拿掉、重新打開，並說一聲（只動 kit 放的 MCP）。
+
 omp 的工具限制：kit 把 Claude 的工具名字換成 omp 做同樣事的工具（例如 Read → read，Bash → bash 和 eval，Grep → grep 和 ast_grep），
 omp 要用被擋的工具時會被拒絕並說原因。tools.deny 的 `Bash(git push:*)` 這種寫法 omp 也照樣擋；別的工具的 `( )` 寫法（例如 `Read(./secret/**)`）omp 擋不到，kit 會說。
 omp 只在這個資料夾本身開時讀 `.omp/hooks/pre/kit.js`（跟 `.mcp.json` 一樣），在子資料夾裡開的 omp 沒有這些限制。
@@ -198,6 +201,7 @@ kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最�
     args: [-y, "@acme/server@1.2.3", --workspace=Ab3dEf5GhIj7KlMn9PqRs1Tu]
     not_secret: ["args[3]"]          # env.名字、headers.名字、url、args[第幾個，從 1 算]
 `kit sync` 時這台電腦沒設的變數會提醒一次（說名字）。
+`command`、`args` 裡的 `${HOME}`，kit 寫進各工具的設定時直接換成這台電腦的家目錄（Windows 是使用者資料夾，`${USERPROFILE}` 也一樣換）：omp、Codex 不會自己代換。其他的 `${變數}` 照原樣放。
 
 ### 貼上設定
 
@@ -251,7 +255,7 @@ kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最�
 | | 跑程式的 MCP | 網址的 MCP（http） | sse | `${變數}` |
 |---|---|---|---|---|
 | Claude Code | `command`、`args`、`env` | `type`、`url`、`headers` | ✅ | Claude 自己代換 |
-| omp | 同上 | 同上 | ✅ | omp 自己代換 |
+| omp | 同上 | 同上 | ✅ | omp 自己代換（`command`、`args` 裡的不換：`${HOME}` kit 先換好） |
 | Codex | `command`、`args`、`env` | `url`、`http_headers` | ✗（不放進 Codex，說一次） | 只有整個值：env 同名 → `env_vars`（直接傳過去）；`Authorization: Bearer ${X}` → `bearer_token_env_var`；header `${X}` → `env_http_headers`。其他地方的 `${…}` Codex 不會代換：照字面放進去並說一次（header 這樣的就不放）；網址裡有 `${…}` 的整個不放 |
 
 ### MCP 的套件（npx、uvx）

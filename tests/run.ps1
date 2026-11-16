@@ -869,6 +869,31 @@ Check 'codex: project_root_markers at the top, user part kept' { $c = ReadT "$H/
 Kit add --dir $FP mcp gerrit
 Check 'add --dir mcp: .mcp.json has it and the own; Claude does not ask' { (JGet "$FP/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (JGet "$FP/.mcp.json" 'mcpServers.own.command') -eq '"y"' -and (Flat (JGet "$FP/.claude/settings.local.json" 'enabledMcpjsonServers')) -eq '["gerrit"]' }
 Check 'add --dir mcp: the folder Codex config, and Codex trusts the folder' { (ReadT "$FP/.codex/config.toml").Contains('[mcp_servers.gerrit]') -and (ReadT "$H/.codex/config.toml").Contains("[projects.`"$($FR.Replace('\', '\\'))`"]`ntrust_level = `"trusted`"") }
+# ${HOME} in an MCP's command and args: this machine's home in every tool's file (omp and Codex do not expand it); other ${VAR} stay
+$gy = ReadT "$TEAM/mcp/gerrit.yaml"
+W "$TEAM/mcp/gerrit.yaml" @'
+name: gerrit
+command: ${HOME}/bin/uv
+args: [run, --directory, "${HOME}/src/gerrit-mcp-server", "${GERRIT_PROFILE}", gerrit-mcp-server]
+env:
+  GERRIT_CONFIG: ${HOME}/.config/gerrit/gerrit_config.json
+'@
+Kit add mcp gerrit; Kit sync
+$hm = (@('run', '--directory', "$H/src/gerrit-mcp-server", '${GERRIT_PROFILE}', 'gerrit-mcp-server')) -join "`n"
+Check '${HOME} in command and args: the home in Claude''s and omp''s files (the account''s, the folder''s .mcp.json), other ${VAR} and env kept' { @(foreach ($f in "$H/.claude.json", "$H/.omp/agent/mcp.json", "$FP/.mcp.json") { $s = (ConvertFrom-Json (ReadT $f)).mcpServers.gerrit; $s.command -ceq "$H/bin/uv" -and (@($s.args) -join "`n") -ceq $hm -and $s.env.GERRIT_CONFIG -ceq '${HOME}/.config/gerrit/gerrit_config.json' }) -notcontains $false }
+$hq = { param($s) '"' + $s.Replace('\', '\\') + '"' }
+Check '${HOME} in command and args: the home in Codex''s (the account''s and the folder''s config.toml)' { @(foreach ($f in "$H/.codex/config.toml", "$FP/.codex/config.toml") { $c = ReadT $f; $c.Contains("command = $(& $hq "$H/bin/uv")`n") -and $c.Contains("args = [`"run`", `"--directory`", $(& $hq "$H/src/gerrit-mcp-server"), `"`${GERRIT_PROFILE}`", `"gerrit-mcp-server`"]`n") }) -notcontains $false }
+# turned off in Claude's /mcp (disabledMcpjsonServers wins over enabledMcpjsonServers): kit turns its own MCP on again
+$SL = "$FP/.claude/settings.local.json"
+W $SL "{`"enabledMcpjsonServers`": [`"gerrit`"], `"disabledMcpjsonServers`": [`"mine`", `"gerrit`"]}`n"
+Kit sync
+Check 'a folder''s Claude settings turned kit''s MCP off: on again, said; the user''s other one stays off' { $out.Contains("$FR 的 Claude 設定把 MCP gerrit 關掉了，kit 已經重新打開") -and (Flat (JGet $SL 'disabledMcpjsonServers')) -ceq '["mine"]' -and (Flat (JGet $SL 'enabledMcpjsonServers')) -ceq '["gerrit"]' }
+Kit sync
+Check 'turned on again: not said again' { -not $out.Contains('重新打開') }
+W $SL "{`"enabledMcpjsonServers`": [`"gerrit`"], `"disabledMcpjsonServers`": [`"gerrit`"]}`n"
+Kit sync
+Check 'the only one turned off: disabledMcpjsonServers goes' { $null -eq (JGet $SL 'disabledMcpjsonServers') -and (Flat (JGet $SL 'enabledMcpjsonServers')) -ceq '["gerrit"]' }
+W "$TEAM/mcp/gerrit.yaml" $gy; Kit rm mcp gerrit; Kit sync
 Kit list --json --dir (Join-Path $FP 'sub')
 Check 'list --json: the folder with .agentkit, its items' { $out.Contains("`"folder`": {`"dir`": $(& { '"' + $FR.Replace('\', '\\') + '"' }), `"why`": `"`", `"items`": [`"skill:gerrit-review`", `"rule:gerrit-flow`", `"mcp:gerrit`"], `"agent`": null}") }
 if (-not $OnWindows) {

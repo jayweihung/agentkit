@@ -432,11 +432,15 @@ EOF
         printf '%s\n' "$x"
         i=0
         while IFS= read -r a; do i=$((i + 1)); [ $i -lt "$first" ] || printf '%s\n' "$a"; done <<EOF
-$(yget "$f" args)
+$(yget "$f" args | mcp_home)
 EOF
         return 0
     fi
-    yget "$f" command | head -n 1; yget "$f" args
+    { yget "$f" command | head -n 1; yget "$f" args; } | mcp_home
+}
+mcp_home() { # lines on stdin, ${HOME} in them made this machine's home (omp and Codex do not expand it); other ${VAR} stay
+    local h='${HOME}' l
+    while IFS= read -r l; do l=${l//"$h"/"$HOME"}; printf '%s\n' "$l"; done
 }
 mcp_map() { yaml "$1" | awk -F'\t' -v p="$2." 'index($1, p) == 1 { k = substr($1, length(p) + 1); sub(/^[^\t]*\t/, ""); print k "\t" $0 }'; }   # mcp_map FILE env|headers -> KEY<TAB>VALUE
 mcp_map_json() { # mcp_map_json FILE KEY -> ,"KEY":{..} when the yaml has that map
@@ -1320,11 +1324,15 @@ drop_made() { # drop_made FILE : a JSON file kit made that is empty again goes a
     [ -f "$1" ] || state_del made "$1"
 }
 dir_claude_allow() { # dir_claude_allow DIR : MCP names on stdin -> .claude/settings.local.json enabledMcpjsonServers
-    local dir=$1 f="$1/.claude/settings.local.json" names n ops add="" del="" km ka
+    # (one turned off in Claude's /mcp is in disabledMcpjsonServers, which wins: kit takes it out of there, says so)
+    local dir=$1 f="$1/.claude/settings.local.json" names n ops add="" del="" on="" km ka off
     km=$(dir_kind "$dir" mcp); ka=$(dir_kind "$dir" allow)
-    names=$(cat); ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
+    names=$(cat); ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX"); off=$(json_strs "$f" disabledMcpjsonServers)
     for n in $names; do
         [ -n "$(state_get "$km" "$n")" ] || continue        # only the servers kit put in .mcp.json
+        if printf '%s\n' "$off" | grep -qxF -- "$(json_str "$n")"; then
+            printf 'rmstr\tdisabledMcpjsonServers\t%s\n' "$n" >> "$ops"; on="$on $n"
+        fi
         [ -n "$(state_get "$ka" "$n")" ] && continue
         printf 'addstr\tenabledMcpjsonServers\t%s\n' "$n" >> "$ops"; add="$add $n"
     done
@@ -1334,9 +1342,10 @@ dir_claude_allow() { # dir_claude_allow DIR : MCP names on stdin -> .claude/sett
     done
     if [ -s "$ops" ]; then
         [ -f "$f" ] || state_set made "$f" 1
-        json_edit "$f" "$ops"; prune_empty "$f" enabledMcpjsonServers
+        json_edit "$f" "$ops"; prune_empty "$f" enabledMcpjsonServers disabledMcpjsonServers
         for n in $add; do state_set "$ka" "$n" 1; done
         for n in $del; do state_del "$ka" "$n"; done
+        for n in $on; do say "  $dir 的 Claude 設定把 MCP $n 關掉了，kit 已經重新打開（這個資料夾要用它）"; done
     fi
     rm -f "$ops"; drop_made "$f"
 }

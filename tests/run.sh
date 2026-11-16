@@ -1025,6 +1025,32 @@ check "add --dir mcp: Claude does not ask (settings.local.json)" 'jget "$P/.clau
 check "add --dir mcp: the folder's Codex config" 'grep -q "^\[mcp_servers.gerrit\]" "$P/.codex/config.toml"'
 check "add --dir mcp: Codex trusts the folder (valid TOML)" 'grep -qF "[projects.\"$P\"]" "$H5/.codex/config.toml" && { ! python3 -c "import tomllib" 2>/dev/null || python3 -c "import tomllib,sys;d=tomllib.load(open(sys.argv[1],\"rb\"));assert d[\"projects\"][sys.argv[2]][\"trust_level\"]==\"trusted\"" "$H5/.codex/config.toml" "$P"; }'
 check "add --dir mcp: not the account" '! jget "$H5/.claude.json" mcpServers.gerrit >/dev/null'
+# ${HOME} in an MCP's command and args: this machine's home in every tool's file (omp and Codex do not expand it); other ${VAR} stay
+cp "$TEAM/mcp/gerrit.yaml" "$T/gerrit.yaml.orig"
+cat > "$TEAM/mcp/gerrit.yaml" <<'EOF'
+name: gerrit
+command: ${HOME}/bin/uv
+args: [run, --directory, "${HOME}/src/gerrit-mcp-server", "${GERRIT_PROFILE}", gerrit-mcp-server]
+env:
+  GERRIT_CONFIG: ${HOME}/.config/gerrit/gerrit_config.json
+EOF
+kit add mcp gerrit >/dev/null 2>&1; kit sync >/dev/null 2>&1
+hj='import json,sys;h=sys.argv[1]
+for f in sys.argv[2:]:
+  s=json.load(open(f))["mcpServers"]["gerrit"];assert s["command"]==h+"/bin/uv" and s["args"]==["run","--directory",h+"/src/gerrit-mcp-server","${GERRIT_PROFILE}","gerrit-mcp-server"] and s["env"]["GERRIT_CONFIG"]=="${HOME}/.config/gerrit/gerrit_config.json",f'
+check "\${HOME} in command and args: the home in Claude's and omp's files (the account's, the folder's .mcp.json), other \${VAR} and env kept" 'python3 -c "$hj" "$H5" "$H5/.claude.json" "$H5/.omp/agent/mcp.json" "$P/.mcp.json"'
+check "\${HOME} in command and args: the home in Codex's (the account's and the folder's config.toml)" 'for c in "$H5/.codex/config.toml" "$P/.codex/config.toml"; do grep -qxF "command = \"$H5/bin/uv\"" "$c" && grep -qxF "args = [\"run\", \"--directory\", \"$H5/src/gerrit-mcp-server\", \"\${GERRIT_PROFILE}\", \"gerrit-mcp-server\"]" "$c" || exit 1; done'
+# turned off in Claude's /mcp (disabledMcpjsonServers wins over enabledMcpjsonServers): kit turns its own MCP on again
+SL="$P/.claude/settings.local.json"
+python3 -c 'import json,sys;f=sys.argv[1];d=json.load(open(f));d["disabledMcpjsonServers"]=["mine","gerrit"];json.dump(d,open(f,"w"))' "$SL"
+out=$(kit sync 2>&1)
+check "a folder's Claude settings turned kit's MCP off: on again, said; the user's other one stays off" 'echo "$out" | grep -qF "$P 的 Claude 設定把 MCP gerrit 關掉了，kit 已經重新打開" && python3 -c "import json,sys;d=json.load(open(sys.argv[1]));assert d[\"disabledMcpjsonServers\"]==[\"mine\"] and d[\"enabledMcpjsonServers\"]==[\"gerrit\"]" "$SL"'
+out=$(kit sync 2>&1)
+check "turned on again: not said again" '! echo "$out" | grep -q "重新打開"'
+python3 -c 'import json,sys;f=sys.argv[1];d=json.load(open(f));d["disabledMcpjsonServers"]=["gerrit"];json.dump(d,open(f,"w"))' "$SL"
+kit sync >/dev/null 2>&1
+check "the only one turned off: disabledMcpjsonServers goes" '! jget "$SL" disabledMcpjsonServers >/dev/null && [ "$(jget "$SL" enabledMcpjsonServers | tr -d " \n")" = "[\"gerrit\"]" ]'
+cp "$T/gerrit.yaml.orig" "$TEAM/mcp/gerrit.yaml"; kit rm mcp gerrit >/dev/null 2>&1; kit sync >/dev/null 2>&1
 kit list --json --dir "$P/sub" > "$T/here5.json" 2>/dev/null
 check "list --json: folder = the one with .agentkit, its items" 'python3 -c "import json,sys;h=json.load(open(sys.argv[1]))[\"here\"];f=h[\"folder\"];assert f[\"dir\"]==sys.argv[2] and f[\"why\"]==\"\" and set(f[\"items\"])=={\"skill:gerrit-review\",\"rule:gerrit-flow\",\"mcp:gerrit\"}" "$T/here5.json" "$P"'
 check "list --json: kit's folder things are not listed again as the folder's own" 'python3 -c "import json,sys;h=json.load(open(sys.argv[1]))[\"here\"];n=[(i[\"kind\"],i[\"name\"]) for i in h[\"items\"]];assert (\"skill\",\"gerrit-review\") not in n and not any(i[\"path\"].endswith(\"AGENTS.md\") for i in h[\"items\"]) and any(i[\"path\"].endswith(\"/CLAUDE.md\") for i in h[\"items\"])" "$T/here5.json"'

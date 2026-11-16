@@ -4,6 +4,14 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.13（2026-11-16）
+
+更新後要做：`kit self-update`，再 `kit sync`。
+
+- MCP 的 `command`、`args` 裡的 `${HOME}`：kit 寫進各工具的設定（`~/.claude.json`、資料夾的 `.mcp.json`、omp 的 `mcp.json`、Codex 的 `config.toml`）時換成這台電腦的家目錄。omp、Codex 不會自己代換，以前照字面放進去，omp 開不起來（`MCP subprocess closed stdout before responding`）。`kit sync` 會改好已經放過的。Windows 換成使用者資料夾，`${USERPROFILE}` 也一樣換。其他的 `${變數}` 照原樣。
+- 資料夾的 MCP 在 Claude 的 `/mcp` 被關掉（`.claude/settings.local.json` 的 `disabledMcpjsonServers`，比 `enabledMcpjsonServers` 優先）：`kit sync` 把 kit 放的那個拿出來、重新打開，並說一聲。
+- Windows 版一樣。
+
 ## 0.6.12（2026-11-16）
 
 更新後要做：`kit self-update`。
