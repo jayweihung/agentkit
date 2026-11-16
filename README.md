@@ -109,7 +109,7 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 並在 `~/.claude.json` 把這個資料夾設成 Claude 信任的（`projects["<資料夾>"].hasTrustDialogAccepted`），開 Claude 就直接用，不會問。
 （Claude 只有在信任「這個資料夾本身」時才讀 `settings.local.json` 的這個設定；只信任上層資料夾〔例如家目錄〕、資料夾又不是 git 的話，每次開都會問「New MCP server found」。）
 只動 kit 放的 MCP，信任也只給這個資料夾；資料夾裡沒有 kit 放的 MCP 了，kit 把信任改回原來的樣子。
-Codex 一樣：kit 在 `~/.codex/config.toml` 信任這個資料夾（`[projects."<資料夾>"]`），Codex 才讀資料夾的 `.codex/config.toml`，開的時候不會問。omp 不用設定：它本來就讀 `.mcp.json`、不會問。
+Codex 一樣：kit 在 `~/.codex/config.toml` 信任這個資料夾（`[projects."<資料夾>"]`），Codex 才讀資料夾的 `.codex/config.toml`，開的時候不會問。kit 放的 MCP（整個帳號的、資料夾的、`kit run` 的）在 Codex 都加 `default_tools_approval_mode = "approve"`，叫它的工具不會每次問；團隊擋掉的工具照舊在 `disabled_tools`。omp 不用設定：它本來就讀 `.mcp.json`、不會問。
 有人在 Claude 的 `/mcp` 把它關掉（記在 `disabledMcpjsonServers`，關掉的優先），下一次 `kit sync` 把它從那裡拿掉、重新打開，並說一聲（只動 kit 放的 MCP）。
 
 omp 的工具限制：kit 把 Claude 的工具名字換成 omp 做同樣事的工具（例如 Read → read，Bash → bash 和 eval，Grep → grep 和 ast_grep），
