@@ -4,6 +4,14 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.14（2026-11-16）
+
+更新後要做：`kit self-update`，再 `kit sync`。
+
+- 資料夾的 MCP（`kit add --dir`、`kit place`）開 Claude 就直接用，不再問「New MCP server found in this project」。以前 kit 只寫資料夾 `.claude/settings.local.json` 的 `enabledMcpjsonServers`，但 Claude 只在信任「這個資料夾本身」時才算數；只信任上層（例如家目錄）、資料夾又不是 git 時每次都問。現在 kit 也在 `~/.claude.json` 把這個資料夾設成信任（`projects["<資料夾>"].hasTrustDialogAccepted`），跟 Codex 那邊一樣。只給有 kit 放的 MCP 的資料夾；MCP 拿掉、`kit uninstall` 時改回原來的樣子。有人把信任關掉，下一次 `kit sync` 再打開並說一聲。`kit sync` 會補好已經放過的資料夾（例如 `~/gerrit`）。
+- Codex、omp 不用改：Codex 開的時候不問（kit 已經信任資料夾），omp 本來就不問。
+- Windows 版一樣。
+
 ## 0.6.13（2026-11-16）
 
 更新後要做：`kit self-update`，再 `kit sync`。

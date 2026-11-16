@@ -87,7 +87,7 @@ yaml()     { LC_ALL=C awk -f "$KIT_LIB/yaml.awk" "$@"; }
 # yget FILE PATH -> values (one per line) for PATH or PATH[]
 yget() { [ -f "$1" ] || return 0; yaml "$1" | awk -F'\t' -v p="$2" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
 
-json_edit() { # json_edit FILE OPSFILE : edit FILE, keep a backup
+json_edit() { # json_edit FILE OPSFILE [SEP] : edit FILE, keep a backup (SEP joins the keys of a PATH, not ".")
     # Other programs (a running Claude) may write FILE at any time, so:
     # edit a snapshot, and only swap the result in (atomic rename) if FILE did
     # not change meanwhile; otherwise try again.
@@ -97,7 +97,7 @@ json_edit() { # json_edit FILE OPSFILE : edit FILE, keep a backup
     tmp=$(mktemp "$f.kit.XXXXXX") || { rm -f "$snap"; die "cannot write next to $f"; }
     for try in 1 2 3 4 5; do
         cp -p "$f" "$snap" && cp -p "$f" "$tmp" || break     # tmp gets f's permissions
-        if ! { LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$ops" "$snap" > "$tmp" &&
+        if ! { LC_ALL=C awk -f "$KIT_LIB/json.awk" -v ops="$ops" -v sep="${3:-}" "$snap" > "$tmp" &&
                LC_ALL=C awk -f "$KIT_LIB/json.awk" "$tmp" > /dev/null; }; then
             rm -f "$snap" "$tmp"; die "沒辦法更新 ${f}（檔案沒有被改動）"
         fi
@@ -123,7 +123,7 @@ prune_empty() { # prune_empty FILE PATH... : delete each PATH whose value is [] 
 }
 prune_deny() { prune_empty "$CLAUDE_DIR/settings.json" permissions.deny permissions hooks.SessionStart hooks.UserPromptSubmit hooks; }
 
-json_get() { LC_ALL=C awk -f "$KIT_LIB/json.awk" -v get="$2" "$1" 2>/dev/null; }
+json_get() { LC_ALL=C awk -f "$KIT_LIB/json.awk" -v get="$2" -v sep="${3:-}" "$1" 2>/dev/null; }   # json_get FILE PATH [SEP]
 json_strs() { # json_strs FILE A.B : the strings in the array at A.B, as JSON text ("..."), one per line (json_str NAME is one)
     [ -f "$1" ] || return 0
     LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$1" 2>/dev/null | awk -F'\t' -v p="$2" '
@@ -1382,6 +1382,33 @@ EOF
     fi
     rm -f "$ops"; drop_made "$f"
 }
+dir_claude_trust() { # dir_claude_trust DIR : the folder trusted in ~/.claude.json while kit has MCP allowed in it
+    # (Claude counts the enabledMcpjsonServers in a folder's .claude/settings.local.json only when ~/.claude.json trusts
+    # that very folder, projects[DIR].hasTrustDialogAccepted; trusting a folder above it is not enough outside git, and
+    # then Claude asks about the MCP at every start. Codex: codex_trust.) kit keeps what was there before (false, or
+    # none) and puts it back when the folder has no MCP of kit's any more. No ~/.claude.json yet: the next kit sync.
+    local dir=$1 k=$'\034' p kt was v ops
+    kt=$(dir_kind "$dir" trust); was=$(state_get "$kt" claude); p="projects$k$dir"
+    [ -f "$CLAUDE_JSON" ] || return 0
+    ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
+    if [ -n "$(state_list "$(dir_kind "$dir" allow)")" ]; then
+        v=$(json_get "$CLAUDE_JSON" "$p${k}hasTrustDialogAccepted" "$k")
+        if [ "$v" != true ]; then
+            printf 'set\t%s%shasTrustDialogAccepted\ttrue\n' "$p" "$k" > "$ops"; json_edit "$CLAUDE_JSON" "$ops" "$k"
+            [ -n "$was" ] || state_set "$kt" claude "${v:-none}"
+            say "  ${dir}：Claude 信任這個資料夾了（kit 放的 MCP 開 Claude 就用，不會再問）"
+        fi
+    elif [ -n "$was" ]; then
+        if [ "$was" = none ]; then printf 'del\t%s%shasTrustDialogAccepted\n' "$p" "$k"
+        else printf 'set\t%s%shasTrustDialogAccepted\t%s\n' "$p" "$k" "$was"; fi > "$ops"
+        json_edit "$CLAUDE_JSON" "$ops" "$k"
+        if [ "$(json_get "$CLAUDE_JSON" "$p" "$k" | tr -d ' \r\n')" = "{}" ]; then   # an entry only kit made
+            printf 'del\t%s\n' "$p" > "$ops"; json_edit "$CLAUDE_JSON" "$ops" "$k"; prune_empty "$CLAUDE_JSON" projects
+        fi
+        state_del "$kt" claude
+    fi
+    rm -f "$ops"
+}
 # Claude Code's own tools that kit knows: a placed agent's tools.only becomes deny rules for the others (Claude's settings
 # have no "only these"; a tool Claude adds later is not in the list). kit.ps1 has the same list. No MultiEdit: newer
 # Claude Code has none (a deny rule for it is warned about), and in one that has it, denying Edit covers it.
@@ -1430,6 +1457,7 @@ apply_dir() { # apply_dir DIR : the folder's .agentkit (and its agent) -> the to
     sync_mcp_json "$dir/.mcp.json" "$(dir_kind "$dir" mcp)" <<< "$mcps"; mcp_vars_warn <<< "$mcps"
     drop_made "$dir/.mcp.json"
     dir_claude_allow "$dir" <<< "$mcps"
+    dir_claude_trust "$dir"
     dir_claude_deny "$dir" <<< "$cdeny"
     # kit's backups of the user's own files go when kit has nothing left in them
     [ -n "$(state_list "$(dir_kind "$dir" mcp)")" ] || rm -f "$dir/.mcp.json.kit-backup"

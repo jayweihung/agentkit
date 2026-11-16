@@ -1019,7 +1019,11 @@ check "add --dir rule: CLAUDE.md keeps the user text, imports the rule" 'head -1
 check "add --dir rule: AGENTS.md (Codex, omp) has the text" 'grep -q "Only comment, never submit." "$P/AGENTS.md"'
 check "add --dir: account rules untouched" '! grep -q gerrit-flow "$H5/.claude/CLAUDE.md"'
 check "codex: project_root_markers at the top, user part kept, valid TOML" 'head -1 "$H5/.codex/config.toml" | grep -q "agentkit:top:begin" && grep -qF "project_root_markers = [\".git\", \".agentkit\"]" "$H5/.codex/config.toml" && grep -qx "model = \"gpt-5\"" "$H5/.codex/config.toml" && { ! python3 -c "import tomllib" 2>/dev/null || python3 -c "import tomllib,sys;d=tomllib.load(open(sys.argv[1],\"rb\"));assert d[\"project_root_markers\"]==[\".git\",\".agentkit\"] and d[\"model\"]==\"gpt-5\"" "$H5/.codex/config.toml"; }'
-kit add --dir "$P" mcp gerrit >/dev/null 2>&1
+[ -f "$H5/.claude.json" ] || { printf '{\n  "numStartups": 1\n}\n' > "$H5/.claude.json"; chmod 600 "$H5/.claude.json"; }
+cp -p "$H5/.claude.json" "$T/cj5.before"
+out=$(kit add --dir "$P" mcp gerrit 2>&1)
+check "add --dir mcp: Claude trusts the folder (~/.claude.json projects[DIR]; else Claude asks about the MCP at every start), said" 'python3 -c "import json,sys;d=json.load(open(sys.argv[1]));assert d[\"projects\"][sys.argv[2]]=={\"hasTrustDialogAccepted\":True}" "$H5/.claude.json" "$P" && echo "$out" | grep -qF "${P}：Claude 信任這個資料夾了"'
+check "add --dir mcp: ~/.claude.json stays private (600)" '[ "$(ls -l "$H5/.claude.json" | cut -c1-10)" = "-rw-------" ]'
 check "add --dir mcp: .mcp.json has it, the user's server kept" '[ "$(jget "$P/.mcp.json" mcpServers.gerrit.command)" = "\"uvx\"" ] && [ "$(jget "$P/.mcp.json" mcpServers.own.command)" = "\"y\"" ]'
 check "add --dir mcp: Claude does not ask (settings.local.json)" 'jget "$P/.claude/settings.local.json" enabledMcpjsonServers | grep -q "\"gerrit\""'
 check "add --dir mcp: the folder's Codex config" 'grep -q "^\[mcp_servers.gerrit\]" "$P/.codex/config.toml"'
@@ -1070,6 +1074,17 @@ kit rm --dir "$P" skill gerrit-review >/dev/null 2>&1; kit rm --dir "$P" rule ge
 check "rm --dir all: the folder exactly as before" 'cmp -s "$P/CLAUDE.md" "$T/p.claude" && cmp -s "$P/.mcp.json" "$T/p.mcp" && [ "$(cd "$P" && ls -A | LC_ALL=C sort | tr "\n" " ")" = ".mcp.json CLAUDE.md sub " ]'
 check "rm --dir all: Codex config byte-identical to after init" 'cmp -s "$H5/.codex/config.toml" "$T/codex5.init"'
 check "rm --dir all: kit forgets the folder" '[ ! -e "$HOME/.config/agentkit/dirs" ] && ! grep -qF "dir:$P:" "$HOME/.config/agentkit/state.tsv"'
+check "rm --dir all: ~/.claude.json byte-identical (kit's trust entry gone)" 'cmp -s "$H5/.claude.json" "$T/cj5.before"'
+# Claude's own entry for the folder (not trusted): kit trusts it and puts back false when its MCP goes
+python3 -c 'import json,sys;f=sys.argv[1];d=json.load(open(f));d.setdefault("projects",{})[sys.argv[2]]={"allowedTools":[],"hasTrustDialogAccepted":False,"lastCost":1};open(f,"w").write(json.dumps(d,indent=2)+"\n")' "$H5/.claude.json" "$P"
+cp -p "$H5/.claude.json" "$T/cj5.claude"
+kit add --dir "$P" mcp gerrit >/dev/null 2>&1
+check "Claude's entry for the folder: trusted, the rest kept" 'python3 -c "import json,sys;d=json.load(open(sys.argv[1]));assert d[\"projects\"][sys.argv[2]]=={\"allowedTools\":[],\"hasTrustDialogAccepted\":True,\"lastCost\":1}" "$H5/.claude.json" "$P"'
+python3 -c 'import json,sys;f=sys.argv[1];d=json.load(open(f));d["projects"][sys.argv[2]]["hasTrustDialogAccepted"]=False;open(f,"w").write(json.dumps(d,indent=2)+"\n")' "$H5/.claude.json" "$P"
+kit sync >/dev/null 2>&1
+check "trust turned off while kit's MCP is there: on again" '[ "$(LC_ALL=C awk -f "$JA" -v get="projects|$P|hasTrustDialogAccepted" -v sep="|" "$H5/.claude.json")" = true ]'
+kit rm --dir "$P" mcp gerrit >/dev/null 2>&1
+check "rm --dir mcp: Claude's entry as it was (false)" 'cmp -s "$H5/.claude.json" "$T/cj5.claude"'
 kit add --dir "$P" skill gerrit-review >/dev/null 2>&1; kit add --dir "$P" mcp gerrit >/dev/null 2>&1
 Q="$T/gone"; mkdir -p "$Q"; Q=$(cd "$Q" && pwd -P); kit add --dir "$Q" skill gerrit-review >/dev/null 2>&1; rm -rf "$Q"; kit sync >/dev/null 2>&1
 check "sync: a folder that is gone leaves the list" '! grep -qxF "$Q" "$HOME/.config/agentkit/dirs" && grep -qxF "$P" "$HOME/.config/agentkit/dirs"'

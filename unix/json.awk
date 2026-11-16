@@ -21,7 +21,7 @@
 #   rmstr   PATH  STRING   remove "STRING" from the array at PATH
 #   addjson PATH  JSON     append JSON to the array at PATH if no equal item exists
 #   rmjson  PATH  JSON     remove items equal to JSON from the array at PATH
-# PATH is keys joined by "." (keys must not contain "." or TAB).
+# PATH is keys joined by "." (keys must not contain "." or TAB), or by -v sep=X (e.g. a folder as a key).
 # STRING is plain text; " and \ are escaped by json.awk.
 #
 # Exit status: 0 ok, 2 parse error (nothing is written to stdout).
@@ -275,7 +275,7 @@ function apply_ops(file,    line, f, cnt, n, p, j, a, i, s, found) {
         if (f[1] == "set") {
             set_path(f[2], parse_text(f[3]))
         } else if (f[1] == "del") {
-            cnt = split(f[2], parts_d, ".")
+            cnt = split(f[2], parts_d, (sep == "" ? "." : sep))
             n = (cnt > 1) ? find_path(root, substr(f[2], 1, length(f[2]) - length(parts_d[cnt]) - 1)) : root
             if (n && (j = child(n, parts_d[cnt]))) C[n, j] = 0
         } else if (f[1] == "addstr" || f[1] == "rmstr") {

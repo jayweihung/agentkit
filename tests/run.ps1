@@ -866,7 +866,12 @@ Kit add --dir (Join-Path (Join-Path $FP 'sub') 'deeper') rule gerrit-flow
 Check 'add --dir from a sub-folder goes to the folder that has .agentkit' { -not (Test-Path "$FP/sub/deeper/.agentkit") -and (ReadT "$FP/.agentkit").Contains("rule:gerrit-flow") }
 Check 'add --dir rule: CLAUDE.md keeps the user text and imports it; AGENTS.md has the text' { $c = ReadT "$FP/CLAUDE.md"; $c.StartsWith("# my notes`n") -and $c.Contains('rules/gerrit-flow.md') -and (ReadT "$FP/AGENTS.md").Contains('Only comment, never submit.') }
 Check 'codex: project_root_markers at the top, user part kept' { $c = ReadT "$H/.codex/config.toml"; $c.StartsWith('# agentkit:top:begin') -and $c.Contains('project_root_markers = [".git", ".agentkit"]') -and $c.Contains("model = `"gpt-5`"") }
+if (-not (Test-Path "$H/.claude.json")) { W "$H/.claude.json" "{`n  `"numStartups`": 1`n}`n" }
+Copy-Item "$H/.claude.json" "$T/cj5.before"
+$CK = $FR.Replace('\', '/')   # Claude names a folder with /
+function CProj { (ConvertFrom-Json (ReadT "$H/.claude.json")).projects.PSObject.Properties[$CK].Value }
 Kit add --dir $FP mcp gerrit
+Check 'add --dir mcp: Claude trusts the folder (~/.claude.json projects[DIR]; else Claude asks about the MCP at every start), said' { $e = CProj; @($e.PSObject.Properties).Count -eq 1 -and $e.hasTrustDialogAccepted -eq $true -and $out.Contains("$FR：Claude 信任這個資料夾了") }
 Check 'add --dir mcp: .mcp.json has it and the own; Claude does not ask' { (JGet "$FP/.mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (JGet "$FP/.mcp.json" 'mcpServers.own.command') -eq '"y"' -and (Flat (JGet "$FP/.claude/settings.local.json" 'enabledMcpjsonServers')) -eq '["gerrit"]' }
 Check 'add --dir mcp: the folder Codex config, and Codex trusts the folder' { (ReadT "$FP/.codex/config.toml").Contains('[mcp_servers.gerrit]') -and (ReadT "$H/.codex/config.toml").Contains("[projects.`"$($FR.Replace('\', '\\'))`"]`ntrust_level = `"trusted`"") }
 # ${HOME} in an MCP's command and args: this machine's home in every tool's file (omp and Codex do not expand it); other ${VAR} stay
@@ -909,6 +914,17 @@ Check "rm: the account hasn't it, a folder has: says which folder and --dir" { $
 Kit rm --dir $FP skill gerrit-review; Kit rm --dir $FP rule gerrit-flow; Kit rm --dir $FP mcp gerrit
 Check 'rm --dir all: the folder exactly as before' { (SameBytes "$T/fp.claude" "$FP/CLAUDE.md") -and (SameBytes "$T/fp.mcp" "$FP/.mcp.json") -and ((@(Get-ChildItem -LiteralPath $FP -Force | ForEach-Object { $_.Name } | Sort-Object) -join ' ') -eq '.mcp.json CLAUDE.md sub') }
 Check 'rm --dir all: Codex config byte-identical to after init, kit forgets the folder' { (SameBytes "$T/codex5.init" "$H/.codex/config.toml") -and -not (Test-Path "$H/.config/agentkit/dirs") }
+Check 'rm --dir all: ~/.claude.json byte-identical (kit''s trust entry gone)' { SameBytes "$T/cj5.before" "$H/.claude.json" }
+# Claude's own entry for the folder (not trusted): kit trusts it and puts back false when its MCP goes
+$cj = ReadT "$H/.claude.json"; W "$H/.claude.json" ($cj.Substring(0, $cj.LastIndexOf('}')).TrimEnd() + ",`n  `"projects`": {`n    $(& { '"' + $CK.Replace('\', '\\') + '"' }): {`n      `"allowedTools`": [],`n      `"hasTrustDialogAccepted`": false,`n      `"lastCost`": 1`n    }`n  }`n}`n")
+Copy-Item "$H/.claude.json" "$T/cj5.claude"
+Kit add --dir $FP mcp gerrit
+Check 'Claude''s entry for the folder: trusted, the rest kept' { $e = CProj; (@($e.PSObject.Properties | ForEach-Object { $_.Name }) -join ' ') -ceq 'allowedTools hasTrustDialogAccepted lastCost' -and $e.hasTrustDialogAccepted -eq $true -and $e.lastCost -eq 1 }
+W "$H/.claude.json" ((ReadT "$H/.claude.json").Replace('"hasTrustDialogAccepted": true', '"hasTrustDialogAccepted": false'))
+Kit sync
+Check 'trust turned off while kit''s MCP is there: on again' { (CProj).hasTrustDialogAccepted -eq $true }
+Kit rm --dir $FP mcp gerrit
+Check 'rm --dir mcp: Claude''s entry as it was (false)' { SameBytes "$T/cj5.claude" "$H/.claude.json" }
 Kit add --dir $FP skill gerrit-review; Kit add --dir $FP mcp gerrit
 Kit uninstall
 Check 'uninstall: the folder and Codex config exactly as before' { (SameBytes "$T/fp.claude" "$FP/CLAUDE.md") -and (SameBytes "$T/fp.mcp" "$FP/.mcp.json") -and -not (Test-Path "$FP/.agentkit") -and (SameBytes "$T/codex5.orig" "$H/.codex/config.toml") }

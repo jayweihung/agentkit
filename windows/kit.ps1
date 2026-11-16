@@ -250,13 +250,14 @@ function Json-Child($o, [string]$key) {
     for ($i = 0; $i -lt $o.k.Count; $i++) { if ($o.k[$i] -ceq $q) { return $i } }
     -1
 }
+$script:JsonSep = '.'   # joins the keys of a PATH (Json-Edit / Json-Get with SEP: a key may have "." in it, e.g. a folder)
 function Json-Find($root, [string]$path) {
     $n = $root
-    foreach ($part in $path.Split('.')) { $i = Json-Child $n $part; if ($i -lt 0) { return $null }; $n = $n.v[$i] }
+    foreach ($part in $path.Split($script:JsonSep)) { $i = Json-Child $n $part; if ($i -lt 0) { return $null }; $n = $n.v[$i] }
     $n
 }
 function Json-Parent($root, [string]$path) { # walk to the parent of PATH, creating objects on the way
-    $parts = $path.Split('.'); $n = $root
+    $parts = $path.Split($script:JsonSep); $n = $root
     for ($j = 0; $j -lt $parts.Count - 1; $j++) {
         if ($n.t -ne 'o') { throw "json: not an object at $($parts[$j])" }
         $i = Json-Child $n $parts[$j]
@@ -269,12 +270,12 @@ function Json-Parent($root, [string]$path) { # walk to the parent of PATH, creat
     $n
 }
 function Json-Set($root, [string]$path, $node) {
-    $p = Json-Parent $root $path; $last = $path.Split('.')[-1]; $i = Json-Child $p $last
+    $p = Json-Parent $root $path; $last = $path.Split($script:JsonSep)[-1]; $i = Json-Child $p $last
     if ($i -ge 0) { $p.v[$i] = $node } else { $p.k.Add((Json-Str $last)); $p.v.Add($node) }
 }
 function Json-Del($root, [string]$path) {
-    $parts = $path.Split('.')
-    $p = if ($parts.Count -gt 1) { Json-Find $root ($parts[0..($parts.Count - 2)] -join '.') } else { $root }
+    $parts = $path.Split($script:JsonSep)
+    $p = if ($parts.Count -gt 1) { Json-Find $root ($parts[0..($parts.Count - 2)] -join $script:JsonSep) } else { $root }
     if ($null -eq $p) { return }
     $i = Json-Child $p $parts[-1]
     if ($i -ge 0) { $p.k.RemoveAt($i); $p.v.RemoveAt($i) }
@@ -320,14 +321,14 @@ function Json-Strs([string]$file, [string]$path) { # the strings in the array at
     if ($null -eq $a -or $a.t -ne 'a') { return @() }
     @(foreach ($x in $a.v) { if ($x.t -eq 'v' -and $x.raw.StartsWith('"')) { $x.raw } })
 }
-function Json-Get([string]$file, [string]$path) {
+function Json-Get([string]$file, [string]$path, [string]$sep = '.') {
     if (-not (Test-Path -LiteralPath $file)) { return $null }
-    $n = Json-Find (Json-Parse (Read-Text $file)) $path
+    $script:JsonSep = $sep; try { $n = Json-Find (Json-Parse (Read-Text $file)) $path } finally { $script:JsonSep = '.' }
     if ($null -eq $n) { return $null }
     Json-Ser $n
 }
 
-function Json-Edit([string]$f, $ops) { # edit FILE, keep a backup
+function Json-Edit([string]$f, $ops, [string]$sep = '.') { # edit FILE, keep a backup (SEP joins the keys of a PATH)
     # Other programs (a running Claude) may write FILE at any time, so: edit a
     # snapshot, and swap the result in only if FILE did not change meanwhile.
     $new = $false
@@ -337,7 +338,7 @@ function Json-Edit([string]$f, $ops) { # edit FILE, keep a backup
         $orig = $Utf8.GetString($snap); $bom = ($orig.Length -gt 0 -and $orig[0] -eq [char]0xFEFF); if ($bom) { $orig = $orig.Substring(1) }
         try {
             $root = Json-Parse $orig
-            Json-Apply $root $ops
+            $script:JsonSep = $sep; try { Json-Apply $root $ops } finally { $script:JsonSep = '.' }
             $text = Json-Text $root $orig
             [void](Json-Parse $text)
         } catch { Die "沒辦法更新 ${f}（檔案沒有被改動）：$($_.Exception.Message)" }
@@ -2389,6 +2390,30 @@ function Dir-ClaudeDeny([string]$dir, $names) { # deny rules -> .claude/settings
     }
     Drop-Made $f
 }
+function Dir-ClaudeTrust([string]$dir) { # the folder trusted in ~/.claude.json while kit has MCP allowed in it
+    # (Claude counts the enabledMcpjsonServers in a folder's .claude/settings.local.json only when ~/.claude.json trusts
+    # that very folder, projects[DIR].hasTrustDialogAccepted; trusting a folder above it is not enough outside git, and
+    # then Claude asks about the MCP at every start. Codex: Codex-Trust.) kit keeps what was there before (false, or
+    # none) and puts it back when the folder has no MCP of kit's any more. No ~/.claude.json yet: the next kit sync.
+    # Claude names a folder with / (C:/Users/...).
+    $k = [string][char]0x1C; $kt = Dir-Kind $dir 'trust'; $was = State-Get $kt 'claude'; $p = "projects$k$($dir.Replace('\', '/'))"
+    if (-not (Test-Path -LiteralPath $ClaudeJson -PathType Leaf)) { return }
+    if (@(State-List (Dir-Kind $dir 'allow')).Count -gt 0) {
+        $v = Json-Get $ClaudeJson "$p${k}hasTrustDialogAccepted" $k
+        if ($v -cne 'true') {
+            Json-Edit $ClaudeJson @(, @('set', "$p${k}hasTrustDialogAccepted", 'true')) $k
+            if ($null -eq $was) { State-Set $kt 'claude' $(if ($null -eq $v) { 'none' } else { $v }) }
+            Say "  $($dir)：Claude 信任這個資料夾了（kit 放的 MCP 開 Claude 就用，不會再問）"
+        }
+    } elseif ($null -ne $was) {
+        $op = if ($was -ceq 'none') { @('del', "$p${k}hasTrustDialogAccepted") } else { @('set', "$p${k}hasTrustDialogAccepted", $was) }
+        Json-Edit $ClaudeJson @(, $op) $k
+        if ((Json-Get $ClaudeJson $p $k) -ceq '{}') {   # an entry only kit made
+            Json-Edit $ClaudeJson @(, @('del', $p)) $k; Prune-Empty $ClaudeJson @('projects')
+        }
+        State-Del $kt 'claude'
+    }
+}
 # Claude Code's own tools that kit knows: a placed agent's tools.only becomes deny rules for the others (Claude's settings
 # have no "only these"; a tool Claude adds later is not in the list). unix/kit has the same list.
 $ClaudeTools = @('Agent', 'Bash', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'Read', 'Task', 'TodoWrite', 'WebFetch', 'WebSearch', 'Write')
@@ -2444,6 +2469,7 @@ function Apply-Dir([string]$dir) { # the folder's .agentkit (and its agent) -> t
     Sync-McpJson $mj (Dir-Kind $dir 'mcp') $mcps; Mcp-VarsWarn $mcps
     Drop-Made $mj
     Dir-ClaudeAllow $dir $mcps
+    Dir-ClaudeTrust $dir
     Dir-ClaudeDeny $dir $cdeny
     # kit's backups of the user's own files go when kit has nothing left in them
     if (@(State-List (Dir-Kind $dir 'mcp')).Count -eq 0 -and (Test-Path -LiteralPath "$mj.kit-backup")) { Remove-Item -LiteralPath "$mj.kit-backup" -Force }
