@@ -96,6 +96,10 @@ function Release-Lock {
 }
 function Temp-Next([string]$f) { "$f.kit." + [IO.Path]::GetRandomFileName() }   # a temp file next to F, unique per kit
 
+function Read-Stdin { # as UTF-8, a BOM or not: Windows PowerShell 5.1's [Console]::In would read the console's code page (Big5 on zh-TW)
+    $sr = New-Object IO.StreamReader ([Console]::OpenStandardInput()), $Utf8, $true
+    try { $sr.ReadToEnd() } finally { $sr.Dispose() }
+}
 function Read-Text([string]$path) {
     $t = [IO.File]::ReadAllText($path, $Utf8)
     if ($t.Length -gt 0 -and $t[0] -eq [char]0xFEFF) { $t = $t.Substring(1) }
@@ -365,14 +369,20 @@ function Swap-In([string]$tmp, [string]$f, [bool]$backup) { # put TMP in place o
         } catch { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; Die "沒辦法寫入 ${f}：$($_.Exception.Message)" }
     }
     $b = if ($backup) { "$f.kit-backup" } else { [NullString]::Value }   # a plain $null would become "
-    try { [IO.File]::Replace($tmp, $f, $b); return }                     # atomic, keeps the file's permissions
+    try { if (Test-Path -LiteralPath $f) { [IO.File]::Replace($tmp, $f, $b) } else { Move-Item -LiteralPath $tmp -Destination $f }; return }   # atomic, keeps the file's permissions
     catch { $why = $_.Exception.Message }
     # some network drives and file systems cannot replace: copy instead (not atomic)
     try {
-        if ($backup) { Copy-Item -LiteralPath $f -Destination "$f.kit-backup" -Force }
+        if ($backup -and (Test-Path -LiteralPath $f)) { Copy-Item -LiteralPath $f -Destination "$f.kit-backup" -Force }
         Copy-Item -LiteralPath $tmp -Destination $f -Force
         Remove-Item -LiteralPath $tmp -Force
     } catch { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; Die "沒辦法寫入 ${f}：$why / $($_.Exception.Message)" }
+}
+# put TMP in place of F, throwing when it can't (for callers that catch): Move-Item -Force over an existing file deletes
+# it first, and when Defender is scanning it the delete is only pending, so the move fails with "file already exists"
+function Move-Over([string]$tmp, [string]$f) {
+    try { if (Test-Path -LiteralPath $f) { [IO.File]::Replace($tmp, $f, [NullString]::Value) } else { Move-Item -LiteralPath $tmp -Destination $f -Force }; return } catch { }
+    Copy-Item -LiteralPath $tmp -Destination $f -Force; Remove-Item -LiteralPath $tmp -Force   # what Swap-In does when Replace can't
 }
 function Prune-Empty([string]$f, [string[]]$paths) { # delete each PATH whose value is [] or {}
     if (-not (Test-Path -LiteralPath $f)) { return }
@@ -426,7 +436,7 @@ function State-Set([string]$k, [string]$n, $v) {
     if ($null -ne $v) { $rows += "$k`t$n`t$v" }
     $t = Temp-Next $State
     Write-Text $t (($rows | ForEach-Object { "$_`n" }) -join '')
-    Move-Item -LiteralPath $t -Destination $State -Force
+    Swap-In $t $State $false
 }
 function State-From-Old([string]$item, [string]$dir) { # a "from" entry written before 0.3.0 with the folder as typed (links in it)
     foreach ($r in State-Rows) {
@@ -457,7 +467,7 @@ function Write-Machine($sources, $added, $removed) {
     $t += 'added: [' + ((@($added) | Where-Object { $_ }) -join ', ') + "]`n"
     $t += 'removed: [' + ((@($removed) | Where-Object { $_ }) -join ', ') + "]    # kit rm; sync will not add these back`n"
     if (M-Approvals) { $t += "# only signed, approved versions of the sources are used (kit approve)`napprovals: $($script:MAppr)`nsigners: $($script:MSigners)`n" }
-    $tmp = Temp-Next $Machine; Write-Text $tmp $t; Move-Item -LiteralPath $tmp -Destination $Machine -Force
+    $tmp = Temp-Next $Machine; Write-Text $tmp $t; Swap-In $tmp $Machine $false
 }
 
 # ---------- sources ----------
@@ -1584,10 +1594,7 @@ function Mcp-PasteErr($out) { # Mcp-Read stopped (an E line): stop kit with its 
 function Mcp-NewConfig($o) { # kit new mcp [NAME] --config FILE|- [--to SOURCE] [--look] : a pasted setup -> mcp/<name>.yaml, secrets as ${VAR}
     if ($o.Name -and -not (Valid-Name $o.Name)) { Die-C bad_name "名字只能用小寫英文、數字和 -：$($o.Name)" }
     # the paste may hold secrets: it is read here, never written anywhere or printed
-    if ($o.Config -eq '-') {   # (as UTF-8, a BOM or not: Windows PowerShell 5.1's [Console]::In would read the console's code page)
-        $sr = New-Object IO.StreamReader ([Console]::OpenStandardInput()), (New-Object Text.UTF8Encoding $false), $true
-        try { $text = $sr.ReadToEnd() } finally { $sr.Dispose() }
-    }
+    if ($o.Config -eq '-') { $text = Read-Stdin }
     else { if (-not (Test-Path -LiteralPath $o.Config -PathType Leaf)) { Die-C usage "找不到 $($o.Config)" }; $text = Read-Text $o.Config }
     if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
     $lines = @($text -split "`n"); if ($text.EndsWith("`n")) { $lines = @($lines | Select-Object -First ($lines.Count - 1)) }
@@ -1740,7 +1747,7 @@ function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills
                     if (-not $b) { Warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; break }
                     Say "  你改過的 skill $n 備份在 $b"; $sum = $sum.Substring($sum.IndexOf(' ') + 1)
                 }
-                if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Item -LiteralPath $dst -Recurse -Force }
+                if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Retry $dst }
                 Copy-Item -LiteralPath $r.src -Destination $dst -Recurse; Drop-Caches $dst
                 State-Set $kind $n $sum; Say "  skill $n → $dir"
                 Link-Deps $n $dst
@@ -1754,7 +1761,7 @@ function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills
                 Warn "skill ${n}（${dir}）被手動改過，沒有刪；kit 之後不再管它，不要了請自己刪"; State-Del $kind $n
             }
             'remove' {
-                if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Item -LiteralPath $dst -Recurse -Force }
+                if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Retry $dst }
                 State-Del $kind $n; Say "  removed skill $n ← $dir"
             }
         }
@@ -1806,7 +1813,7 @@ function Kit-PendingAsk([string]$id, [string]$text) { # a kit pending item kept 
     try {
         Ensure-Dir $PendDir
         $f = Join-Path $PendDir $id; $since = [string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()); $old = Pend-Read $id; if ($old) { $since = $old[2] }
-        Write-Text "$f.tmp" ("`n`n$((Get-Location).ProviderPath)`n$since`n$text`n$(Proc-Up ([string](Proc-Parent $PID)))`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force
+        Write-Text "$f.tmp" ("`n`n$((Get-Location).ProviderPath)`n$since`n$text`n$(Proc-Up ([string](Proc-Parent $PID)))`n"); Move-Over "$f.tmp" $f
     } catch { }
     Warn $text
 }
@@ -2072,7 +2079,7 @@ function Codex-GuardSays([string]$tool, [string]$cmd, $only, $deny) { # why Code
     ''
 }
 function Cmd-CodexGuard { # Codex's PreToolUse hook (~/.codex/hooks.json): what it hands over on stdin
-    $in = [Console]::In.ReadToEnd(); $tool = Str-Of 'tool_name' $in
+    $in = Read-Stdin; $tool = Str-Of 'tool_name' $in
     if ($tool -cne 'Bash' -and $tool -cne 'apply_patch') { return }
     $j = $null; try { $j = $in | ConvertFrom-Json } catch { return }
     $cmd = "$($j.tool_input.command)"; $cwd = "$($j.cwd)"
@@ -2331,7 +2338,7 @@ function Dirs-Set([string]$d, [string]$how) { # the list of folders kit has to k
     $rows = @(Dirs-Registered | Where-Object { $_ -ne $d }); if ($how -eq 'add') { $rows += $d }
     if ($rows.Count -eq 0) { if (Test-Path -LiteralPath $DirsList) { Remove-Item -LiteralPath $DirsList -Force }; return }
     Ensure-Dir $KitConf; $t = Temp-Next $DirsList
-    Write-Text $t (($rows | ForEach-Object { "$_`n" }) -join ''); Move-Item -LiteralPath $t -Destination $DirsList -Force
+    Write-Text $t (($rows | ForEach-Object { "$_`n" }) -join ''); Swap-In $t $DirsList $false
 }
 function Dir-Write([string]$d, $items, $marks = $null) { # the folder's .agentkit (gone when nothing is left); kit place's lines kept
     $f = Join-Path $d $DirFile; $items = @($items | Where-Object { $_ })
@@ -3064,9 +3071,16 @@ function Remove-Tree([string]$p) { # a folder and what is in it; links (junction
             if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($e.FullName) } else { $stack.Push($e.FullName) }
         }
     }
-    Remove-Item -LiteralPath $p -Recurse -Force
+    Remove-Retry $p
 }
-function Remove-Store([string]$p) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force } }   # kit's own: no links in it
+function Remove-Store([string]$p) { if (Test-Path -LiteralPath $p) { Remove-Retry $p } }   # kit's own: no links in it
+# Windows deletes a file only once nobody has it open (Defender, an indexer): a folder can be "not empty" for a moment
+function Remove-Retry([string]$p) {
+    for ($i = 1; ; $i++) {
+        try { Remove-Item -LiteralPath $p -Recurse -Force; return }
+        catch { if (-not (Test-Path -LiteralPath $p)) { return }; if ($i -ge 5) { throw }; Start-Sleep -Milliseconds 200 }
+    }
+}
 function Install-Npm([string]$d, [string]$s) {
     $bad = Npm-Bad $d
     if ($bad) { Die "kit 不裝這些 npm 套件（只能裝 npm registry 上的版本，不能是 git、網址、檔案或連結）：$bad" }
@@ -3109,7 +3123,7 @@ function Install-Pip([string]$d, [string]$s) {
     # failing or stopped (Ctrl-C), the old one goes back. An .old left over: that install never finished.
     $old = "$s.old"
     if (Test-Path -LiteralPath $old) { Pip-Back $s }
-    if (Test-Path -LiteralPath $s) { Move-Item -LiteralPath $s -Destination $old }
+    if (Test-Path -LiteralPath $s) { try { Move-Item -LiteralPath $s -Destination $old } catch { Die "$s 正在使用中：先關掉用這個 MCP 的 Claude／Codex 再試" } }
     $done = $false
     try {
         Ensure-Dir (Join-Path $s '.kit-src')
@@ -3264,7 +3278,7 @@ function Claude-Limit([string]$f) { # "UNTIL_SECONDS KIND" when that Claude stop
 function Ctx-Pct([string]$u, [string]$w) { [string][long][Math]::Floor(([double][long]$u * 100 + [Math]::Floor([long]$w / 2)) / [long]$w) }   # (u * 100 + w / 2) / w in whole numbers
 function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for kit context, print a short status line
     # (the window set in settings.json, autoCompactWindow, only when settings.json has one)
-    $j = [Console]::In.ReadToEnd()
+    $j = Read-Stdin
     $w = Num-Of 'context_window_size' $j
     $pm = [regex]::Match($j, '"used_percentage"\s*:\s*([0-9]+(\.[0-9]+)?)'); $pct = if ($pm.Success) { [string][long][Math]::Floor([double]::Parse($pm.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) + 0.5) } else { '' }
     $u = ''
@@ -3293,16 +3307,16 @@ function Cmd-Statusline { # what Claude's statusLine runs: keep the numbers for 
             # the paths as Claude wrote them (already JSON text)
             $line = '{"pid": ' + $cp + ', "session": ' + (Json-S $sid) + ', "used": ' + $(if ($u) { $u } else { 'null' }) + ', "window": ' + $(if ($w) { $w } else { 'null' }) + ', "pct": ' + $(if ($pct) { $pct } else { 'null' }) + ', "model": ' + (Json-S $model) + ', "transcript": "' + $tp + '", "cwd": "' + $cwd + "`"}`n"
             $tmp = Join-Path $CtxDir ".claude-$cp.$PID"; [IO.File]::WriteAllText($tmp, $line, (New-Object Text.UTF8Encoding $false))
-            Move-Item -LiteralPath $tmp -Destination (Join-Path $CtxDir "claude-$cp.json") -Force
-        } catch { }
+            Move-Over $tmp (Join-Path $CtxDir "claude-$cp.json")
+        } catch { if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
     }
     # the account's usage limits, whichever Claude saw them last (kit usage)
     if ($lim) {
         try {
             Ensure-Dir $CtxDir
             $tmp = Join-Path $CtxDir ".claude-usage.$PID"; [IO.File]::WriteAllText($tmp, "$lim`n", (New-Object Text.UTF8Encoding $false))
-            Move-Item -LiteralPath $tmp -Destination (Join-Path $CtxDir 'claude-usage.json') -Force
-        } catch { }
+            Move-Over $tmp (Join-Path $CtxDir 'claude-usage.json')
+        } catch { if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
     }
     $sf = Join-Path $ClaudeDir 'settings.json'; $st = ''
     if (Test-Path -LiteralPath $sf -PathType Leaf) { try { $st = Read-Text $sf } catch { } }
@@ -3316,7 +3330,7 @@ $script:HandoffAt = @(80, 90)   # the context's % at which Claude is told (once 
 function Cmd-HandoffHook { # Claude's UserPromptSubmit hook (the same as unix/kit's handoff-hook): the context nearly full -> tell the
     # agent, once at each of HandoffAt, to write HANDOFF.md and its kit note before going on; below the first: forgotten
     # Codex (its hooks.json, the same hook): what it hands over has its rollout (transcript_path): its last token_count
-    $in = [Console]::In.ReadToEnd(); $sid = (Str-Of 'session_id' $in) -replace '[^A-Za-z0-9-]', ''
+    $in = Read-Stdin; $sid = (Str-Of 'session_id' $in) -replace '[^A-Za-z0-9-]', ''
     $tp = Ctx-Unjs (Str-Of 'transcript_path' $in)
     if ($tp -and ((Ctx-Under $tp (Join-Path $OmpDir 'sessions')) -or $tp -match '[\\/]\.omp[\\/]agent[\\/]sessions[\\/].*\.jsonl$')) {   # omp (kit's hook module)
         if (-not (Test-Path -LiteralPath $tp -PathType Leaf)) { return }
@@ -4571,7 +4585,7 @@ function Ctx-Detail([string]$cpid, [string]$tool, [string]$dir, [bool]$fresh) { 
     $R = New-List
     Ctx-Rows $cpid $tool $dir $R
     $j = Ctx-Assemble $R ([string]$now)
-    try { Ensure-Dir $CtxDir; $tmp = "$f.$PID"; [IO.File]::WriteAllText($tmp, $j + "`n", $Utf8); Move-Item -LiteralPath $tmp -Destination $f -Force } catch { }
+    try { Ensure-Dir $CtxDir; $tmp = "$f.$PID"; [IO.File]::WriteAllText($tmp, $j + "`n", $Utf8); Move-Over $tmp $f } catch { }
     [Console]::Out.Write($j + "`n")
 }
 
@@ -5016,7 +5030,7 @@ function Cmd-Note($rest) { # kit note [text...] | --clear | --pid PID [--json] [
     $at = [string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
     $f = Join-Path $NoteDir $key
     try {
-        Write-Text "$f.tmp" ($(if ($sess) { '' } else { Proc-Start $cpid }) + "`n$tool`n$dir`n$at`n$text`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force
+        Write-Text "$f.tmp" ($(if ($sess) { '' } else { Proc-Start $cpid }) + "`n$tool`n$dir`n$at`n$text`n"); Move-Over "$f.tmp" $f
         [IO.File]::AppendAllText($hf, "$at`t$key`t$tool`t$dir`t$($text.Replace("`n", $US))`n", $Utf8)
     } catch { Die-C no-write "寫不進 $NoteDir" }
     $all = [IO.File]::ReadAllLines($hf, $Utf8)
@@ -5108,7 +5122,7 @@ function Cmd-Pending($rest) { # kit pending | kit pending add "<what>" [--id ID]
     $dir = if ($cpid) { Proc-Cwd ([int]$cpid) } else { (Get-Location).ProviderPath }
     $f = Join-Path $PendDir $id
     $up = Proc-Up $(if ($cpid) { $cpid } else { [string](Proc-Parent $PID) })
-    try { Write-Text "$f.tmp" ($(if ($cpid) { Proc-Start $cpid } else { '' }) + "`n$cpid`n$dir`n$since`n$text`n$up`n"); Move-Item -LiteralPath "$f.tmp" -Destination $f -Force }
+    try { Write-Text "$f.tmp" ($(if ($cpid) { Proc-Start $cpid } else { '' }) + "`n$cpid`n$dir`n$since`n$text`n$up`n"); Move-Over "$f.tmp" $f }
     catch { Die-C no-write "寫不進 $PendDir" }
     Say "記下了：${id}（等到了跑 kit pending done ${id}）"
 }
@@ -5512,7 +5526,7 @@ function Sync-Hook { # run by Claude at start: warn when it saves no transcript;
 }
 function Sync-Bg { # the background half of Sync-Hook
     $lock = Join-Path $KitConf 'sync.lock'; $log = Join-Path $KitConf 'sync.log'
-    if ((Test-Path -LiteralPath $log) -and (Get-Item -LiteralPath $log).Length -gt 100000) { Move-Item -LiteralPath $log -Destination "$log.old" -Force }
+    try { if ((Test-Path -LiteralPath $log) -and (Get-Item -LiteralPath $log).Length -gt 100000) { Move-Over $log "$log.old" } } catch { }
     $script:LogPath = $log
     $script:Locked = $true; $script:LockMine = $true
     try {

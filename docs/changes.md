@@ -4,6 +4,15 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.16（2026-11-18）
+
+更新後要做：Windows 上 `kit self-update`，再 `kit sync`。macOS、Linux 不用。
+
+- Windows：`kit sync` 不會再中途停在「當檔案已存在時，無法建立該檔案」。kit 換掉自己的記錄檔（`state.tsv`、`machine.yaml`、要顧的資料夾清單、等你的事、進度、狀態列的用量）時，以前是先刪舊檔再搬新檔；Windows Defender 剛好在掃舊檔時，刪除只是「排隊中」，搬新檔就失敗，還留下 `state.tsv.kit.<亂碼>` 暫存檔，嚴重時 `state.tsv` 不見。現在改用 Windows 的整檔替換（一步換過去，不先刪），換不了就複製過去。
+- Windows：刪技能資料夾遇到「資料夾不是空的」（檔案還被掃描中）會等一下再試，不會刪一半、之後被當成「你改過的」。
+- Windows：Codex 的工具限制（`tools.only`／`tools.deny`）、狀態列、交接提醒讀 Claude／Codex 給的資料時用 UTF-8。以前 Windows PowerShell 用主控台的編碼（中文 Windows 是 Big5）讀，資料夾名字有中文時路徑讀錯，Codex 的限制就沒套上。
+- Windows：MCP 的 Python 環境正在被 Claude／Codex 用時，更新它會說「先關掉用這個 MCP 的 Claude／Codex 再試」，不是一串 .NET 錯誤。
+
 ## 0.6.15（2026-11-17）
 
 更新後要做：`kit self-update`，再 `kit sync`。
