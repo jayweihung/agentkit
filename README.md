@@ -391,6 +391,29 @@ skill 的說明常常是英文。中文說明只給面板看，agent 還是讀�
 
 寫在那個項目所在來源的 `descriptions-zh.txt`（一行一個：`種類:名字 TAB 原本說明的雜湊 TAB 中文`），跟著 `kit push` 送出、簽章，別台不用再翻。翻譯只做一次：原作者改了說明（例如收新版），那一行就不算數，面板改回顯示原文，`kit describe --todo` 又會列出它。kit 自己不叫模型：請一個 agent 跑 `--todo`，翻好一個一個寫回去。
 
+## 公司的不動，其他只能透過 kit
+
+skill、MCP、外掛只有兩種會被 Claude Code、Codex、omp 載入：**kit 放的**，和**公司的**。其他的（agent 自己 `npx` 裝的、手動複製的、從 marketplace 裝的外掛）每次 `kit sync`（包括開工具時自動跑的那次）都會讓工具不載入。沒有開關，每台用 kit 的電腦都一樣。
+
+- **公司的**（kit 不收、不擋、不改）：
+  - 工具原廠的：Claude 同步下來的 skill 裡 `manifest.json` 的 `source` 是 `anthropic…` 的、Claude 內建的、claude.ai 的 connector；Codex 的 `~/.codex/skills/.system`；omp 自己的。
+  - 公司管理員放的：要 root 才能改的資料夾（Claude `/Library/Application Support/ClaudeCode/`、`/etc/claude-code/`；Codex `/etc/codex/`）；Claude 同步的 skill 裡，帳號的組織是 Team 或 Enterprise 的。
+  - 專案 commit 進 git 的：專案裡 `git ls-files` 有列的 `.claude/skills`、`.agents/skills`、`.codex/skills`、`.omp/skills`、`.mcp.json`、`.codex/config.toml`、`.omp/mcp.json`。
+  - 從 marketplace 裝的外掛**不算**公司的（就算是官方 marketplace）。
+- **怎麼擋**：只改各工具「載入什麼」的設定，檔案不刪也不搬：
+
+  | 工具 | skill | MCP | 外掛 |
+  |---|---|---|---|
+  | Claude Code | `~/.claude/settings.json` 的 `skillOverrides: {"<名字>": "off"}`；專案裡的寫進那個專案的 `.claude/settings.local.json` | 帳號的：`settings.json` 的 `deniedMcpServers: [{"serverName": "<名字>"}]`（`~/.claude.json` 不動）；專案 `.mcp.json` 的：`.claude/settings.local.json` 的 `disabledMcpjsonServers` | `enabledPlugins: {"<外掛>": false}` |
+  | Codex | `~/.codex/config.toml` kit 那段裡的 `[[skills.config]] name = "<名字>" enabled = false` | 那個 `[mcp_servers.<名字>]` 裡 `enabled = false` | `[plugins."<外掛>"]` 裡 `enabled = false` |
+  | omp | `~/.omp/agent/config.yml` 的 `disabledExtensions: [skill:<名字>]` | `~/.omp/agent/mcp.json` 的 `disabledServers` | `omp plugin disable --scope user <外掛>` |
+
+  各工具都是照名字關，所以跟 kit 的或公司的同名的不擋（不然會連它們一起關掉）。
+- **你自己寫的設定不會不見**：kit 把它寫的每一項、和那裡原本的值記在 `~/.config/agentkit/blocked.tsv`；東西收進 kit、變成公司的、或 `kit uninstall` 時，把那一項拿掉、原本的值放回去。agent 把關掉的設定改回來，下一次 `kit sync` 再關掉。
+- **看哪些資料夾**：整個帳號，加上開工具時所在的專案（`kit sync --hook`；在 git 裡就是整個 repo），和 kit 已經知道的資料夾（`kit add --dir`、`kit place`）。不掃整台電腦。
+- **擋了什麼**：擋下新的東西時 `kit sync` 會列出來；全部列在 `kit list --json` 的 `blocked`（Kit 面板也會列）。
+- **要用被擋下的**：收進 kit，再加：有原本網址的用 `kit collect <網址>`，沒有的用 `kit new skill <名字> --from <資料夾>`（在來源的說明寫它從哪裡來），然後 `kit add skill <名字>`。kit 要放的地方已經有一個不是 kit 放的同名資料夾時（例如 `~/.claude/skills/<名字>`），kit 先把它備份到 `~/.config/agentkit/backups/skills/`，再換成 kit 的（跟 `kit sync --force` 一樣）；git 有記錄的（專案 commit 的）不換。
+
 ## 外掛（plugin）
 
 外掛是一包一起用的東西：skill、hook（agent 開始、送出訊息時自動跑的程式）、MCP、指令。它是來源裡的 `plugins/<名字>/`，裡面有 `.claude-plugin/plugin.json`（可能還有 `.codex-plugin/plugin.json`，和 `package.json` 的 `pi` 或 `omp` 寫 omp 的擴充）。
@@ -413,10 +436,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.11
+    kit api        →  1.12
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.11（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.12（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -484,6 +507,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - `items[].kind`：`rule`、`skill`、`mcp`、`agent`、`plugin`（1.9 起）。`description`：skill、agent 是 frontmatter 的、mcp 是 yaml 的 `description:`、外掛是 `plugin.json` 的、規則是檔案第一行 `# ` 標題（1.9 起）。`description_zh`（1.9 起）：有人用 `kit describe` 寫了這個說明的中文版才有，畫面程式優先顯示它（見「中文說明」）。`status`：`required`（團隊必備）、`used`、`unused`、`agent`。`new`：還沒在 `kit list` 看過。`changed`：`kit push` 會送它（skill：它資料夾裡任何一個檔案）。
 - `needs` 只有 skill、mcp 和外掛有（外掛的是它的 hook 要跑的程式），`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。
 - 外掛（1.11 起）一定有 `"parts": {"skills": ["…"], "commands": ["…"], "agents": ["…"], "mcp": ["…"], "hooks": true}`：裡面帶了什麼（`skills/<名字>/SKILL.md`、`commands/*.md`、`agents/*.md`、`.mcp.json` 的 `mcpServers`、`hooks/*.json` 或 `plugin.json` 的 `hooks`），名字照 C 語系排序；畫面程式寫成一行「裡面有：…」。
+- `blocked`（1.12 起）：一定有（沒有就是 `[]`）。kit 讓工具不載入的東西（見「公司的不動，其他只能透過 kit」），上一次 `kit sync` 寫的：`{"kind": "skill", "name": "ui-ux-pro-max", "tool": "claude", "path": "<它在哪>", "scope": "account"}`。`kind`：`skill`、`mcp`、`plugin`（外掛的 `name` 是 `<外掛>@<marketplace>`）；`tool`：`claude`、`codex`、`omp`（同一個東西每個工具一筆）；`path`：skill 的資料夾、MCP 所在的設定檔、外掛的清單檔；`scope`：`account`（整個帳號）或 `folder`（那時多一個 `"dir"`：那個專案資料夾）。畫面程式給「收進 kit」：`kit collect <網址>` 或 `kit new skill <名字> --from <path>`。
 - mcp（1.3 起）一定有：`"type"`（`stdio`、`http`、`sse`）、`"vars": [{"name": "GITHUB_TOKEN", "set": false}]`（它要的環境變數，這台電腦有沒有設）、`"needs"`（同 skill）、`"packages"`：沒有套件是 `[]`，有的話一個
   `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
 - `sign`（1.8 起）：這台電腦簽過核准（`kit approve` 記下的核准紀錄還在）才有：`{"approvals": "<核准紀錄的 clone>", "serial": 19, "approved": [{"name": "team", "commit": "<40 字的 commit>"}]}`，畫面程式拿它說「已經簽了，等那台同步」、給簽章的指令。

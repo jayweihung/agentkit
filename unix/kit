@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.11
+KIT_API=1.12
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -562,16 +562,21 @@ apply_rules() { # apply_rules WANTED : the account's instructions (Claude, Codex
 skills_plan() { # skills_plan DIR STATEKIND : what sync_skills will do with the wanted skills (names on stdin); changes nothing
     # rows ACTION<TAB>NAME<TAB>SUM<TAB>SOURCE. SUM: the source's hash, or (yours) the copy's: a plan stays the same plan
     # only while neither changed. ACTION: add, update (a newer one over kit's copy), same, missing (in no source),
-    # foreign (a folder kit did not put there), modified (you changed kit's copy: skipped), replace (that with --force:
-    # backed up first), remove (not wanted any more), keep (that, changed by you: stays, yours from now on), drop (keep
-    # with --force: backed up, then gone)
+    # foreign (a folder kit did not put there that git tracks: a project's own, skipped), takeover (one git does not
+    # track: backed up, then kit's, so it is kit's and never blocked), modified (you changed kit's copy: skipped), replace
+    # (that with --force: backed up first), remove (not wanted any more), keep (that, changed by you: stays, yours from now
+    # on), drop (keep with --force: backed up, then gone)
     local dir=$1 kind=$2 names n p dst h old cur
     names=$(cat)
     for n in $names; do
         p=$(find_item skill "$n" 2>/dev/null) || { printf 'missing\t%s\t\t\n' "$n"; continue; }
         p=$(dirname "$p"); dst="$dir/$n"; h=$(dir_hash "$p")
         old=$(state_get "$kind" "$n")
-        if [ -e "$dst" ] && [ -z "$old" ]; then printf 'foreign\t%s\t\t\n' "$n"; continue; fi
+        if [ -e "$dst" ] && [ -z "$old" ]; then
+            if [ -n "$(git -C "$dst" ls-files 2>/dev/null | head -n 1)" ]; then printf 'foreign\t%s\t\t\n' "$n"
+            else printf 'takeover\t%s\t%s\t%s\n' "$n" "$h" "$p"; fi
+            continue
+        fi
         if [ -n "$old" ] && [ -d "$dst" ] && cur=$(dir_hash "$dst") && [ "$cur" != "$old" ]; then
             if [ -n "${FORCE:-}" ]; then printf 'replace\t%s\t%s %s\t%s\n' "$n" "$cur" "$h" "$p"
             else printf 'modified\t%s\t%s\t\n' "$n" "$cur"; fi
@@ -604,10 +609,13 @@ sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin
                 [ -n "$(state_get skipped "$dst")" ] || { warn "$dst 已經存在，不是 kit 放的，跳過（只提醒這一次）"; state_set skipped "$dst" 1; };;
             modified) warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）";;
             same) link_deps "$n" "$dst";;
-            add|update|replace)
+            add|update|replace|takeover)
                 if [ "$act" = replace ]; then
                     b=$(backup_skill "$dst" "$n") || { warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; continue; }
                     say "  你改過的 skill $n 備份在 $b"; sum=${sum#* }
+                elif [ "$act" = takeover ]; then
+                    b=$(backup_skill "$dst" "$n") || { warn "${dst} 不是 kit 放的，沒辦法備份，沒有換成 kit 的"; continue; }
+                    say "  ${dst} 不是 kit 放的：備份在 ${b}，換成 kit 的"
                 fi
                 rm -rf "$dst"; cp -R "$p" "$dst" && drop_caches "$dst" || { warn "沒辦法複製 skill $n 到 $dir"; rm -rf "$dst"; continue; }
                 state_set "$kind" "$n" "$sum"; say "  skill $n → $dir"
@@ -916,6 +924,281 @@ EOF
     done
 }
 
+# ---------- only through kit: what kit did not put there and is not the company's is not loaded ----------
+# The company's are left as they are: the tool vendor's (Claude's synced skills whose manifest says source anthropic*,
+# Codex's ~/.codex/skills/.system), the company admin's (the root-owned managed folders; Claude's synced skills of a
+# Team or Enterprise org) and what a project committed (git ls-files). Everything else kit did not put there is turned
+# off in each tool's own settings (files never deleted or moved). blocked.tsv keeps each entry kit wrote and what was
+# there before, to put it back once the item is kit's or the company's (or on kit uninstall):
+# TOOL KIND NAME SCOPE DIR PATH TARGET PREV (TARGET: the settings file; PREV: the value before, has, or none).
+BLOCKED="$KIT_CONF/blocked.tsv"
+KS=$'\034'                                   # joins JSON keys that may hold a "." (plugin ids)
+block_dirs() { # the folders looked at: kit's (kit add --dir, kit place), the one the tool started in (kit sync --hook),
+    # and those with something blocked already (so it stays blocked when kit sync runs elsewhere)
+    local d h; h=$(home_real)
+    { dirs_registered
+      [ -z "${KIT_HOOK_DIR:-}" ] || git -C "$KIT_HOOK_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$KIT_HOOK_DIR"
+      [ -f "$BLOCKED" ] && awk -F'\t' '$5 != "-" { print $5 }' "$BLOCKED"
+    } | awk 'NF && !seen[$0]++' | while IFS= read -r d; do
+        [ -d "$d" ] && [ "$d" != "$h" ] && [ "$d" != "$HOME" ] && [ "$d" != / ] && printf '%s\n' "$d"
+    done
+    return 0
+}
+blk() { # blk CLASS KIND NAME SCOPE DIR PATH TOOL... : a block_scan row for each tool that loads it, with where kit turns it off
+    local c=$1 k=$2 n=$3 s=$4 d=$5 p=$6 t g; shift 6
+    for t in "$@"; do
+        case $t:$k in
+            claude:skill) if [ "$s" = folder ]; then g="$d/.claude/settings.local.json"; else g="$CLAUDE_DIR/settings.json"; fi;;
+            claude:mcp) case $p in */.mcp.json) g="$d/.claude/settings.local.json";; *) g="$CLAUDE_DIR/settings.json";; esac;;
+            claude:plugin) g="$CLAUDE_DIR/settings.json";;
+            codex:skill|codex:plugin) g="$CODEX_DIR/config.toml";;
+            codex:mcp) g=$p;;
+            omp:skill) g="$OMP_DIR/config.yml";;
+            omp:mcp) g="$OMP_DIR/mcp.json";;
+            omp:plugin) g=omp;;
+        esac
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$c" "$t" "$k" "$n" "$s" "${d:--}" "$p" "$g"   # (-: no folder; read splits on TABs)
+    done
+}
+block_scan() { # rows CLASS TOOL KIND NAME SCOPE DIR PATH TARGET for the skills, MCP and plugins the tools load (CLASS: kit,
+    # company or other)
+    local d n p f c k kk ts tc="" to="" org typ admin src tracked m
+    has_codex && tc=codex; has_omp && to=omp
+    for p in "$CLAUDE_DIR"/skills/*/SKILL.md; do               # Claude's account skills (omp reads them too)
+        [ -f "$p" ] || continue; d=${p%/SKILL.md}; n=${d##*/}
+        c=other; [ -z "$(state_get skill "$n")" ] || c=kit
+        blk $c skill "$n" account "" "$d" claude $to
+    done
+    org=$(json_get "$CLAUDE_JSON" oauthAccount.organizationUuid | tr -d '"'); typ=$(json_get "$CLAUDE_JSON" oauthAccount.organizationType | tr -d '"')
+    for f in "$CLAUDE_DIR"/skills/synced/*/manifest.json; do  # Claude's synced skills: <org>_<user>/
+        [ -f "$f" ] || continue; d=${f%/manifest.json}; admin=0
+        if [ -n "$org" ]; then case ${d##*/} in "$org"_*) case $typ in *team*|*enterprise*) admin=1;; esac;; esac; fi
+        LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$f" 2>/dev/null | awk -F'\t' '$1 == "skills" && ($3 == "name" || $3 == "source") {
+                v = $4; gsub(/^"|"$/, "", v); a[$2, $3] = v; if (!($2 in s)) { s[$2] = 1; o[++m] = $2 } }
+            END { for (i = 1; i <= m; i++) print a[o[i], "name"] "\t" a[o[i], "source"] }' |
+        while IFS="$TAB" read -r n src; do
+            [ -n "$n" ] || continue
+            case $src in anthropic*) c=company;; *) if [ $admin = 1 ]; then c=company; else c=other; fi;; esac
+            blk $c skill "$n" account "" "$d/$n" claude
+        done
+    done
+    for m in "/Library/Application Support/ClaudeCode" /etc/claude-code; do   # the admin's
+        for p in "$m"/.claude/skills/*/SKILL.md; do [ -f "$p" ] && { d=${p%/SKILL.md}; blk company skill "${d##*/}" account "" "$d" claude; }; done
+        [ -f "$m/managed-mcp.json" ] && json_keys "$m/managed-mcp.json" mcpServers | while IFS= read -r n; do blk company mcp "$n" account "" "$m/managed-mcp.json" claude; done
+    done
+    for p in "$CODEX_DIR"/skills/.system/*/SKILL.md /etc/codex/skills/*/SKILL.md; do   # Codex's own, the admin's
+        [ -f "$p" ] && { d=${p%/SKILL.md}; blk company skill "${d##*/}" account "" "$d" $tc $to; }
+    done
+    for p in "$CODEX_DIR"/skills/*/SKILL.md; do [ -f "$p" ] && { d=${p%/SKILL.md}; blk other skill "${d##*/}" account "" "$d" $tc $to; }; done
+    for p in "$AGENTS_SKILLS"/*/SKILL.md; do
+        [ -f "$p" ] || continue; d=${p%/SKILL.md}; n=${d##*/}
+        c=other; [ -z "$(state_get skill.agents "$n")" ] || c=kit
+        blk $c skill "$n" account "" "$d" $tc $to
+    done
+    for p in "$OMP_DIR"/skills/*/SKILL.md; do [ -f "$p" ] && { d=${p%/SKILL.md}; blk other skill "${d##*/}" account "" "$d" $to; }; done
+    [ -f "$CLAUDE_JSON" ] && json_keys "$CLAUDE_JSON" mcpServers | while IFS= read -r n; do
+        c=other; [ -z "$(state_get mcp "$n")" ] || c=kit; blk $c mcp "$n" account "" "$CLAUDE_JSON" claude $to; done
+    for f in /etc/codex/managed_config.toml /etc/codex/config.toml; do
+        [ -f "$f" ] && toml_mcp_names "$f" | while IFS= read -r n; do blk company mcp "$n" account "" "$f" $tc; done
+    done
+    [ -f "$CODEX_DIR/config.toml" ] && toml_mcp_names "$CODEX_DIR/config.toml" | while IFS= read -r n; do blk other mcp "$n" account "" "$CODEX_DIR/config.toml" $tc; done
+    [ -f "$OMP_DIR/mcp.json" ] && json_keys "$OMP_DIR/mcp.json" mcpServers | while IFS= read -r n; do
+        c=other; [ -z "$(state_get mcp.omp "$n")" ] || c=kit; blk $c mcp "$n" account "" "$OMP_DIR/mcp.json" $to; done
+    # plugins (from a marketplace: never the company's; kit's are <name>@kit)
+    f="$CLAUDE_DIR/plugins/installed_plugins.json"
+    [ -f "$f" ] && json_keys "$f" plugins | while IFS= read -r n; do
+        c=other; case $n in *@kit) [ -z "$(state_get plugin.claude "${n%@kit}")" ] || c=kit;; esac; blk $c plugin "$n" account "" "$f" claude; done
+    [ -n "$tc" ] && [ -f "$CODEX_DIR/config.toml" ] && toml_tables "$CODEX_DIR/config.toml" plugins | while IFS= read -r n; do
+        c=other; case $n in *@kit) [ -z "$(state_get plugin.codex "${n%@kit}")" ] || c=kit;; esac; blk $c plugin "$n" account "" "$CODEX_DIR/config.toml" codex; done
+    f="$HOME/.omp/plugins/installed_plugins.json"
+    [ -n "$to" ] && [ -f "$f" ] && command -v omp >/dev/null 2>&1 && json_keys "$f" plugins | while IFS= read -r n; do
+        # one omp has turned off already (assumed: "enabled": false in its entry) is left alone
+        json_get "$f" "plugins${KS}$n${KS}1${KS}enabled" "$KS" | grep -qx false && continue
+        c=other; case $n in *@kit) [ -z "$(state_get plugin.omp "${n%@kit}")" ] || c=kit;; esac; blk $c plugin "$n" account "" "$f" omp; done
+    while IFS= read -r d; do                                  # the folders
+        [ -n "$d" ] || continue
+        tracked=$(git -C "$d" ls-files -- .claude/skills .agents/skills .codex/skills .omp/skills .mcp.json .codex/config.toml .omp/mcp.json 2>/dev/null)
+        for p in "$d"/.claude/skills/*/SKILL.md "$d"/.agents/skills/*/SKILL.md "$d"/.codex/skills/*/SKILL.md "$d"/.omp/skills/*/SKILL.md; do
+            [ -f "$p" ] || continue; n=${p%/SKILL.md}; n=${n##*/}; k=${p#"$d"/}
+            case $k in .claude/*) kk=skill; ts="claude $to";; .agents/*) kk=skill.agents; ts="$tc $to";; .codex/*) kk=""; ts=$tc;; *) kk=""; ts=$to;; esac
+            if [ -n "$kk" ] && [ -n "$(state_get "$(dir_kind "$d" "$kk")" "$n")" ]; then c=kit
+            elif printf '%s\n' "$tracked" | grep -qxF -- "$k"; then c=company; else c=other; fi
+            blk $c skill "$n" folder "$d" "${p%/SKILL.md}" $ts
+        done
+        f="$d/.mcp.json"; [ -f "$f" ] && json_keys "$f" mcpServers | while IFS= read -r n; do
+            if [ -n "$(state_get "$(dir_kind "$d" mcp)" "$n")" ]; then c=kit
+            elif printf '%s\n' "$tracked" | grep -qxF .mcp.json; then c=company; else c=other; fi
+            blk $c mcp "$n" folder "$d" "$f" claude $to; done
+        f="$d/.codex/config.toml"; [ -f "$f" ] && toml_mcp_names "$f" | while IFS= read -r n; do
+            c=other; printf '%s\n' "$tracked" | grep -qxF .codex/config.toml && c=company; blk $c mcp "$n" folder "$d" "$f" $tc; done
+        f="$d/.omp/mcp.json"; [ -f "$f" ] && json_keys "$f" mcpServers | while IFS= read -r n; do
+            c=other; printf '%s\n' "$tracked" | grep -qxF .omp/mcp.json && c=company; blk $c mcp "$n" folder "$d" "$f" $to; done
+        [ -f "$CLAUDE_JSON" ] && json_keys "$CLAUDE_JSON" "projects$TAB$d${TAB}mcpServers" | while IFS= read -r n; do
+            blk other mcp "$n" folder "$d" "$CLAUDE_JSON" claude; done
+    done <<EOF
+$(block_dirs)
+EOF
+    return 0
+}
+block_plan() { # what kit sync turns off: block_scan's other rows, except a name that is kit's or the company's in that tool
+    # (each tool turns off by name), once per tool kind name target -> TOOL KIND NAME SCOPE DIR PATH TARGET
+    block_scan | awk -F'\t' -v OFS='\t' '{ r[NR] = $0; k[NR] = $2 SUBSEP $3 SUBSEP $4; if ($1 != "other") keep[k[NR]] = 1 }
+        END { for (i = 1; i <= NR; i++) { split(r[i], f, "\t"); if (f[1] != "other" || (k[i] in keep)) continue
+              u = k[i] SUBSEP f[8]; if (u in seen) continue; seen[u] = 1; print f[2], f[3], f[4], f[5], f[6], f[7], f[8] } }'
+}
+toml_tables() { # toml_tables FILE PREFIX : the X of each [PREFIX.X] table outside kit's blocks (quotes taken off)
+    awk -v b="$TOML_BEGIN" -v e="$TOML_END" -v p="$2" '{ sub(/\r$/, "") } $0 == b { s = 1 } $0 == e { s = 0; next } s { next }
+        { l = $0; sub(/^[ \t]*/, "", l) } index(l, "[" p ".") == 1 { l = substr(l, length(p) + 3); sub(/\][ \t]*(#.*)?$/, "", l); gsub(/"/, "", l); print l }' "$1" 2>/dev/null
+}
+toml_enabled() { # toml_enabled FILE TABLE [VALUE] : without VALUE print [TABLE]'s enabled value (none: no such line); with
+    # VALUE set it (none: the line taken out). Only tables outside kit's blocks; 1: FILE has no such table
+    local f=$1 tmp rc=0 set=0
+    [ -f "$f" ] || return 1
+    if [ $# -ge 3 ]; then set=1; tmp=$(mktemp "$f.kit.XXXXXX") || return 1; cp -p "$f" "$tmp"; else tmp=/dev/stdout; fi
+    awk -v t="$2" -v v="${3:-}" -v set=$set -v b="$TOML_BEGIN" -v e="$TOML_END" '
+        function norm(s) { sub(/[ \t]*#.*$/, "", s); gsub(/[ \t"]/, "", s); return s }
+        function out(s) { if (set) print s }
+        function flush(  j) { if (intab && set && !did && v != "none") print "enabled = " v; if (intab) did = 1; for (j = 1; j <= nb; j++) out(hold[j]); nb = 0 }
+        BEGIN { want = norm("[" t "]") }
+        { l = $0; sub(/\r$/, "", l) }
+        l == b { flush(); intab = 0; kb = 1; out($0); next }
+        l == e { kb = 0; out($0); next }
+        kb { out($0); next }
+        l ~ /^[ \t]*\[/ { flush(); intab = (norm(l) == want); if (intab) found = 1; out($0); next }
+        intab && l ~ /^[ \t]*enabled[ \t]*=/ { x = l; sub(/^[ \t]*enabled[ \t]*=[ \t]*/, "", x); sub(/[ \t]*(#.*)?$/, "", x); cur = x
+            if (set) { did = 1; if (v != "none") print "enabled = " v } next }
+        intab && l ~ /^[ \t]*$/ { hold[++nb] = $0; next }
+        intab { for (j = 1; j <= nb; j++) out(hold[j]); nb = 0; out($0); next }
+        { out($0) }
+        END { flush(); if (!set && found) print (cur == "" ? "none" : cur); exit !found }' "$f" > "$tmp" || rc=$?
+    [ $set = 1 ] || return $rc
+    if [ $rc != 0 ] || cmp -s "$tmp" "$f"; then rm -f "$tmp"; return $rc; fi
+    if [ -L "$f" ]; then cat "$tmp" > "$f"; rm -f "$tmp"; else mv -f "$tmp" "$f"; fi
+}
+yaml_list_rm() { # yaml_list_rm FILE KEY VALUE : VALUE out of the top-level list KEY (yaml_list_add's two forms); the KEY
+    # line goes too when nothing is left in it
+    local f=$1 t="$1.tmp.$$"
+    [ -f "$f" ] || return 0
+    awk -v k="$2" -v v="$3" '
+        function unq(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); if (s ~ /^".*"$/ || s ~ /^\047.*\047$/) s = substr(s, 2, length(s) - 2); return s }
+        function done() { if (kept || !gone) print key; printf "%s", buf; buf = ""; st = 2 }
+        st == 1 && /^[ \t]*-[ \t]/ { x = $0; sub(/^[ \t]*-[ \t]*/, "", x); sub(/[ \t]+#.*$/, "", x); if (unq(x) == v) { gone = 1; next } kept = 1; buf = buf $0 "\n"; next }
+        st == 1 && /^[ \t]*(#.*)?\r?$/ { buf = buf $0 "\n"; next }
+        st == 1 { done() }
+        st == 0 && index($0, k ":") == 1 {
+            rest = substr($0, length(k) + 2)
+            if (rest ~ /^[ \t]*\[.*\]/) {
+                a = index($0, "["); b = index($0, "]"); n = split(substr($0, a + 1, b - a - 1), it, ","); s = ""
+                for (i = 1; i <= n; i++) if (unq(it[i]) != v && unq(it[i]) != "") s = s (s == "" ? "" : ", ") unq(it[i])
+                if (s != "" || unq(substr($0, a + 1, b - a - 1)) == "") print substr($0, 1, a) s substr($0, b)
+                st = 2; next
+            }
+            st = 1; key = $0; next
+        }
+        { print }
+        END { if (st == 1) done() }' "$f" > "$t" && mv "$t" "$f" || rm -f "$t"
+}
+block_was() { # block_was TOOL KIND NAME TARGET : what TARGET has there before kit turns it off (has / none / the value)
+    local v=""
+    case $1:$2:${4##*/} in
+        claude:skill:*) v=$(json_get "$4" "skillOverrides$KS$3" "$KS");;
+        claude:mcp:settings.json) json_get "$4" deniedMcpServers | tr -d ' \t\r\n' | grep -qF "{\"serverName\":$(json_str "$3")}" && v=has;;
+        claude:mcp:*) json_strs "$4" disabledMcpjsonServers | grep -qxF -- "$(json_str "$3")" && v=has;;
+        claude:plugin:*) v=$(json_get "$4" "enabledPlugins$KS$3" "$KS");;
+        codex:mcp:*) v=$(toml_enabled "$4" "mcp_servers.$3");;
+        codex:plugin:*) v=$(toml_enabled "$4" "plugins.$3");;
+        omp:skill:*) yget "$4" disabledExtensions | grep -qxF "skill:$3" && v=has;;
+        omp:mcp:*) json_strs "$4" disabledServers | grep -qxF -- "$(json_str "$3")" && v=has;;
+    esac
+    printf '%s\n' "${v:-none}"
+}
+block_json() { # block_json FILE OP PATH [VALUE] : one json_edit (keys joined by KS); a file kit made is remembered (drop_made)
+    local ops; ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
+    [ -f "$1" ] || state_set made "$1" 1
+    if [ $# -ge 4 ]; then printf '%s\t%s\t%s\n' "$2" "$3" "$4"; else printf '%s\t%s\n' "$2" "$3"; fi > "$ops"
+    json_edit "$1" "$ops" "$KS"; rm -f "$ops"
+}
+block_do() { # block_do TOOL KIND NAME TARGET NEW : turn it off there (only what is not off already; omp's plugin command only
+    # when NEW); 1 when it could not
+    local t=$1 k=$2 n=$3 g=$4
+    case $t:$k:${g##*/} in
+        claude:skill:*) [ "$(json_get "$g" "skillOverrides$KS$n" "$KS")" = '"off"' ] || block_json "$g" set "skillOverrides$KS$n" '"off"';;
+        claude:mcp:settings.json) [ "$(block_was "$t" "$k" "$n" "$g")" = has ] || block_json "$g" addjson deniedMcpServers "{\"serverName\":$(json_str "$n")}";;
+        claude:mcp:*) [ "$(block_was "$t" "$k" "$n" "$g")" = has ] || block_json "$g" addstr disabledMcpjsonServers "$n";;
+        claude:plugin:*) [ "$(json_get "$g" "enabledPlugins$KS$n" "$KS")" = false ] || block_json "$g" set "enabledPlugins$KS$n" false;;
+        codex:skill:*) ;;                                     # in kit's block (codex_skills_off)
+        codex:mcp:*) [ "$(toml_enabled "$g" "mcp_servers.$n")" = false ] || toml_enabled "$g" "mcp_servers.$n" false;;
+        codex:plugin:*) [ "$(toml_enabled "$g" "plugins.$n")" = false ] || toml_enabled "$g" "plugins.$n" false;;
+        omp:skill:*) [ "$(block_was "$t" "$k" "$n" "$g")" = has ] || { [ -f "$g" ] || state_set made "$g" 1; ( yaml_list_add "$g" disabledExtensions "skill:$n" ); };;
+        omp:mcp:*) [ "$(block_was "$t" "$k" "$n" "$g")" = has ] || block_json "$g" addstr disabledServers "$n";;
+        omp:plugin:*) [ "$5" != 1 ] || plugin_run omp plugin disable --scope user "$n";;
+    esac
+}
+block_undo() { # block_undo TOOL KIND NAME TARGET PREV : kit's entry out, what was there before back; 1 when it could not
+    local t=$1 k=$2 n=$3 g=$4 p=$5
+    [ "$g" = omp ] || [ -f "$g" ] || return 0
+    case $t:$k:${g##*/} in
+        claude:skill:*) [ "$(json_get "$g" "skillOverrides$KS$n" "$KS")" = '"off"' ] || return 0
+            if [ "$p" = none ]; then block_json "$g" del "skillOverrides$KS$n"; prune_empty "$g" skillOverrides; else block_json "$g" set "skillOverrides$KS$n" "$p"; fi;;
+        claude:mcp:settings.json) [ "$p" = has ] || { block_json "$g" rmjson deniedMcpServers "{\"serverName\":$(json_str "$n")}"; prune_empty "$g" deniedMcpServers; };;
+        claude:mcp:*) [ "$p" = has ] || { block_json "$g" rmstr disabledMcpjsonServers "$n"; prune_empty "$g" disabledMcpjsonServers; };;
+        claude:plugin:*) [ "$(json_get "$g" "enabledPlugins$KS$n" "$KS")" = false ] || return 0
+            if [ "$p" = none ]; then block_json "$g" del "enabledPlugins$KS$n"; prune_empty "$g" enabledPlugins; else block_json "$g" set "enabledPlugins$KS$n" "$p"; fi;;
+        codex:skill:*) ;;
+        codex:mcp:*) [ "$(toml_enabled "$g" "mcp_servers.$n")" != false ] || toml_enabled "$g" "mcp_servers.$n" "$p";;
+        codex:plugin:*) [ "$(toml_enabled "$g" "plugins.$n")" != false ] || toml_enabled "$g" "plugins.$n" "$p";;
+        omp:skill:*) [ "$p" = has ] || yaml_list_rm "$g" disabledExtensions "skill:$n"
+            [ -s "$g" ] || [ -z "$(state_get made "$g")" ] || { rm -f "$g"; state_del made "$g"; };;   # a file only kit made, empty again
+        omp:mcp:*) [ "$p" = has ] || { block_json "$g" rmstr disabledServers "$n"; prune_empty "$g" disabledServers; };;
+        omp:plugin:*) command -v omp >/dev/null 2>&1 || return 0; plugin_run omp plugin enable --scope user "$n" || return 1;;
+    esac
+    case $g in *.json) drop_made "$g";; esac
+    case $g in */.claude/settings.local.json) [ -f "$g" ] || rmdir "${g%/*}" 2>/dev/null;; esac   # (only an empty .claude)
+    return 0
+}
+block_has() { awk -F'\t' -v t="$1" -v k="$2" -v n="$3" -v g="$4" '$1 == t && $2 == k && $3 == n && $7 == g { f = 1 } END { exit !f }'; }   # PLAN rows on stdin
+block_say() { # block_say TOOL KIND NAME PATH : one line for people
+    local t p=$4; case $1 in claude) t=Claude;; codex) t=Codex;; *) t=$1;; esac
+    case $p in "$HOME"/*) p="~/${p#"$HOME"/}";; esac
+    printf '  %s %s %s（%s）' "$t" "$2" "$3" "$p"
+}
+codex_skills_off() { # codex_skills_off PLAN : [[skills.config]] tables turning off PLAN's Codex skills (in kit's block)
+    printf '%s\n' "$1" | awk -F'\t' '$1 == "codex" && $2 == "skill" { print $3 }' | while IFS= read -r n; do
+        printf '[[skills.config]]\nname = %s\nenabled = false\n\n' "$(json_str "$n")"; done
+}
+sync_blocks() { # sync_blocks PLAN : block_plan's rows turned off in the tools' settings, kit's entries no longer in it put
+    # back; blocked.tsv says what kit wrote. Tells what it newly turned off (the first kit sync after kit self-update too).
+    local plan=$1 t k n s d p g v old tmp new="" back=""
+    old=$(cat "$BLOCKED" 2>/dev/null)
+    mkdir -p "$KIT_CONF"; tmp=$(mktemp "$BLOCKED.XXXXXX") || return 0
+    while IFS="$TAB" read -r t k n s d p g v; do
+        [ -n "$t" ] || continue
+        printf '%s\n' "$plan" | block_has "$t" "$k" "$n" "$g" && continue
+        if block_undo "$t" "$k" "$n" "$g" "$v"; then back="$back$(block_say "$t" "$k" "$n" "$p")$LF"
+        else printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$t" "$k" "$n" "$s" "$d" "$p" "$g" "$v" >> "$tmp"; fi   # again next time
+    done <<EOF
+$old
+EOF
+    while IFS="$TAB" read -r t k n s d p g; do
+        [ -n "$t" ] || continue
+        if v=$(printf '%s\n' "$old" | awk -F'\t' -v t="$t" -v k="$k" -v n="$n" -v g="$g" '$1 == t && $2 == k && $3 == n && $7 == g { print $8; f = 1; exit } END { exit !f }'); then
+            block_do "$t" "$k" "$n" "$g" 0 || continue
+        else
+            v=$(block_was "$t" "$k" "$n" "$g"); block_do "$t" "$k" "$n" "$g" 1 || continue
+            new="$new$(block_say "$t" "$k" "$n" "$p")$LF"
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$t" "$k" "$n" "$s" "$d" "$p" "$g" "$v" >> "$tmp"
+    done <<EOF
+$plan
+EOF
+    if [ -s "$tmp" ]; then mv -f "$tmp" "$BLOCKED"; else rm -f "$tmp" "$BLOCKED"; fi
+    [ -z "$new" ] || say "kit：這些不是 kit 放的、也不是公司的，已經讓工具不載入（檔案沒動）：
+${new}要用的話收進 kit：有原本網址的用  kit collect <網址>，沒有的用  kit new skill <名字> --from <資料夾>，再  kit add。被擋下的都列在  kit list --json  的 blocked。"
+    [ -z "$back" ] || say "kit：這些現在是 kit 的或公司的，不再擋：
+${back%"$LF"}"
+    return 0
+}
+
 apply_claude() {
     local want n p dst h old ops k rules skills mcps plugins
     want=$(wanted)
@@ -932,16 +1215,18 @@ apply_claude() {
 
     # Codex and omp share ~/.agents/skills
     if has_codex || has_omp; then sync_skills "$AGENTS_SKILLS" skill.agents <<< "$skills"; fi
-    if has_codex; then
-        codex_block "$(codex_mcp_toml <<< "$mcps"; codex_trust; codex_sandbox)"
-        KIT_BLOCK=$(codex_top) replace_top_block "$CODEX_DIR/config.toml" "$TOP_BEGIN" "$TOP_END"
-    fi
     if has_omp; then
         sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp <<< "$mcps"
+    fi
+    local plan; plan=$(block_plan)                           # what is not kit's or the company's (Codex's skills: in kit's block)
+    if has_codex; then
+        codex_block "$(codex_mcp_toml <<< "$mcps"; codex_trust; codex_sandbox; codex_skills_off "$plan")"
+        KIT_BLOCK=$(codex_top) replace_top_block "$CODEX_DIR/config.toml" "$TOP_BEGIN" "$TOP_END"
     fi
     has_codex && codex_hooks                                 # the same two hooks as Claude's, for Codex and omp
     has_omp && omp_hook
     sync_plugins <<< "$plugins"
+    sync_blocks "$plan"
 
     ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
     # tool deny rules -> ~/.claude/settings.json
@@ -1214,7 +1499,7 @@ sync_hook() { # run by Claude at start: warn when it saves no transcript; sync i
         trap 'rmdir "$lock" 2>/dev/null' EXIT
         printf '== %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
         KIT_LOCKED=1
-        GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20 NO_NAG=1 cmd_sync
+        KIT_HOOK_DIR=$(pwd -P) GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20 NO_NAG=1 cmd_sync
     ) </dev/null >>"$log" 2>&1 &
     exit 0
 }
@@ -3906,7 +4191,8 @@ sync_dry_run() { # kit sync --dry-run [--force] : the sources brought up to date
         case $a in
             add) what="新增";; update) what="更新";; replace) what="你改過的先備份，再換新的";; remove) what="拿掉";;
             drop) what="你改過的先備份，再拿掉";; keep) what="不再要了，但你改過：留著，之後歸你";;
-            modified) what="你改過：跳過（--force 會先備份再換）";; foreign) what="不是 kit 放的：跳過";; missing) what="來源裡找不到：跳過";;
+            modified) what="你改過：跳過（--force 會先備份再換）";; foreign) what="不是 kit 放的（git 有記錄）：跳過";; missing) what="來源裡找不到：跳過";;
+            takeover) what="不是 kit 放的：先備份，再換成 kit 的";;
             *) continue;;
         esac
         say "  $(here_short "$PWD" "$d")/${n}：${what}"; shown=1
@@ -4208,6 +4494,14 @@ EOF
                          (plugin) printf ', "needs": %s, "parts": %s' "$(needs_json "${p%/.claude-plugin/plugin.json}" "${d%/}")" "$(parts_json "${p%/.claude-plugin/plugin.json}")";;
                          (mcp) mcp_list_json "$p" "$n";; esac)"
     done
+    printf '\n  ],\n  "blocked": ['
+    first=1
+    [ -f "$BLOCKED" ] && while IFS="$TAB" read -r i k n s d p _; do   # (tool kind name scope dir path: kit sync wrote them)
+        [ -n "$i" ] || continue
+        [ $first = 1 ] || printf ','; first=0
+        printf '\n    {"kind": %s, "name": %s, "tool": %s, "path": %s, "scope": %s%s}' "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$i")" \
+            "$(json_s "$p")" "$( [ "$s" = folder ] && echo '"folder"' || echo '"account"')" "$( [ "$d" = - ] || printf ', "dir": %s' "$(json_s "$d")")"
+    done < "$BLOCKED"
     printf '\n  ],\n  "kit_version_wanted": %s' "$(json_s "$(wanted_version)")"
     sign_json
     [ -n "${HERE_DIR:-}" ] && here_json "$HERE_DIR" "${HERE_PID:-}"
@@ -4528,6 +4822,7 @@ EOF
     codex_block "" || left=1
     KIT_BLOCK= replace_top_block "$CODEX_DIR/config.toml" "$TOP_BEGIN" "$TOP_END" || left=1
     QUIET=1
+    sync_blocks ""                                           # every entry kit wrote to turn something off, out again
     sync_skills "$CLAUDE_DIR/skills" skill < /dev/null
     sync_skills "$AGENTS_SKILLS" skill.agents < /dev/null
     sync_mcp_json "$CLAUDE_JSON" mcp < /dev/null           # stops kit (state.tsv kept) when the file cannot be written
@@ -4551,7 +4846,7 @@ EOF
     rm -f "$ops"
     f="$OMP_DIR/hooks/pre/kit.js"; [ -f "$f" ] && [ "$(head -n 1 "$f")" = "$OMP_HOOK_HEAD" ] && rm -f "$f"
     [ $left = 0 ] || die "有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall"
-    rm -f "$STATE" "$MACHINE"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps" "$KIT_CONF/mcp-deps" "$KIT_CONF/placed" "$CTX_DIR"
+    rm -f "$STATE" "$MACHINE" "$BLOCKED"; rm -rf "$KIT_CONF/deps" "$KIT_CONF/pydeps" "$KIT_CONF/mcp-deps" "$KIT_CONF/placed" "$CTX_DIR"
     say "kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）"
     say "     來源的 clone 還留在 $KIT_SRC"
     if [ $self = 1 ]; then

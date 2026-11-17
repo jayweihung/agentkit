@@ -4,6 +4,18 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.7.0（2026-11-18）
+
+更新後要做：`kit self-update`，再 `kit sync`，**看它列出擋下了什麼**。要用的收進 kit（下面）。Windows 版之後才有，Windows 上先不變。
+
+**公司的不動，其他的 skill、MCP、外掛只能透過 kit 載入。** 沒有開關，每個用 kit 的人、每台電腦都一樣。
+- 從這版起，每次 `kit sync`（包括開 Claude、Codex、omp 時自動跑的那次）會讓 Claude Code、Codex、omp **不載入**不是 kit 放的、也不是公司的 skill、MCP、外掛。檔案不刪不搬，只改各工具「載入什麼」的設定。
+- **會被擋的**：帳號裡自己裝的 skill（`~/.claude/skills/<名字>`、`~/.agents/skills`、`~/.codex/skills`、`~/.omp/agent/skills`，例如 `npx` 裝的）、自己加的 MCP（`~/.claude.json`、`~/.codex/config.toml`、omp 的 `mcp.json`）、從 marketplace 裝的外掛（官方的也算），和專案裡沒 commit 進 git 的 skill、`.mcp.json`。專案只看開工具時所在的那個、和 `kit add --dir`／`kit place` 過的。
+- **不會擋的（公司的）**：Anthropic、OpenAI、omp 自己的（Claude 同步下來 `source` 是 anthropic 的 skill、claude.ai 的 connector、Codex 的 `~/.codex/skills/.system`）；公司管理員放的（要 root 的系統資料夾、Team／Enterprise 組織同步的 skill）；專案 commit 進 git 的。kit 放的當然也不擋。
+- **被擋下的去哪裡看**：`kit sync` 擋下新的東西時列出來；全部在 Kit 面板、`kit list --json` 的 `blocked`（`kit api` 是 1.12）。
+- **要繼續用**：收進自己的來源再加。有原本網址的：`kit collect <網址>`；沒有的：`kit new skill <名字> --from <資料夾>`；然後 `kit add skill <名字>`。原本的資料夾剛好是 kit 要放的地方（例如 `~/.claude/skills/<名字>`）時，kit 先備份到 `~/.config/agentkit/backups/skills/` 再換成 kit 的（以前是跳過）。
+- 你自己寫的設定不會不見：kit 只拿掉它自己寫的那幾項，原本的值記著，收進 kit、`kit uninstall` 時放回去。各工具用的設定見 README「公司的不動，其他只能透過 kit」。
+
 ## 0.6.16（2026-11-18）
 
 更新後要做：Windows 上 `kit self-update`，再 `kit sync`。macOS、Linux 不用。
