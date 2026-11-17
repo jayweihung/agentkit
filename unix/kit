@@ -137,8 +137,13 @@ json_str() { # quote a string for JSON
     printf '"%s"' "$s"
 }
 
+# Python's caches (__pycache__/, .pyc, .pyo: written next to a skill's scripts when they run) are never part of a skill:
+# not hashed, not checked, not sent, not copied (only kit's own new copies lose them; your folders are never touched)
+CACHE_RE='(^|/)__pycache__(/|$)|\.py[co]$'
+not_cache() { grep -vE "$CACHE_RE"; return 0; }   # file names on stdin, without Python's caches
+drop_caches() { find "$1" \( -name __pycache__ -o -name '*.py[co]' \) -prune -exec rm -rf {} +; }   # drop_caches DIR : DIR is kit's new copy
 dir_hash() { # content hash of a directory (portable: cksum)
-    ( cd "$1" && find . -type f ! -name '.DS_Store' | LC_ALL=C sort | while IFS= read -r f; do printf '%s ' "$f"; cksum < "$f"; done ) | cksum | awk '{print $1}'
+    ( cd "$1" && find . -type f ! -name '.DS_Store' | not_cache | LC_ALL=C sort | while IFS= read -r f; do printf '%s ' "$f"; cksum < "$f"; done ) | cksum | awk '{print $1}'
 }
 
 # ---------- state ----------
@@ -604,7 +609,7 @@ sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin
                     b=$(backup_skill "$dst" "$n") || { warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; continue; }
                     say "  你改過的 skill $n 備份在 $b"; sum=${sum#* }
                 fi
-                rm -rf "$dst"; cp -R "$p" "$dst" || { warn "沒辦法複製 skill $n 到 $dir"; rm -rf "$dst"; continue; }
+                rm -rf "$dst"; cp -R "$p" "$dst" && drop_caches "$dst" || { warn "沒辦法複製 skill $n 到 $dir"; rm -rf "$dst"; continue; }
                 state_set "$kind" "$n" "$sum"; say "  skill $n → $dir"
                 link_deps "$n" "$dst";;
             drop)       # you changed it: never deleted; --force keeps a backup
@@ -765,7 +770,7 @@ codex_own_trust() { # codex_own_trust CHANGED : after kit's hooks in ~/.codex/ho
 codex_plugin_trust() { # codex_plugin_trust NAME : after codex plugin add (PLUGIN_SAID names Codex's copy)
     local n=$1 copy out w i
     copy=$(printf '%s\n' "$PLUGIN_SAID" | sed -n 's/^Installed plugin root: //p' | tail -n 1)
-    if ! plugin_signed "$n" || [ -z "$copy" ] || ! diff -rq "$(plugin_root)/$n" "$copy" >/dev/null 2>&1; then
+    if ! plugin_signed "$n" || [ -z "$copy" ] || ! diff -rq -x __pycache__ -x '*.py[co]' "$(plugin_root)/$n" "$copy" >/dev/null 2>&1; then
         kit_pending_ask "codex-hooks-$n" "要你同意：外掛 $n 的 hook 在 Codex 打 /hooks 信任一次（這個版本沒有簽章，kit 不自己信任）"; return 0
     fi
     out=$(mktemp "${TMPDIR:-/tmp}/kit-codex.XXXXXX")
@@ -793,7 +798,7 @@ sync_plugins() { # sync_plugins : wanted plugin names on stdin -> kit's copies, 
         p=$(find_item plugin "$n") || { warn "plugin $n not found in any source"; continue; }
         p=${p%/.claude-plugin/plugin.json}; h=$(dir_hash "$p"); old=$(state_get plugin "$n")
         [ "$h" = "$old" ] && [ -d "$r/$n" ] && continue
-        mkdir -p "$r" && rm -rf "${r:?}/$n" && cp -R "$p" "$r/$n" || { warn "沒辦法複製外掛 $n 到 $r"; rm -rf "${r:?}/$n"; continue; }
+        mkdir -p "$r" && rm -rf "${r:?}/$n" && cp -R "$p" "$r/$n" && drop_caches "$r/$n" || { warn "沒辦法複製外掛 $n 到 $r"; rm -rf "${r:?}/$n"; continue; }
         state_set plugin "$n" "$h"; say "  plugin $n → $r"
     done
     plugin_market "$(state_list plugin)" || { warn "沒辦法寫 kit 的外掛清單（${r}）"; return 0; }
@@ -4361,7 +4366,7 @@ cmd_run() {
     mkdir -p "$skdir"
     for n in $(fmget skills); do
         p=$(find_item skill "$n") || { warn "skill $n not found"; continue; }
-        cp -R "$(dirname "$p")" "$skdir/$n"; [ -n "${KIT_DRY_RUN:-}" ] || link_deps "$n" "$skdir/$n"
+        cp -R "$(dirname "$p")" "$skdir/$n"; drop_caches "$skdir/$n"; [ -n "${KIT_DRY_RUN:-}" ] || link_deps "$n" "$skdir/$n"
     done
     # the agent's rules + its prompt
     {
@@ -4614,7 +4619,7 @@ stage_from() { # stage_from KIND NAME FROM OUTDIR : copy what kit accepts from a
             esac
             mkdir -p "$(dirname "$out/$name/$rel")"; cp "$f" "$out/$name/$rel"
         done <<EOF
-$(cd "$from" && find "$(pwd -P)" -name .git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort)
+$(cd "$from" && find "$(pwd -P)" -name .git -prune -o \( -type f -o -type l \) -print | not_cache | LC_ALL=C sort)
 EOF
         [ $skipped -gt 0 ] && warn "跳過 $skipped 個檔案（只帶 .md$( [ $scripts = 1 ] && echo '、scripts/')；不帶 LICENSE、README、.git）"
         printf '%s\n' "$out/$name/SKILL.md";;
@@ -4812,7 +4817,7 @@ cmd_diff_update() { # cmd_diff_update diff|update ARGS...
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-diff.XXXXXX")
     f=$(stage_from "$KIND" "$NAME" "$FROM" "$tmp") || { rm -rf "$tmp"; exit 1; }
     if [ "$mode" = diff ]; then
-        if [ "$KIND" = skill ]; then diff -ru "$(dirname "$dst")" "$(dirname "$f")"; else diff -u "$dst" "$f"; fi
+        if [ "$KIND" = skill ]; then diff -ru -x __pycache__ -x '*.py[co]' "$(dirname "$dst")" "$(dirname "$f")"; else diff -u "$dst" "$f"; fi
         [ $? = 0 ] && say "一樣，沒有要更新的"
         rm -rf "$tmp"; return 0
     fi
@@ -4822,7 +4827,7 @@ cmd_diff_update() { # cmd_diff_update diff|update ARGS...
         if [ -z "$old" ]; then die "$KIND:$NAME 不是這台用 kit new --from 帶進來的，不知道有沒有人改過。先 kit diff 看清楚，確定要蓋掉再加 --force"; fi
         die "$KIND:$NAME 在 $(basename "$dir") 被改過（跟上次帶進來的不一樣）。先 kit diff 看差在哪；要保留別人的修改就手動合併，確定要蓋掉再加 --force"
     fi
-    if [ "$KIND" = skill ]; then diff -rq "$(dirname "$dst")" "$(dirname "$f")" >/dev/null; else cmp -s "$dst" "$f"; fi && { rm -rf "$tmp"; say "一樣，沒有要更新的"; return 0; }
+    if [ "$KIND" = skill ]; then diff -rq -x __pycache__ -x '*.py[co]' "$(dirname "$dst")" "$(dirname "$f")" >/dev/null; else cmp -s "$dst" "$f"; fi && { rm -rf "$tmp"; say "一樣，沒有要更新的"; return 0; }
     dst=$(put_item "$KIND" "$NAME" "$f" "$dir"); rm -rf "$tmp"
     state_set from "$KIND:$NAME@$dir" "$(item_hash "$KIND" "$dst")"
     say "已更新 ${dst#"$dir"/}（在 $(basename "$dir")）。記得刪掉暫存的資料夾：$FROM"
@@ -4915,7 +4920,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
             done
         fi
         # files: no git inside, no links, text only
-        ( cd "$d" && find . -mindepth 1 \( -name .git -prune -o -print \) ) | while IFS= read -r f; do
+        ( cd "$d" && find . -mindepth 1 \( -name .git -prune -o -print \) ) | not_cache | while IFS= read -r f; do
             rel=${f#./}
             if [ -L "$d/$rel" ]; then echo "$rel: 不能放捷徑（symlink）"
             elif [ -f "$d/$rel" ]; then
@@ -4928,7 +4933,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
         # URLs only to content_hosts (when the source lists them)
         hosts=$( { yget "$d/kit.yaml" content_hosts; [ -f "$MACHINE" ] && src_dirs | while IFS= read -r v; do yget "$v/kit.yaml" content_hosts; done; } | tr 'A-Z' 'a-z' | awk 'NF && !seen[$0]++')
         if [ -n "$hosts" ]; then
-            LC_ALL=C grep -rnIoE --exclude-dir=.git '(https?|ssh|git)://[^][ "<>()`'"'"']+|git@[A-Za-z0-9.-]+:' "$d" 2>/dev/null | while IFS= read -r line; do
+            LC_ALL=C grep -rnIoE --exclude-dir=.git --exclude-dir=__pycache__ --exclude='*.py[co]' '(https?|ssh|git)://[^][ "<>()`'"'"']+|git@[A-Za-z0-9.-]+:' "$d" 2>/dev/null | while IFS= read -r line; do
                 v=${line#*:*:}; h=$(url_host "$v")
                 printf '%s\n' "$hosts" | grep -qxF "$h" || echo "${line%%:*}" "$(printf '%s' "$line" | cut -d: -f2)" "$h"
             done | while read -r f n h; do problem "${f#"$d"/}:$n: 網址 $h 不在 content_hosts"; done
@@ -4936,8 +4941,8 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
         # private words (only the place, never the word); not in a source its kit.yaml calls private (private: true:
         # never made public, so it may name the private things; kit export-self still checks)
         if [ -s "$pw" ] && [ "$(yget "$d/kit.yaml" private 2>/dev/null)" != true ]; then
-            LC_ALL=C grep -rnIiF -f "$pw" --exclude-dir=.git --exclude=private-words.txt "$d" 2>/dev/null | cut -d: -f1,2 | while IFS= read -r line; do problem "${line#"$d"/}: 有不該公開的字"; done
-            ( cd "$d" && find . -mindepth 1 -name .git -prune -o -print ) | sed 's#^\./##' | grep -iF -f "$pw" | while IFS= read -r line; do problem "$line: 檔名有不該公開的字"; done
+            LC_ALL=C grep -rnIiF -f "$pw" --exclude-dir=.git --exclude-dir=__pycache__ --exclude='*.py[co]' --exclude=private-words.txt "$d" 2>/dev/null | cut -d: -f1,2 | while IFS= read -r line; do problem "${line#"$d"/}: 有不該公開的字"; done
+            ( cd "$d" && find . -mindepth 1 -name .git -prune -o -print ) | not_cache | sed 's#^\./##' | grep -iF -f "$pw" | while IFS= read -r line; do problem "$line: 檔名有不該公開的字"; done
         fi
         # --ci: commit author emails
         if [ -n "${CHECK_CI:-}" ] && [ -d "$d/.git" ]; then
@@ -5140,7 +5145,7 @@ send_files() { # send_files : (in a source's folder) what kit push would send, o
 }
 changed_files() { # changed files here, one per line, exactly as named (a rename: the new and the old name)
     git status --porcelain -z --untracked-files=all | tr '\0' '\n' |
-        awk '{ if (old) { old = 0; print; next } if (substr($0, 1, 1) == "R") old = 1; print substr($0, 4) }'
+        awk '{ if (old) { old = 0; print; next } if (substr($0, 1, 1) == "R") old = 1; print substr($0, 4) }' | not_cache
 }
 git_add_commit() { # git_add_commit MSG FILE... : commit exactly these files (names taken literally, not as patterns)
     # if git (or a commit hook) says no, the files go back to how they were before: nothing staged
@@ -5418,7 +5423,7 @@ collect_scan() { # collect_scan SRC [OUT] : what collect takes (text files, no l
         [ -z "$out" ] || { mkdir -p "$(dirname "$out/$rel")"; cp "$f" "$out/$rel"; }
         case $rel in *.sh|*.py|*.js|*.mjs|*.cjs|*.ts|*.ps1|*.rb|*.pl|*.bat|*.cmd) COL_SCRIPTS="$COL_SCRIPTS $rel";; *) [ -x "$f" ] && COL_SCRIPTS="$COL_SCRIPTS $rel";; esac
     done <<EOT
-$(cd "$src" && find "$(pwd -P)" \( -name .git -o -name node_modules \) -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort)
+$(cd "$src" && find "$(pwd -P)" \( -name .git -o -name node_modules \) -prune -o \( -type f -o -type l \) -print | not_cache | LC_ALL=C sort)
 EOT
     COL_SCRIPTS=${COL_SCRIPTS# }
 }

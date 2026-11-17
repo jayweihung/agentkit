@@ -157,6 +157,17 @@ Kit sync --force --expect $ph
 Check '--force overwrites' { (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('team change') }
 function BackupHas([string]$name, [string]$text) { @(Get-ChildItem -Path "$H/.config/agentkit/backups/skills" -Filter "$name-*" -Directory -ErrorAction SilentlyContinue | Where-Object { (ReadT (Join-Path $_.FullName 'SKILL.md')).Contains($text) }).Count -gt 0 }
 Check '--force keeps your edit as a backup (outside the skills folder)' { BackupHas 'gerrit-review' 'my change' }
+# Python's caches (written next to a skill's scripts when they run) are not part of the skill: not a hand edit, not copied
+$G = "$H/.claude/skills/gerrit-review"
+[void](New-Item -ItemType Directory -Force -Path "$G/scripts/__pycache__", "$TEAM/skills/gerrit-review/scripts/__pycache__")
+[IO.File]::WriteAllBytes("$G/scripts/__pycache__/x.cpython-314.pyc", [byte[]]@(0, 1, 2)); [IO.File]::WriteAllBytes("$G/y.pyc", [byte[]]@(0, 1, 2))
+[IO.File]::WriteAllBytes("$TEAM/skills/gerrit-review/scripts/__pycache__/x.cpython-314.pyc", [byte[]]@(0, 1, 2))
+Kit sync
+Check 'python caches in a skill''s copy: not a hand edit' { -not $out.Contains('手動改過') }
+[IO.File]::AppendAllText("$TEAM/skills/gerrit-review/SKILL.md", "team change 2`n")
+Kit sync
+Check '... the skill still updates; the source''s caches are not copied' { (ReadT "$G/SKILL.md").Contains('team change 2') -and -not (Test-Path "$G/scripts/__pycache__") -and -not $out.Contains('手動改過') }
+Remove-Item -LiteralPath "$TEAM/skills/gerrit-review/scripts" -Recurse -Force
 W "$TEAM/skills/team-build/SKILL.md" "---`nname: team-build`ndescription: b`n---`nx`n"
 Kit sync
 Check 'new item announced' { $out.Contains('新： skill:team-build') }
@@ -490,6 +501,7 @@ W "$AU/kit.yaml" "name: authoring`ncontent_hosts: [gitea.example]`nrequired:`n  
 W "$LIB/skills/foo/SKILL.md" "---`nname: foo`ndescription: foo skill`n---`nRun scripts/x.sh, see https://gitea.example/doc`n"
 W "$LIB/skills/foo/scripts/x.sh" "echo hi`n"; W "$LIB/skills/foo/LICENSE" "MIT`n"; W "$LIB/skills/foo/README.md" "readme`n"
 [IO.File]::WriteAllBytes("$LIB/skills/foo/logo.png", [byte[]]@(0, 1, 2)); W "$LIB/skills/foo/.git/config" "x`n"
+[void](New-Item -ItemType Directory -Force -Path "$LIB/skills/foo/scripts/__pycache__"); [IO.File]::WriteAllBytes("$LIB/skills/foo/scripts/__pycache__/x.cpython-314.pyc", [byte[]]@(0, 1, 2))
 W "$LIB/skills/bar/SKILL.md" "---`nname: bar`ndescription: >-`n  Use for bar.`n  Two lines # not a comment`n`nlicense: MIT`n---`nbar`n"; W "$LIB/skills/bar/run.sh" "echo no`n"
 Push-Location $AU
 Kit new rule sec
@@ -498,7 +510,7 @@ Kit new agent bot
 Check 'new agent skeleton has frontmatter' { (ReadT "$AU/agents/bot.md").Contains("`nname: bot`n") }
 Kit new skill foo --from "$LIB/skills/foo"
 Check 'new --from copies md and declared scripts' { $rc -eq 0 -and (Test-Path "$AU/skills/foo/SKILL.md") -and (Test-Path "$AU/skills/foo/scripts/x.sh") }
-Check 'new --from skips LICENSE, README, binaries, .git' { -not (Test-Path "$AU/skills/foo/LICENSE") -and -not (Test-Path "$AU/skills/foo/README.md") -and -not (Test-Path "$AU/skills/foo/logo.png") -and -not (Test-Path "$AU/skills/foo/.git") }
+Check 'new --from skips LICENSE, README, binaries, .git, Python caches' { -not (Test-Path "$AU/skills/foo/LICENSE") -and -not (Test-Path "$AU/skills/foo/README.md") -and -not (Test-Path "$AU/skills/foo/logo.png") -and -not (Test-Path "$AU/skills/foo/.git") -and -not (Test-Path "$AU/skills/foo/scripts/__pycache__") }
 Check 'new --from reminds to delete the temp folder' { $out.Contains('記得刪掉') }
 Kit new skill bar --from "$LIB/skills/bar"
 Check 'undeclared extra files not copied' { -not (Test-Path "$AU/skills/bar/run.sh") }
@@ -525,6 +537,9 @@ Check 'update --force overwrites' { $rc -eq 0 -and -not (ReadT "$AU/skills/foo/S
 W "$AU/agents/bot.md" "---`nname: bot`ndescription: b`nskills: [foo]`n---`nhi`n"
 Kit check
 Check 'check passes on clean content' { $rc -eq 0 }
+[void](New-Item -ItemType Directory -Force -Path "$AU/skills/foo/scripts/__pycache__"); [IO.File]::WriteAllBytes("$AU/skills/foo/scripts/__pycache__/x.cpython-314.pyc", [byte[]]@(0, 1, 2)); [IO.File]::WriteAllBytes("$AU/skills/foo/z.pyo", [byte[]]@(0, 1, 2))
+Kit check
+Check 'check: Python caches (__pycache__, .pyc) are not part of a skill' { $rc -eq 0 -and -not $out.Contains('只能放文字檔') }
 W "$AU/agents/bot.md" "---`nname: bot`ndescription: b`nskills: [foo, nope]`n---`nsee https://evil.example/x`n"
 W "$AU/mcp/m.yaml" "command: uvx`nargs: [git+https://gitea.example/x.git]`n"
 W "$AU/skills/baz/SKILL.md" "no header`n"
@@ -554,7 +569,7 @@ W "$PV/kit.yaml" "name: pv`n"
 Kit check $PV
 Check 'check: without private: true they are' { $rc -ne 0 -and $out.Contains('rules/pvr.md:5: 有不該公開的字') -and $out.Contains('rules/topsecretname-notes: 檔名有不該公開的字') -and -not $out.Contains('runs here') }
 Remove-Item -LiteralPath $PV -Recurse -Force
-foreach ($x in 'skills/gerrit-review', 'skills/foo/.git', '.gitmodules', 'rules/link.md', 'skills/foo/logo.png', 'skills/baz', 'mcp') { Remove-Item -LiteralPath (Join-Path $AU $x) -Recurse -Force }
+foreach ($x in 'skills/gerrit-review', 'skills/foo/.git', '.gitmodules', 'rules/link.md', 'skills/foo/logo.png', 'skills/baz', 'mcp', 'skills/foo/scripts/__pycache__', 'skills/foo/z.pyo') { Remove-Item -LiteralPath (Join-Path $AU $x) -Recurse -Force }
 W "$AU/agents/bot.md" "---`nname: bot`ndescription: b`nskills: [foo]`n---`nhi`n"; W "$AU/rules/sec.md" "Be safe.`n"
 [IO.File]::AppendAllText("$AU/kit.yaml", "author_domains: [corp.example]`n")
 & git -C $AU init -q; & git -C $AU add -A; & git -C $AU -c user.name=a -c user.email=me@home.example commit -qm x
@@ -648,6 +663,11 @@ Kit push --dry-run
 Check 'push --dry-run lists files and branch, sends nothing' { $rc -eq 0 -and $out.Contains('skills/pfoo/SKILL.md') -and $out.Contains("kit/pfoo-$DAY") -and (& git -C $W rev-parse HEAD) -eq $head0 -and (KitBranches) -eq 0 -and (RemoteHeads) -eq 'main' }
 KitJ push --dry-run --json
 Check 'push --dry-run --json: files, commit, branch, where the PR goes; nothing else on stdout' { $rc -eq 0 -and $out -ceq "{`"source`": `"$(Split-Path -Leaf $W)`", `"dir`": `"$WJ`", `"push`": `"pr`", `"dry_run`": true, `"files`": [`"skills/pfoo/SKILL.md`"], `"skipped`": [], `"commit`": `"kit: add skill:pfoo`", `"branch`": `"kit/pfoo-$DAY`", `"into`": `"main`", `"remotes`": [`"origin`"], `"sent`": false, `"pr_url`": null, `"compare_url`": `"$WebBase/acme/team/compare/main...kit/pfoo-$DAY`"}" }
+$pj = $out
+[void](New-Item -ItemType Directory -Force -Path "$W/skills/pfoo/scripts/__pycache__"); [IO.File]::WriteAllBytes("$W/skills/pfoo/scripts/__pycache__/x.cpython-314.pyc", [byte[]]@(0, 1, 2))
+KitJ push --dry-run --json
+Check 'push: Python caches in a skill are not sent, not listed as left out, do not stop kit check' { $rc -eq 0 -and $out -ceq $pj }
+Remove-Item -LiteralPath "$W/skills/pfoo/scripts" -Recurse -Force
 [IO.File]::AppendAllText("$W/skills/pfoo/SKILL.md", "TopSecretName here`n")
 Kit push
 Check 'push: check problem stops, nothing sent' { $rc -ne 0 -and $out.Contains('什麼都沒送') -and (KitBranches) -eq 0 -and (RemoteHeads) -eq 'main' }
@@ -1197,6 +1217,9 @@ $h2 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashm
 W "$T/hashme/c.txt" "c`n"
 $h3 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashme" 2>&1 | ForEach-Object { "$_" }) -join ''
 Check 'skill hash: a link (junction) in it does not count, its own files do' { $h1 -match '^[0-9A-F]{16}$' -and $h1 -eq $h2 -and $h3 -ne $h1 }
+[void](New-Item -ItemType Directory -Force -Path "$T/hashme/scripts/__pycache__"); [IO.File]::WriteAllBytes("$T/hashme/scripts/__pycache__/x.cpython-314.pyc", [byte[]]@(0, 1, 2)); [IO.File]::WriteAllBytes("$T/hashme/y.pyc", [byte[]]@(0, 1, 2))
+$h4 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashme" 2>&1 | ForEach-Object { "$_" }) -join ''
+Check 'skill hash: Python caches (__pycache__, .pyc) do not count' { $h4 -eq $h3 }
 $env:PATH = $savedP
 
 # ---------- how full an agent's context is (kit context, kit statusline) ----------

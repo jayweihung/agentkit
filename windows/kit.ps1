@@ -387,6 +387,13 @@ function Text-Hash([string]$s) {
     $sha = [Security.Cryptography.SHA256]::Create()
     ([BitConverter]::ToString($sha.ComputeHash($Utf8.GetBytes($s)))).Replace('-', '').Substring(0, 16)
 }
+# Python's caches (__pycache__/, .pyc, .pyo: written next to a skill's scripts when they run) are never part of a skill:
+# not hashed, not checked, not sent, not copied (only kit's own new copies lose them; your folders are never touched)
+$script:CacheRe = '(^|/)__pycache__(/|$)|\.py[co]$'
+function Is-Cache([string]$name) { $name -cmatch $CacheRe }   # a file or folder name, or a path with /
+function Drop-Caches([string]$dir) { # DIR is kit's new copy
+    foreach ($e in @(Walk-Tree $dir -Caches)) { if (Is-Cache $e.Name) { Remove-Tree $e.FullName } }
+}
 function Dir-Hash([string]$dir) { # content hash of a directory: its files, not what links (junctions) point at
     # (like find -type f; PowerShell 5.1 -Recurse goes into junctions: node_modules / .venv would count as hand edits)
     $base = (Resolve-Path -LiteralPath $dir).ProviderPath.TrimEnd('\', '/')
@@ -395,6 +402,7 @@ function Dir-Hash([string]$dir) { # content hash of a directory: its files, not 
     $lines = while ($stack.Count -gt 0) {
         foreach ($e in @(Get-ChildItem -LiteralPath $stack.Pop() -Force)) {
             if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            if (Is-Cache $e.Name) { continue }
             if ($e.PSIsContainer) { $stack.Push($e.FullName); continue }
             if ($e.Name -eq '.DS_Store') { continue }
             $e.FullName.Substring($base.Length + 1).Replace('\', '/') + ' ' + [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($e.FullName)))
@@ -1733,7 +1741,7 @@ function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills
                     Say "  你改過的 skill $n 備份在 $b"; $sum = $sum.Substring($sum.IndexOf(' ') + 1)
                 }
                 if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Item -LiteralPath $dst -Recurse -Force }
-                Copy-Item -LiteralPath $r.src -Destination $dst -Recurse
+                Copy-Item -LiteralPath $r.src -Destination $dst -Recurse; Drop-Caches $dst
                 State-Set $kind $n $sum; Say "  skill $n → $dir"
                 Link-Deps $n $dst
             }
@@ -1969,7 +1977,7 @@ function Sync-Plugins($names) { # wanted plugins -> kit's copies, and each tool 
         $p = Find-Item 'plugin' $n; if (-not $p) { Warn "plugin $n not found in any source"; continue }
         $p = Split-Path -Parent (Split-Path -Parent $p); $h = Dir-Hash $p; $dst = Join-Path $r $n
         if ($h -eq (State-Get 'plugin' $n) -and (Test-Path -LiteralPath $dst -PathType Container)) { continue }
-        try { Ensure-Dir $r; Remove-Tree $dst; Copy-Item -LiteralPath $p -Destination $dst -Recurse -Force }
+        try { Ensure-Dir $r; Remove-Tree $dst; Copy-Item -LiteralPath $p -Destination $dst -Recurse -Force; Drop-Caches $dst }
         catch { Warn "沒辦法複製外掛 $n 到 $r"; try { Remove-Tree $dst } catch { }; continue }
         State-Set 'plugin' $n $h; Say "  plugin $n → $r"
     }
@@ -5960,7 +5968,7 @@ function Cmd-Run($rest) {
         $skills = @()
         foreach ($n in YGet-From $fm 'skills') {
             $p = Find-Item 'skill' $n; if (-not $p) { Warn "skill $n not found"; continue }
-            Copy-Item -LiteralPath (Split-Path -Parent $p) -Destination (Join-Path $skdir $n) -Recurse
+            Copy-Item -LiteralPath (Split-Path -Parent $p) -Destination (Join-Path $skdir $n) -Recurse; Drop-Caches (Join-Path $skdir $n)
             if (-not $dry) { Link-Deps $n (Join-Path $skdir $n) }
             $skills += $n
         }
@@ -6200,11 +6208,13 @@ function Cmd-SelfUpdate { # pull the clone kit was installed from, then reinstal
 $script:Kinds = @('rule', 'skill', 'mcp', 'agent')
 function Valid-Name([string]$n) { $n -cmatch '^[a-z0-9][a-z0-9-]*$' }
 function Is-Link($e) { [bool]($e.Attributes -band [IO.FileAttributes]::ReparsePoint) }
-function Walk-Tree([string]$base) { # every entry under BASE; .git folders and links are listed but not entered
+function Walk-Tree([string]$base, [switch]$Caches) { # every entry under BASE; .git folders and links are listed but not entered
+    # Python's caches are left out (-Caches: listed too)
     $stack = New-Object System.Collections.Stack; $stack.Push($base)
     while ($stack.Count -gt 0) {
         $d = $stack.Pop()
         foreach ($e in @(Get-ChildItem -LiteralPath $d -Force)) {
+            if (-not $Caches -and (Is-Cache $e.Name)) { continue }
             $e
             if ($e.PSIsContainer -and $e.Name -ne '.git' -and -not (Is-Link $e)) { $stack.Push($e.FullName) }
         }
@@ -6651,7 +6661,7 @@ function Cmd-ExportSelf($rest) {
     # nothing that points back to GitHub or names private things; text files only
     $gh = @(('github' + '.com'), ('github' + 'usercontent'), ('noreply' + '.github'))   # split so the export does not flag itself
     $pw = @(Private-Words @($repo))
-    $files = [string[]]@(Walk-Tree $out | Where-Object { -not $_.PSIsContainer } | ForEach-Object { Rel-Path $out $_.FullName })
+    $files = [string[]]@(Walk-Tree $out -Caches | Where-Object { -not $_.PSIsContainer } | ForEach-Object { Rel-Path $out $_.FullName })
     [Array]::Sort($files, [StringComparer]::Ordinal)
     $bad = '\.(exe|dll|so|dylib|msi|bin|jar|class|pyc|o|a|lib|zip|gz|tgz|7z|rar)$'
     foreach ($rel in $files) {
@@ -6718,10 +6728,10 @@ function Changed-Files([string]$dir) { # changed files in DIR, exactly as named 
     $raw = "$(@(Git-Q -C $dir status --porcelain -z --untracked-files=all) -join "`n")"
     $old = $false
     foreach ($e in $raw.Split([char]0)) {
-        if ($old) { $old = $false; if ($e) { $e }; continue }
+        if ($old) { $old = $false; if ($e -and -not (Is-Cache $e)) { $e }; continue }
         if ($e.Length -lt 4) { continue }
         if ($e[0] -eq 'R') { $old = $true }
-        $e.Substring(3)
+        if (-not (Is-Cache $e.Substring(3))) { $e.Substring(3) }
     }
 }
 function Git-AddCommit([string]$dir, [string]$msg, $files) { # commit exactly these files (names taken literally, not as patterns)

@@ -157,6 +157,17 @@ fi
 kit sync --force --expect "$(hashof "$(kit sync --force --dry-run 2>&1)")" >/dev/null 2>&1
 check "--force overwrites" 'grep -q "team change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
 check "--force keeps your edit as a backup (outside the skills folder)" 'grep -q "my change" "$HOME"/.config/agentkit/backups/skills/gerrit-review-*/SKILL.md'
+# Python's caches (written next to a skill's scripts when they run) are not part of the skill: not a hand edit, not copied
+G="$HOME/.claude/skills/gerrit-review"
+mkdir -p "$G/scripts/__pycache__" "$TEAM/skills/gerrit-review/scripts/__pycache__"
+printf '\0\1\2' > "$G/scripts/__pycache__/x.cpython-314.pyc"; printf '\0\1\2' > "$G/y.pyc"
+printf '\0\1\2' > "$TEAM/skills/gerrit-review/scripts/__pycache__/x.cpython-314.pyc"
+out=$(kit sync 2>&1)
+check "python caches in a skill's copy: not a hand edit" '! echo "$out" | grep -q 手動改過'
+echo "team change 2" >> "$TEAM/skills/gerrit-review/SKILL.md"
+out=$(kit sync 2>&1)
+check "... the skill still updates; the source's caches are not copied" 'grep -q "team change 2" "$G/SKILL.md" && [ ! -e "$G/scripts/__pycache__" ] && ! echo "$out" | grep -q 手動改過'
+rm -rf "$TEAM/skills/gerrit-review/scripts"
 mkdir -p "$TEAM/skills/team-build"; printf -- '---\nname: team-build\ndescription: b\n---\nx\n' > "$TEAM/skills/team-build/SKILL.md"
 out=$(kit sync 2>&1)
 check "new item announced" 'echo "$out" | grep -q "新： skill:team-build"'
@@ -536,6 +547,7 @@ printf 'name: authoring\ncontent_hosts: [gitea.example]\nrequired:\n  rules: [se
 printf -- '---\nname: foo\ndescription: foo skill\n---\nRun scripts/x.sh, see https://gitea.example/doc\n' > "$LIB/skills/foo/SKILL.md"
 echo 'echo hi' > "$LIB/skills/foo/scripts/x.sh"; echo MIT > "$LIB/skills/foo/LICENSE"; echo readme > "$LIB/skills/foo/README.md"
 printf '\0\1\2' > "$LIB/skills/foo/logo.png"; echo x > "$LIB/skills/foo/.git/config"
+mkdir -p "$LIB/skills/foo/scripts/__pycache__"; printf '\0\1\2' > "$LIB/skills/foo/scripts/__pycache__/x.cpython-314.pyc"
 printf -- '---\nname: bar\ndescription: >-\n  Use for bar.\n  Two lines # not a comment\n\nlicense: MIT\n---\nbar\n' > "$LIB/skills/bar/SKILL.md"; echo 'echo no' > "$LIB/skills/bar/run.sh"
 cd "$AU"
 out=$(kit new rule sec 2>&1); rc=$?
@@ -544,7 +556,7 @@ kit new agent bot >/dev/null 2>&1
 check "new agent skeleton has frontmatter" 'head -2 "$AU/agents/bot.md" | grep -qx "name: bot"'
 out=$(kit new skill foo --from "$LIB/skills/foo" 2>&1); rc=$?
 check "new --from copies md and declared scripts" '[ $rc -eq 0 ] && [ -f "$AU/skills/foo/SKILL.md" ] && [ -f "$AU/skills/foo/scripts/x.sh" ]'
-check "new --from skips LICENSE, README, binaries, .git" '[ ! -e "$AU/skills/foo/LICENSE" ] && [ ! -e "$AU/skills/foo/README.md" ] && [ ! -e "$AU/skills/foo/logo.png" ] && [ ! -e "$AU/skills/foo/.git" ]'
+check "new --from skips LICENSE, README, binaries, .git, Python caches" '[ ! -e "$AU/skills/foo/LICENSE" ] && [ ! -e "$AU/skills/foo/README.md" ] && [ ! -e "$AU/skills/foo/logo.png" ] && [ ! -e "$AU/skills/foo/.git" ] && [ ! -e "$AU/skills/foo/scripts/__pycache__" ]'
 check "new --from reminds to delete the temp folder" 'echo "$out" | grep -q 記得刪掉'
 kit new skill bar --from "$LIB/skills/bar" >/dev/null 2>&1
 check "undeclared extra files not copied" '[ ! -e "$AU/skills/bar/run.sh" ]'
@@ -574,6 +586,9 @@ check "update --force overwrites" '[ $rc -eq 0 ] && ! grep -q "colleague edit" "
 printf -- '---\nname: bot\ndescription: b\nskills: [foo]\n---\nhi\n' > "$AU/agents/bot.md"
 out=$(kit check 2>&1); rc=$?
 check "check passes on clean content" '[ $rc -eq 0 ]'
+mkdir -p "$AU/skills/foo/scripts/__pycache__"; printf '\0\1\2' > "$AU/skills/foo/scripts/__pycache__/x.cpython-314.pyc"; printf '\0\1\2' > "$AU/skills/foo/z.pyo"
+out=$(kit check 2>&1); rc=$?
+check "check: Python caches (__pycache__, .pyc) are not part of a skill" '[ $rc -eq 0 ] && ! echo "$out" | grep -q 只能放文字檔'
 printf -- '---\nname: bot\ndescription: b\nskills: [foo, nope]\n---\nsee https://evil.example/x\n' > "$AU/agents/bot.md"
 mkdir -p "$AU/mcp"; printf 'command: uvx\nargs: [git+https://gitea.example/x.git]\n' > "$AU/mcp/m.yaml"
 mkdir -p "$AU/skills/baz"; printf 'no header\n' > "$AU/skills/baz/SKILL.md"
@@ -609,7 +624,7 @@ fi
 rm -rf "$PV"
 rm -rf "$AU/skills/gerrit-review"
 # --ci: author emails from the company domain only
-rm -rf "$AU/skills/foo/.git" "$AU/.gitmodules" "$AU/rules/link.md" "$AU/skills/foo/logo.png" "$AU/skills/baz" "$AU/mcp"
+rm -rf "$AU/skills/foo/.git" "$AU/.gitmodules" "$AU/rules/link.md" "$AU/skills/foo/logo.png" "$AU/skills/baz" "$AU/mcp" "$AU/skills/foo/scripts/__pycache__" "$AU/skills/foo/z.pyo"
 printf -- '---\nname: bot\ndescription: b\nskills: [foo]\n---\nhi\n' > "$AU/agents/bot.md"; echo "Be safe." > "$AU/rules/sec.md"
 echo "author_domains: [corp.example]" >> "$AU/kit.yaml"
 git -C "$AU" init -q && git -C "$AU" add -A && git -C "$AU" -c user.name=a -c user.email=me@home.example commit -qm x
@@ -708,6 +723,12 @@ check "push --dry-run --json: only one JSON line on stdout: files, commit, branc
 if [ -n "$PWSH" ]; then
     check "push --dry-run --json: kit.ps1 prints the same" '[ "$(kps push --dry-run --json 2>/dev/null)" = "$out" ]'
 fi
+mkdir -p skills/pfoo/scripts/__pycache__; printf '\0\1\2' > skills/pfoo/scripts/__pycache__/x.cpython-314.pyc
+check "push: Python caches in a skill are not sent, not listed as left out, do not stop kit check" '[ "$(kit push --dry-run --json 2>/dev/null)" = "$out" ]'
+if [ -n "$PWSH" ]; then
+    check "push: Python caches: kit.ps1 the same" '[ "$(kps push --dry-run --json 2>/dev/null)" = "$out" ]'
+fi
+rm -rf skills/pfoo/scripts
 echo "TopSecretName here" >> skills/pfoo/SKILL.md
 out=$(kit push 2>&1); rc=$?
 check "push: check problem stops, nothing sent" '[ $rc -ne 0 ] && echo "$out" | grep -q 什麼都沒送 && [ -z "$(git branch --list "kit/*")" ] && [ "$(remote_heads)" = main ]'

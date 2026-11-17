@@ -4,6 +4,17 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.6.15（2026-11-17）
+
+更新後要做：`kit self-update`，再 `kit sync`。
+
+- kit 不把 Python 的快取（`__pycache__` 資料夾、`.pyc`、`.pyo` 檔）當成技能的一部分。技能裡的 Python 程式跑過一次，Python 就會在旁邊寫這些檔；以前 `kit check`（`kit push` 前也會跑）每個都說「只能放文字檔」，什麼都送不出去，kit 也可能以為技能被手動改過。現在：
+  - `kit check`、`kit push` 跳過它們：不擋、不送，也不列在「不會送」裡。
+  - 不算改動：技能裡多了快取，`kit sync` 不會說「被手動改過」。
+  - 不複製：kit 放技能、外掛（`kit sync`、`kit run`）、`kit new --from`、`kit update --from`、`kit collect` 都不帶它們。
+  - 你資料夾裡的快取 kit 不刪，只是不管它。
+- Windows 版一樣。
+
 ## 0.6.14（2026-11-16）
 
 更新後要做：`kit self-update`，再 `kit sync`。
