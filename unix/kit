@@ -1012,8 +1012,8 @@ block_scan() { # rows CLASS TOOL KIND NAME SCOPE DIR PATH TARGET for the skills,
         c=other; case $n in *@kit) [ -z "$(state_get plugin.codex "${n%@kit}")" ] || c=kit;; esac; blk $c plugin "$n" account "" "$CODEX_DIR/config.toml" codex; done
     f="$HOME/.omp/plugins/installed_plugins.json"
     [ -n "$to" ] && [ -f "$f" ] && command -v omp >/dev/null 2>&1 && json_keys "$f" plugins | while IFS= read -r n; do
-        # one omp has turned off already (assumed: "enabled": false in its entry) is left alone
-        json_get "$f" "plugins${KS}$n${KS}1${KS}enabled" "$KS" | grep -qx false && continue
+        # one omp has turned off already ("enabled": false in its first entry) is left alone
+        LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$f" 2>/dev/null | awk -F'\t' -v n="$n" '$1 == "plugins" && $2 == n && $3 == 1 && $4 == "enabled" && $5 == "false" { f = 1 } END { exit !f }' && continue
         c=other; case $n in *@kit) [ -z "$(state_get plugin.omp "${n%@kit}")" ] || c=kit;; esac; blk $c plugin "$n" account "" "$f" omp; done
     while IFS= read -r d; do                                  # the folders
         [ -n "$d" ] || continue

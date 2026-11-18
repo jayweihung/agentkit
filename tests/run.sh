@@ -2932,6 +2932,9 @@ sk "$PB/.claude/skills/committed"; sk "$PB/.claude/skills/loose"; printf '{"mcpS
 ( cd "$PB" && git init -q && git config user.name t && git config user.email t@t && git add .claude/skills/committed && git commit -qm c )
 (
 export HOME="$HB"
+# omp's plugins: one omp has turned off already ("enabled": false in its first entry), one on; a fake omp logs what kit asks
+mkdir -p "$HB/.omp/plugins" "$T/fakeomp"; printf '{"version": 2, "plugins": {"off@mkt": [{"scope": "user", "enabled": false}], "on@mkt": [{"scope": "user"}]}}\n' > "$HB/.omp/plugins/installed_plugins.json"
+printf '#!/bin/sh\necho "$*" >> "%s/omp.log"\n' "$T" > "$T/fakeomp/omp"; chmod +x "$T/fakeomp/omp"; export PATH="$T/fakeomp:$PATH"
 out=$(KIT_HOOK_DIR="$PB" kit init "$TEAM" 2>&1); out=$out$(kit add skill gerrit-review 2>&1)
 S="$HB/.claude/settings.json"; CX="$HB/.codex/config.toml"
 check "block: a skill kit did not put there is off in Claude, your own setting for it kept to put back" '[ "$(jget "$S" skillOverrides.npxed)" = "\"off\"" ] && [ "$(jget "$S" model)" = "\"opus\"" ] && echo "$out" | grep -q "已經讓工具不載入"'
@@ -2944,6 +2947,7 @@ check "block: the project: what git tracks left alone, the rest off in its setti
 check "block: a folder that is not kit's where kit puts a skill: backed up, then kit's (never blocked)" 'grep -qx mine "$HB"/.config/agentkit/backups/skills/gerrit-review-*/SKILL.md && grep -q "how to review" "$HB/.claude/skills/gerrit-review/SKILL.md" && [ -z "$(jget "$S" skillOverrides.gerrit-review)" ]'
 out=$(kit list --json 2>/dev/null)
 check "block: kit list --json has blocked" 'echo "$out" | grep -qF "{\"kind\": \"skill\", \"name\": \"npxed\", \"tool\": \"claude\", \"path\": \"$HB/.claude/skills/npxed\", \"scope\": \"account\"}" && echo "$out" | grep -qF "\"name\": \"loose\", \"tool\": \"claude\", \"path\": \"$PB/.claude/skills/loose\", \"scope\": \"folder\", \"dir\": \"$PB\"}"'
+check "block: an omp plugin omp has off already is left alone (not disabled, not in blocked); the other one is" '! grep -qF "off@mkt" "$T/omp.log" && grep -qxF "plugin disable --scope user on@mkt" "$T/omp.log" && ! echo "$out" | grep -qF "\"name\": \"off@mkt\"" && echo "$out" | grep -qF "{\"kind\": \"plugin\", \"name\": \"on@mkt\", \"tool\": \"omp\""'
 sed -i.bak '/"npxed": "off"/d' "$S"; rm -f "$S.bak"; out=$(kit sync 2>&1)
 check "block: told once; taken out by hand: back on the next sync (the project too)" '! echo "$out" | grep -q "已經讓工具不載入" && [ "$(jget "$S" skillOverrides.npxed)" = "\"off\"" ] && [ "$(jget "$PB/.claude/settings.local.json" skillOverrides.loose)" = "\"off\"" ]'
 sk "$TEAM/skills/npxed"; out=$(kit add skill npxed 2>&1)
