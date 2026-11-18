@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.11'
+$script:KitApi = '1.12'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -69,6 +69,7 @@ function Warn([string]$msg) {
 }
 function Die([string]$msg, [string]$code = 'error') {
     Warn $msg
+    if ($script:DieThrow) { throw 'kit-die' }   # (Block-Try: that one entry is not written, kit goes on)
     if ($script:JsonOut) { [Console]::Out.WriteLine('{"error": {"code": ' + (Json-S $code) + ', "message": ' + (Json-S $msg) + $script:DieExtra + '}}') }
     exit 1
 }
@@ -1699,13 +1700,18 @@ function Apply-Rules($want) { # the account's instructions (Claude, Codex, omp):
 
 function Skills-Plan([string]$dir, [string]$kind, $names) { # what Sync-Skills will do with the wanted skills; changes nothing
     # rows @{ a; n; sum; src } (the same as unix/kit's skills_plan). sum: the source's hash, or (yours) the copy's: a plan stays
-    # the same plan only while neither changed. a: add, update, same, missing, foreign, modified, replace, remove, keep, drop
+    # the same plan only while neither changed. a: add, update, same, missing, foreign (git tracks it: a project's own),
+    # takeover (one git does not track: backed up, then kit's), modified, replace, remove, keep, drop
     $names = @($names | Where-Object { $_ })
     foreach ($n in $names) {
         $p = Find-Item 'skill' $n; if (-not $p) { @{ a = 'missing'; n = $n; sum = ''; src = '' }; continue }
         $src = Split-Path -Parent $p; $dst = Join-Path $dir $n; $h = Dir-Hash $src
         $old = State-Get $kind $n
-        if ((Test-Path -LiteralPath $dst) -and -not $old) { @{ a = 'foreign'; n = $n; sum = ''; src = '' }; continue }
+        if ((Test-Path -LiteralPath $dst) -and -not $old) {
+            if (@(Git-Q -C $dst ls-files | Select-Object -First 1).Count -gt 0) { @{ a = 'foreign'; n = $n; sum = ''; src = '' } }
+            else { @{ a = 'takeover'; n = $n; sum = $h; src = $src } }
+            continue
+        }
         if ($old -and (Test-Path -LiteralPath $dst)) {
             $cur = Dir-Hash $dst
             if ($cur -ne $old) {
@@ -1740,12 +1746,16 @@ function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills
             }
             'modified' { Warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）" }
             'same' { Link-Deps $n $dst }
-            { $_ -in 'add', 'update', 'replace' } {
+            { $_ -in 'add', 'update', 'replace', 'takeover' } {
                 $sum = $r.sum
                 if ($r.a -eq 'replace') {
                     $b = Backup-Skill $dst $n
                     if (-not $b) { Warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; break }
                     Say "  你改過的 skill $n 備份在 $b"; $sum = $sum.Substring($sum.IndexOf(' ') + 1)
+                } elseif ($r.a -eq 'takeover') {
+                    $b = Backup-Skill $dst $n
+                    if (-not $b) { Warn "${dst} 不是 kit 放的，沒辦法備份，沒有換成 kit 的"; break }
+                    Say "  ${dst} 不是 kit 放的：備份在 ${b}，換成 kit 的"
                 }
                 if (Test-Path -LiteralPath $dst) { Drop-DepsLink $dst; Remove-Retry $dst }
                 Copy-Item -LiteralPath $r.src -Destination $dst -Recurse; Drop-Caches $dst
@@ -1801,6 +1811,318 @@ function Sync-McpJson([string]$f, [string]$kind, $names) { # wanted MCP -> FILE'
         foreach ($x in $sets) { State-Set $kind $x[0] $x[1]; if ($null -ne (State-Get 'skipped' "$f#mcp.$($x[0])")) { State-Del 'skipped' "$f#mcp.$($x[0])" } }
         foreach ($n in $dels) { State-Del $kind $n }
     }
+}
+
+# ---------- only through kit: what kit did not put there and is not the company's is not loaded ----------
+# (the same as unix/kit's; its comment says more) The company's are left as they are: the tool vendor's, the admin's
+# (the managed folders only an admin can write), what a project committed (git ls-files). Everything else kit did not put
+# there is turned off in each tool's own settings (files never deleted or moved). blocked.tsv: TOOL KIND NAME SCOPE DIR
+# PATH TARGET PREV, each entry kit wrote and what was there before, to put it back.
+$script:Blocked = Join-Path $KitConf 'blocked.tsv'
+$script:KS = [string][char]28                               # joins JSON keys that may hold a "." (plugin ids)
+if ($OnWindows) { $script:AdminClaude = @('C:\Program Files\ClaudeCode'); $script:AdminCodex = @(Join-Path (Env-Or 'ProgramData' 'C:\ProgramData') 'OpenAI\Codex') }
+else { $script:AdminClaude = @('/Library/Application Support/ClaudeCode', '/etc/claude-code'); $script:AdminCodex = @('/etc/codex') }
+$script:DieThrow = $false                                   # Die throws instead of stopping kit (a block that could not be written)
+function Block-Rows { if (Test-Path -LiteralPath $Blocked) { @((Read-Text $Blocked) -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ }) } else { @() } }
+function Ord-Set { New-Object Collections.Hashtable ([StringComparer]::Ordinal) }
+function Skill-Names([string]$root) { # the folders with a SKILL.md in ROOT, sorted (no dot folders, as a shell glob)
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return @() }
+    @(Sorted-Names (Get-ChildItem -LiteralPath $root -Directory -Force | Where-Object { -not $_.Name.StartsWith('.') -and (Test-Path -LiteralPath (Join-Path $_.FullName 'SKILL.md') -PathType Leaf) }))
+}
+function Jg([string]$f, [string]$p) { try { Json-Get $f $p $KS } catch { $null } }   # Json-Get with keys joined by KS; $null when FILE is not JSON
+function Block-Dirs { # the folders looked at: kit's, the one the tool started in (kit sync --hook), those with something blocked already
+    $h = Home-Real; $l = @(Dirs-Registered)
+    if ($env:KIT_HOOK_DIR) { $t = @(Git-Q -C $env:KIT_HOOK_DIR rev-parse --show-toplevel); $l += $(if ($t.Count -gt 0 -and $t[0]) { Full-Path $t[0] } else { $env:KIT_HOOK_DIR }) }
+    foreach ($r in Block-Rows) { $f = $r.Split("`t"); if ($f.Count -gt 4 -and $f[4] -ne '-') { $l += $f[4] } }
+    @(Uniq $l | Where-Object { (Test-Path -LiteralPath $_ -PathType Container) -and $_ -ne $h -and $_ -ne $UserHome -and -not (Is-RootDir $_) })
+}
+function Blk([string]$c, [string]$k, [string]$n, [string]$s, [string]$d, [string]$p, $tools) { # a Block-Scan row per tool that loads it, with where kit turns it off
+    foreach ($t in @($tools | Where-Object { $_ })) {
+        $g = switch ("${t}:$k") {
+            'claude:skill' { if ($s -eq 'folder') { Join-Path (Join-Path $d '.claude') 'settings.local.json' } else { Join-Path $ClaudeDir 'settings.json' } }
+            'claude:mcp' { if ((Split-Path -Leaf $p) -ceq '.mcp.json') { Join-Path (Join-Path $d '.claude') 'settings.local.json' } else { Join-Path $ClaudeDir 'settings.json' } }
+            'claude:plugin' { Join-Path $ClaudeDir 'settings.json' }
+            'codex:skill' { Join-Path $CodexDir 'config.toml' }
+            'codex:plugin' { Join-Path $CodexDir 'config.toml' }
+            'codex:mcp' { $p }
+            'omp:skill' { Join-Path $OmpDir 'config.yml' }
+            'omp:mcp' { Join-Path $OmpDir 'mcp.json' }
+            'omp:plugin' { 'omp' }
+        }
+        "$c`t$t`t$k`t$n`t$s`t$(if ($d) { $d } else { '-' })`t$p`t$g"
+    }
+}
+function Plugin-Class([string]$t, [string]$n) { if ($n.EndsWith('@kit', [StringComparison]::Ordinal) -and (State-Get "plugin.$t" $n.Substring(0, $n.Length - 4))) { 'kit' } else { 'other' } }
+function Omp-PluginOff([string]$f, [string]$n) { # omp has turned it off already ("enabled": false in its first entry)
+    try {
+        $o = Json-Parse (Read-Text $f); foreach ($key in 'plugins', $n) { $i = Json-Child $o $key; if ($i -lt 0) { return $false }; $o = $o.v[$i] }
+        if ($o.t -ne 'a' -or $o.v.Count -eq 0) { return $false }
+        $e = $o.v[0]; $i = Json-Child $e 'enabled'
+        return ($i -ge 0 -and $e.v[$i].t -eq 'v' -and $e.v[$i].raw -ceq 'false')
+    } catch { return $false }
+}
+function Block-Scan { # rows CLASS TOOL KIND NAME SCOPE DIR PATH TARGET for the skills, MCP and plugins the tools load (CLASS: kit, company or other)
+    $tc = $(if (Has-Codex) { 'codex' } else { '' }); $to = $(if (Has-Omp) { 'omp' } else { '' })
+    $sd = Join-Path $ClaudeDir 'skills'                       # Claude's account skills (omp reads them too)
+    foreach ($n in Skill-Names $sd) { Blk $(if (State-Get 'skill' $n) { 'kit' } else { 'other' }) 'skill' $n 'account' '' (Join-Path $sd $n) @('claude', $to) }
+    $org = "$(Jg $ClaudeJson "oauthAccount${KS}organizationUuid")".Replace('"', ''); $typ = "$(Jg $ClaudeJson "oauthAccount${KS}organizationType")".Replace('"', '')
+    $sy = Join-Path $sd 'synced'                              # Claude's synced skills: <org>_<user>\
+    if (Test-Path -LiteralPath $sy -PathType Container) {
+        foreach ($b in Sorted-Names (Get-ChildItem -LiteralPath $sy -Directory -Force | Where-Object { -not $_.Name.StartsWith('.') })) {
+            $bd = Join-Path $sy $b; $lv = Json-LeavesOf (Join-Path $bd 'manifest.json'); if ($null -eq $lv) { continue }
+            $admin = $org -and $b.StartsWith("${org}_", [StringComparison]::Ordinal) -and ($typ -clike '*team*' -or $typ -clike '*enterprise*')
+            $ids = New-List; $nm = Ord-Set; $src = Ord-Set
+            foreach ($x in $lv) {
+                if ($x.Count -ne 4 -or $x[0] -cne 'skills') { continue }
+                $v = $x[3] -replace '^"|"$', ''
+                $id = "$($x[1])"
+                if ($x[2] -ceq 'name') { $nm[$id] = $v } elseif ($x[2] -ceq 'source') { $src[$id] = $v } else { continue }
+                if (-not $ids.Contains($id)) { $ids.Add($id) }
+            }
+            foreach ($i in $ids) {
+                $n = "$($nm[$i])"; if (-not $n) { continue }
+                $c = $(if ("$($src[$i])" -clike 'anthropic*' -or $admin) { 'company' } else { 'other' })
+                Blk $c 'skill' $n 'account' '' (Join-Path $bd $n) @('claude')
+            }
+        }
+    }
+    foreach ($m in $AdminClaude) {                            # the admin's
+        $ms = Join-Path (Join-Path $m '.claude') 'skills'
+        foreach ($n in Skill-Names $ms) { Blk 'company' 'skill' $n 'account' '' (Join-Path $ms $n) @('claude') }
+        $f = Join-Path $m 'managed-mcp.json'; if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('mcpServers')) { Blk 'company' 'mcp' $n 'account' '' $f @('claude') } }
+    }
+    foreach ($r in @((Join-Path (Join-Path $CodexDir 'skills') '.system')) + @(foreach ($m in $AdminCodex) { Join-Path $m 'skills' })) {   # Codex's own, the admin's
+        foreach ($n in Skill-Names $r) { Blk 'company' 'skill' $n 'account' '' (Join-Path $r $n) @($tc, $to) }
+    }
+    $r = Join-Path $CodexDir 'skills'; foreach ($n in Skill-Names $r) { Blk 'other' 'skill' $n 'account' '' (Join-Path $r $n) @($tc, $to) }
+    foreach ($n in Skill-Names $AgentsSkills) { Blk $(if (State-Get 'skill.agents' $n) { 'kit' } else { 'other' }) 'skill' $n 'account' '' (Join-Path $AgentsSkills $n) @($tc, $to) }
+    $r = Join-Path $OmpDir 'skills'; foreach ($n in Skill-Names $r) { Blk 'other' 'skill' $n 'account' '' (Join-Path $r $n) @($to) }
+    if (Test-Path -LiteralPath $ClaudeJson -PathType Leaf) { foreach ($n in Json-Keys $ClaudeJson @('mcpServers')) { Blk $(if (State-Get 'mcp' $n) { 'kit' } else { 'other' }) 'mcp' $n 'account' '' $ClaudeJson @('claude', $to) } }
+    foreach ($m in $AdminCodex) { foreach ($f in @((Join-Path $m 'managed_config.toml'), (Join-Path $m 'config.toml'))) { if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Toml-McpNames $f) { Blk 'company' 'mcp' $n 'account' '' $f @($tc) } } } }
+    $cx = Join-Path $CodexDir 'config.toml'
+    if (Test-Path -LiteralPath $cx -PathType Leaf) { foreach ($n in Toml-McpNames $cx) { Blk 'other' 'mcp' $n 'account' '' $cx @($tc) } }
+    $f = Join-Path $OmpDir 'mcp.json'
+    if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('mcpServers')) { Blk $(if (State-Get 'mcp.omp' $n) { 'kit' } else { 'other' }) 'mcp' $n 'account' '' $f @($to) } }
+    # plugins (from a marketplace: never the company's; kit's are <name>@kit)
+    $f = Join-Path (Join-Path $ClaudeDir 'plugins') 'installed_plugins.json'
+    if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('plugins')) { Blk (Plugin-Class 'claude' $n) 'plugin' $n 'account' '' $f @('claude') } }
+    if ($tc -and (Test-Path -LiteralPath $cx -PathType Leaf)) { foreach ($n in Toml-Tables $cx 'plugins') { Blk (Plugin-Class 'codex' $n) 'plugin' $n 'account' '' $cx @('codex') } }
+    $f = Join-Path (Join-Path (Join-Path $UserHome '.omp') 'plugins') 'installed_plugins.json'
+    if ($to -and (Test-Path -LiteralPath $f -PathType Leaf) -and (Has-Command 'omp')) {
+        foreach ($n in Json-Keys $f @('plugins')) { if (-not (Omp-PluginOff $f $n)) { Blk (Plugin-Class 'omp' $n) 'plugin' $n 'account' '' $f @('omp') } }
+    }
+    foreach ($d in Block-Dirs) {                              # the folders
+        $tracked = @(Git-Q -C $d ls-files -- .claude/skills .agents/skills .codex/skills .omp/skills .mcp.json .codex/config.toml .omp/mcp.json)
+        foreach ($x in @(@('.claude', 'skill', @('claude', $to)), @('.agents', 'skill.agents', @($tc, $to)), @('.codex', '', @($tc)), @('.omp', '', @($to)))) {
+            $r = Join-Path (Join-Path $d $x[0]) 'skills'
+            foreach ($n in Skill-Names $r) {
+                if ($x[1] -and (State-Get (Dir-Kind $d $x[1]) $n)) { $c = 'kit' } elseif ($tracked -ccontains "$($x[0])/skills/$n/SKILL.md") { $c = 'company' } else { $c = 'other' }
+                Blk $c 'skill' $n 'folder' $d (Join-Path $r $n) $x[2]
+            }
+        }
+        $f = Join-Path $d '.mcp.json'
+        if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('mcpServers')) {
+            if (State-Get (Dir-Kind $d 'mcp') $n) { $c = 'kit' } elseif ($tracked -ccontains '.mcp.json') { $c = 'company' } else { $c = 'other' }
+            Blk $c 'mcp' $n 'folder' $d $f @('claude', $to) } }
+        $c = $(if ($tracked -ccontains '.codex/config.toml') { 'company' } else { 'other' }); $f = Join-Path (Join-Path $d '.codex') 'config.toml'
+        if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Toml-McpNames $f) { Blk $c 'mcp' $n 'folder' $d $f @($tc) } }
+        $c = $(if ($tracked -ccontains '.omp/mcp.json') { 'company' } else { 'other' }); $f = Join-Path (Join-Path $d '.omp') 'mcp.json'
+        if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('mcpServers')) { Blk $c 'mcp' $n 'folder' $d $f @($to) } }
+        if (Test-Path -LiteralPath $ClaudeJson -PathType Leaf) {
+            $pks = @($d); if ($d.Contains('\')) { $pks += $d.Replace('\', '/') }; $seen = Ord-Set
+            foreach ($pk in $pks) { foreach ($n in Json-Keys $ClaudeJson @('projects', $pk, 'mcpServers')) { if (-not $seen.ContainsKey($n)) { $seen[$n] = 1; Blk 'other' 'mcp' $n 'folder' $d $ClaudeJson @('claude') } } }
+        }
+    }
+}
+function Block-Plan { # what kit sync turns off: Block-Scan's other rows, except a name that is kit's or the company's in that tool
+    # (each tool turns off by name), once per tool kind name target -> rows TOOL KIND NAME SCOPE DIR PATH TARGET
+    $rows = @(Block-Scan); $keep = Ord-Set; $seen = Ord-Set
+    foreach ($r in $rows) { $f = $r.Split("`t"); if ($f[0] -cne 'other') { $keep["$($f[1])`t$($f[2])`t$($f[3])"] = 1 } }
+    foreach ($r in $rows) {
+        $f = $r.Split("`t"); $k = "$($f[1])`t$($f[2])`t$($f[3])"
+        if ($f[0] -cne 'other' -or $keep.ContainsKey($k)) { continue }
+        $u = "$k`t$($f[7])"; if ($seen.ContainsKey($u)) { continue }; $seen[$u] = 1
+        $f[1..7] -join "`t"
+    }
+}
+function Toml-Lines([string]$text) { if ($text -eq '') { return @() }; $l = $text -split "`n"; if ($text.EndsWith("`n")) { $l = $l[0..($l.Count - 2)] }; $l }   # as awk reads them
+function Toml-Tables([string]$f, [string]$pre) { # the X of each [PRE.X] table outside kit's blocks (quotes taken off)
+    $in = $false
+    @(foreach ($l in Toml-Lines (Read-Text $f)) { $l = $l.TrimEnd("`r")
+        if ($l -ceq $TomlBegin) { $in = $true }; if ($l -ceq $TomlEnd) { $in = $false; continue }; if ($in) { continue }
+        $l = $l -replace '^[ \t]*', ''
+        if ($l.StartsWith("[$pre.", [StringComparison]::Ordinal)) { ($l.Substring($pre.Length + 2) -replace '\][ \t]*(#.*)?$', '').Replace('"', '') } })
+}
+function Toml-Enabled([string]$f, [string]$table, $value = $null) { # without VALUE: [TABLE]'s enabled value ('none': no such line;
+    # $null: no such table); with VALUE set it ('none': the line taken out), $false when FILE has no such table. Only tables outside kit's blocks
+    $set = $null -ne $value
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { if ($set) { return $false }; return $null }
+    $norm = { param($s) ($s -replace '[ \t]*#.*$', '') -replace '[ \t"]', '' }
+    $want = & $norm "[$table]"; $text = Read-Text $f
+    $out = New-List; $hold = New-List; $intab = $false; $kb = $false; $found = $false; $did = $false; $cur = ''
+    $flush = { if ($intab -and $set -and -not $did -and $value -ne 'none') { $out.Add("enabled = $value") }; if ($intab) { $did = $true }; foreach ($h in $hold) { $out.Add($h) }; $hold.Clear() }
+    foreach ($l0 in Toml-Lines $text) {
+        $l = $l0 -replace "`r$", ''
+        if ($l -ceq $TomlBegin) { . $flush; $intab = $false; $kb = $true; $out.Add($l0); continue }
+        if ($l -ceq $TomlEnd) { $kb = $false; $out.Add($l0); continue }
+        if ($kb) { $out.Add($l0); continue }
+        if ($l -cmatch '^[ \t]*\[') { . $flush; $intab = ((& $norm $l) -ceq $want); if ($intab) { $found = $true }; $out.Add($l0); continue }
+        if ($intab -and $l -cmatch '^[ \t]*enabled[ \t]*=') {
+            $cur = ($l -replace '^[ \t]*enabled[ \t]*=[ \t]*', '') -replace '[ \t]*(#.*)?$', ''
+            if ($set) { $did = $true; if ($value -ne 'none') { $out.Add("enabled = $value") } }
+            continue
+        }
+        if ($intab -and $l -cmatch '^[ \t]*$') { $hold.Add($l0); continue }
+        if ($intab) { foreach ($h in $hold) { $out.Add($h) }; $hold.Clear() }
+        $out.Add($l0)
+    }
+    . $flush
+    if (-not $set) { if (-not $found) { return $null }; if ($cur -eq '') { return 'none' }; return $cur }
+    if (-not $found) { return $false }
+    $new = ($out -join "`n") + "`n"; if ($new -cne $text) { Write-Text $f $new }
+    $true
+}
+function Yaml-ListRm([string]$f, [string]$k, [string]$v) { # VALUE out of the top-level list KEY (Yaml-ListAdd's two forms); the KEY line goes too when nothing is left in it
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return }
+    $unq = { param($s) $s = ($s -replace '^[ \t]+', '') -replace '[ \t\r]+$', ''; if ($s -cmatch '^".*"$' -or $s -cmatch "^'.*'$") { $s = $s.Substring(1, $s.Length - 2) }; $s }
+    $out = New-List; $buf = New-List; $st = 0; $key = ''; $kept = $false; $gone = $false
+    $done = { if ($kept -or -not $gone) { $out.Add($key) }; foreach ($b in $buf) { $out.Add($b) }; $buf.Clear(); $st = 2 }
+    foreach ($l in Toml-Lines (Read-Text $f)) {
+        if ($st -eq 1 -and $l -cmatch '^[ \t]*-[ \t]') {
+            $x = ($l -replace '^[ \t]*-[ \t]*', '') -replace '[ \t]+#.*$', ''
+            if ((& $unq $x) -ceq $v) { $gone = $true; continue }
+            $kept = $true; $buf.Add($l); continue
+        }
+        if ($st -eq 1 -and $l -cmatch "^[ \t]*(#.*)?`r?$") { $buf.Add($l); continue }
+        if ($st -eq 1) { . $done }
+        if ($st -eq 0 -and $l.StartsWith("${k}:", [StringComparison]::Ordinal)) {
+            if ($l.Substring($k.Length + 1) -cmatch '^[ \t]*\[.*\]') {
+                $a = $l.IndexOf('['); $b = $l.IndexOf(']'); $inner = $l.Substring($a + 1, $b - $a - 1)
+                $s = @(foreach ($i in $inner.Split(',')) { $u = & $unq $i; if ($u -cne $v -and $u -ne '') { $u } }) -join ', '
+                if ($s -ne '' -or (& $unq $inner) -eq '') { $out.Add($l.Substring(0, $a + 1) + $s + $l.Substring($b)) }
+                $st = 2; continue
+            }
+            $st = 1; $key = $l; continue
+        }
+        $out.Add($l)
+    }
+    if ($st -eq 1) { . $done }
+    Write-Text $f $(if ($out.Count -gt 0) { ($out -join "`n") + "`n" } else { '' })
+}
+function Block-Was([string]$t, [string]$k, [string]$n, [string]$g) { # what TARGET has there before kit turns it off (has / none / the value)
+    $v = $null
+    switch ("${t}:$k") {
+        'claude:skill' { $v = Jg $g "skillOverrides$KS$n" }
+        'claude:mcp' {
+            if ((Split-Path -Leaf $g) -ceq 'settings.json') { if ((Flat-Json (Jg $g 'deniedMcpServers')).Contains("{`"serverName`":$(Json-Str $n)}")) { $v = 'has' } }
+            elseif (@(Json-Strs $g 'disabledMcpjsonServers') -ccontains (Json-Str $n)) { $v = 'has' }
+        }
+        'claude:plugin' { $v = Jg $g "enabledPlugins$KS$n" }
+        'codex:mcp' { $v = Toml-Enabled $g "mcp_servers.$n" }
+        'codex:plugin' { $v = Toml-Enabled $g "plugins.$n" }
+        'omp:skill' { if (@(YGet $g 'disabledExtensions') -ccontains "skill:$n") { $v = 'has' } }
+        'omp:mcp' { if (@(Json-Strs $g 'disabledServers') -ccontains (Json-Str $n)) { $v = 'has' } }
+    }
+    if ($v) { "$v" } else { 'none' }
+}
+function Block-Json([string]$f, $op) { # one Json-Edit (keys joined by KS); a file kit made is remembered (Drop-Made)
+    if (-not (Test-Path -LiteralPath $f)) { State-Set 'made' $f 1 }
+    Json-Edit $f @(, $op) $KS
+}
+function Block-Try([scriptblock]$do) { # run DO; $false when it could not (kit's own stop is said already; the rest is said here)
+    $script:DieThrow = $true
+    try { $r = @(& $do); if ($r.Count -gt 0 -and $r[-1] -is [bool]) { return $r[-1] }; return $true }
+    catch { if ($_.Exception.Message -cne 'kit-die') { Warn $_.Exception.Message }; return $false }
+    finally { $script:DieThrow = $false }
+}
+function Block-Do([string]$t, [string]$k, [string]$n, [string]$g, [bool]$new) { # turn it off there (only what is not off already; omp's
+    # plugin command only when NEW); $false when it could not
+    Block-Try {
+        switch ("${t}:$k") {
+            'claude:skill' { if ((Jg $g "skillOverrides$KS$n") -cne '"off"') { Block-Json $g @('set', "skillOverrides$KS$n", '"off"') } }
+            'claude:mcp' {
+                if ((Block-Was $t $k $n $g) -ceq 'has') { break }
+                if ((Split-Path -Leaf $g) -ceq 'settings.json') { Block-Json $g @('addjson', 'deniedMcpServers', "{`"serverName`":$(Json-Str $n)}") }
+                else { Block-Json $g @('addstr', 'disabledMcpjsonServers', $n) }
+            }
+            'claude:plugin' { if ((Jg $g "enabledPlugins$KS$n") -cne 'false') { Block-Json $g @('set', "enabledPlugins$KS$n", 'false') } }
+            'codex:mcp' { if ((Toml-Enabled $g "mcp_servers.$n") -cne 'false') { return [bool](Toml-Enabled $g "mcp_servers.$n" 'false') } }
+            'codex:plugin' { if ((Toml-Enabled $g "plugins.$n") -cne 'false') { return [bool](Toml-Enabled $g "plugins.$n" 'false') } }
+            'omp:skill' {
+                if ((Block-Was $t $k $n $g) -ceq 'has') { break }
+                if (-not (Test-Path -LiteralPath $g)) { State-Set 'made' $g 1 }
+                Yaml-ListAdd $g 'disabledExtensions' "skill:$n"
+            }
+            'omp:mcp' { if ((Block-Was $t $k $n $g) -cne 'has') { Block-Json $g @('addstr', 'disabledServers', $n) } }
+            'omp:plugin' { if ($new) { return [bool](Plugin-Run 'omp' @('plugin', 'disable', '--scope', 'user', $n)) } }
+        }
+    }
+}
+function Block-Undo([string]$t, [string]$k, [string]$n, [string]$g, [string]$p) { # kit's entry out, what was there before back; $false when it could not
+    if ($g -cne 'omp' -and -not (Test-Path -LiteralPath $g -PathType Leaf)) { return $true }
+    Block-Try {
+        switch ("${t}:$k") {
+            'claude:skill' {
+                if ((Jg $g "skillOverrides$KS$n") -cne '"off"') { return $true }
+                if ($p -ceq 'none') { Block-Json $g @('del', "skillOverrides$KS$n"); Prune-Empty $g @('skillOverrides') } else { Block-Json $g @('set', "skillOverrides$KS$n", $p) }
+            }
+            'claude:mcp' {
+                if ($p -ceq 'has') { break }
+                if ((Split-Path -Leaf $g) -ceq 'settings.json') { Block-Json $g @('rmjson', 'deniedMcpServers', "{`"serverName`":$(Json-Str $n)}"); Prune-Empty $g @('deniedMcpServers') }
+                else { Block-Json $g @('rmstr', 'disabledMcpjsonServers', $n); Prune-Empty $g @('disabledMcpjsonServers') }
+            }
+            'claude:plugin' {
+                if ((Jg $g "enabledPlugins$KS$n") -cne 'false') { return $true }
+                if ($p -ceq 'none') { Block-Json $g @('del', "enabledPlugins$KS$n"); Prune-Empty $g @('enabledPlugins') } else { Block-Json $g @('set', "enabledPlugins$KS$n", $p) }
+            }
+            'codex:mcp' { if ((Toml-Enabled $g "mcp_servers.$n") -ceq 'false' -and -not (Toml-Enabled $g "mcp_servers.$n" $p)) { return $false } }
+            'codex:plugin' { if ((Toml-Enabled $g "plugins.$n") -ceq 'false' -and -not (Toml-Enabled $g "plugins.$n" $p)) { return $false } }
+            'omp:skill' {
+                if ($p -cne 'has') { Yaml-ListRm $g 'disabledExtensions' "skill:$n" }
+                if ((Get-Item -LiteralPath $g).Length -eq 0 -and $null -ne (State-Get 'made' $g)) { Remove-Item -LiteralPath $g -Force; State-Del 'made' $g }   # a file only kit made, empty again
+            }
+            'omp:mcp' { if ($p -cne 'has') { Block-Json $g @('rmstr', 'disabledServers', $n); Prune-Empty $g @('disabledServers') } }
+            'omp:plugin' { if ((Has-Command 'omp') -and -not (Plugin-Run 'omp' @('plugin', 'enable', '--scope', 'user', $n))) { return $false } }
+        }
+        if ($g.EndsWith('.json', [StringComparison]::Ordinal)) { Drop-Made $g }
+        $pd = Split-Path -Parent $g                           # (only an empty .claude)
+        if ((Split-Path -Leaf $g) -ceq 'settings.local.json' -and (Split-Path -Leaf $pd) -ceq '.claude' -and -not (Test-Path -LiteralPath $g) -and @(Get-ChildItem -LiteralPath $pd -Force).Count -eq 0) { Remove-Item -LiteralPath $pd -Force }
+        $true
+    }
+}
+function Block-Say([string]$t, [string]$k, [string]$n, [string]$p) { # one line for people
+    $tn = switch -CaseSensitive ($t) { 'claude' { 'Claude' } 'codex' { 'Codex' } default { $t } }
+    if ($p.StartsWith($UserHome + [IO.Path]::DirectorySeparatorChar, [StringComparison]::Ordinal)) { $p = '~' + $p.Substring($UserHome.Length) }
+    "  $tn $k $n（$p）"
+}
+function Codex-SkillsOff($plan) { # [[skills.config]] tables turning off PLAN's Codex skills (in kit's block)
+    -join @(foreach ($r in @($plan)) { $f = $r.Split("`t"); if ($f[0] -ceq 'codex' -and $f[1] -ceq 'skill') { "[[skills.config]]`nname = $(Json-Str $f[2])`nenabled = false`n`n" } })
+}
+function Sync-Blocks($plan) { # Block-Plan's rows turned off in the tools' settings, kit's entries no longer in it put back; blocked.tsv
+    # says what kit wrote. Tells what it newly turned off (the first kit sync after kit self-update too).
+    $plan = @($plan | Where-Object { $_ }); $old = @(Block-Rows)
+    $inPlan = Ord-Set; foreach ($r in $plan) { $f = $r.Split("`t"); $inPlan["$($f[0])`t$($f[1])`t$($f[2])`t$($f[6])"] = 1 }
+    $prev = Ord-Set
+    $out = New-List; $new = New-List; $back = New-List
+    foreach ($r in $old) {
+        $f = $r.Split("`t"); if ($f.Count -lt 8) { continue }
+        $key = "$($f[0])`t$($f[1])`t$($f[2])`t$($f[6])"; if (-not $prev.ContainsKey($key)) { $prev[$key] = $f[7] }
+        if ($inPlan.ContainsKey($key)) { continue }
+        if (Block-Undo $f[0] $f[1] $f[2] $f[6] $f[7]) { $back.Add((Block-Say $f[0] $f[1] $f[2] $f[5])) } else { $out.Add($r) }   # (else again next time)
+    }
+    foreach ($r in $plan) {
+        $f = $r.Split("`t"); $key = "$($f[0])`t$($f[1])`t$($f[2])`t$($f[6])"
+        if ($prev.ContainsKey($key)) { $v = $prev[$key]; if (-not (Block-Do $f[0] $f[1] $f[2] $f[6] $false)) { continue } }
+        else {
+            $v = Block-Was $f[0] $f[1] $f[2] $f[6]; if (-not (Block-Do $f[0] $f[1] $f[2] $f[6] $true)) { continue }
+            $new.Add((Block-Say $f[0] $f[1] $f[2] $f[5]))
+        }
+        $out.Add("$r`t$v")
+    }
+    Ensure-Dir $KitConf
+    if ($out.Count -gt 0) { Write-Text $Blocked (($out -join "`n") + "`n") } elseif (Test-Path -LiteralPath $Blocked) { Remove-Item -LiteralPath $Blocked -Force }
+    if ($new.Count -gt 0) { Say ("kit：這些不是 kit 放的、也不是公司的，已經讓工具不載入（檔案沒動）：`n" + ($new -join "`n") + "`n要用的話收進 kit：有原本網址的用  kit collect <網址>，沒有的用  kit new skill <名字> --from <資料夾>，再  kit add。被擋下的都列在  kit list --json  的 blocked。") }
+    if ($back.Count -gt 0) { Say ("kit：這些現在是 kit 的或公司的，不再擋：`n" + ($back -join "`n")) }
 }
 
 # ---------- plugins ----------
@@ -2175,16 +2497,18 @@ function Apply-All {
     # Codex and omp share ~/.agents/skills
     $codex = Has-Codex; $omp = Has-Omp
     if ($codex -or $omp) { Sync-Skills $AgentsSkills 'skill.agents' $skills }
-    if ($codex) {
-        [void](Codex-Block ((Codex-Mcp-Toml $mcps) + (Codex-Trust) + (Codex-Sandbox)).TrimEnd("`n"))
-        [void](Replace-TopBlock (Join-Path $CodexDir 'config.toml') $TopBegin $TopEnd (Codex-Top))
-    }
     if ($omp) {
         Sync-McpJson (Join-Path $OmpDir 'mcp.json') 'mcp.omp' $mcps
+    }
+    $plan = @(Block-Plan)                                     # what is not kit's or the company's (Codex's skills: in kit's block)
+    if ($codex) {
+        [void](Codex-Block ((Codex-Mcp-Toml $mcps) + (Codex-Trust) + (Codex-Sandbox) + (Codex-SkillsOff $plan)).TrimEnd("`n"))
+        [void](Replace-TopBlock (Join-Path $CodexDir 'config.toml') $TopBegin $TopEnd (Codex-Top))
     }
     if ($codex) { Codex-Hooks }                              # the same two hooks as Claude's, for Codex and omp
     if ($omp) { Omp-Hook }
     Sync-Plugins $plugins
+    Sync-Blocks $plan
 
     # tool deny rules and the auto-sync hook -> ~/.claude/settings.json
     # (state.tsv only after settings.json was written)
@@ -5400,7 +5724,8 @@ function Sync-DryRun { # kit sync --dry-run [--force] : the sources brought up t
     $rows = @(Plan-All); $f = $(if ($script:Force) { ' --force' } else { '' }); $shown = $false
     Say "kit sync$f 會這樣改 skill（只看 skill；rule、MCP 等照常更新）："
     $what = @{ add = '新增'; update = '更新'; replace = '你改過的先備份，再換新的'; remove = '拿掉'; drop = '你改過的先備份，再拿掉'
-        keep = '不再要了，但你改過：留著，之後歸你'; modified = '你改過：跳過（--force 會先備份再換）'; foreign = '不是 kit 放的：跳過'; missing = '來源裡找不到：跳過' }
+        keep = '不再要了，但你改過：留著，之後歸你'; modified = '你改過：跳過（--force 會先備份再換）'; foreign = '不是 kit 放的（git 有記錄）：跳過'; missing = '來源裡找不到：跳過'
+        takeover = '不是 kit 放的：先備份，再換成 kit 的' }
     foreach ($row in $rows) {
         $c = $row -split "`t"
         if (-not $what.ContainsKey($c[1])) { continue }
@@ -5519,6 +5844,7 @@ function Sync-Hook { # run by Claude at start: warn when it saves no transcript;
     try { [void](New-Item -ItemType Directory -Path $lock -ErrorAction Stop) } catch { exit 0 }   # another sync is running
     Write-Text $stamp ''
     $exe = (Get-Process -Id $PID).Path
+    $env:KIT_HOOK_DIR = Real-Dir (Get-Location).ProviderPath   # the folder the tool started in (Block-Dirs), for the background sync
     $argline = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" sync --bg"
     if ($OnWindows) { Start-Process -FilePath $exe -ArgumentList $argline -WindowStyle Hidden }
     else { Start-Process -FilePath $exe -ArgumentList $argline }
@@ -5864,6 +6190,14 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
               elseif ($k -eq 'plugin') { $pd = Split-Path -Parent (Split-Path -Parent $p); ', "needs": ' + (Needs-Json $pd $dir) + ', "parts": ' + (Parts-Json $pd) } elseif ($k -eq 'mcp') { Mcp-ListJson $p $n } else { '' }
         [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"changed`": $changed, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S $desc)$zj, `"path`": $(Json-S $p)$nj}")
     }
+    [void]$sb.Append("`n  ],`n  `"blocked`": [")
+    $first = $true
+    foreach ($r in Block-Rows) {                              # (tool kind name scope dir path: kit sync wrote them)
+        $f = $r.Split("`t"); if ($f.Count -lt 6) { continue }
+        if (-not $first) { [void]$sb.Append(',') }; $first = $false
+        $dj = if ($f[4] -ne '-') { ", `"dir`": $(Json-S $f[4])" } else { '' }
+        [void]$sb.Append("`n    {`"kind`": $(Json-S $f[1]), `"name`": $(Json-S $f[2]), `"tool`": $(Json-S $f[0]), `"path`": $(Json-S $f[5]), `"scope`": $(if ($f[3] -ceq 'folder') { '"folder"' } else { '"account"' })$dj}")
+    }
     [void]$sb.Append("`n  ],`n  `"kit_version_wanted`": $(Json-S (Wanted-Version))")
     [void]$sb.Append((Sign-Json))
     if ($hereDir) { [void]$sb.Append((Here-Json $hereDir $herePid)) }
@@ -6148,6 +6482,7 @@ function Cmd-Uninstall($rest) {
     if (-not (Codex-Block '')) { $left = $true }
     if (-not (Replace-TopBlock (Join-Path $CodexDir 'config.toml') $TopBegin $TopEnd '')) { $left = $true }
     $script:Quiet = $true
+    Sync-Blocks @()                                           # every entry kit wrote to turn something off, out again
     Sync-Skills (Join-Path $ClaudeDir 'skills') 'skill' @()
     Sync-Skills $AgentsSkills 'skill.agents' @()
     Sync-McpJson $ClaudeJson 'mcp' @()
@@ -6174,7 +6509,7 @@ function Cmd-Uninstall($rest) {
     $oh = Join-Path $OmpDir 'hooks/pre/kit.js'
     if ((Test-Path -LiteralPath $oh) -and ((Read-Text $oh) -split "`r?`n")[0] -eq $OmpHookHead) { Remove-Item -LiteralPath $oh -Force }
     if ($left) { Die '有的檔案 kit 沒辦法改（看上面），其他的已經拿掉；修好後再打一次  kit uninstall' }
-    foreach ($f in @($State, $Machine)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
+    foreach ($f in @($State, $Machine, $Blocked)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
     foreach ($x in 'deps', 'pydeps', 'mcp-deps', 'placed', 'ctx') { $deps = Join-Path $KitConf $x; if (Test-Path -LiteralPath $deps) { Remove-Item -LiteralPath $deps -Recurse -Force } }
     Say 'kit：已移除 kit 放進 Claude、Codex、omp 的東西（你自己的檔案沒動）'
     Say "     來源的 clone 還留在 $KitSrc"

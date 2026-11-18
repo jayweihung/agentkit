@@ -6,7 +6,7 @@
 
 ## 0.7.0（2026-11-18）
 
-更新後要做：`kit self-update`，再 `kit sync`，**看它列出擋下了什麼**。要用的收進 kit（下面）。Windows 版之後才有，Windows 上先不變。
+更新後要做：`kit self-update`，再 `kit sync`，**看它列出擋下了什麼**。要用的收進 kit（下面）。Windows 版一樣（公司管理員的資料夾是 `C:\Program Files\ClaudeCode\`、`%ProgramData%\OpenAI\Codex\`）。
 
 **公司的不動，其他的 skill、MCP、外掛只能透過 kit 載入。** 沒有開關，每個用 kit 的人、每台電腦都一樣。
 - 從這版起，每次 `kit sync`（包括開 Claude、Codex、omp 時自動跑的那次）會讓 Claude Code、Codex、omp **不載入**不是 kit 放的、也不是公司的 skill、MCP、外掛。檔案不刪不搬，只改各工具「載入什麼」的設定。

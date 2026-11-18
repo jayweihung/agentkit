@@ -397,7 +397,7 @@ skill、MCP、外掛只有兩種會被 Claude Code、Codex、omp 載入：**kit 
 
 - **公司的**（kit 不收、不擋、不改）：
   - 工具原廠的：Claude 同步下來的 skill 裡 `manifest.json` 的 `source` 是 `anthropic…` 的、Claude 內建的、claude.ai 的 connector；Codex 的 `~/.codex/skills/.system`；omp 自己的。
-  - 公司管理員放的：要 root 才能改的資料夾（Claude `/Library/Application Support/ClaudeCode/`、`/etc/claude-code/`；Codex `/etc/codex/`）；Claude 同步的 skill 裡，帳號的組織是 Team 或 Enterprise 的。
+  - 公司管理員放的：要 root（Windows：系統管理員）才能改的資料夾（Claude `/Library/Application Support/ClaudeCode/`、`/etc/claude-code/`、Windows `C:\Program Files\ClaudeCode\`；Codex `/etc/codex/`、Windows `%ProgramData%\OpenAI\Codex\`）；Claude 同步的 skill 裡，帳號的組織是 Team 或 Enterprise 的。
   - 專案 commit 進 git 的：專案裡 `git ls-files` 有列的 `.claude/skills`、`.agents/skills`、`.codex/skills`、`.omp/skills`、`.mcp.json`、`.codex/config.toml`、`.omp/mcp.json`。
   - 從 marketplace 裝的外掛**不算**公司的（就算是官方 marketplace）。
 - **怎麼擋**：只改各工具「載入什麼」的設定，檔案不刪也不搬：
