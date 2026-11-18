@@ -211,7 +211,7 @@ kit 看錯了（其實不是密碼，例如很長的 ID）：在那個 yaml 最�
 
 別人給的 MCP 設定（README 上的 JSON、`claude mcp add …` 那一行）不用自己改寫：存成檔案，kit 幫你轉成上面的 yaml。
 
-    kit new mcp [名字] --config <檔案> [--to 來源]     （檔案寫 - 就從標準輸入讀）
+    kit new mcp [名字] --config <檔案> [--to 來源]     （檔案寫 - 就從標準輸入讀；Windows 寫 --config 後面不接檔案，Windows PowerShell 傳不了單獨的 -）
     kit new mcp [名字] --config <檔案> --look          只看會寫成什麼，不寫（JSON，見「給程式讀的介面」）
 
 看得懂的寫法：
@@ -556,7 +556,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 `state`：`latest`（一樣）、`new`（原作者有新的：`kit collect <name> --to <source>` 收新版）、`unreachable`（連不到：repo 不見了、改名、
 改成私人，或這台沒網路）、`skipped`（作者已經不在 `collect_sources`，沒去問）。`ref` 空字串＝原作者的預設分支。原作者只把那個資料夾刪掉，`kit collect` 時才會知道。
 
-### `kit new mcp [名字] --config <檔案|-> [--to 來源] --look`（1.3 起）
+### `kit new mcp [名字] --config <檔案|-> [--to 來源] --look`（1.3 起；Windows 的標準輸入：`--config` 後面不接檔案）
 
 一行：
 

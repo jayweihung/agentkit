@@ -6701,7 +6701,7 @@ function New-TempDir([string]$prefix) { $t = Join-Path ([IO.Path]::GetTempPath()
 function Cmd-New($rest) {
     $o = Parse-ItemArgs $rest
     if ($o.Config) {
-        if ($o.Kind -ne 'mcp' -or $o.From) { Die-C usage '用法：kit new mcp [名字] --config 檔案|- [--to 來源] [--look]' }
+        if ($o.Kind -ne 'mcp' -or $o.From) { Die-C usage '用法：kit new mcp [名字] --config 檔案 [--to 來源] [--look]（從標準輸入：--config 後面不接檔案）' }
         Mcp-NewConfig $o; return
     }
     if ($o.Look) { Die-C usage '--look 要和 --config 一起用：kit new mcp [名字] --config 檔案 --look' }
@@ -7921,7 +7921,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 
 寫內容的人用（只吃本機資料夾，不連網）：
   kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]
-  kit new mcp [名字] --config 檔案|- [--to 來源] [--look]
+  kit new mcp [名字] --config [檔案] [--to 來源] [--look]   （不接檔案：從標準輸入讀）
                                     從貼上的 MCP 設定建立（JSON、claude mcp add、codex mcp add、config.toml）；
                                     密碼和 token 換成 ${變數}，套件固定版本（只有這個會連網：查最新版本）；--look 只看不寫（JSON）
   kit diff   [種類] <名字> --from 本機資料夾   比較
