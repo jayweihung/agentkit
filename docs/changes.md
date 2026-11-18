@@ -4,6 +4,13 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.7.4（2026-11-19）
+
+更新後要做：Mac、Linux 上 `kit self-update`。Windows 不用（kit.ps1 本來就對）。
+
+- Kit 面板的「方案用量（omp）」不會再一直停在很久以前的數字（例如「897 分鐘前的數字」）。kit 在背景問 `omp usage` 時如果中途被中斷，會留下一個裡面還有暫存檔的鎖；以前清舊鎖用的方法刪不掉有東西的資料夾，鎖就一直在，之後再也不問 omp。現在舊鎖（超過 2 分鐘）連裡面的東西一起清掉，下一次就會重新問。
+- 已經卡住的電腦：更新後下一次打開面板（或 `kit usage`）就會自己恢復，不用做別的。
+
 ## 0.7.3（2026-11-18）
 
 更新後要做：Linux 上 `kit self-update`，再 `kit sync`；之前 `kit add mcp` 時看到「free(): double free detected in tcache 2」的，再打一次 `kit add mcp <名字>`（例如 `kit add mcp codegraph`）和 `kit sync`。macOS、Windows 不用更新。

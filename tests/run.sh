@@ -1841,6 +1841,10 @@ OU="$H7/.config/agentkit/ctx/omp-usage.json"; OMP_WANT='"omp": {"anthropic": {"a
 rm -f "$OU"; kit usage >/dev/null; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$OU" ] && break; sleep 0.5; done
 out=$(kit usage)
 check "usage (omp): each provider's windows from omp usage, numbers only (no e-mail or account)" 'case $out in *"$OMP_WANT") true;; *) false;; esac && ! grep -q "example.com\|a-1" "$OU"'
+# a refresh killed mid-run leaves its lock with raw.json inside: once old, it goes and omp is asked again
+ou_lock="${OU%.json}.lock"; rm -f "$OU"; mkdir -p "$ou_lock"; : > "$ou_lock/raw.json"; touch -t 202001010000 "$ou_lock"
+kit usage >/dev/null; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$OU" ] && break; sleep 0.5; done
+check "usage (omp): an old lock left with raw.json inside goes, omp asked again" '[ -s "$OU" ] && [ ! -d "$ou_lock" ]'
 if [ -n "$PWSH" ]; then
     rm -f "$OU"; kps usage >/dev/null; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "$OU" ] && break; sleep 0.5; done
     out2=$(kps usage); check "usage (omp): kit.ps1 keeps and says the same" '[ "$out2" = "$out" ]'

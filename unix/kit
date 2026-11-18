@@ -2703,7 +2703,8 @@ omp_usage_parse() { # omp_usage_parse FILE : `omp usage --json` -> {"<provider>"
 }
 omp_usage_refresh() { # in the background: ask omp, keep the numbers (one at a time; a lock left by a crash goes after 2 minutes)
     local f="$CTX_DIR/omp-usage.json" lock="$CTX_DIR/omp-usage.lock" raw
-    [ -n "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null
+    # rm -r, not rmdir: a refresh killed mid-run leaves raw.json inside, and rmdir would keep the lock (and the old numbers) forever
+    [ -n "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ] && rm -rf "$lock"
     mkdir -p "$CTX_DIR" 2>/dev/null; mkdir "$lock" 2>/dev/null || return 0
     raw="$lock/raw.json"
     if omp usage --json > "$raw" 2>/dev/null; then
