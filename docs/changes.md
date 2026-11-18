@@ -4,6 +4,13 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.7.3（2026-11-18）
+
+更新後要做：Linux 上 `kit self-update`，再 `kit sync`；之前 `kit add mcp` 時看到「free(): double free detected in tcache 2」的，再打一次 `kit add mcp <名字>`（例如 `kit add mcp codegraph`）和 `kit sync`。macOS、Windows 不用更新。
+
+- Linux：awk 是 GNU Awk 5.2.1 的電腦（Debian、Ubuntu 預設的 awk，root 也一樣）不會再印「free(): double free detected in tcache 2」、「Aborted (core dumped)」。kit 讀 MCP 的 yaml 時，沒有網址（url）的 MCP 會讓這版 gawk 自己當掉，`kit add`、`kit sync`、`kit list`、`kit check` 每次都會碰到：MCP 的套件版本、要設的環境變數、`kit check` 找寫死的密碼都少算了。和 `~/.claude.json` 大小無關。mawk、BusyBox、macOS 的 awk 本來就沒事，輸出一字不差。
+- `kit add mcp codegraph` 之後還是被擋（Claude 的 `deniedMcpServers` 還有它、`kit list --json` 的 blocked 還列著）：是 `~/.claude.json` 裡還有你自己加的同名 codegraph，kit 不動你自己的，所以照樣擋。先 `claude mcp remove codegraph -s user`，再 `kit sync`，就換成 kit 的、不再擋。
+
 ## 0.7.2（2026-11-18）
 
 更新後要做：`kit self-update`。

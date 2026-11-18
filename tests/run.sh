@@ -2605,6 +2605,15 @@ check "paste: the name is made from A-Z, a-z, 0-9 only (the Kelvin sign is not a
 printf '%s\n' "claude mcp add --transport http 1pw https://pw.example.com/mcp -H \"Authorization: Bearer $S2\"" > "$MT/c12.txt"
 out=$(mk new mcp --config "$MT/c12.txt" --look 2>/dev/null)
 check "paste: a header secret of a server named 1pw -> \${MCP_1PW_TOKEN}" 'mj /dev/stdin "assert d[\"secrets\"]==[{\"where\":\"headers.Authorization\",\"var\":\"MCP_1PW_TOKEN\"}]" <<< "$out"'
+# gawk 5.2.1 (Debian/Ubuntu's awk) died with "free(): double free" in mcp.awk when an element it never set (no url: F[j, "url"];
+# an args item it skips) went to a function and was read and set again later: kit add, kit sync, kit list stopped there
+printf '%s\n' 'claude mcp add codegraph -- codegraph serve --mcp' > "$MT/c13.txt"
+out=$(mk new mcp --config "$MT/c13.txt" 2>&1); rc=$?
+out2=$(LC_ALL=C awk -f "$HERE/../unix/yaml.awk" "$MS/mcp/codegraph.yaml" | LC_ALL=C awk -f "$HERE/../unix/mcp.awk" -v mode=yaml -v name=codegraph 2>&1); rc2=$?
+check "paste a server without a url (codegraph serve --mcp), then read its yaml (kit add, sync, list): no crash, stdio" '[ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ "$out2" = "$(printf "T\tstdio")" ] && grep -qx "command: codegraph" "$MS/mcp/codegraph.yaml"'
+printf '{"cg": {"command": "x", "args": [{"b": 2}, "y"]}}\n' > "$MT/c14.json"
+out=$(mk new mcp --config "$MT/c14.json" --look 2>/dev/null); rc=$?
+check "paste: an args item kit skips ({...}) is an empty one, no crash" '[ $rc -eq 0 ] && mj /dev/stdin "y=d[\"yaml\"].split(chr(10));assert \"  - \\\"\\\"\" in y and \"  - \\\"y\\\"\" in y, y" <<< "$out"'
 # kit new: a failure is a failure (the error JSON only, exit not 0, nothing said to be made)
 out=$(mk new mcp dock --config "$MT/c5.json" --to nosuch --look 2>/dev/null); rc=$?
 check "new mcp --look --to nosuch: only the error JSON, exit 1" '[ $rc -ne 0 ] && [ "$(echo "$out" | wc -l | tr -d " ")" = 1 ] && echo "$out" | grep -qF "\"code\": \"no_source\""'

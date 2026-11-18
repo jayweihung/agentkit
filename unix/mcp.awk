@@ -62,6 +62,8 @@ function norm(s) { s = tolower(s); gsub(/[^a-z0-9]+/, "-", s); gsub(/^-+|-+$/, "
 function srv(nm,   j) {
     if (nm in SI) return SI[nm]
     j = ++NS; SI[nm] = j; SNAME[j] = nm; AN[j] = 0; EN[j] = 0; HN[j] = 0; CN[j] = 0; WN[j] = 0
+    # (each F field set: gawk 5.2.1 dies, "double free", when a missing element went to a function, ctl(F[j, "url"]), and is read and set again later; finish fills A's holes)
+    F[j, "type"] = ""; F[j, "command"] = ""; F[j, "url"] = ""; F[j, "description"] = ""
     return j
 }
 function setenv(j, k, v,   i) {
@@ -572,6 +574,8 @@ function yq(v) {
     fail("bad_config", "有個值同時有 ' 和 \" 或 \\，kit 的 yaml 寫不下"); return ""
 }
 function finish(j,   i, t, vars, y, s, r, nv, VL) {
+    for (i = 1; i <= AN[j]; i++) if (!((j, i) in A)) A[j, i] = ""      # (an item kit skips, {...} in args: "", as before)
+    for (i = 1; i <= CN[j]; i++) if (!((j, i) in CA)) CA[j, i] = ""
     if (CN[j] > 0) {   # "command": ["npx", "-y", "x"]
         for (i = AN[j]; i >= 1; i--) A[j, i + CN[j] - 1] = A[j, i]
         for (i = 2; i <= CN[j]; i++) A[j, i - 1] = CA[j, i]
