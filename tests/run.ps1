@@ -2156,6 +2156,11 @@ Check 'block: the project: what git tracks left alone, the rest off in its setti
 Check "block: a folder that is not kit's where kit puts a skill: backed up, then kit's (never blocked)" { (BackupHas 'gerrit-review' 'mine') -and (ReadT "$HB/.claude/skills/gerrit-review/SKILL.md").Contains('how to review') -and $null -eq (JGet $S 'skillOverrides.gerrit-review') }
 KitJ list --json
 Check 'block: kit list --json has blocked' { $out.Contains("{`"kind`": `"skill`", `"name`": `"npxed`", `"tool`": `"claude`", `"path`": `"$(JS (Join-Path "$HB/.claude/skills" 'npxed'))`", `"scope`": `"account`"}") -and $out.Contains("`"name`": `"loose`", `"tool`": `"claude`", `"path`": `"$(JS (Join-Path "$PB2/.claude/skills" 'loose'))`", `"scope`": `"folder`", `"dir`": `"$(JS $PB2)`"}") }
+$blk = { param($s) $i = $s.IndexOf('"blocked": ['); $s.Substring($i, $s.IndexOf("`n  ]", $i) - $i) }
+$was = $out; Move-Item -LiteralPath "$HB/.claude/skills/npxed" -Destination "$T/npxed.away"; Move-Item -LiteralPath "$PB2/.claude" -Destination "$T/pbclaude.away"
+KitJ list --json
+Check "block: kit list --json: blocked from what kit sync kept (the tools' files not looked at again)" { $out.Contains('"name": "npxed"') -and (& $blk $out) -ceq (& $blk $was) }
+Move-Item -LiteralPath "$T/npxed.away" -Destination "$HB/.claude/skills/npxed"; Move-Item -LiteralPath "$T/pbclaude.away" -Destination "$PB2/.claude"
 W $S ((ReadT $S) -replace '(?m)^.*"npxed": "off".*\r?\n', ''); Kit sync
 Check 'block: told once; taken out by hand: back on the next sync (the project too)' { -not $out.Contains('已經讓工具不載入') -and (JGet $S 'skillOverrides.npxed') -ceq '"off"' -and (JGet $SLB 'skillOverrides.loose') -ceq '"off"' }
 Sk "$TEAM/skills/npxed"; Kit add skill npxed

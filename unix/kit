@@ -358,23 +358,22 @@ item_path() { # item_path DIR KIND NAME
         plugin) printf '%s/plugins/%s/.claude-plugin/plugin.json\n' "$1" "$3";;
     esac
 }
-find_item() { # find_item KIND NAME -> path of the first source that has it
-    local d p
+find_item() { # find_item KIND NAME -> path of the first source that has it (SRC_DIRS_LIST: src_dirs, when a caller has it already)
+    local d rel; rel=$(item_path "" "$1" "$2")
     while IFS= read -r d; do
-        p=$(item_path "$d" "$1" "$2")
-        [ -f "$p" ] && { printf '%s\n' "$p"; return 0; }
+        [ -f "$d$rel" ] && { printf '%s\n' "$d$rel"; return 0; }
     done <<EOF
-$(src_dirs)
+${SRC_DIRS_LIST:-$(src_dirs)}
 EOF
     return 1
 }
 available() { # all kind:name in all sources
     src_dirs | while IFS= read -r d; do
-        for f in "$d"/rules/*.md;          do [ -f "$f" ] && echo "rule:$(basename "$f" .md)"; done
-        for f in "$d"/skills/*/SKILL.md;   do [ -f "$f" ] && echo "skill:$(basename "$(dirname "$f")")"; done
-        for f in "$d"/mcp/*.yaml;          do [ -f "$f" ] && echo "mcp:$(basename "$f" .yaml)"; done
-        for f in "$d"/agents/*.md;         do [ -f "$f" ] && echo "agent:$(basename "$f" .md)"; done
-        for f in "$d"/plugins/*/.claude-plugin/plugin.json; do [ -f "$f" ] && echo "plugin:$(basename "${f%/.claude-plugin/plugin.json}")"; done
+        for f in "$d"/rules/*.md;          do [ -f "$f" ] && f=${f##*/} && echo "rule:${f%.md}"; done
+        for f in "$d"/skills/*/SKILL.md;   do [ -f "$f" ] && f=${f%/SKILL.md} && echo "skill:${f##*/}"; done
+        for f in "$d"/mcp/*.yaml;          do [ -f "$f" ] && f=${f##*/} && echo "mcp:${f%.yaml}"; done
+        for f in "$d"/agents/*.md;         do [ -f "$f" ] && f=${f##*/} && echo "agent:${f%.md}"; done
+        for f in "$d"/plugins/*/.claude-plugin/plugin.json; do [ -f "$f" ] && f=${f%/.claude-plugin/plugin.json} && echo "plugin:${f##*/}"; done
     done | awk '!seen[$0]++'
 }
 required_items() {
@@ -1956,8 +1955,10 @@ skill_needs() { # skill_needs SKILLDIR [SOURCEDIR] -> name<TAB>min per program t
     # pyproject.toml; package.json's engines.node gives the lowest Node (files alone say nothing: often only for the author)
     local d=$1 src=${2:-} v
     {
-        [ -f "$d/SKILL.md" ] && fm_val "$(fm_of "$d/SKILL.md")" requires
-        [ -n "$src" ] && yget "$src/kit.yaml" "requires.$(basename "$d")"
+        [ -f "$d/SKILL.md" ] && fm_val "${KIT_FM-$(fm_of "$d/SKILL.md")}" requires
+        v=${d%/}; v=${v##*/}
+        if [ -n "${KIT_REQS+x}" ]; then fm_val "$KIT_REQS" "$src/kit.yaml:requires.$v"   # (kit list --json read them once)
+        elif [ -n "$src" ]; then yget "$src/kit.yaml" "requires.$v"; fi
         if [ -f "$d/SKILL.md" ]; then
             LC_ALL=C grep -qE '(^|[^A-Za-z0-9_-])(node[ 	]+(-[A-Za-z-]+[ 	]+)*[./A-Za-z0-9_-]+\.(mjs|cjs|js)([^A-Za-z0-9]|$)|npx[ 	]+[A-Za-z@]|npm[ 	]+(run|install|ci|exec)([^A-Za-z]|$))' "$d/SKILL.md" && echo node
             LC_ALL=C grep -qE '(^|[^A-Za-z0-9_-])(python3?[ 	]+(-m[ 	]+[A-Za-z]|[./A-Za-z0-9_-]+\.py([^A-Za-z0-9]|$))|pip3?[ 	]+install|uv[ 	]+run)' "$d/SKILL.md" && echo python
@@ -2013,8 +2014,8 @@ needs_json() { # needs_json SKILLDIR SOURCEDIR -> [{"tool", "title", "min", "hav
         ok=false; [ -n "$h" ] && { [ -z "$m" ] || ver_ge "$h" "$m"; } && ok=true
         if [ $ok = true ]; then i=""; elif [ -n "$h" ]; then eval "i=\${TC_UPG_$c-}"; fi
         [ $first = 1 ] || printf ', '; first=0
-        printf '{"tool": %s, "title": %s, "min": %s, "have": %s, "ok": %s, "install": %s}' "$(json_s "$n")" "$(json_s "$t")" \
-            "$(json_s "$m")" "$(json_s "$h")" "$ok" "$(json_s "$i")"
+        printf '{"tool": '; json_s "$n"; printf ', "title": '; json_s "$t"; printf ', "min": '; json_s "$m"
+        printf ', "have": '; json_s "$h"; printf ', "ok": %s, "install": ' "$ok"; json_s "$i"; printf '}'
     done <<EOF
 $(if [ "$1" = - ]; then cat; else skill_needs "$1" "$2"; fi)
 EOF
@@ -4232,9 +4233,10 @@ json_s() { # a JSON string: \ " TAB LF CR escaped, other control characters drop
     printf '"%s"' "$s"
 }
 item_desc() { # item_desc KIND FILE : the description of a skill or agent (frontmatter), of an MCP yaml, or a rule's first "# " heading
+    local l
     case $1 in
         rule) grep -m 1 '^# ' "$2" 2>/dev/null | sed 's/^# *//' | tr -d '\r';;
-        skill|agent) fm_starts "$2" && fm_val "$(fm_of "$2")" description | head -n 1;;
+        skill|agent) fm_starts "$2" && { l=$(fm_val "$(fm_of "$2")" description); printf '%s\n' "${l%%"$LF"*}"; };;
         mcp) yget "$2" description 2>/dev/null | head -n 1;;
         plugin) unjs "$(json_get "$2" description | sed 's/^"//; s/"$//')";;
     esac
@@ -4243,13 +4245,14 @@ item_desc() { # item_desc KIND FILE : the description of a skill or agent (front
 # "<kind>:<name> TAB <hash of the description it translates> TAB <中文>". Only the panel reads them; agents keep reading
 # the item's own description. A changed description makes its line stale (not shown) until it is translated again.
 DESC_ZH=descriptions-zh.txt
-desc_hash() { printf '%s' "$1" | git hash-object --stdin 2>/dev/null | cut -c1-12; }   # the same as kit.ps1's Desc-Hash
+desc_hash() { local h; h=$(printf '%s' "$1" | git hash-object --stdin 2>/dev/null); printf '%s\n' "${h:0:12}"; }   # the same as kit.ps1's Desc-Hash
 has_cjk() { LC_ALL=C grep -q "$(printf '[\343-\351]')" <<< "$1"; }   # already Chinese (or Japanese): nothing to translate
 desc_zh() { # desc_zh SOURCE_DIR KIND:NAME DESCRIPTION : its Chinese description, when written for this very description
-    local l
+    local l r
     [ -n "$3" ] && [ -f "$1/$DESC_ZH" ] || return 0
-    l=$(awk -F'\t' -v k="$2" '$1 == k { print; exit }' "$1/$DESC_ZH" | tr -d '\r')
-    [ -n "$l" ] && [ "$(printf '%s\n' "$l" | cut -f2)" = "$(desc_hash "$3")" ] && printf '%s\n' "$l" | cut -f3-
+    while IFS= read -r l || [ -n "$l" ]; do case $l in "$2$TAB"*) break;; esac; l=""; done < "$1/$DESC_ZH"
+    l=${l//$'\r'/}; r=${l#*"$TAB"}                           # r: HASH TAB 中文
+    [ -n "$l" ] && [ "${r%%"$TAB"*}" = "$(desc_hash "$3")" ] && case $r in *"$TAB"*) printf '%s\n' "${r#*"$TAB"}";; esac
     return 0
 }
 cmd_describe() { # kit describe --todo | kit describe KIND NAME "<中文說明>"
@@ -4458,8 +4461,11 @@ sign_json() { # ,"sign": the approvals repo this computer signs with (kit approv
         "$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:" { print $1 "\t" $2 }' "$f" | while IFS="$TAB" read -r n s; do printf '%s{"name": %s, "commit": %s}' "${c:+, }" "$(json_s "$n")" "$(json_s "$s")"; c=1; done)"
 }
 cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a kit panel); kit.ps1 prints the same
-    local want req i k n p d status new first s tools sf chg="" changed rel f desc
-    want=$(wanted); req=$(required_items)
+    local want req i k n p d status new first s tools sf chg="" changed rel f desc zh seen SRC_DIRS_LIST KIT_REQS KIT_FM
+    # each item below without a program run for what is the same for all of them (a slow machine: seconds per fork)
+    want=$LF$(wanted)$LF; req=$LF$(required_items)$LF; SRC_DIRS_LIST=$(src_dirs)
+    seen=$LF$([ -f "$STATE" ] && awk -F'\t' '$1 == "seen" && $3 != "" { print $2 }' "$STATE")$LF
+    KIT_REQS=$(while IFS= read -r d; do [ -f "$d/kit.yaml" ] && yaml "$d/kit.yaml" | awk -v f="$d/kit.yaml:" '/^requires\./ { print f $0 }'; done <<< "$SRC_DIRS_LIST")
     tool_cache                                               # each program looked at once, not once per skill
     printf '{\n  "kit": %s,\n  "sources": [' "$(json_s "$KIT_VERSION")"
     first=1
@@ -4479,23 +4485,30 @@ EOF
         k=${i%%:*}; n=${i#*:}
         p=$(find_item "$k" "$n") || continue
         status=unused
-        printf '%s\n' "$want" | grep -qxF "$i" && status=used
-        printf '%s\n' "$req" | grep -qxF "$i" && status=required
+        case $want in *"$LF$i$LF"*) status=used;; esac
+        case $req in *"$LF$i$LF"*) status=required;; esac
         [ "$k" = agent ] && status=agent
-        new=false; [ -n "$(state_get seen "$i")" ] || new=true
+        case $seen in *"$LF$i$LF"*) new=false;; *) new=true;; esac
         rel=$(item_path "" "$k" "$n"); d=${p%"$rel"}            # the source folder that has it
         # changed: kit push would send it (a skill: any file in its folder)
         changed=false
         case $k in skill) case $chg in *"$TAB$d${rel%/*}/"*) changed=true;; esac;;
                    plugin) case $chg in *"$TAB$d/plugins/$n/"*) changed=true;; esac;;
                    *) case $chg in *"$TAB$d$rel$LF"*) changed=true;; esac;; esac
-        desc=$(item_desc "$k" "$p")
+        if [ "$k" = skill ]; then                            # its frontmatter read once (skill_needs reads KIT_FM)
+            KIT_FM=$(fm_of "$p"); desc=""; fm_starts "$p" && desc=$(fm_val "$KIT_FM" description) && desc=${desc%%"$LF"*}
+        else desc=$(item_desc "$k" "$p"); fi
         [ $first = 1 ] || printf ','; first=0
-        printf '\n    {"kind": %s, "name": %s, "status": %s, "new": %s, "changed": %s, "source": %s, "description": %s%s, "path": %s%s}' \
-            "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$status")" "$new" "$changed" "$(json_s "$(basename "$d")")" "$(json_s "$desc")" "$(zh=$(desc_zh "${d%/}" "$i" "$desc"); [ -z "$zh" ] || printf ', "description_zh": %s' "$(json_s "$zh")")" "$(json_s "$p")" \
-            "$(case $k in (skill) printf ', "needs": %s%s' "$(needs_json "$(dirname "$p")" "${d%/}")" "$(packages_json "$(dirname "$p")" "$n")";;
-                         (plugin) printf ', "needs": %s, "parts": %s' "$(needs_json "${p%/.claude-plugin/plugin.json}" "${d%/}")" "$(parts_json "${p%/.claude-plugin/plugin.json}")";;
-                         (mcp) mcp_list_json "$p" "$n";; esac)"
+        printf '\n    {"kind": '; json_s "$k"; printf ', "name": '; json_s "$n"; printf ', "status": '; json_s "$status"
+        printf ', "new": %s, "changed": %s, "source": ' "$new" "$changed"; json_s "${d##*/}"; printf ', "description": '; json_s "$desc"
+        zh=$(desc_zh "$d" "$i" "$desc"); [ -z "$zh" ] || { printf ', "description_zh": '; json_s "$zh"; }
+        printf ', "path": '; json_s "$p"
+        case $k in
+            skill) printf ', "needs": '; needs_json "${p%/*}" "$d"; packages_json "${p%/*}" "$n";;
+            plugin) printf ', "needs": '; needs_json "${p%/.claude-plugin/plugin.json}" "$d"; printf ', "parts": '; parts_json "${p%/.claude-plugin/plugin.json}";;
+            mcp) mcp_list_json "$p" "$n";;
+        esac
+        printf '}'
     done
     printf '\n  ],\n  "blocked": ['
     first=1
@@ -5134,10 +5147,10 @@ cmd_diff_update() { # cmd_diff_update diff|update ARGS...
 # ---------- check ----------
 problem() { printf '%s\n' "$*" >> "$PROBLEM_FILE"; printf '%s: %s\n' "${PROBLEM_TAG:-kit check}" "$*" >&2; }
 fm_of() { LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$1" 2>/dev/null; }
-fm_starts() { head -n 1 "$1" | tr -d '\r' | grep -qx -- '---'; }   # the file starts with a --- line
+fm_starts() { local l=""; IFS= read -r l 2>/dev/null < "$1"; [ "${l//$'\r'/}" = --- ]; }   # the file starts with a --- line
 fm_body() { awk '{ l = $0; sub(/\r$/, "", l) } c >= 2 { print l; next } l == "---" { c++ }' "$1"; }   # the lines after the frontmatter
 push_mode() { local m; m=$(yget "$1/kit.yaml" push); printf '%s\n' "${m:-pr}"; }   # push_mode DIR : pr (the default) or direct
-fm_val() { printf '%s\n' "$1" | awk -F'\t' -v p="$2" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
+fm_val() { local l; while IFS= read -r l; do case $l in "$2$TAB"*|"$2[]$TAB"*) printf '%s\n' "${l#*"$TAB"}";; esac; done <<< "$1"; }
 private_words() { # private_words OUT [DIR...] : nonblank lines of the private word lists (this machine, sources, DIRs) into OUT
     local out=$1 d; shift
     { cat "$KIT_CONF/private-words.txt" 2>/dev/null

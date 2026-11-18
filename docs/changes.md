@@ -4,6 +4,13 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.7.2（2026-11-18）
+
+更新後要做：`kit self-update`。
+
+- `kit list --json`（Kit 面板）快很多：電腦很忙時（load 50～250）從 30～57 秒降到 10～23 秒，用的 CPU 時間約剩三分之一。每個 skill、規則不再各自重新讀來源清單、狀態檔、kit.yaml，也少開很多小程式。輸出一字不差。
+- 不是 0.7.0 的擋下功能造成的：0.6.16 一樣要 40 秒。`blocked` 一直是讀 `kit sync` 存下的 blocked.tsv，`kit list --json` 不會重新掃各工具的設定（測試確認）。
+
 ## 0.7.1（2026-11-18）
 
 更新後要做：Windows 上 `kit self-update`，再 `kit sync`。macOS、Linux 只有 git 設了 `core.autocrlf=true` 的要更新。
