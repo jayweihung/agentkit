@@ -604,14 +604,18 @@ function Ssh-Keygen($a, [string]$in) { # ssh-keygen ARGS with file IN on its std
     $c = @(Get-Command ssh-keygen -CommandType Application -ErrorAction SilentlyContinue); if ($c.Count -eq 0) { return @(-1, '') }
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = [string]$c[0].Path; $psi.Arguments = (@(foreach ($x in $a) { Ctx-Arg "$x" }) -join ' ')
+    $win = $in -and $script:OnWindows
+    if ($win) {   # the file itself through cmd's <: Windows' ssh-keygen (Win32-OpenSSH 9.5) misreads data from a pipe ("incorrect signature")
+        $psi.Arguments = '/d /s /c ""' + $psi.FileName + '" ' + $psi.Arguments + ' < "' + $in + '""'; $psi.FileName = $env:ComSpec
+    }
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = -not $win; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = $Utf8
     $p = $null
     try {
         $p = [Diagnostics.Process]::Start($psi)
         $out = $p.StandardOutput.ReadToEndAsync(); [void]$p.StandardError.ReadToEndAsync()
-        try { if ($in) { $b = [IO.File]::ReadAllBytes($in); $p.StandardInput.BaseStream.Write($b, 0, $b.Length) }; $p.StandardInput.BaseStream.Close() } catch { }
+        if (-not $win) { try { if ($in) { $b = [IO.File]::ReadAllBytes($in); $p.StandardInput.BaseStream.Write($b, 0, $b.Length) }; $p.StandardInput.BaseStream.Close() } catch { } }
         if (-not $p.WaitForExit(30000)) { Ctx-Kill $p; return @(-1, '') }
         $p.WaitForExit()
         @($p.ExitCode, [string]$out.Result)
@@ -628,18 +632,26 @@ function Approvals-Parse([string]$f) { # approved.txt -> @{ serial = the "serial
     @{ serial = "$serial"; lines = $ls.ToArray() }
 }
 function Appr-Sha($lines, [string]$n) { foreach ($l in @($lines)) { $w = "$l" -split ' '; if ($w[0] -ceq $n) { return $w[1] } }; $null }   # NAME's commit in "name sha" lines
-function Approvals-SigOk([string]$f) { # FILE.sig is a good signature of FILE by the signers file (only reads files)
-    $s = $script:MSigners
-    $r = Ssh-Keygen @('-Y', 'find-principals', '-s', "$f.sig", '-f', $s) ''
-    $ps = @(); if ($r[0] -eq 0) { $ps = @(@("$($r[1])" -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Select-Object -First 1) }
-    if ($ps.Count -eq 0) {   # an ssh-keygen without find-principals: each name the signers file lists
-        $ps = @(foreach ($l in @([IO.File]::ReadAllText($s, $Utf8) -split "`n")) {
-            $l = $l.Trim(); if (-not $l -or $l.StartsWith('#')) { continue }
-            foreach ($x in (($l -split '\s+')[0] -split ',')) { if ($x) { $x } }
-        })
-    }
-    foreach ($p in $ps) { if ((Ssh-Keygen @('-Y', 'verify', '-f', $s, '-I', $p, '-n', 'agentkit', '-s', "$f.sig") $f)[0] -eq 0) { return $true } }
-    $false
+function Appr-Lf([string]$f) { # a temp copy of FILE and FILE.sig without CR (what was signed: git with core.autocrlf=true, the Git for
+    # Windows default, checks them out with CRLF); its FILE. Remove its folder after.
+    $t = New-TempDir 'kit-appr.'; $l1 = [Text.Encoding]::GetEncoding(28591)   # (byte for byte)
+    foreach ($x in $f, "$f.sig") { [IO.File]::WriteAllText((Join-Path $t (Split-Path -Leaf $x)), $l1.GetString([IO.File]::ReadAllBytes($x)).Replace("`r", ''), $l1) }
+    Join-Path $t (Split-Path -Leaf $f)
+}
+function Approvals-SigOk([string]$f) { # FILE.sig is a good signature of FILE by the signers file (changes nothing)
+    $s = $script:MSigners; $f = Appr-Lf $f
+    try {
+        $r = Ssh-Keygen @('-Y', 'find-principals', '-s', "$f.sig", '-f', $s) ''
+        $ps = @(); if ($r[0] -eq 0) { $ps = @(@("$($r[1])" -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Select-Object -First 1) }
+        if ($ps.Count -eq 0) {   # an ssh-keygen without find-principals: each name the signers file lists
+            $ps = @(foreach ($l in @([IO.File]::ReadAllText($s, $Utf8) -split "`n")) {
+                $l = $l.Trim(); if (-not $l -or $l.StartsWith('#')) { continue }
+                foreach ($x in (($l -split '\s+')[0] -split ',')) { if ($x) { $x } }
+            })
+        }
+        foreach ($p in $ps) { if ((Ssh-Keygen @('-Y', 'verify', '-f', $s, '-I', $p, '-n', 'agentkit', '-s', "$f.sig") $f)[0] -eq 0) { return $true } }
+        $false
+    } finally { Remove-Item -LiteralPath (Split-Path -Parent $f) -Recurse -Force -ErrorAction SilentlyContinue }
 }
 function Read-Approvals { # sets $script:Approved ("name sha" lines); $false when there is no valid signed list
     if ($script:ApprovedRead) { return $script:Approved.Count -gt 0 }
@@ -6537,7 +6549,7 @@ function Cmd-SelfUpdate { # pull the clone kit was installed from, then reinstal
     if (-not (Test-Path -LiteralPath (Join-Path $repo '.git'))) { Die "找不到 clone：$repo" }
     $url = (Git-Safe -C $repo remote get-url origin | Select-Object -First 1)
     if ($LASTEXITCODE -eq 0 -and $url) { Check-Host $url } else { $url = '' }
-    $before = "$(& git -C $repo rev-parse --short=12 HEAD 2>$null)".Trim()
+    $before = "$(Git-Q -C $repo rev-parse --short=12 HEAD)".Trim()
     if (M-Approvals) {
         if (-not $url) { Die "$repo 沒有 origin" }
         $sha = Approved-Sha (Src-Name $url); if (-not $sha) { Die "kit 本身（$(Src-Name $url)）沒有有效的核准，不更新" }
@@ -6550,7 +6562,7 @@ function Cmd-SelfUpdate { # pull the clone kit was installed from, then reinstal
     $exe = (Get-Process -Id $PID).Path
     & $exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'windows/install.ps1') -Quiet
     if ($LASTEXITCODE -ne 0) { Die '重新安裝失敗' }
-    $ver = (Read-Text (Join-Path $KitLib 'VERSION')).Trim(); $now = "$(& git -C $repo rev-parse --short=12 HEAD 2>$null)".Trim()
+    $ver = (Read-Text (Join-Path $KitLib 'VERSION')).Trim(); $now = "$(Git-Q -C $repo rev-parse --short=12 HEAD)".Trim()
     if ($before -and $before -eq $now) { Say "kit：已經是最新（$ver，$now）" } else { Say "kit：已更新到 $ver（$now）" }
 }
 # ---------- authoring: new / diff / update (local folders only, never the network) ----------
@@ -6662,7 +6674,12 @@ function Parse-ItemArgs($rest) {
             '--from' { if ($i + 1 -ge $rest.Count) { Die '--from 後面要接資料夾' }; $i++; $o.From = [string]$rest[$i] }
             '--to' { if ($i + 1 -ge $rest.Count) { Die '--to 後面要接來源' }; $i++; $o.To = [string]$rest[$i] }
             '--force' { $o.Force = $true }
-            '--config' { if ($i + 1 -ge $rest.Count) { Die-C usage '--config 後面要接檔案（或 - 從標準輸入讀）' }; $i++; $o.Config = [string]$rest[$i] }
+            '--config' {
+                # no file after it and something piped in: stdin, as -  (Windows PowerShell 5.1's -File, kit.cmd, cannot pass a lone -)
+                if (($i + 1 -ge $rest.Count -or "$($rest[$i + 1])".StartsWith('--')) -and [Console]::IsInputRedirected) { $o.Config = '-' }
+                elseif ($i + 1 -ge $rest.Count) { Die-C usage '--config 後面要接檔案（或 - 從標準輸入讀）' }
+                else { $i++; $o.Config = [string]$rest[$i] }
+            }
             '--look' { $o.Look = $true }
             default {
                 if (-not $o.Name -and -not $o.Kind -and ($Kinds -ccontains $a)) { $o.Kind = $a }
@@ -6795,7 +6812,8 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
         foreach ($n in Plugin-Names $d) { if (-not (Valid-Name $n)) { Problem "plugins/${n}: 名字只能用小寫英文、數字和 -" } }
         foreach ($n in Names-In (Join-Path $d 'rules') '*.md') {
             if (-not (Valid-Name $n)) { Problem "rules/${n}.md: 名字只能用小寫英文、數字和 -" }
-            if ((Get-Item -LiteralPath (Join-Path $d "rules/$n.md")).Length -eq 0) { Problem "rules/${n}.md: 是空的" }
+            $ri = Get-Item -LiteralPath (Join-Path $d "rules/$n.md")   # (a link: said below; on Windows its own Length is 0)
+            if (-not (Is-Link $ri) -and $ri.Length -eq 0) { Problem "rules/${n}.md: 是空的" }
         }
         foreach ($n in Names-In (Join-Path $d 'mcp') '*.yaml') {
             $rel = "mcp/$n.yaml"; $f = Join-Path $d $rel
@@ -6866,7 +6884,7 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
             $doms = @(YGet $kitYaml 'author_domains')
             if ($doms.Count -gt 0) {
                 $range = if ($env:KIT_CI_BASE) { "$($env:KIT_CI_BASE)..HEAD" } else { '-1' }
-                foreach ($l in @(& git -C $d log --format='%h %ae' $range 2>$null)) {
+                foreach ($l in @(Git-Q -C $d log '--format=%h %ae' $range)) {
                     $parts = "$l".Split(' '); if ($parts.Count -lt 2) { continue }
                     $dom = $parts[1].Substring($parts[1].LastIndexOf('@') + 1)
                     if ($doms -notcontains $dom.ToLowerInvariant() -and $doms -notcontains $dom) { Problem "commit $($parts[0]): 作者 email 不是公司網域" }
@@ -7311,7 +7329,7 @@ function Collect-Allowed([string]$url, [string]$dir) {
 function Is-Maintainer([string]$dir) { # kit.yaml lists no maintainers, or you are one
     $m = @(YGet (Join-Path $dir 'kit.yaml') 'maintainers' | Where-Object { $_ })
     if ($m.Count -eq 0) { return $true }
-    $me = "$(& git -C $dir config user.email 2>$null)"
+    $me = "$(Git-Q -C $dir config user.email)"
     $who = @($me, ($me -replace '@.*$', ''), $env:USERNAME, $env:USER) | Where-Object { $_ }
     foreach ($w in $who) { if ($m -contains $w) { return $true } }
     $false
@@ -7420,12 +7438,12 @@ function Collect-Cached([string]$url, [string]$ref) { # the kept download of wha
     foreach ($x in @(Get-ChildItem -LiteralPath $c -Force -ErrorAction SilentlyContinue)) { if ($x.LastWriteTime -lt $old) { Remove-Tree $x.FullName } }
     $sha = Remote-Sha $url $ref; if (-not $sha) { return '' }
     $k = Join-Path $c $sha; $r = Join-Path $k 'repo'
-    if (-not (Test-Path -LiteralPath $r -PathType Container) -or "$(& git -C $r rev-parse -q --verify HEAD 2>$null)".Trim() -ne $sha) { return '' }
+    if (-not (Test-Path -LiteralPath $r -PathType Container) -or "$(Git-Q -C $r rev-parse -q --verify HEAD)".Trim() -ne $sha) { return '' }
     try { (Get-Item -LiteralPath $k -Force).LastWriteTime = Get-Date } catch { }
     Full-Path $r
 }
 function Collect-Keep([string]$repo) { # REPO kept for next time (moved there; its new place), else REPO itself
-    $sha = "$(& git -C $repo rev-parse -q --verify HEAD 2>$null)".Trim(); if (-not $sha) { return $repo }
+    $sha = "$(Git-Q -C $repo rev-parse -q --verify HEAD)".Trim(); if (-not $sha) { return $repo }
     $c = Join-Path $KitConf 'cache/collect'; $k = Join-Path $c $sha; $n = "$k.$PID"
     try {
         Ensure-Dir $c; foreach ($x in @($k, $n)) { if (Test-Path -LiteralPath $x) { Remove-Tree $x } }
@@ -7479,7 +7497,7 @@ function Cmd-Collect($rest) {
     # collect_sources: who may be collected from. --allow adds this author to it, only in your own source (push: direct);
     # a team source's list is the maintainers' to change. --look only looks: it says whether the author is on the list.
     $ok = Collect-Allowed $url $dir
-    $real = "$(& git ls-remote --get-url $url 2>$null)".Trim()
+    $real = "$(Git-Q ls-remote --get-url $url)".Trim()
     $moved = $real -and $real -ne $url
     if ($moved -and -not (Collect-Allowed $real $dir)) {
         if (-not $look) { Die-C not_allowed "git 設定把 $url 改到 ${real}，不在 collect_sources" }
@@ -7699,8 +7717,8 @@ function Cmd-Outdated($rest) {
 # ---------- agents: the definitions (agents/<name>.md), for programs that show agents ----------
 function Json-Arr($vals) { '[' + ((@($vals | Where-Object { $_ }) | ForEach-Object { Json-S $_ }) -join ', ') + ']' }
 function Git-State([string]$dir, [string]$file) { # "new", "changed" or "" (or "no-git")
-    & git -C $dir rev-parse --git-dir *> $null; if ($LASTEXITCODE -ne 0) { return 'no-git' }
-    $st = "$(& git -C $dir status --porcelain --untracked-files=all -- $file 2>$null | Select-Object -First 1)"
+    [void](Git-Q -C $dir rev-parse --git-dir); if ($LASTEXITCODE -ne 0) { return 'no-git' }
+    $st = "$(Git-Q -C $dir status --porcelain --untracked-files=all -- $file | Select-Object -First 1)"
     if (-not $st) { return '' }
     $c = $st.Substring(0, [Math]::Min(2, $st.Length))
     if ($c -eq ('?' + '?') -or $c.StartsWith('A')) { 'new' } else { 'changed' }

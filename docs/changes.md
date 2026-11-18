@@ -4,6 +4,15 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.7.1（2026-11-18）
+
+更新後要做：Windows 上 `kit self-update`，再 `kit sync`。macOS、Linux 只有 git 設了 `core.autocrlf=true` 的要更新。
+
+- Windows：用簽核版本（`kit init --approvals`）的電腦不會再一直說「核准紀錄的簽章不對」。兩個原因都修了：Git for Windows 預設（`core.autocrlf=true`）把 `approved.txt` 和簽章換成 CRLF 放出來，簽的是 LF，現在 kit 驗簽章、讀 serial 和版本時不看 CR（Mac、Linux 的 kit 也一樣改了）；Windows 內建的 ssh-keygen 從管線讀資料會讀錯，現在改成用 cmd 把檔案直接接到它的標準輸入。
+- Windows：`kit agents --json` 遇到不是 git 的來源資料夾，不會再停在「fatal: not a git repository」（Windows PowerShell 把 git 的錯誤訊息當成錯誤）。`kit check --ci`、`kit self-update`、`kit collect` 裡的 git 也一樣。
+- Windows：`kit check` 不會把捷徑（symlink）的規則多算一個「是空的」。
+- Windows：從標準輸入貼 MCP 設定寫成 `kit new mcp --config --look`（`--config` 後面不寫檔案）。Windows PowerShell 傳不了單獨的 `-`，`--config -` 在 kit 開始前就出錯。
+
 ## 0.7.0（2026-11-18）
 
 更新後要做：`kit self-update`，再 `kit sync`，**看它列出擋下了什麼**。要用的收進 kit（下面）。Windows 版一樣（公司管理員的資料夾是 `C:\Program Files\ClaudeCode\`、`%ProgramData%\OpenAI\Codex\`）。

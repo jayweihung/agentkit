@@ -290,17 +290,20 @@ read_approvals() { # sets APPROVED ("name sha" lines); returns 1 when there is n
     [ -f "$f" ] && [ -f "$f.sig" ] || { warn "核准紀錄裡沒有 approved.txt 和 approved.txt.sig"; return 1; }
     [ -f "$M_SIGNERS" ] || { warn "找不到 signers 檔：$M_SIGNERS"; return 1; }
     approvals_sig_ok "$f" || { warn "核准紀錄的簽章不對，不換版本（有人改過 approved.txt？）"; return 1; }
-    serial=$(awk '$1 == "serial:" { print $2; exit }' "$f"); old=$(state_get approvals serial)
+    serial=$(awk '{ sub(/\r$/, "") } $1 == "serial:" { print $2; exit }' "$f"); old=$(state_get approvals serial)
     case $serial in ""|*[!0-9]*) warn "核准紀錄沒有 serial"; return 1;; esac
     if [ -n "$old" ] && [ "$serial" -lt "$old" ]; then warn "核准紀錄比上次用的舊（serial ${serial} < ${old}），不換版本"; return 1; fi
     state_set approvals serial "$serial"
-    APPROVED=$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:"' "$f")
+    APPROVED=$(awk '{ sub(/\r$/, "") } NF == 2 && $1 !~ /^#/ && $1 != "serial:"' "$f")
     [ -n "$APPROVED" ]
 }
-approvals_sig_ok() { # approvals_sig_ok FILE : FILE.sig is a good signature of FILE by the signers file (only reads files)
-    local p
-    p=$(ssh-keygen -Y find-principals -s "$1.sig" -f "$M_SIGNERS" 2>/dev/null | head -n 1)
-    [ -n "$p" ] && ssh-keygen -Y verify -f "$M_SIGNERS" -I "$p" -n agentkit -s "$1.sig" < "$1" >/dev/null 2>&1
+approvals_sig_ok() { # approvals_sig_ok FILE : FILE.sig is a good signature of FILE by the signers file (changes nothing)
+    # read without CR: what was signed (git with core.autocrlf=true, Git for Windows' default, checks them out with CRLF)
+    local p t r=1; t=$(mktemp -d "${TMPDIR:-/tmp}/kit-appr.XXXXXX") || return 1
+    tr -d '\r' < "$1" > "$t/f" && tr -d '\r' < "$1.sig" > "$t/f.sig" &&
+        p=$(ssh-keygen -Y find-principals -s "$t/f.sig" -f "$M_SIGNERS" 2>/dev/null | head -n 1) &&
+        [ -n "$p" ] && ssh-keygen -Y verify -f "$M_SIGNERS" -I "$p" -n agentkit -s "$t/f.sig" < "$t/f" >/dev/null 2>&1 && r=0
+    rm -rf "$t"; return $r
 }
 approved_sha() { # approved_sha NAME
     read_approvals || return 1
@@ -6115,9 +6118,9 @@ cmd_status() {
         if is_url "$M_APPROVALS"; then ad=$(approvals_dir); else ad=$M_APPROVALS; fi
         f="$ad/approved.txt"
         if [ -f "$f" ] && [ -f "$f.sig" ] && [ -f "$M_SIGNERS" ] && approvals_sig_ok "$f"; then
-            valid=true; appr=$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:"' "$f")
+            valid=true; appr=$(awk '{ sub(/\r$/, "") } NF == 2 && $1 !~ /^#/ && $1 != "serial:"' "$f")
         fi
-        approvals="{\"serial\": $(json_uint "$(awk '$1 == "serial:" { print $2; exit }' "$f" 2>/dev/null)"), \"used\": $(json_uint "$(state_get approvals serial)"), \"valid\": $valid}"
+        approvals="{\"serial\": $(json_uint "$(awk '{ sub(/\r$/, "") } $1 == "serial:" { print $2; exit }' "$f" 2>/dev/null)"), \"used\": $(json_uint "$(state_get approvals serial)"), \"valid\": $valid}"
     fi
     local pend="" one
     repo=$(cat "$KIT_LIB/.repo" 2>/dev/null)                  # kit's own clone (the one kit self-update pulls)

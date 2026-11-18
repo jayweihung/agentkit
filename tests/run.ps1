@@ -853,7 +853,7 @@ Check 'codex toml has kit server' { $toml.Contains("[mcp_servers.gerrit]`ncomman
 Check "codex toml: kit's MCP tools run without asking" { $toml.Contains("default_tools_approval_mode = `"approve`"") }
 Check 'codex toml args' { $toml.Contains('args = ["--index-url", "https://pypi.example/simple", "gerrit-mcp-server==1.0"]') }
 Check 'codex team deny -> disabled_tools' { $toml.Contains('disabled_tools = ["submit_change"]') }
-Check 'codex toml: kit''s notes folder writable in Codex''s sandbox (kit note)' { $toml.Contains("[sandbox_workspace_write]`nwritable_roots = [") -and $toml.Contains('agentkit/notes') }
+Check 'codex toml: kit''s notes folder writable in Codex''s sandbox (kit note)' { $toml.Contains("[sandbox_workspace_write]`nwritable_roots = [") -and $toml.Replace('\\', '/').Contains('agentkit/notes') }
 Check 'codex env table, not expanded' { $toml.Contains("[mcp_servers.gerrit.env]`nGERRIT_CONFIG = `"`${HOME}/.config") }
 Check 'omp mcp.json has kit server and own' { (JGet "$H/.omp/agent/mcp.json" 'mcpServers.gerrit.command') -eq '"uvx"' -and (JGet "$H/.omp/agent/mcp.json" 'mcpServers.own.command') -eq '"y"' }
 Check 'no backup for a file kit created' { -not (Test-Path "$H/.omp/agent/AGENTS.md.kit-backup") }
@@ -1823,7 +1823,8 @@ KitJ new mcp --config "$T/m9.json" --look
 Check 'mcp paste: the name is made from A-Z, a-z, 0-9 only (the Kelvin sign is not a k)' { $rc -eq 0 -and ($out | ConvertFrom-Json).name -ceq 'ube' }
 # stdin is read as UTF-8 (Windows PowerShell 5.1 would read it in the console's code page)
 $oe = $OutputEncoding; $OutputEncoding = New-Object System.Text.UTF8Encoding $false
-$o = ("claude mcp add u8 -e NOTE=é漢 -- uvx u8-srv@2.0.0`n" | & $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit new mcp --config - --look 2>$null | ForEach-Object { "$_" }) -join "`n"
+$dash = @(if ($PSVersionTable.PSEdition -ne 'Desktop') { '-' })   # (Windows PowerShell 5.1's -File cannot pass a lone -: --config with nothing after it reads stdin)
+$o = ("claude mcp add u8 -e NOTE=é漢 -- uvx u8-srv@2.0.0`n" | & $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit new mcp --config @dash --look 2>$null | ForEach-Object { "$_" }) -join "`n"
 $OutputEncoding = $oe
 Check 'mcp paste --config -: read as UTF-8' { ($o | ConvertFrom-Json).yaml.Contains('é漢') }
 # kit new: a failure is a failure (the error JSON only, exit not 0, nothing said to be made)
@@ -1840,10 +1841,11 @@ if (-not $OnWindows) {
 }
 $addOut = ''; foreach ($n in 'github-server', 'web', 'events', 'docs', 'remote') { Kit add mcp $n; $addOut += $out + "`n" }
 $cj = ReadT "$H/.claude.json" | ConvertFrom-Json
-Check 'mcp Claude: stdio without type, env as ${VAR}' { $s = $cj.mcpServers.'github-server'; $s.command -eq 'npx' -and $s.env.GITHUB_PERSONAL_ACCESS_TOKEN -eq '${GITHUB_PERSONAL_ACCESS_TOKEN}' -and -not (@($s.PSObject.Properties.Name) -contains 'type') }
+$npx = if ($OnWindows) { 'cmd' } else { 'npx' }   # (on Windows npx.cmd runs through cmd /c)
+Check 'mcp Claude: stdio without type, env as ${VAR}' { $s = $cj.mcpServers.'github-server'; $s.command -eq $npx -and $s.env.GITHUB_PERSONAL_ACCESS_TOKEN -eq '${GITHUB_PERSONAL_ACCESS_TOKEN}' -and -not (@($s.PSObject.Properties.Name) -contains 'type') }
 Check 'mcp Claude: http and sse with type, url, headers' { $w = $cj.mcpServers.web; $w.type -eq 'http' -and $w.url -eq 'https://mcp.example.com/mcp' -and $w.headers.Authorization -eq 'Bearer ${WEB_TOKEN}' -and $cj.mcpServers.events.type -eq 'sse' }
 $om = ReadT "$H/.omp/agent/mcp.json" | ConvertFrom-Json
-Check 'mcp omp: the same' { $om.mcpServers.web.type -eq 'http' -and $om.mcpServers.web.headers.'X-Api-Key' -eq '${WEB_API_KEY}' -and $om.mcpServers.'github-server'.command -eq 'npx' }
+Check 'mcp omp: the same' { $om.mcpServers.web.type -eq 'http' -and $om.mcpServers.web.headers.'X-Api-Key' -eq '${WEB_API_KEY}' -and $om.mcpServers.'github-server'.command -eq $npx }
 $ct = (ReadT "$H/.codex/config.toml").Replace("`r`n", "`n")
 Check 'mcp Codex http: url, bearer_token_env_var, env_http_headers, http_headers' { $ct.Contains("[mcp_servers.web]`nurl = `"https://mcp.example.com/mcp`"`nbearer_token_env_var = `"WEB_TOKEN`"`n") -and $ct.Contains('env_http_headers = { X-Api-Key = "WEB_API_KEY" }') -and $ct.Contains('http_headers = { X-Plain = "v1" }') }
 Check 'mcp Codex stdio: an env that is ${ITSELF} -> env_vars' { $ct.Contains('env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]') -and $ct.Contains('env_vars = ["DOCS_TOKEN"]') -and $ct.Contains('LOG_LEVEL = "info"') }
