@@ -80,8 +80,8 @@ kit 自己放的東西照 kit 現有的紀錄辨認，算「在清單上」。
 
 | 東西 | 在哪 | 處理 |
 |---|---|---|
-| `ui-ux-pro-max`、`banner-design`、`brand`、`design`、`design-system`、`slides`、`ui-styling`（npx 裝的 7 個 skill） | `~/.claude/skills/` | 把 `github.com/nextlevelbuilder/ui-ux-pro-max-skill`（MIT）加進 `agentkit-library` 的 `collect_sources`，用 `kit collect` 收進 `agentkit-library`，再加到整個帳號，由 kit 接手原本的資料夾（上面第 7 點） |
-| nvim-jay 的 hook（PreToolUse、Stop、SubagentStart/Stop） | `~/.claude/settings.json`、`~/.codex/hooks.json`、`~/.omp/agent/hooks/pre/nvim-jay.js` | kit 沒有單獨的 hook 種類，要包成 kit 外掛（skill、hook、MCP 一起）才收得進來；公司也在用，所以外掛放在 herdr-jay、從 GitHub 收（待定） |
+| `ui-ux-pro-max`、`banner-design`、`brand`、`design`、`design-system`、`slides`、`ui-styling`（npx 裝的 7 個 skill） | `~/.claude/skills/` | 把原作者 nextlevelbuilder 的 ui-ux-pro-max-skill（MIT）加進 `agentkit-library` 的 `collect_sources`，用 `kit collect` 收進 `agentkit-library`，再加到整個帳號，由 kit 接手原本的資料夾（上面第 7 點） |
+| nvim-jay 的 hook（PreToolUse、Stop、SubagentStart/Stop） | `~/.claude/settings.json`、`~/.codex/hooks.json`、`~/.omp/agent/hooks/pre/nvim-jay.js` | kit 沒有單獨的 hook 種類，要包成 kit 外掛（skill、hook、MCP 一起）才收得進來；公司也在用，所以外掛放在 herdr-jay 的 `herdr-app/kit-plugins/nvim-jay`，從 herdr-jay 收進 `agentkit-library` |
 
 MCP（只有 `kit-ping`）和外掛（只有 `ponytail@kit`）都已經是 kit 的。
 
