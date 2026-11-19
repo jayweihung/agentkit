@@ -2518,13 +2518,25 @@ newest_files() { # newest_files DIR NAME : files called NAME under DIR changed i
     [ -d "$1" ] || return 0
     find "$1" -type f -name "$2" -mtime -7 -print0 2>/dev/null | xargs -0 -r ls -t 2>/dev/null | head -n 40
 }
+# a Claude transcript's last reply with its usage (not one Claude Code made itself: "<synthetic>", usage 0) and its last
+# compaction: "cut" (compacted since), "reply", "more" (nothing in the part read) or nothing; then those two lines
+CLAUDE_LAST_AWK='cut && NR == 1 { next }
+    index($0, "\"type\":\"assistant\"") && index($0, "\"usage\"") && !index($0, "\"model\":\"<synthetic>\"") { a = $0; an = NR }
+    index($0, "\"compact_boundary\"") { c = $0; cn = NR }
+    END { print (cn > an ? "cut" : an ? "reply" : cut ? "more" : ""); print a; print c }'
 claude_ctx() { # claude_ctx PID CWD
     local f="$CTX_DIR/claude-$1.json" j d t which line cb u w m post
     if [ -n "$1" ] && [ -f "$f" ]; then
         # the window: what settings.json tells Claude Code (autoCompactWindow, as its own /context shows), else Claude's
         j=$(cat "$f"); u=$(num_of used "$j"); m=$(str_of model "$j"); w=$(setting_window "$m")
         [ -n "$w" ] || w=$(num_of window "$j")
-        CTX_LIMIT=$(claude_limit "$(str_of transcript "$j")") ctx_json claude "$u" "$w" statusline "$m"; return
+        # compacted since the status line's last numbers (they change only with Claude's next reply): what is left after it
+        t=$(str_of transcript "$j"); which=""
+        [ -f "$t" ] && { IFS= read -r which; IFS= read -r line; IFS= read -r cb; } <<EOF
+$(ctx_scan "$t" "$CLAUDE_LAST_AWK" 1048576)
+EOF
+        [ "$which" = cut ] && { CTX_LIMIT=$(claude_limit "$t") ctx_json claude "$(num_of postTokens "$cb")" "$w" compacted "$m"; return; }
+        CTX_LIMIT=$(claude_limit "$t") ctx_json claude "$u" "$w" statusline "$m"; return
     fi
     # its own transcript (claude_where: the pid's session), not just the newest of its folder: two Claudes in one
     # folder would read each other's
@@ -2539,10 +2551,7 @@ claude_ctx() { # claude_ctx PID CWD
     local CTX_LIMIT; CTX_LIMIT=$(claude_limit "$t")
     # the last reply with its usage (not one Claude Code made itself: "<synthetic>", usage 0) and the last compaction
     { IFS= read -r which; IFS= read -r line; IFS= read -r cb; } <<EOF
-$(ctx_read "$t" 'cut && NR == 1 { next }
-    index($0, "\"type\":\"assistant\"") && index($0, "\"usage\"") && !index($0, "\"model\":\"<synthetic>\"") { a = $0; an = NR }
-    index($0, "\"compact_boundary\"") { c = $0; cn = NR }
-    END { print (cn > an ? "cut" : an ? "reply" : cut ? "more" : ""); print a; print c }')
+$(ctx_read "$t" "$CLAUDE_LAST_AWK")
 EOF
     m=$(str_of model "$line"); w=$(model_window "$m")
     if [ "$which" = cut ]; then post=$(num_of postTokens "$cb"); ctx_json claude "$post" "$w" transcript "$m"; return; fi

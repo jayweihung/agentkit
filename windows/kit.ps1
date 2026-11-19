@@ -3737,8 +3737,13 @@ function Claude-Ctx([string]$cpid, [string]$cwd) {
     if ($f) {
         # the window: what settings.json tells Claude Code (autoCompactWindow, as its own /context shows), else Claude's
         $j = Read-Text $f; $m = Str-Of 'model' $j; $w = Setting-Window $m; if (-not $w) { $w = Num-Of 'window' $j }
-        $script:CtxLimit = Claude-Limit (Ctx-Unjs (Str-Of 'transcript' $j))
-        try { return Ctx-Json 'claude' (Num-Of 'used' $j) $w 'statusline' $m } finally { $script:CtxLimit = '' }
+        $tf = Ctx-Unjs (Str-Of 'transcript' $j); $script:CtxLimit = Claude-Limit $tf
+        # compacted since the status line's last numbers (they change only with Claude's next reply): what is left after it
+        $s = if ($tf -and (Test-Path -LiteralPath $tf)) { Claude-Scan $tf 1048576 } else { $null }
+        try {
+            if ($s -and $s.which -eq 'cut') { return Ctx-Json 'claude' (Num-Of 'postTokens' $s.c) $w 'compacted' $m }
+            return Ctx-Json 'claude' (Num-Of 'used' $j) $w 'statusline' $m
+        } finally { $script:CtxLimit = '' }
     }
     # its own transcript (Claude-Where: the pid's session), not just the newest of its folder: two Claudes in one
     # folder would read each other's

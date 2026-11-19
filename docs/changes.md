@@ -4,6 +4,12 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.7.5（2026-11-20）
+
+更新後要做：每台 `kit self-update`（Windows 也要）。
+
+- Claude 打 `/compact` 壓縮後，畫面程式（Herdr、手機 App）的 context 用量馬上變成壓縮後剩的量，不會一直停在壓縮前的數字（例如 91%）等到 Claude 下一次回話。數字來自壓縮紀錄裡「壓縮後剩多少」；Claude 一回話就換回狀態列給的數字。
+
 ## 0.7.4（2026-11-19）
 
 更新後要做：Mac、Linux 上 `kit self-update`。Windows 不用（kit.ps1 本來就對）。

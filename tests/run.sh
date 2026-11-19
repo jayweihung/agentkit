@@ -1598,6 +1598,17 @@ SID=0a1b2c3d-1111-2222-3333-444455556666; PD7="$H7/.claude/projects/$(printf '%s
 printf '{"pid": %s, "session": "%s", "used": 130000, "window": 1000000, "pct": 13, "model": "claude-opus-5-5", "transcript": "%s", "cwd": "%s"}\n' "$$" "$SID" "$TS7" "$P7" > "$H7/.config/agentkit/ctx/claude-$$.json"
 out=$(CX --pid $$ --tool claude --dir "$P7")
 check "context (claude): the window set in settings.json (autoCompactWindow) wins over the status line's" '[ "$out" = "{\"tool\": \"claude\", \"used\": 130000, \"window\": 400000, \"pct\": 33, \"source\": \"statusline\", \"model\": \"claude-opus-5-5\"}" ]'
+# compacted since the status line's numbers (they change only with Claude's next reply): what is left after it
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":1,"cache_read_input_tokens":360000}}}' '{"type":"system","subtype":"compact_boundary","compactMetadata":{"preTokens":366588,"postTokens":63134}}' > "$T/cut.jsonl"
+printf '{"pid": 4242, "used": 364000, "window": 400000, "pct": 91, "model": "claude-opus-5-5", "transcript": "%s"}\n' "$T/cut.jsonl" > "$H7/.config/agentkit/ctx/claude-4242.json"
+out=$(CX --pid 4242 --tool claude --dir "$P7")
+check "context (claude): compacted after the status line's numbers -> what is left after it" '[ "$out" = "{\"tool\": \"claude\", \"used\": 63134, \"window\": 400000, \"pct\": 16, \"source\": \"compacted\", \"model\": \"claude-opus-5-5\"}" ]'
+[ -z "$PWSH" ] || { out=$(kps context --pid 4242 --tool claude --dir "$P7" 2>&1)
+    check "context (kit.ps1): compacted after the status line's numbers -> the same" '[ "$out" = "{\"tool\": \"claude\", \"used\": 63134, \"window\": 400000, \"pct\": 16, \"source\": \"compacted\", \"model\": \"claude-opus-5-5\"}" ]'; }
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":1,"cache_read_input_tokens":60000}}}' >> "$T/cut.jsonl"
+out=$(CX --pid 4242 --tool claude --dir "$P7")
+check "context (claude): a reply after the compaction -> the status line's numbers again" '[ "$out" = "{\"tool\": \"claude\", \"used\": 364000, \"window\": 400000, \"pct\": 91, \"source\": \"statusline\", \"model\": \"claude-opus-5-5\"}" ]'
+rm -f "$H7/.config/agentkit/ctx/claude-4242.json"
 printf '{"session_id":"%s","transcript_path":"%s","cwd":"/x","workspace":{"current_dir":"/x/sub","project_dir":"%s"},"model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"context_window":{"context_window_size":1000000,"current_usage":{"input_tokens":2,"cache_creation_input_tokens":1146,"cache_read_input_tokens":138452},"used_percentage":14}}' "$SID" "$TS7" "$P7" > "$T/sl2.json"
 mkdir -p "$T/fb9"; printf '#!/bin/sh\necho $$ > "%s/cpid9"\n"%s" statusline < "%s/sl2.json"\n' "$T" "$KIT" "$T" > "$T/fb9/claude"; chmod +x "$T/fb9/claude"
 out=$("$T/fb9/claude"); cp9=$(cat "$T/cpid9")
