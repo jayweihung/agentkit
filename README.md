@@ -419,8 +419,10 @@ skill、MCP、外掛只有兩種會被 Claude Code、Codex、omp 載入：**kit 
 外掛是一包一起用的東西：skill、hook（agent 開始、送出訊息時自動跑的程式）、MCP、指令。它是來源裡的 `plugins/<名字>/`，裡面有 `.claude-plugin/plugin.json`（可能還有 `.codex-plugin/plugin.json`，和 `package.json` 的 `pi` 或 `omp` 寫 omp 的擴充）。
 
     kit collect <原作者 repo 網址> [--skip 不要的檔案或資料夾]...   收進來（只收各家會讀的部分）
-    kit add plugin <名字>                                             整個帳號都用（不能 --dir）
+    kit add plugin <名字>                                             整個帳號都用
     kit rm  plugin <名字>
+    kit add --dir <資料夾> plugin <名字>                              只有這個資料夾（Claude、omp；Codex 不行）
+    kit rm  --dir <資料夾> plugin <名字>
 
 - **跟原作者的裝法一樣**：kit 照 Claude、Codex、omp 自己裝外掛的方式裝（`claude plugin install`、`codex plugin add`、`omp plugin install`），所以每次自動開、記等級、子 agent 套用這些都跟原版一樣。
 - **不從原作者那邊裝、不自動更新**：kit 在這台做一個自己的外掛清單（`~/.config/agentkit/plugins`，名字叫 `kit`），放來源裡的那份（用核准紀錄的話就是簽過的版本）。來源換版本，`kit sync` 才重裝。
@@ -428,6 +430,11 @@ skill、MCP、外掛只有兩種會被 Claude Code、Codex、omp 載入：**kit 
 - **Codex 的 hook 要信任**：kit 自己在 `~/.codex/hooks.json` 的 hook（`kit sync --hook`、`kit handoff-hook`、`kit codex-guard`），kit 寫進新的或改過的時先問 Codex 信任了沒有，還沒才用 `kit pending` 提醒你打 `/hooks`，已經信任（例如你或別的 agent 打過）就不提。Codex 第一次看到外掛的 hook（每個版本一次）要你在 Codex 打 `/hooks` 信任。用核准紀錄的電腦（`kit init … --approvals`），和簽章的那台（打過 `kit approve`，用它記住的核准紀錄和金鑰驗）上，kit 只對**簽過的版本**、而且 Codex 那份跟 kit 那份一模一樣時，自己請 Codex 信任（hash 是 Codex 自己算、自己寫進 `~/.codex/config.toml`，寫完再問 Codex 一次確認）。其他情況 kit 不碰，用 `kit pending` 提醒你打 `/hooks`。先裝、後簽也可以：簽好後下一次 `kit sync` 就請 Codex 信任。
 - hook 要 node（或 python）的話，`kit list --json` 的 `needs` 會列出來，畫面程式提醒這台要裝。
 - 外掛和 skill 不能同名。已經單獨加了外掛裡的 skill，先 `kit rm skill …`，不然會有兩份。
+- **只加到一個資料夾**（`kit add --dir`）：用 Claude 和 omp 自己的資料夾範圍裝，kit 在那個資料夾跑它們的指令；kit 不改 git 有記錄的檔案。`kit rm --dir` 只拿掉 kit 在那裡裝的，`kit sync` 照常（來源換版本就重裝），`kit uninstall` 也會拿掉。
+  - Claude：`claude plugin install <外掛>@kit --scope local`。Claude 寫在它的「專案」的 `.claude/settings.local.json`（`enabledPlugins`），裝了什麼記在 `~/.claude/plugins/installed_plugins.json`（`"scope": "local"`、`projectPath`）。Claude 的專案是 git repo 的最上層：資料夾在 repo 裡面時，**整個 repo** 開的 Claude 都有（kit 會說）；不在 git 裡就是那個資料夾本身（它的子資料夾開的 Claude 沒有）。`settings.local.json` git 不記（Claude 自己把它寫進 `~/.config/git/ignore`）；這個檔案 git 有記錄的話 kit 不裝 Claude 的。
+  - omp：`omp plugin install <外掛>@kit --scope project`。omp 寫在它的專案的 `.omp/plugins/`（`installed_plugins.json`、`omp-plugins.lock.json`、`node_modules/<外掛>` 指到 omp 的快取）；omp 的專案是往上第一個有 `.omp/` 的資料夾（沒有就是 git repo 的最上層），所以 kit 先在那個資料夾建 `.omp/`，只有那裡和子資料夾開的 omp 有。這些是新檔案，git 沒記錄（`git status` 會看到）；`.omp/plugins` git 有記錄的話 kit 不裝 omp 的。
+  - Codex：**Codex 只能整個帳號裝**（沒有資料夾的範圍；kit 也不把外掛拆成 skill，會少了 hook 和 MCP）。在那個資料夾開的 Codex 沒有這個外掛，kit 會說；要 Codex 也有就 `kit add plugin <名字>`。
+  - 「只透過 kit」：kit 在資料夾裝的外掛算 kit 的，不會被擋。
 
 ## 給程式讀的介面
 
@@ -436,10 +443,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.12
+    kit api        →  1.13
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.12（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.13（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -511,7 +518,8 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - mcp（1.3 起）一定有：`"type"`（`stdio`、`http`、`sse`）、`"vars": [{"name": "GITHUB_TOKEN", "set": false}]`（它要的環境變數，這台電腦有沒有設）、`"needs"`（同 skill）、`"packages"`：沒有套件是 `[]`，有的話一個
   `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
 - `sign`（1.8 起）：這台電腦簽過核准（`kit approve` 記下的核准紀錄還在）才有：`{"approvals": "<核准紀錄的 clone>", "serial": 19, "approved": [{"name": "team", "commit": "<40 字的 commit>"}]}`，畫面程式拿它說「已經簽了，等那台同步」、給簽章的指令。
-- `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items", "agent"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。`here.folder.agent`（1.3 起）：那個資料夾是 `kit place` 放的 agent 時是它的名字，不是就 `null`；這時 `here.folder.items` 是 agent 的規則、skill、MCP（不含用 `kit rm --dir` 拿掉的）再加上另外加的。
+- `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items", "agent", "plugins"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。`here.folder.agent`（1.3 起）：那個資料夾是 `kit place` 放的 agent 時是它的名字，不是就 `null`；這時 `here.folder.items` 是 agent 的規則、skill、MCP（不含用 `kit rm --dir` 拿掉的）再加上另外加的。
+- `here.folder.plugins`（1.13 起）：一定有（沒有就是 `[]`）。這個資料夾加的外掛（`kit add --dir … plugin`，也在 `here.folder.items` 裡，`plugin:<名字>`），一個一筆：`{"name": "unslop", "tools": ["claude", "omp"], "note": "Codex 只能整個帳號裝"}`。`tools`：kit 已經在這個資料夾幫哪些工具裝好了（`claude`、`omp`；沒裝那個工具、git 有記錄那個檔案、或裝失敗就不在裡面）；`note`：給人看的一句話，畫面程式照樣顯示（Codex 沒有資料夾的範圍，在這裡開的 Codex 沒有它）。
 
 ### `kit agents --json`
 
@@ -688,7 +696,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 這些印給人看的字（不要解析），程式只看 exit code（0＝成功），失敗時把 stdout、stderr 顯示給人看：
 
-    kit add|rm [--dir 資料夾] rule|skill|mcp <名字>
+    kit add|rm [--dir 資料夾] rule|skill|mcp|plugin <名字>
     kit agent <名字> add|rm rule|skill|mcp <東西>
     kit new rule|skill|mcp|agent <名字> [--to 來源]
     kit new mcp [名字] --config <檔案|-> [--to 來源]

@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.12
+KIT_API=1.13
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -701,21 +701,26 @@ plugin_run() { # plugin_run TOOL ARGS... : the tool's own plugin command; its wo
     PLUGIN_SAID=$("$@" 2>&1) && return 0
     warn "$1 $2 ${3:-}${4:+ $4} 沒成功：$(printf '%s\n' "$PLUGIN_SAID" | awk 'NF' | tail -n 2 | tr '\n' ' ')"; return 1
 }
-plugin_install() { # plugin_install TOOL NAME : install (again) NAME@kit, adding kit's marketplace first
+plugin_install() { # plugin_install TOOL NAME [DIR] : install (again) NAME@kit, adding kit's marketplace first (DIR: only
+    # there, with the tool's own folder scope, run in DIR; Claude and omp only)
     local r; r=$(plugin_root)
     case $1 in
         claude) plugin_run claude plugin marketplace add "$r" --scope user && plugin_run claude plugin marketplace update kit &&
-                plugin_run claude plugin install "$2@kit" --scope user;;
+                if [ -n "${3:-}" ]; then ( cd "$3" && plugin_run claude plugin install "$2@kit" --scope local )
+                else plugin_run claude plugin install "$2@kit" --scope user; fi;;
         codex)  plugin_run codex plugin marketplace add "$r" && plugin_run codex plugin add "$2@kit" && codex_plugin_trust "$2";;
         omp)    { omp plugin marketplace update kit >/dev/null 2>&1 || plugin_run omp plugin marketplace add "$r"; } &&
-                plugin_run omp plugin install "$2@kit" --scope user --force;;
+                if [ -n "${3:-}" ]; then ( mkdir -p "$3/.omp" && cd "$3" && plugin_run omp plugin install "$2@kit" --scope project --force )
+                else plugin_run omp plugin install "$2@kit" --scope user --force; fi;;
     esac
 }
-plugin_uninstall() { # plugin_uninstall TOOL NAME
-    case $1 in
-        claude) plugin_run claude plugin uninstall "$2@kit" --scope user;;
-        codex)  plugin_run codex plugin remove "$2@kit";;
-        omp)    plugin_run omp plugin uninstall "$2@kit" --scope user;;
+plugin_uninstall() { # plugin_uninstall TOOL NAME [DIR]
+    case $1:${3:+dir} in
+        claude:) plugin_run claude plugin uninstall "$2@kit" --scope user;;
+        claude:dir) ( cd "$3" && plugin_run claude plugin uninstall "$2@kit" --scope local );;
+        codex:) plugin_run codex plugin remove "$2@kit";;
+        omp:)   plugin_run omp plugin uninstall "$2@kit" --scope user;;
+        omp:dir) ( cd "$3" && plugin_run omp plugin uninstall "$2@kit" --scope project );;
     esac
 }
 plugin_signed() { # plugin_signed NAME : the source's folder for it is what the signed approvals say (kit approve): this
@@ -800,17 +805,23 @@ codex_plugin_trust() { # codex_plugin_trust NAME : after codex plugin add (PLUGI
     rm -f "$out"
     kit_pending_ask "codex-hooks-$n" "要你同意：外掛 $n 的 hook 在 Codex 打 /hooks 信任一次（kit 沒辦法讓 Codex 記住）"
 }
-sync_plugins() { # sync_plugins : wanted plugin names on stdin -> kit's copies, and each tool installs them
-    local names r n p h old t ok
-    names=$(cat); r=$(plugin_root)
-    [ -n "$names$(state_list plugin)" ] || return 0
-    for n in $names; do
-        p=$(find_item plugin "$n") || { warn "plugin $n not found in any source"; continue; }
-        p=${p%/.claude-plugin/plugin.json}; h=$(dir_hash "$p"); old=$(state_get plugin "$n")
-        [ "$h" = "$old" ] && [ -d "$r/$n" ] && continue
-        mkdir -p "$r" && rm -rf "${r:?}/$n" && cp -R "$p" "$r/$n" && drop_caches "$r/$n" || { warn "沒辦法複製外掛 $n 到 $r"; rm -rf "${r:?}/$n"; continue; }
-        state_set plugin "$n" "$h"; say "  plugin $n → $r"
-    done
+plugin_copy() { # plugin_copy NAME : kit's copy of the source's plugin, copied again when the source's changed; 1: none
+    local r p h; r=$(plugin_root)
+    p=$(find_item plugin "$1") || { warn "plugin $1 not found in any source"; return 1; }
+    p=${p%/.claude-plugin/plugin.json}; h=$(dir_hash "$p")
+    [ "$h" = "$(state_get plugin "$1")" ] && [ -d "$r/$1" ] && return 0
+    mkdir -p "$r" && rm -rf "${r:?}/$1" && cp -R "$p" "$r/$1" && drop_caches "$r/$1" || { warn "沒辦法複製外掛 $1 到 $r"; rm -rf "${r:?}/$1"; return 1; }
+    state_set plugin "$1" "$h"; say "  plugin $1 → $r"
+}
+dir_plugin_names() { local d; dirs_registered | while IFS= read -r d; do [ -d "$d" ] && dir_items "$d" | sed -n 's/^plugin://p'; done | awk '!seen[$0]++'; }
+plugin_kits() { # plugin_kits TOOL : the plugins kit installed in TOOL, for the account or a folder (kit add --dir)
+    [ -f "$STATE" ] && awk -F'\t' -v t="plugin.$1" '$1 == t || ($1 ~ /^dir:/ && substr($1, length($1) - length(t)) == ":" t) { print $2 }' "$STATE" | awk '!seen[$0]++'
+}
+sync_plugins() { # sync_plugins : wanted plugin names on stdin -> kit's copies (the folders' too), and each tool installs them
+    local names all r n h t ok
+    names=$(cat); r=$(plugin_root); all=$(printf '%s\n' "$names"; dir_plugin_names)
+    [ -n "$(printf '%s' "$all" | tr -d '\n')$(state_list plugin)" ] || return 0
+    for n in $all; do plugin_copy "$n"; done
     plugin_market "$(state_list plugin)" || { warn "沒辦法寫 kit 的外掛清單（${r}）"; return 0; }
     for t in $(plugin_tools); do
         for n in $(state_list plugin); do
@@ -827,8 +838,8 @@ sync_plugins() { # sync_plugins : wanted plugin names on stdin -> kit's copies, 
     done
     # codex plugin puts its tables at the end of config.toml, inside kit's block: out of it now, quietly
     has_codex && QUIET=1 codex_keep "$(cat "$CODEX_LAST" 2>/dev/null)"
-    for n in $(state_list plugin); do        # kit's copy goes once no tool has it any more
-        printf '%s\n' "$names" | grep -qxF "$n" && continue
+    for n in $(state_list plugin); do        # kit's copy goes once no tool and no folder has it any more
+        printf '%s\n' "$all" | grep -qxF "$n" && continue
         ok=1; for t in claude codex omp; do [ -z "$(state_get "plugin.$t" "$n")" ] || ok=0; done
         [ $ok = 1 ] && { rm -rf "${r:?}/$n"; state_del plugin "$n"; kit_pending_done "codex-hooks-$n"; }
     done
@@ -964,7 +975,7 @@ blk() { # blk CLASS KIND NAME SCOPE DIR PATH TOOL... : a block_scan row for each
 }
 block_scan() { # rows CLASS TOOL KIND NAME SCOPE DIR PATH TARGET for the skills, MCP and plugins the tools load (CLASS: kit,
     # company or other)
-    local d n p f c k kk ts tc="" to="" org typ admin src tracked m
+    local d n p f c k kk ts tc="" to="" org typ admin src tracked m kc
     has_codex && tc=codex; has_omp && to=omp
     for p in "$CLAUDE_DIR"/skills/*/SKILL.md; do               # Claude's account skills (omp reads them too)
         [ -f "$p" ] || continue; d=${p%/SKILL.md}; n=${d##*/}
@@ -1008,8 +1019,9 @@ block_scan() { # rows CLASS TOOL KIND NAME SCOPE DIR PATH TARGET for the skills,
         c=other; [ -z "$(state_get mcp.omp "$n")" ] || c=kit; blk $c mcp "$n" account "" "$OMP_DIR/mcp.json" $to; done
     # plugins (from a marketplace: never the company's; kit's are <name>@kit)
     f="$CLAUDE_DIR/plugins/installed_plugins.json"
-    [ -f "$f" ] && json_keys "$f" plugins | while IFS= read -r n; do
-        c=other; case $n in *@kit) [ -z "$(state_get plugin.claude "${n%@kit}")" ] || c=kit;; esac; blk $c plugin "$n" account "" "$f" claude; done
+    # (Claude lists a folder's install, --scope local, here too: kit's when kit installed it there, kit add --dir)
+    [ -f "$f" ] && kc=$LF$(plugin_kits claude)$LF && json_keys "$f" plugins | while IFS= read -r n; do
+        c=other; case $n in *@kit) case $kc in *"$LF${n%@kit}$LF"*) c=kit;; esac;; esac; blk $c plugin "$n" account "" "$f" claude; done
     [ -n "$tc" ] && [ -f "$CODEX_DIR/config.toml" ] && toml_tables "$CODEX_DIR/config.toml" plugins | while IFS= read -r n; do
         c=other; case $n in *@kit) [ -z "$(state_get plugin.codex "${n%@kit}")" ] || c=kit;; esac; blk $c plugin "$n" account "" "$CODEX_DIR/config.toml" codex; done
     f="$HOME/.omp/plugins/installed_plugins.json"
@@ -1569,7 +1581,7 @@ dir_root() { # dir_root DIR : the folder kit uses for DIR: the nearest one at or
 # not:kind:name, one of the agent's you took out (kit rm --dir; it stays out until you kit add --dir it again).
 # Kit keeps a copy of the agent file ($KIT_CONF/placed/): when the agent cannot be found or read (renamed, its source
 # gone, an approved commit without it), the folder stays as it was, the prompt and tool limits too.
-dir_lines() { [ -f "$1/$DIR_FILE" ] && awk '{ sub(/\r$/, "") } /^(not:)?(rule|skill|mcp):[^ ]+$/' "$1/$DIR_FILE" | awk '!seen[$0]++'; }
+dir_lines() { [ -f "$1/$DIR_FILE" ] && awk '{ sub(/\r$/, "") } /^(not:)?(rule|skill|mcp|plugin):[^ ]+$/' "$1/$DIR_FILE" | awk '!seen[$0]++'; }
 dir_own() { dir_lines "$1" | grep -v '^not:'; }            # dir_own DIR : what you added
 dir_nots() { dir_lines "$1" | sed -n 's/^not://p'; }       # dir_nots DIR : the agent's you took out
 placed_copy() { printf '%s/placed/%s.md\n' "$KIT_CONF" "$(printf '%s' "$1" | cksum | awk '{ print $1 }')"; }
@@ -1606,7 +1618,7 @@ dirs_set() { # dirs_set DIR add|rm : the list of folders kit has to keep up to d
 dir_write() { # dir_write DIR ITEMS [MARKS] : the folder's .agentkit (gone when nothing is left); kit place's lines kept
     local marks; if [ $# -ge 3 ]; then marks=$3; else marks=$(dir_marks "$1"); fi
     if [ -z "$2" ] && [ -z "$marks" ]; then rm -f "$1/$DIR_FILE"; return; fi
-    { printf '# kit：這個資料夾自己的規則、skill、MCP。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。\n'
+    { printf '# kit：這個資料夾自己的規則、skill、MCP、外掛。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。\n'
       printf '# 用  kit add --dir <資料夾> 種類 名字  /  kit rm --dir …  改。\n'
       [ -z "$marks" ] || { printf '# kit place：這個資料夾就是下面這個 agent（在這裡開的 claude、codex、omp 都是它）。\n'
                            printf '# agent 的規則、skill、MCP 每次 kit sync 照 agent 檔放；下面的 種類:名字 是你另外加的，not:種類:名字 是你拿掉的 agent 的。\n'
@@ -1704,6 +1716,51 @@ dir_claude_trust() { # dir_claude_trust DIR : the folder trusted in ~/.claude.js
     fi
     rm -f "$ops"
 }
+# A folder's plugins (kit add --dir D plugin N): each tool's own folder scope, run in D. Codex has none (only the account).
+#   Claude: claude plugin install N@kit --scope local: enabledPlugins in .claude/settings.local.json of Claude's project
+#     (the git repo's top, else D: Claude reads it there, and in no folder below a D outside git), the install in
+#     ~/.claude/plugins/installed_plugins.json (projectPath D). Claude keeps that file out of git (~/.config/git/ignore).
+#   omp: omp plugin install N@kit --scope project, with a D/.omp so omp's project is D (else the nearest folder above with
+#     .omp, or the git repo's top): D/.omp/plugins/ (installed_plugins.json, omp-plugins.lock.json, node_modules/N).
+#   That file tracked by git: kit leaves the tool out there (kit's --dir never changes what git tracks).
+dir_plugin_file() { # dir_plugin_file TOOL DIR -> the file the tool's folder scope writes
+    case $1 in
+        claude) printf '%s/.claude/settings.local.json\n' "$(git -C "$2" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$2")";;
+        omp) printf '%s/.omp/plugins/installed_plugins.json\n' "$2";;
+    esac
+}
+dir_plugins() { # dir_plugins DIR : the folder's plugins installed (again when kit's copy changed) or taken out, Claude and omp
+    local dir=$1 names t k f n h top
+    names=$(dir_items "$dir" | sed -n 's/^plugin://p')
+    for n in $names; do plugin_copy "$n"; done
+    [ -z "$names" ] || plugin_market "$(state_list plugin)" || { warn "沒辦法寫 kit 的外掛清單（$(plugin_root)）"; return 0; }
+    for t in claude omp; do
+        k=$(dir_kind "$dir" "plugin.$t")
+        [ -n "$names$(state_list "$k")" ] && command -v "$t" >/dev/null 2>&1 || continue
+        f=$(dir_plugin_file "$t" "$dir"); top=${f%/.*/*}
+        for n in $names; do
+            h=$(state_get plugin "$n"); [ -n "$h" ] && [ "$(state_get "$k" "$n")" != "$h" ] || continue
+            if [ -n "$(git -C "$dir" ls-files -- "$( [ "$t" = omp ] && printf '%s' "${f%/*}" || printf '%s' "$f")" 2>/dev/null)" ]; then
+                [ -n "$(state_get told "plugin:$t:$dir")" ] || { warn "${dir}：$t 的外掛設定（${f}）git 有記錄，kit 不改它：在這裡開的 $t 沒有外掛 $n"; state_set told "plugin:$t:$dir" 1; }
+                continue
+            fi
+            [ -e "$f" ] || [ -n "$(state_list "$k")" ] || state_set made "$f" 1
+            plugin_install "$t" "$n" "$dir" || continue
+            state_set "$k" "$n" "$h"
+            if [ "$t" = claude ] && [ "$top" != "$dir" ]; then say "  plugin $n → claude（整個 git repo ${top}：Claude 的資料夾範圍就是整個 repo）"
+            else say "  plugin $n → ${t}（只有 ${dir}）"; fi
+        done
+        for n in $(state_list "$k"); do
+            printf '%s\n' "$names" | grep -qxF "$n" && continue
+            plugin_uninstall "$t" "$n" "$dir" && { state_del "$k" "$n"; say "  removed plugin $n ← ${t}（${dir}）"; }
+        done
+        [ -z "$(state_list "$k")" ] && [ -n "$(state_get made "$f")" ] || continue
+        case $t in                                         # the tool's files kit's install made, once they have nothing
+            claude) prune_empty "$f" enabledPlugins; rm -f "$f.kit-backup"; drop_made "$f"; rmdir "${f%/*}" 2>/dev/null;;
+            omp) [ -n "$(json_keys "$f" plugins 2>/dev/null)" ] || { rm -rf "${f%/*}"; state_del made "$f"; };;
+        esac
+    done
+}
 # Claude Code's own tools that kit knows: a placed agent's tools.only becomes deny rules for the others (Claude's settings
 # have no "only these"; a tool Claude adds later is not in the list). kit.ps1 has the same list. No MultiEdit: newer
 # Claude Code has none (a deny rule for it is warned about), and in one that has it, denying Edit covers it.
@@ -1754,6 +1811,7 @@ apply_dir() { # apply_dir DIR : the folder's .agentkit (and its agent) -> the to
     dir_claude_allow "$dir" <<< "$mcps"
     dir_claude_trust "$dir"
     dir_claude_deny "$dir" <<< "$cdeny"
+    dir_plugins "$dir"
     # kit's backups of the user's own files go when kit has nothing left in them
     [ -n "$(state_list "$(dir_kind "$dir" mcp)")" ] || rm -f "$dir/.mcp.json.kit-backup"
     [ -n "$(state_list "$(dir_kind "$dir" allow)")$(state_list "$(dir_kind "$dir" deny)")" ] || rm -f "$dir/.claude/settings.local.json.kit-backup"
@@ -4446,8 +4504,11 @@ here_json() { # here_json DIR PID : the "here" part of kit list --json --dir
     if [ ! -d "$dir" ]; then printf ', "error": %s, "items": []}' "$(json_s "找不到這個資料夾")"; return; fi
     local froot; froot=$(dir_root "$dir")
     local fa; fa=$(dir_mark "$froot" agent)
-    printf ', "folder": {"dir": %s, "why": %s, "items": %s, "agent": %s}' "$(json_s "$froot")" "$(json_s "$(dir_why_not "$froot")")" "$(dir_items "$froot" | json_arr)" \
-        "$( [ -n "$fa" ] && json_s "$fa" || echo null)"
+    local fp="" pn; for pn in $(dir_items "$froot" | sed -n 's/^plugin://p'); do   # which tools have each folder plugin
+        fp="$fp${fp:+, }{\"name\": $(json_s "$pn"), \"tools\": $(for t in claude omp; do [ -z "$(state_get "$(dir_kind "$froot" "plugin.$t")" "$pn")" ] || echo $t; done | json_arr), \"note\": $(json_s "Codex 只能整個帳號裝")}"
+    done
+    printf ', "folder": {"dir": %s, "why": %s, "items": %s, "agent": %s, "plugins": [%s]}' "$(json_s "$froot")" "$(json_s "$(dir_why_not "$froot")")" "$(dir_items "$froot" | json_arr)" \
+        "$( [ -n "$fa" ] && json_s "$fa" || echo null)" "$fp"
     printf ', "items": ['
     while IFS="$TAB" read -r sc k n f t; do
         [ -n "$k" ] || continue
@@ -4587,7 +4648,6 @@ cmd_add_rm() {
     need_init
     local k=$1 n i added removed; shift
     case " rule skill mcp plugin " in *" $k "*) ;; *) die "種類只能是 rule、skill、mcp、plugin";; esac
-    [ -z "$dir" ] || [ "$k" != plugin ] || die "外掛只能加到整個帳號（不能 --dir）"
     if [ -n "$dir" ]; then dir_add_rm "$verb" "$dir" "$k" "$1"; return; fi
     local acct; acct=$(wanted)
     for n in "$@"; do
@@ -4636,8 +4696,10 @@ dir_add_rm() { # dir_add_rm add|rm DIR KIND NAME : only that folder (and below i
     dir_write "$root" "$items"
     if [ -n "$items$(dir_mark "$root" agent)" ]; then dirs_set "$root" add; else dirs_set "$root" rm; fi
     apply_dir "$root"
-    has_codex && apply_claude                                # Codex: the folder's trust and the root marker
+    # Codex: the folder's trust and the root marker; a plugin: kit's copy and what is blocked (a folder's plugin is kit's)
+    { has_codex || [ "$k" = plugin ]; } && apply_claude
     if [ "$verb" = add ]; then say "kit：$i 加到 ${root}（只有在這裡和子資料夾開的 agent 讀得到，開新的才會讀到）"
+        [ "$k" != plugin ] || say "     Codex 只能整個帳號裝：在這裡開的 Codex 沒有外掛 ${n}（Codex 也要的話：kit add plugin ${n}，整個帳號都有）"
     else say "kit：$i 從 $root 拿掉了"; fi
 }
 
@@ -4855,7 +4917,7 @@ EOF
     sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp < /dev/null
     sync_plugins < /dev/null
     if [ -d "$(plugin_root)" ]; then                          # kit's marketplace, once nothing of it is installed
-        for k in $(plugin_tools); do [ -n "$(state_list "plugin.$k")" ] || "$k" plugin marketplace remove kit >/dev/null 2>&1; done
+        for k in $(plugin_tools); do [ -n "$(plugin_kits "$k")" ] || "$k" plugin marketplace remove kit >/dev/null 2>&1; done
         [ -n "$(state_list plugin)" ] || rm -rf "$(plugin_root)"
     fi
     QUIET=
@@ -6268,9 +6330,10 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
   kit add|rm plugin <名字>          外掛（skill、hook、MCP 一起）：照 Claude、Codex、omp 自己裝外掛的方式裝，
                                     從這台的來源副本裝、不自動更新；Codex 的 hook 只有簽過的版本 kit 才自己信任
-  kit add --dir <資料夾> rule|skill|mcp <名字>
+  kit add --dir <資料夾> rule|skill|mcp|plugin <名字>
                                     只加到這個資料夾：在這裡（含子資料夾）開的 agent 才有
-  kit rm  --dir <資料夾> rule|skill|mcp <名字>
+                                    （外掛：Claude、omp 用它們自己的資料夾範圍裝；Codex 只能整個帳號裝）
+  kit rm  --dir <資料夾> rule|skill|mcp|plugin <名字>
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
                                     用 kit 的裝法裝，太舊就升級（畫面程式的「安裝」按鈕也是用這個）

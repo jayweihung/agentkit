@@ -4,6 +4,15 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.8.0（2026-11-21）
+
+更新後要做：每台 `kit self-update`（Windows 也要）。畫面程式要顯示資料夾的外掛：先確認 `kit api` 至少 1.13。
+
+- 外掛可以只加到一個資料夾：`kit add --dir <資料夾> plugin <名字>`（`kit rm --dir …` 拿掉）。Claude 用它自己的 `--scope local` 裝（寫在 Claude 專案的 `.claude/settings.local.json`，git 不記；資料夾在 git repo 裡面時，整個 repo 開的 Claude 都有，kit 會說），omp 用它自己的 `--scope project` 裝（寫在那個資料夾的 `.omp/plugins/`）。kit 不改 git 有記錄的檔案：那種情況那個工具就不裝，kit 會說。
+- Codex 只能整個帳號裝：在那個資料夾開的 Codex 沒有這個外掛，kit 加的時候會說；要 Codex 也有就 `kit add plugin <名字>`。
+- `kit sync` 照常：來源換版本就在那個資料夾重裝；`kit uninstall` 也會拿掉。kit 在資料夾裝的外掛算 kit 的，不會被「只能透過 kit」擋掉。整個帳號的外掛跟以前一樣。
+- `kit list --json --dir` 多了 `here.folder.plugins`：每個資料夾外掛哪些工具已經裝好、和「Codex 只能整個帳號裝」（`kit api` 1.13）。
+
 ## 0.7.5（2026-11-20）
 
 更新後要做：每台 `kit self-update`（Windows 也要）。

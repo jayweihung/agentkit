@@ -298,7 +298,7 @@ cp "$HOME/.claude.json" "$T/cj.bak"
 printf 'set\tprojects|%s|mcpServers|lm\t{"command": "y"}\nset\tmcpServers|um\t{"command": "z"}\n' "$PP" > "$T/cj.ops"
 LC_ALL=C awk -f "$JA" -v ops="$T/cj.ops" -v sep="|" "$T/cj.bak" > "$HOME/.claude.json"
 kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here.json" 2>&1; rc=$?
-check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"agent\": null, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": [], \"agent\": null}, \"items\": [" "$T/here.json"'
+check "list --json --dir: valid JSON, the folder, no other user" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/here.json" > /dev/null && grep -qF "\"here\": {\"dir\": \"$PP\", \"user\": null, \"agent\": null, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": [], \"agent\": null, \"plugins\": []}, \"items\": [" "$T/here.json"'
 check "list --json --dir: rules here and above, AGENTS.md for codex/omp" 'grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"CLAUDE.md\", \"path\": \"$PP/CLAUDE.md\", \"tools\": \"claude omp\", \"description\": \"\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \".claude/rules/r1.md\", \"path\": \"$PP/.claude/rules/r1.md\", \"tools\": \"claude\", \"description\": \"Rule one\"}" "$T/here.json" &&
     grep -qF "{\"scope\": \"dir\", \"kind\": \"rule\", \"name\": \"$PU/CLAUDE.md\", \"path\": \"$PU/CLAUDE.md\", \"tools\": \"claude\", \"description\": \"Project rules\"}" "$T/here.json" &&
@@ -325,7 +325,7 @@ check "list --json --pid: numbers only" '[ $rc -ne 0 ] && echo "$out" | grep -q 
 RUND="$HOME/.config/agentkit/run"; mkdir -p "$RUND"; echo gerrit > "$RUND/$$"
 ( : ) & dp=$!; wait $dp; echo gone > "$RUND/$dp"
 kit list --json --dir "$T/proj/sub" --pid $$ > "$T/here2.json" 2>&1
-check "list --json --pid: the agent kit run started there" 'grep -qF "\"user\": null, \"agent\": {\"name\": \"gerrit\", \"source\": \"team\", \"rules\": [\"gerrit-flow\"], \"skills\": [\"gerrit-review\"], \"mcp\": [\"gerrit\"]}, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": [], \"agent\": null}, \"items\": [" "$T/here2.json"'
+check "list --json --pid: the agent kit run started there" 'grep -qF "\"user\": null, \"agent\": {\"name\": \"gerrit\", \"source\": \"team\", \"rules\": [\"gerrit-flow\"], \"skills\": [\"gerrit-review\"], \"mcp\": [\"gerrit\"]}, \"folder\": {\"dir\": \"$PP\", \"why\": \"\", \"items\": [], \"agent\": null, \"plugins\": []}, \"items\": [" "$T/here2.json"'
 check "list --json --pid: the marker of a kit run that ended is dropped" '[ ! -e "$RUND/$dp" ] && [ -e "$RUND/$$" ]'
 if [ -n "$PWSH" ]; then
     echo gone > "$RUND/$dp"
@@ -1291,7 +1291,7 @@ if [ -n "$PWSH" ]; then
     (cd "$w/s" && for f in $(find . -type f | LC_ALL=C sort); do echo "== $f"; cat "$f"; done); }
   mkdir -p "$T/pl1" "$T/pl2"; P1=$(cd "$T/pl1" && pwd -P); P2=$(cd "$T/pl2" && pwd -P)
   a=$(pl "$P1" kps | sed "s#$P1#W#g"); b=$(pl "$P2" kit | sed "s#$P2#W#g")
-  check "kit.ps1 place: the same JSON, errors, here.folder.agent and files as unix/kit" '[ "$a" = "$b" ] && echo "$a" | grep -q "\"agent\": \"gerrit\"}"'
+  check "kit.ps1 place: the same JSON, errors, here.folder.agent and files as unix/kit" '[ "$a" = "$b" ] && echo "$a" | grep -qF "\"agent\": \"gerrit\", \"plugins\": []}"'
   [ "$a" = "$b" ] || diff <(echo "$a") <(echo "$b") | head -20
 fi
 kit uninstall >/dev/null 2>&1
@@ -2369,10 +2369,10 @@ check "list --json: sign, the approvals this computer signs with" 'printf "%s" "
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.12)" '[ $rc -eq 0 ] && [ "$out" = 1.12 ]'
+check "api: one line, major.minor (1.13)" '[ $rc -eq 0 ] && [ "$out" = 1.13 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.12 ]'
+    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.13 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?
@@ -2910,8 +2910,14 @@ pk rm plugin demo >/dev/null 2>&1; pk approve "$PG/appr" "$PG/src" --key "$SA/ke
 out=$(pk add plugin demo 2>&1)
 check "plugins: Codex's copy not the same as kit's -> not trusted" '[ ! -f "$PG/cxwrite" ] && [ -f "$PH/.config/agentkit/notes/pending/codex-hooks-demo" ]'
 rm -f "$PG/cxchange"
-out=$(pk add --dir "$PG" plugin demo 2>&1); rc=$?
-check "plugins: only for the whole account (no --dir)" '[ $rc -ne 0 ] && echo "$out" | grep -qF "只能加到整個帳號"'
+# a folder's plugin: Claude --scope local and omp --scope project, run in the folder; Codex only for the account (said)
+mkdir -p "$PG/fd"; : > "$PG/log"
+out=$(pk add --dir "$PG/fd" plugin demo 2>&1); rc=$?
+check "plugins: --dir -> Claude --scope local, omp --scope project ; kit says Codex is account-only" '[ $rc -eq 0 ] && grep -qxF "claude plugin install demo@kit --scope local" "$PG/log" && grep -qxF "omp plugin install demo@kit --scope project --force" "$PG/log" && echo "$out" | grep -qF "Codex 只能整個帳號裝"'
+out=$(pk list --json --dir "$PG/fd" 2>/dev/null)
+check "plugins: list --json --dir, here.folder.plugins" 'echo "$out" | mj /dev/stdin "assert d[\"here\"][\"folder\"][\"plugins\"]==[{\"name\": \"demo\", \"tools\": [\"claude\", \"omp\"], \"note\": \"Codex 只能整個帳號裝\"}]"'
+: > "$PG/log"; pk rm --dir "$PG/fd" plugin demo >/dev/null 2>&1
+check "plugins: rm --dir uninstalls there only" 'grep -qxF "claude plugin uninstall demo@kit --scope local" "$PG/log" && grep -qxF "omp plugin uninstall demo@kit --scope project" "$PG/log" && ! grep -q "scope user" "$PG/log"'
 pk uninstall >/dev/null 2>&1
 check "plugins: uninstall takes them out and kit's marketplace with them" 'grep -qxF "claude plugin marketplace remove kit" "$PG/log" && grep -qxF "omp plugin marketplace remove kit" "$PG/log" && [ ! -e "$PC" ]'
 # collect: the whole plugin, only what the tools load; --skip remembered in the lock, out of plugin.json too

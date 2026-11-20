@@ -332,7 +332,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.12)' { $rc -eq 0 -and $out -ceq '1.12' }
+Check 'api: one line, major.minor (1.13)' { $rc -eq 0 -and $out -ceq '1.13' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -919,7 +919,7 @@ Kit sync
 Check 'the only one turned off: out of disabledMcpjsonServers (the one not kit''s stays)' { (Flat (JGet $SL 'disabledMcpjsonServers')) -ceq '["own"]' -and (Flat (JGet $SL 'enabledMcpjsonServers')) -ceq '["gerrit"]' }
 W "$TEAM/mcp/gerrit.yaml" $gy; Kit rm mcp gerrit; Kit sync
 Kit list --json --dir (Join-Path $FP 'sub')
-Check 'list --json: the folder with .agentkit, its items' { $out.Contains("`"folder`": {`"dir`": $(& { '"' + $FR.Replace('\', '\\') + '"' }), `"why`": `"`", `"items`": [`"skill:gerrit-review`", `"rule:gerrit-flow`", `"mcp:gerrit`"], `"agent`": null}") }
+Check 'list --json: the folder with .agentkit, its items' { $out.Contains("`"folder`": {`"dir`": $(& { '"' + $FR.Replace('\', '\\') + '"' }), `"why`": `"`", `"items`": [`"skill:gerrit-review`", `"rule:gerrit-flow`", `"mcp:gerrit`"], `"agent`": null, `"plugins`": []}") }
 if (-not $OnWindows) {
     $env:HOME = $H; $bash = (& /bin/sh -c "cd '$Repo' && HOME='$H' unix/kit list --json --dir '$FP/sub' 2>&1") -join "`n"
     Check 'list --json --dir with a folder of its own: unix/kit prints the same' { $bash -ceq $out }
@@ -972,7 +972,7 @@ $s1 = Snap $G
 KitJ place gerrit "$G/" --json
 Check 'place again (same agent): fine, nothing changes' { $rc -eq 0 -and (Snap $G) -ceq $s1 }
 KitJ list --json --dir $G
-Check 'list --json --dir: here.folder.agent names the placed agent' { $out.Contains("`"items`": [`"rule:gerrit-flow`", `"skill:gerrit-review`", `"mcp:gerrit`"], `"agent`": `"gerrit`"}") }
+Check 'list --json --dir: here.folder.agent names the placed agent' { $out.Contains("`"items`": [`"rule:gerrit-flow`", `"skill:gerrit-review`", `"mcp:gerrit`"], `"agent`": `"gerrit`", `"plugins`": []}") }
 KitJ place helper $G --json
 Check 'place: refuses a folder that is another agent (other_agent), untouched' { $rc -ne 0 -and $out.Contains('"code": "other_agent"') -and (Snap $G) -ceq $s1 }
 W "$SP/busy/notes.txt" "mine`n"
@@ -1018,7 +1018,7 @@ Kit sync; $o1 = $out; Kit sync; $o2 = $out
 Check 'agent gone: the placed folder is left as it was (deny, prompt, MCP)' { (Snap $G) -ceq $s2 -and (JGet "$G/.claude/settings.local.json" 'permissions.deny').Contains('"Bash"') }
 Check 'agent gone: said once' { $o1.Contains('agent gerrit 找不到或讀不懂') -and -not $o2.Contains('agent gerrit 找不到或讀不懂') }
 KitJ list --json --dir $G
-Check 'agent gone: list --json --dir still has the agent''s (kit''s copy)' { $out.Contains('"items": ["mcp:gerrit"], "agent": "gerrit"}') }
+Check 'agent gone: list --json --dir still has the agent''s (kit''s copy)' { $out.Contains('"items": ["mcp:gerrit"], "agent": "gerrit", "plugins": []}') }
 W "$TEAM/agents/gerrit.md" "---`nname: gerrit`nthis is not yaml`n---`nbroken`n"; Kit sync
 Check 'agent unreadable (bad header): the folder is left as it was' { (Snap $G) -ceq $s2 }
 Move-Item -LiteralPath "$T/gerrit.md.away" -Destination "$TEAM/agents/gerrit.md" -Force; Kit sync
@@ -2062,8 +2062,15 @@ if ($sshOk) {   # signed later on the computer that signs (no approvals of its o
     Check 'plugins: trusted, nothing to do at the next sync' { -not @(PLog | Where-Object { $_ -match 'plugin add|install' }) }
     Remove-Item -LiteralPath "$PG/cxwrite", "$PG/cxtrusted" -Force -ErrorAction SilentlyContinue
 }
-Kit add --dir $PG plugin demo
-Check 'plugins: only for the whole account (no --dir)' { $rc -ne 0 -and $out.Contains('只能加到整個帳號') }
+New-Item -ItemType Directory -Force -Path "$PG/fd" | Out-Null; [IO.File]::WriteAllText("$PG/log", '')
+Kit add --dir "$PG/fd" plugin demo
+$l = PLog
+Check 'plugins: --dir -> Claude --scope local, omp --scope project ; kit says Codex is account-only' { $rc -eq 0 -and ($l -ccontains 'claude plugin install demo@kit --scope local') -and ($l -ccontains 'omp plugin install demo@kit --scope project --force') -and $out.Contains('Codex 只能整個帳號裝') }
+KitJ list --json --dir "$PG/fd"
+Check 'plugins: list --json --dir, here.folder.plugins' { $out.Contains('"plugins": [{"name": "demo", "tools": ["claude", "omp"], "note": "Codex 只能整個帳號裝"}]') }
+[IO.File]::WriteAllText("$PG/log", ''); Kit rm --dir "$PG/fd" plugin demo
+$l = PLog
+Check 'plugins: rm --dir uninstalls there only' { ($l -ccontains 'claude plugin uninstall demo@kit --scope local') -and ($l -ccontains 'omp plugin uninstall demo@kit --scope project') -and -not @($l | Where-Object { $_ -like '*scope user*' }) }
 Kit rm plugin demo
 $l = PLog
 Check "plugins: rm uninstalls from each tool, kit's copy gone" { ($l -ccontains 'claude plugin uninstall demo@kit --scope user') -and ($l -ccontains 'codex plugin remove demo@kit') -and ($l -ccontains 'omp plugin uninstall demo@kit --scope user') -and -not (Test-Path "$PC/demo") -and -not (Test-Path "$PD/codex-hooks-demo") }

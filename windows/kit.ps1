@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.12'
+$script:KitApi = '1.13'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -1864,7 +1864,8 @@ function Blk([string]$c, [string]$k, [string]$n, [string]$s, [string]$d, [string
         "$c`t$t`t$k`t$n`t$s`t$(if ($d) { $d } else { '-' })`t$p`t$g"
     }
 }
-function Plugin-Class([string]$t, [string]$n) { if ($n.EndsWith('@kit', [StringComparison]::Ordinal) -and (State-Get "plugin.$t" $n.Substring(0, $n.Length - 4))) { 'kit' } else { 'other' } }
+# (Claude lists a folder's install, --scope local, in the same file: kit's when kit installed it there, kit add --dir)
+function Plugin-Class([string]$t, [string]$n) { if ($n.EndsWith('@kit', [StringComparison]::Ordinal) -and (@(Plugin-Kits $t) -ccontains $n.Substring(0, $n.Length - 4))) { 'kit' } else { 'other' } }
 function Omp-PluginOff([string]$f, [string]$n) { # omp has turned it off already ("enabled": false in its first entry)
     try {
         $o = Json-Parse (Read-Text $f); foreach ($key in 'plugins', $n) { $i = Json-Child $o $key; if ($i -lt 0) { return $false }; $o = $o.v[$i] }
@@ -2180,22 +2181,26 @@ function Plugin-Run([string]$tool, $a, [switch]$Quiet) { # the tool's own plugin
     if (-not $Quiet) { Warn "$tool $($a[0]) $($a[1]) 沒成功：$(@($script:PluginSaid -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' ')" }
     $false
 }
-function Plugin-Install([string]$t, [string]$n) { # install (again) NAME@kit, adding kit's marketplace first; $true when it worked
+function In-Dir([string]$d, [scriptblock]$b) { Push-Location -LiteralPath $d; try { & $b } finally { Pop-Location } }   # run B in folder D (its programs too)
+function Plugin-Install([string]$t, [string]$n, [string]$dir = '') { # install (again) NAME@kit, adding kit's marketplace first; $true when it worked
+    # (DIR: only there, with the tool's own folder scope, run in DIR; Claude and omp only)
     $r = Plugin-Root
     switch ($t) {
-        'claude' { return (Plugin-Run claude @('plugin', 'marketplace', 'add', $r, '--scope', 'user')) -and (Plugin-Run claude @('plugin', 'marketplace', 'update', 'kit')) -and
-                          (Plugin-Run claude @('plugin', 'install', "$n@kit", '--scope', 'user')) }
+        'claude' { if (-not ((Plugin-Run claude @('plugin', 'marketplace', 'add', $r, '--scope', 'user')) -and (Plugin-Run claude @('plugin', 'marketplace', 'update', 'kit')))) { return $false }
+                   if ($dir) { return In-Dir $dir { Plugin-Run claude @('plugin', 'install', "$n@kit", '--scope', 'local') } }
+                   return Plugin-Run claude @('plugin', 'install', "$n@kit", '--scope', 'user') }
         'codex' { return (Plugin-Run codex @('plugin', 'marketplace', 'add', $r)) -and (Plugin-Run codex @('plugin', 'add', "$n@kit")) -and (Codex-PluginTrust $n) }
-        'omp' { return ((Plugin-Run omp @('plugin', 'marketplace', 'update', 'kit') -Quiet) -or (Plugin-Run omp @('plugin', 'marketplace', 'add', $r))) -and
-                       (Plugin-Run omp @('plugin', 'install', "$n@kit", '--scope', 'user', '--force')) }
+        'omp' { if (-not ((Plugin-Run omp @('plugin', 'marketplace', 'update', 'kit') -Quiet) -or (Plugin-Run omp @('plugin', 'marketplace', 'add', $r)))) { return $false }
+                if ($dir) { Ensure-Dir (Join-Path $dir '.omp'); return In-Dir $dir { Plugin-Run omp @('plugin', 'install', "$n@kit", '--scope', 'project', '--force') } }
+                return Plugin-Run omp @('plugin', 'install', "$n@kit", '--scope', 'user', '--force') }
     }
     $false
 }
-function Plugin-Uninstall([string]$t, [string]$n) {
+function Plugin-Uninstall([string]$t, [string]$n, [string]$dir = '') {
     switch ($t) {
-        'claude' { return Plugin-Run claude @('plugin', 'uninstall', "$n@kit", '--scope', 'user') }
+        'claude' { if ($dir) { return In-Dir $dir { Plugin-Run claude @('plugin', 'uninstall', "$n@kit", '--scope', 'local') } }; return Plugin-Run claude @('plugin', 'uninstall', "$n@kit", '--scope', 'user') }
         'codex' { return Plugin-Run codex @('plugin', 'remove', "$n@kit") }
-        'omp' { return Plugin-Run omp @('plugin', 'uninstall', "$n@kit", '--scope', 'user') }
+        'omp' { if ($dir) { return In-Dir $dir { Plugin-Run omp @('plugin', 'uninstall', "$n@kit", '--scope', 'project') } }; return Plugin-Run omp @('plugin', 'uninstall', "$n@kit", '--scope', 'user') }
     }
     $false
 }
@@ -2311,17 +2316,23 @@ function Codex-PluginTrust([string]$n) { # after codex plugin add ($script:Plugi
     Kit-PendingAsk "codex-hooks-$n" "要你同意：外掛 $n 的 hook 在 Codex 打 /hooks 信任一次（kit 沒辦法讓 Codex 記住）"
     $true
 }
-function Sync-Plugins($names) { # wanted plugins -> kit's copies, and each tool installs them
-    $names = @($names | Where-Object { $_ }); $r = Plugin-Root
-    if ($names.Count -eq 0 -and @(State-List 'plugin').Count -eq 0) { return }
-    foreach ($n in $names) {
-        $p = Find-Item 'plugin' $n; if (-not $p) { Warn "plugin $n not found in any source"; continue }
-        $p = Split-Path -Parent (Split-Path -Parent $p); $h = Dir-Hash $p; $dst = Join-Path $r $n
-        if ($h -eq (State-Get 'plugin' $n) -and (Test-Path -LiteralPath $dst -PathType Container)) { continue }
-        try { Ensure-Dir $r; Remove-Tree $dst; Copy-Item -LiteralPath $p -Destination $dst -Recurse -Force; Drop-Caches $dst }
-        catch { Warn "沒辦法複製外掛 $n 到 $r"; try { Remove-Tree $dst } catch { }; continue }
-        State-Set 'plugin' $n $h; Say "  plugin $n → $r"
-    }
+function Plugin-Copy([string]$n) { # kit's copy of the source's plugin, copied again when the source's changed; $false: none
+    $r = Plugin-Root
+    $p = Find-Item 'plugin' $n; if (-not $p) { Warn "plugin $n not found in any source"; return $false }
+    $p = Split-Path -Parent (Split-Path -Parent $p); $h = Dir-Hash $p; $dst = Join-Path $r $n
+    if ($h -eq (State-Get 'plugin' $n) -and (Test-Path -LiteralPath $dst -PathType Container)) { return $true }
+    try { Ensure-Dir $r; Remove-Tree $dst; Copy-Item -LiteralPath $p -Destination $dst -Recurse -Force; Drop-Caches $dst }
+    catch { Warn "沒辦法複製外掛 $n 到 $r"; try { Remove-Tree $dst } catch { }; return $false }
+    State-Set 'plugin' $n $h; Say "  plugin $n → $r"; $true
+}
+function Dir-PluginNames { Uniq @(foreach ($d in @(Dirs-Registered)) { if (Test-Path -LiteralPath $d -PathType Container) { Of-Kind @(Dir-Items $d) 'plugin' } }) }
+function Plugin-Kits([string]$t) { # the plugins kit installed in TOOL, for the account or a folder (kit add --dir)
+    Uniq @(foreach ($r in State-Rows) { $f = $r.Split("`t"); if ($f[0] -ceq "plugin.$t" -or ($f[0].StartsWith('dir:') -and $f[0].EndsWith(":plugin.$t", [StringComparison]::Ordinal))) { $f[1] } })
+}
+function Sync-Plugins($names) { # wanted plugins -> kit's copies (the folders' too), and each tool installs them
+    $names = @($names | Where-Object { $_ }); $r = Plugin-Root; $all = @(Uniq (@($names) + @(Dir-PluginNames)))
+    if ($all.Count -eq 0 -and @(State-List 'plugin').Count -eq 0) { return }
+    foreach ($n in $all) { [void](Plugin-Copy $n) }
     if (-not (Plugin-Market @(State-List 'plugin'))) { Warn "沒辦法寫 kit 的外掛清單（$r）"; return }
     foreach ($t in Plugin-Tools) {
         foreach ($n in @(State-List 'plugin')) {
@@ -2338,8 +2349,8 @@ function Sync-Plugins($names) { # wanted plugins -> kit's copies, and each tool 
     }
     # codex plugin puts its tables at the end of config.toml, inside kit's block: out of it now, quietly
     if (Has-Codex) { $q = $script:Quiet; $script:Quiet = $true; try { Codex-Keep $(if (Test-Path -LiteralPath $CodexLast) { Read-Text $CodexLast } else { '' }) } finally { $script:Quiet = $q } }
-    foreach ($n in @(State-List 'plugin')) {                 # kit's copy goes once no tool has it any more
-        if ($names -ccontains $n) { continue }
+    foreach ($n in @(State-List 'plugin')) {                 # kit's copy goes once no tool and no folder has it any more
+        if ($all -ccontains $n) { continue }
         $any = $false; foreach ($t in 'claude', 'codex', 'omp') { if ($null -ne (State-Get "plugin.$t" $n)) { $any = $true } }
         if (-not $any) { Remove-Tree (Join-Path $r $n); State-Del 'plugin' $n; Kit-PendingDone "codex-hooks-$n" }
     }
@@ -2639,7 +2650,7 @@ function Dir-Root([string]$d) { # the folder kit uses for D: the nearest one at 
 function Dir-Lines([string]$d) {
     $f = Join-Path $d $DirFile
     if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return @() }
-    Uniq @(foreach ($l in (Read-Text $f) -split "`n") { $l = $l.TrimEnd("`r"); if ($l -cmatch '^(not:)?(rule|skill|mcp):[^ ]+$') { $l } })
+    Uniq @(foreach ($l in (Read-Text $f) -split "`n") { $l = $l.TrimEnd("`r"); if ($l -cmatch '^(not:)?(rule|skill|mcp|plugin):[^ ]+$') { $l } })
 }
 function Dir-Own([string]$d) { @(Dir-Lines $d | Where-Object { -not $_.StartsWith('not:') }) }                     # what you added
 function Dir-Nots([string]$d) { @(foreach ($l in @(Dir-Lines $d)) { if ($l.StartsWith('not:')) { $l.Substring(4) } }) }   # the agent's you took out
@@ -2680,7 +2691,7 @@ function Dir-Write([string]$d, $items, $marks = $null) { # the folder's .agentki
     $f = Join-Path $d $DirFile; $items = @($items | Where-Object { $_ })
     if ($null -eq $marks) { $marks = @(Dir-Marks $d) }; $marks = @($marks | Where-Object { $_ })
     if ($items.Count -eq 0 -and $marks.Count -eq 0) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }; return }
-    $t = "# kit：這個資料夾自己的規則、skill、MCP。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。`n"
+    $t = "# kit：這個資料夾自己的規則、skill、MCP、外掛。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。`n"
     $t += "# 用  kit add --dir <資料夾> 種類 名字  /  kit rm --dir …  改。`n"
     if ($marks.Count -gt 0) {
         $t += "# kit place：這個資料夾就是下面這個 agent（在這裡開的 claude、codex、omp 都是它）。`n"
@@ -2789,6 +2800,47 @@ function Place-More([string]$name, [string]$f, [bool]$rules) { # the agent's pro
     $pre = ''; if ($rules) { $pre = "`n" }
     $pre + "<!-- agent: $name -->`n$b`n"
 }
+# A folder's plugins (kit add --dir D plugin N): each tool's own folder scope, run in D. Codex has none (only the account).
+# As unix/kit's dir_plugins: Claude --scope local (.claude/settings.local.json of Claude's project: the git repo's top, else
+# D), omp --scope project with a D/.omp (D/.omp/plugins/). That file tracked by git: kit leaves the tool out there.
+function Dir-PluginFile([string]$t, [string]$d) {
+    if ($t -eq 'claude') {
+        $top = "$(Git-Q -C $d rev-parse --show-toplevel)".Trim(); if ($LASTEXITCODE -ne 0 -or -not $top) { $top = $d }
+        return Join-Path (Join-Path $top '.claude') 'settings.local.json'
+    }
+    Join-Path (Join-Path (Join-Path $d '.omp') 'plugins') 'installed_plugins.json'
+}
+function Dir-Plugins([string]$dir) { # the folder's plugins installed (again when kit's copy changed) or taken out, Claude and omp
+    $names = @(Of-Kind @(Dir-Items $dir) 'plugin')
+    foreach ($n in $names) { [void](Plugin-Copy $n) }
+    if ($names.Count -gt 0 -and -not (Plugin-Market @(State-List 'plugin'))) { Warn "沒辦法寫 kit 的外掛清單（$(Plugin-Root)）"; return }
+    foreach ($t in 'claude', 'omp') {
+        $k = Dir-Kind $dir "plugin.$t"
+        if (($names.Count -eq 0 -and @(State-List $k).Count -eq 0) -or -not (Has-Command $t)) { continue }
+        $f = Dir-PluginFile $t $dir; $top = Split-Path -Parent (Split-Path -Parent $f)
+        $tracked = $(if ($t -eq 'omp') { Split-Path -Parent $f } else { $f })
+        foreach ($n in $names) {
+            $h = State-Get 'plugin' $n; if (-not $h -or (State-Get $k $n) -eq $h) { continue }
+            if ("$(Git-Q -C $dir ls-files -- $tracked)".Trim()) {
+                if ($null -eq (State-Get 'told' "plugin:${t}:$dir")) { Warn "${dir}：$t 的外掛設定（${f}）git 有記錄，kit 不改它：在這裡開的 $t 沒有外掛 $n"; State-Set 'told' "plugin:${t}:$dir" 1 }
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $f) -and @(State-List $k).Count -eq 0) { State-Set 'made' $f 1 }
+            if (-not (Plugin-Install $t $n $dir)) { continue }
+            State-Set $k $n $h
+            if ($t -eq 'claude' -and $top -ne $dir) { Say "  plugin $n → claude（整個 git repo ${top}：Claude 的資料夾範圍就是整個 repo）" }
+            else { Say "  plugin $n → ${t}（只有 ${dir}）" }
+        }
+        foreach ($n in @(State-List $k)) {
+            if ($names -ccontains $n) { continue }
+            if (Plugin-Uninstall $t $n $dir) { State-Del $k $n; Say "  removed plugin $n ← ${t}（${dir}）" }
+        }
+        if (@(State-List $k).Count -gt 0 -or $null -eq (State-Get 'made' $f)) { continue }
+        if ($t -eq 'claude') { Prune-Empty $f @('enabledPlugins'); if (Test-Path -LiteralPath "$f.kit-backup") { Remove-Item -LiteralPath "$f.kit-backup" -Force }; Drop-Made $f
+                              $cd = Split-Path -Parent $f; if ((Test-Path -LiteralPath $cd -PathType Container) -and -not (Get-ChildItem -LiteralPath $cd -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $cd -Force } }
+        elseif (@(Json-Keys $f @('plugins')).Count -eq 0) { Remove-Tree (Split-Path -Parent $f); State-Del 'made' $f }
+    }
+}
 function Apply-Dir([string]$dir) { # the folder's .agentkit (and its agent) -> the tools' files in it
     # kit place: the agent's rules, skills, MCP, its prompt after the rules, its tool limits into the tools' settings
     # (read from the agent each time, so kit sync brings a change). An agent kit cannot read: kit's copy from the last
@@ -2825,6 +2877,7 @@ function Apply-Dir([string]$dir) { # the folder's .agentkit (and its agent) -> t
     Dir-ClaudeAllow $dir $mcps
     Dir-ClaudeTrust $dir
     Dir-ClaudeDeny $dir $cdeny
+    Dir-Plugins $dir
     # kit's backups of the user's own files go when kit has nothing left in them
     if (@(State-List (Dir-Kind $dir 'mcp')).Count -eq 0 -and (Test-Path -LiteralPath "$mj.kit-backup")) { Remove-Item -LiteralPath "$mj.kit-backup" -Force }
     $sl = Join-Path (Join-Path $dir '.claude') 'settings.local.json.kit-backup'
@@ -2950,8 +3003,10 @@ function Dir-AddRm([string]$verb, [string]$dir, [string]$k, [string]$n) { # only
     Dir-Write $root $items
     if ($items.Count -gt 0 -or (Dir-Mark $root 'agent')) { Dirs-Set $root 'add' } else { Dirs-Set $root 'rm' }
     Apply-Dir $root
-    if (Has-Codex) { Apply-All }                              # Codex: the folder's trust and the root marker
-    if ($verb -eq 'add') { Say "kit：$i 加到 ${root}（只有在這裡和子資料夾開的 agent 讀得到，開新的才會讀到）" }
+    # Codex: the folder's trust and the root marker; a plugin: kit's copy and what is blocked (a folder's plugin is kit's)
+    if ((Has-Codex) -or $k -eq 'plugin') { Apply-All }
+    if ($verb -eq 'add') { Say "kit：$i 加到 ${root}（只有在這裡和子資料夾開的 agent 讀得到，開新的才會讀到）"
+        if ($k -eq 'plugin') { Say "     Codex 只能整個帳號裝：在這裡開的 Codex 沒有外掛 ${n}（Codex 也要的話：kit add plugin ${n}，整個帳號都有）" } }
     else { Say "kit：$i 從 $root 拿掉了" }
 }
 
@@ -6148,7 +6203,9 @@ function Here-Json([string]$dir, [string]$hpid) { # the "here" part of kit list 
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $out + ", `"error`": $(Json-S '找不到這個資料夾'), `"items`": []}" }
     $froot = Dir-Root $dir
     $fa = Dir-Mark $froot 'agent'
-    $out += ", `"folder`": {`"dir`": $(Json-S $froot), `"why`": $(Json-S (Dir-WhyNot $froot)), `"items`": $(Json-Arr @(Dir-Items $froot)), `"agent`": $(if ($fa) { Json-S $fa } else { 'null' })}"
+    $fp = @(foreach ($pn in @(Of-Kind @(Dir-Items $froot) 'plugin')) {   # which tools have each folder plugin
+        "{`"name`": $(Json-S $pn), `"tools`": $(Json-Arr @(foreach ($t in 'claude', 'omp') { if ($null -ne (State-Get (Dir-Kind $froot "plugin.$t") $pn)) { $t } })), `"note`": $(Json-S 'Codex 只能整個帳號裝')}" })
+    $out += ", `"folder`": {`"dir`": $(Json-S $froot), `"why`": $(Json-S (Dir-WhyNot $froot)), `"items`": $(Json-Arr @(Dir-Items $froot)), `"agent`": $(if ($fa) { Json-S $fa } else { 'null' }), `"plugins`": [$($fp -join ', ')]}"
     $out += ', "items": ['
     $first = $true
     foreach ($r in Here-Rows $dir) {
@@ -6268,7 +6325,6 @@ function Cmd-AddRm([string]$verb, $rest) {
     Need-Init
     $k = $rest[0]; $names = @($rest[1..($rest.Count - 1)])
     if (@('rule', 'skill', 'mcp', 'plugin') -notcontains $k) { Die '種類只能是 rule、skill、mcp、plugin' }
-    if ($dir -and $k -eq 'plugin') { Die '外掛只能加到整個帳號（不能 --dir）' }
     if ($dir) { Dir-AddRm $verb $dir $k $names[0]; return }
     $acct = @(Wanted)
     foreach ($n in $names) {
@@ -6506,7 +6562,7 @@ function Cmd-Uninstall($rest) {
     Sync-McpJson (Join-Path $OmpDir 'mcp.json') 'mcp.omp' @()
     Sync-Plugins @()
     if (Test-Path -LiteralPath (Plugin-Root)) {               # kit's marketplace, once nothing of it is installed
-        foreach ($t in Plugin-Tools) { if (@(State-List "plugin.$t").Count -eq 0) { [void](Plugin-Run $t @('plugin', 'marketplace', 'remove', 'kit') -Quiet) } }
+        foreach ($t in Plugin-Tools) { if (@(Plugin-Kits $t).Count -eq 0) { [void](Plugin-Run $t @('plugin', 'marketplace', 'remove', 'kit') -Quiet) } }
         if (@(State-List 'plugin').Count -eq 0) { Remove-Tree (Plugin-Root) }
     }
     $script:Quiet = $false
@@ -7896,9 +7952,10 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）
   kit add|rm plugin <名字>          外掛（skill、hook、MCP 一起）：照 Claude、Codex、omp 自己裝外掛的方式裝，
                                     從這台的來源副本裝、不自動更新；Codex 的 hook 只有簽過的版本 kit 才自己信任
-  kit add --dir <資料夾> rule|skill|mcp <名字>
+  kit add --dir <資料夾> rule|skill|mcp|plugin <名字>
                                     只加到這個資料夾：在這裡（含子資料夾）開的 agent 才有
-  kit rm  --dir <資料夾> rule|skill|mcp <名字>
+                                    （外掛：Claude、omp 用它們自己的資料夾範圍裝；Codex 只能整個帳號裝）
+  kit rm  --dir <資料夾> rule|skill|mcp|plugin <名字>
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
                                     用 kit 的裝法裝，太舊就升級（畫面程式的「安裝」按鈕也是用這個）
