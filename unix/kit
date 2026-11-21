@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.14
+KIT_API=1.15
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -675,6 +675,98 @@ EOF
     rm -f "$ops"
 }
 
+# ---------- Claude's MCP: a plugin of kit's ----------
+# Claude takes kit's MCP servers from a plugin in kit's marketplace: kit-mcp for the account (--scope user), kit-mcp-<id>
+# for a folder (kit add --dir, kit place: --scope local there). Claude reads a plugin of a folder marketplace from that
+# folder, so after kit rewrites its .mcp.json, /reload-plugins in a running Claude connects or drops them (no restart).
+# Their tools are mcp__plugin_<plugin>_<server>__<tool>: kit writes a deny rule for an MCP tool in both forms. A folder
+# keeps its .mcp.json for omp; Claude has kit's servers there in disabledMcpjsonServers, so it takes the plugin's. No
+# claude, one older than CLAUDE_MCP_MIN (the one this was tried with), or its plugin install fails: ~/.claude.json and
+# the folder's enabledMcpjsonServers, as before.
+CLAUDE_MCP_MIN=2.1.330
+KIT_CMP=""
+claude_mcp_ok() { # 0: this machine's Claude takes kit's MCP as a plugin
+    local v=""
+    if [ -z "$KIT_CMP" ]; then
+        command -v claude >/dev/null 2>&1 && v=$(tool_version claude | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1)
+        KIT_CMP=json
+        if [ -n "$v" ] && ver_ge "$v" "$CLAUDE_MCP_MIN"; then KIT_CMP=plugin
+        elif [ -n "$v" ] && [ -z "$(state_get told claude-mcp-json)" ]; then
+            warn "Claude Code $v 比 $CLAUDE_MCP_MIN 舊：kit 的 MCP 照舊寫在 ${CLAUDE_JSON}，改了要重開 Claude（更新 Claude 後 kit sync 會改成 kit 的外掛，打 /reload-plugins 就生效）（只提醒這一次）"
+            state_set told claude-mcp-json 1
+        fi
+    fi
+    [ "$KIT_CMP" = plugin ]
+}
+claude_mcp_name() { [ -z "${1:-}" ] && echo kit-mcp || printf '%s' "$1" | cksum | awk '{ printf "kit-mcp-%x\n", $1 }'; }   # [DIR]
+claude_mcp_put() { # claude_mcp_put OLDKIND FILE [DIR] : wanted MCP names on stdin -> kit's plugin for Claude (the
+    # account's, or DIR's), installed or removed. FILE (state kind OLDKIND): where Claude had kit's before; a server of
+    # yours there by that name stays yours, not in the plugin. 1: not done (Claude keeps them the old way).
+    local ok=$1 f=$2 dir=${3:-} pn r d n p k body="" kind on mf new
+    pn=$(claude_mcp_name "$dir"); r=$(plugin_root); d="$r/$pn"
+    kind=mcp.claude; [ -z "$dir" ] || kind=$(dir_kind "$dir" mcp.claude)
+    for n in $(cat); do
+        p=$(find_item mcp "$n" 2>/dev/null) && k=$(mcp_json "$p" 2>/dev/null) || continue   # (sync_mcp_json says why)
+        if [ -z "$(state_get "$ok" "$n")" ] && [ -f "$f" ] && json_get "$f" "mcpServers.$n" >/dev/null; then
+            [ -n "$(state_get skipped "$f#mcp.$n")" ] || { warn "$f 已經有自己的 MCP ${n}，不是 kit 放的，kit 不動它（只提醒這一次）"; state_set skipped "$f#mcp.$n" 1; }
+            continue
+        fi
+        body="$body${body:+$LF}$n$TAB$k"
+    done
+    on=""; grep -qF "\"$pn@kit\"" "$CLAUDE_DIR/plugins/installed_plugins.json" 2>/dev/null && on=1
+    mf=""; [ -z "$dir" ] || mf=$(dir_plugin_file claude "$dir")
+    if [ -z "$body" ]; then                                  # nothing for Claude: the plugin goes
+        [ -n "$on$(state_list "$kind")" ] || [ -d "$d" ] || return 0
+        if [ -n "$on" ]; then plugin_uninstall claude "$pn" ${dir:+"$dir"} || return 1; fi
+        rm -rf "${d:?}"; plugin_market "$(state_list plugin)"
+        for n in $(state_list "$kind"); do state_del "$kind" "$n"; done
+        [ -z "$dir" ] || { prune_empty "$mf" enabledPlugins; drop_made "$mf"; rmdir "${mf%/*}" 2>/dev/null; }
+        return 0
+    fi
+    new=$(printf '%s\n' "$body" | awk -F'\t' '{ printf "%s\"%s\":%s", (NR > 1 ? "," : ""), $1, $2 } END { print "" }')
+    new="{\"mcpServers\":{$new}}"
+    mkdir -p "$d/.claude-plugin" && chmod 700 "$d" || return 1   # (a token in an env stays the owner's, as in ~/.claude.json)
+    if [ "$(cat "$d/.mcp.json" 2>/dev/null)" != "$new" ]; then
+        printf '%s\n' "$new" > "$d/.mcp.json" &&
+        printf '{"name":"%s","version":"%s","description":"kit: MCP servers for Claude"}\n' "$pn" "$(printf '%s' "$new" | cksum | awk '{ print $1 }')" > "$d/.claude-plugin/plugin.json" || return 1
+        say "  mcp $(printf '%s\n' "$body" | cut -f1 | paste -sd ' ' -) → claude（kit 的外掛 ${pn}：開著的 Claude 打 /reload-plugins 就生效）"
+    fi
+    plugin_market "$(state_list plugin)" || return 1
+    if [ -z "$on" ]; then
+        [ -z "$dir" ] || [ -e "$mf" ] || state_set made "$mf" 1
+        plugin_install claude "$pn" ${dir:+"$dir"} || { rm -rf "${d:?}"; plugin_market "$(state_list plugin)"; return 1; }
+    fi
+    for n in $(state_list "$kind"); do printf '%s\n' "$body" | cut -f1 | grep -qxF "$n" || state_del "$kind" "$n"; done
+    for n in $(printf '%s\n' "$body" | cut -f1); do state_set "$kind" "$n" "$pn"; done
+}
+claude_deny_forms() { # claude_deny_forms PLUGIN... : deny rules on stdin -> the same, and an MCP tool's also as each kit
+    # MCP plugin's (mcp__<server>__<tool> -> mcp__plugin_<plugin>_<server>__<tool>)
+    awk -v ps="$*" '{ print } /^mcp__/ { n = split(ps, P, " "); for (i = 1; i <= n; i++) print "mcp__plugin_" P[i] "_" substr($0, 6) }' | awk 'NF && !seen[$0]++'
+}
+dir_claude_off() { # dir_claude_off DIR : MCP names on stdin (Claude has them from kit's plugin) -> the folder's
+    # .claude/settings.local.json disabledMcpjsonServers: Claude neither asks about nor starts the .mcp.json copies (omp's).
+    # One already there is yours: kit does not count it as its own, so never takes it out.
+    local dir=$1 f="$1/.claude/settings.local.json" names n ops add="" del="" km ko have
+    km=$(dir_kind "$dir" mcp); ko=$(dir_kind "$dir" off)
+    names=$(cat); ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX"); have=$(json_strs "$f" disabledMcpjsonServers)
+    for n in $names; do
+        [ -n "$(state_get "$km" "$n")" ] && [ -z "$(state_get "$ko" "$n")" ] || continue
+        printf '%s\n' "$have" | grep -qxF -- "$(json_str "$n")" && continue
+        printf 'addstr\tdisabledMcpjsonServers\t%s\n' "$n" >> "$ops"; add="$add $n"
+    done
+    for n in $(state_list "$ko"); do
+        printf '%s\n' "$names" | grep -qxF "$n" && [ -n "$(state_get "$km" "$n")" ] && continue
+        printf 'rmstr\tdisabledMcpjsonServers\t%s\n' "$n" >> "$ops"; del="$del $n"
+    done
+    if [ -s "$ops" ]; then
+        [ -f "$f" ] || state_set made "$f" 1
+        json_edit "$f" "$ops"; prune_empty "$f" disabledMcpjsonServers
+        for n in $add; do state_set "$ko" "$n" 1; done
+        for n in $del; do state_del "$ko" "$n"; done
+    fi
+    rm -f "$ops"; drop_made "$f"
+}
+
 # ---------- plugins ----------
 # A plugin (plugins/<name>/ in a source, with .claude-plugin/plugin.json; maybe .codex-plugin/plugin.json and a
 # package.json whose pi or omp key names omp's extension) goes to each tool the way the tool installs a plugin, from
@@ -688,7 +780,8 @@ kit_pending_done() { rm -f "$PEND_DIR/$1" 2>/dev/null; return 0; }
 plugin_root() { printf '%s/plugins\n' "$KIT_CONF"; }
 plugin_tools() { local t; for t in claude codex omp; do command -v "$t" >/dev/null 2>&1 && printf '%s\n' "$t"; done; }
 plugin_market() { # plugin_market NAMES : kit's marketplace lists them (Claude and omp read .claude-plugin, Codex .agents)
-    local r n c="" a=""; r=$(plugin_root)
+    local r n c="" a="" d; r=$(plugin_root)
+    for d in "$r"/kit-mcp "$r"/kit-mcp-*; do [ -f "$d/.claude-plugin/plugin.json" ] && c="$c${c:+,}{\"name\":\"${d##*/}\",\"source\":\"./${d##*/}\"}"; done   # Claude's only
     for n in $1; do
         c="$c${c:+,}{\"name\":\"$n\",\"source\":\"./$n\"}"
         a="$a${a:+,}{\"name\":\"$n\",\"source\":{\"source\":\"local\",\"path\":\"./$n\"},\"policy\":{\"installation\":\"AVAILABLE\",\"authentication\":\"ON_INSTALL\"},\"category\":\"Productivity\"}"
@@ -815,7 +908,9 @@ plugin_copy() { # plugin_copy NAME : kit's copy of the source's plugin, copied a
 }
 dir_plugin_names() { local d; dirs_registered | while IFS= read -r d; do [ -d "$d" ] && dir_items "$d" | sed -n 's/^plugin://p'; done | awk '!seen[$0]++'; }
 plugin_kits() { # plugin_kits TOOL : the plugins kit installed in TOOL, for the account or a folder (kit add --dir)
-    [ -f "$STATE" ] && awk -F'\t' -v t="plugin.$1" '$1 == t || ($1 ~ /^dir:/ && substr($1, length($1) - length(t)) == ":" t) { print $2 }' "$STATE" | awk '!seen[$0]++'
+    # (Claude: kit's MCP plugins too)
+    [ -f "$STATE" ] && awk -F'\t' -v t="plugin.$1" '$1 == t || ($1 ~ /^dir:/ && substr($1, length($1) - length(t)) == ":" t) { print $2 }
+        t == "plugin.claude" && ($1 == "mcp.claude" || $1 ~ /^dir:.*:mcp\.claude$/) { print $3 }' "$STATE" | awk '!seen[$0]++'
 }
 sync_plugins() { # sync_plugins : wanted plugin names on stdin -> kit's copies (the folders' too), and each tool installs them
     local names all r n h t ok
@@ -1222,10 +1317,17 @@ apply_claude() {
     plugins=$(printf '%s\n' "$want" | sed -n 's/^plugin://p')
 
     # (no pipelines here: a file kit cannot write stops kit, before state.tsv says it was done)
-    # Claude: rules as @imports (Codex and omp: AGENTS.md gets the rule text itself), skills, MCP in ~/.claude.json
+    # Claude: rules as @imports (Codex and omp: AGENTS.md gets the rule text itself), skills, MCP in kit's plugin
+    # kit-mcp (kit's from before in ~/.claude.json go once it is installed), else in ~/.claude.json
     apply_rules "$want"
     sync_skills "$CLAUDE_DIR/skills" skill <<< "$skills"
-    sync_mcp_json "$CLAUDE_JSON" mcp <<< "$mcps"; mcp_vars_warn <<< "$mcps"
+    if claude_mcp_ok && claude_mcp_put mcp "$CLAUDE_JSON" <<< "$mcps"; then sync_mcp_json "$CLAUDE_JSON" mcp < /dev/null
+    else
+        sync_mcp_json "$CLAUDE_JSON" mcp <<< "$mcps"
+        [ -z "$(state_list mcp.claude)" ] || claude_mcp_put mcp "$CLAUDE_JSON" < /dev/null
+    fi
+    if claude_mcp_ok && [ -z "$(state_list mcp)" ]; then state_set claude_mcp account plugin; else state_set claude_mcp account config; fi
+    mcp_vars_warn <<< "$mcps"
 
     # Codex and omp share ~/.agents/skills
     if has_codex || has_omp; then sync_skills "$AGENTS_SKILLS" skill.agents <<< "$skills"; fi
@@ -1245,7 +1347,7 @@ apply_claude() {
     ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
     # tool deny rules -> ~/.claude/settings.json
     # (one you already have is yours: kit does not count it as its own, so never takes it out)
-    local deny add="" del="" have; deny=$(required_deny); have=$(json_strs "$CLAUDE_DIR/settings.json" permissions.deny)
+    local deny add="" del="" have; deny=$(required_deny | claude_deny_forms $( [ -z "$(state_list mcp.claude)" ] || echo kit-mcp )); have=$(json_strs "$CLAUDE_DIR/settings.json" permissions.deny)
     while IFS= read -r n; do
         [ -n "$n" ] || continue
         [ -n "$(state_get deny "$n")" ] && continue
@@ -1699,7 +1801,7 @@ dir_claude_trust() { # dir_claude_trust DIR : the folder trusted in ~/.claude.js
     kt=$(dir_kind "$dir" trust); was=$(state_get "$kt" claude); p="projects$k$dir"
     [ -f "$CLAUDE_JSON" ] || return 0
     ops=$(mktemp "${TMPDIR:-/tmp}/kit-ops.XXXXXX")
-    if [ -n "$(state_list "$(dir_kind "$dir" allow)")" ]; then
+    if [ -n "$(state_list "$(dir_kind "$dir" allow)")$(state_list "$(dir_kind "$dir" off)")" ]; then
         v=$(json_get "$CLAUDE_JSON" "$p${k}hasTrustDialogAccepted" "$k")
         if [ "$v" != true ]; then
             printf 'set\t%s%shasTrustDialogAccepted\ttrue\n' "$p" "$k" > "$ops"; json_edit "$CLAUDE_JSON" "$ops" "$k"
@@ -1809,13 +1911,23 @@ apply_dir() { # apply_dir DIR : the folder's .agentkit (and its agent) -> the to
     [ -f "$dir/.mcp.json" ] || [ -z "$mcps" ] || state_set made "$dir/.mcp.json" 1
     sync_mcp_json "$dir/.mcp.json" "$(dir_kind "$dir" mcp)" <<< "$mcps"; mcp_vars_warn <<< "$mcps"
     drop_made "$dir/.mcp.json"
-    dir_claude_allow "$dir" <<< "$mcps"
+    if claude_mcp_ok && claude_mcp_put "$(dir_kind "$dir" mcp)" "$dir/.mcp.json" "$dir" <<< "$mcps"; then
+        dir_claude_allow "$dir" < /dev/null; dir_claude_off "$dir" <<< "$mcps"
+    else
+        [ -z "$(state_list "$(dir_kind "$dir" mcp.claude)")" ] || claude_mcp_put "$(dir_kind "$dir" mcp)" "$dir/.mcp.json" "$dir" < /dev/null
+        dir_claude_off "$dir" < /dev/null; dir_claude_allow "$dir" <<< "$mcps"
+    fi
     dir_claude_trust "$dir"
+    # kit's MCP plugin here: the agent's MCP denies in its names too, and the team's (the account's settings have the rest)
+    if [ -n "$(state_list "$(dir_kind "$dir" mcp.claude)")" ]; then
+        cdeny=$( { printf '%s\n' "$cdeny" | claude_deny_forms "$(claude_mcp_name "$dir")" $( [ -z "$(state_list mcp.claude)" ] || echo kit-mcp )
+                   required_deny | claude_deny_forms "$(claude_mcp_name "$dir")" | grep '^mcp__plugin_'; } | awk 'NF && !seen[$0]++')
+    fi
     dir_claude_deny "$dir" <<< "$cdeny"
     dir_plugins "$dir"
     # kit's backups of the user's own files go when kit has nothing left in them
     [ -n "$(state_list "$(dir_kind "$dir" mcp)")" ] || rm -f "$dir/.mcp.json.kit-backup"
-    [ -n "$(state_list "$(dir_kind "$dir" allow)")$(state_list "$(dir_kind "$dir" deny)")" ] || rm -f "$dir/.claude/settings.local.json.kit-backup"
+    [ -n "$(state_list "$(dir_kind "$dir" allow)")$(state_list "$(dir_kind "$dir" off)")$(state_list "$(dir_kind "$dir" deny)")" ] || rm -f "$dir/.claude/settings.local.json.kit-backup"
     if has_codex || has_omp || [ "$tool" = codex ] || [ "$tool" = omp ] || [ -n "$(state_list "$(dir_kind "$dir" skill.agents)")" ]; then
         set_rules "$dir/AGENTS.md" inline "$more" <<< "$rules"
         sync_skills "$dir/.agents/skills" "$(dir_kind "$dir" skill.agents)" <<< "$skills"
@@ -4045,7 +4157,7 @@ USED_CLAUDE='
     s = $0
     while (match(s, /"type":"tool_use","id":"[^"]*","name":"mcp__([^"\\]|\\.)*"/)) {
         n = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH); n = substr(n, index(n, "\"name\":\"mcp__") + 13); n = substr(n, 1, length(n) - 1)
-        if ((i = index(n, "__")) > 1) print t "\t" fi "\t" (++r) "\t" tno() "\tmcp\t" unesc(substr(n, 1, i - 1))
+        if ((i = index(n, "__")) > 1) { n = unesc(substr(n, 1, i - 1)); sub(/^plugin_kit-mcp(-[0-9a-f]+)?_/, "", n); print t "\t" fi "\t" (++r) "\t" tno() "\tmcp\t" n }
     }
 }'
 USED_CODEX='
@@ -4621,6 +4733,7 @@ ver_targets() { # what each tool has from kit: "verkind TAB tool:kind:name TAB m
         k == "skill.agents" { p = (s == "" ? as : s "/.agents/skills") "/" $2; if (cx) out("codex", "skill", $3, p); if (om) out("omp", "skill", $3, p) }
         k == "mcp" { out("claude", "mcp", "=", s == "" ? cj : s "/.mcp.json"); if (s != "" && om) out("omp", "mcp", "=", s "/.mcp.json") }
         k == "mcp.omp" && s == "" { out("omp", "mcp", "=", od "/mcp.json") }
+        k == "mcp.claude" && s == "" { out("claude", "mcp", "=", pr "/" $3 "/.mcp.json") }
         k ~ /^plugin\.(claude|codex|omp)$/ { out(substr(k, 8), "plugin", $3, pr "/" $2) }' "$STATE"
     for n in $(printf '%s\n' "$w" | sed -n 's/^rule://p'); do
         [ -z "$cx" ] || printf 'ver\tcodex:rule:%s\t=\t%s\n' "$n" "$CODEX_DIR/AGENTS.md"
@@ -4784,7 +4897,9 @@ cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a k
 $(m_sources)
 EOF
     tools='"claude"'; has_codex && tools="$tools, \"codex\""; has_omp && tools="$tools, \"omp\""
-    printf '\n  ],\n  "tools": [%s],\n  "items": [' "$tools"
+    # how Claude gets kit's MCP: plugin (kit-mcp: /reload-plugins brings a change), config (~/.claude.json: a restart)
+    local cm; cm=$(state_get claude_mcp account); [ -n "$cm" ] || cm=config   # (kit sync writes it: no claude run here)
+    printf '\n  ],\n  "tools": [%s],\n  "claude_mcp": "%s",\n  "items": [' "$tools" "$cm"
     first=1
     for i in $ALL; do
         k=${i%%:*}; n=${i#*:}
@@ -5151,6 +5266,7 @@ EOF
     sync_skills "$CLAUDE_DIR/skills" skill < /dev/null
     sync_skills "$AGENTS_SKILLS" skill.agents < /dev/null
     sync_mcp_json "$CLAUDE_JSON" mcp < /dev/null           # stops kit (state.tsv kept) when the file cannot be written
+    claude_mcp_put mcp "$CLAUDE_JSON" < /dev/null           # kit's MCP plugin for Claude
     sync_mcp_json "$OMP_DIR/mcp.json" mcp.omp < /dev/null
     sync_plugins < /dev/null
     if [ -d "$(plugin_root)" ]; then                          # kit's marketplace, once nothing of it is installed

@@ -54,7 +54,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 
 | | rule | skill | MCP | 團隊禁用的工具 |
 |---|---|---|---|---|
-| Claude Code | `~/.claude/CLAUDE.md`（標記之間，@ 引用） | `~/.claude/skills/` | `~/.claude.json` | `~/.claude/settings.json` 的 `permissions.deny` |
+| Claude Code | `~/.claude/CLAUDE.md`（標記之間，@ 引用） | `~/.claude/skills/` | kit 自己的外掛 `kit-mcp`（0.10.0 起，見下面；Claude 太舊時 `~/.claude.json`） | `~/.claude/settings.json` 的 `permissions.deny` |
 | Codex | `~/.codex/AGENTS.md`（標記之間，內容直接放進去） | `~/.agents/skills/` | `~/.codex/config.toml`（標記之間） | MCP 工具 → `disabled_tools`；shell、改檔 → `~/.codex/hooks.json` 的 `kit codex-guard`（kit 0.6.7 起） |
 | omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | `~/.omp/agent/hooks/pre/kit.js`（kit 0.6.7 起） |
 
@@ -111,6 +111,14 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 只動 kit 放的 MCP，信任也只給這個資料夾；資料夾裡沒有 kit 放的 MCP 了，kit 把信任改回原來的樣子。
 Codex 一樣：kit 在 `~/.codex/config.toml` 信任這個資料夾（`[projects."<資料夾>"]`），Codex 才讀資料夾的 `.codex/config.toml`，開的時候不會問。kit 放的 MCP（整個帳號的、資料夾的、`kit run` 的）在 Codex 都加 `default_tools_approval_mode = "approve"`，叫它的工具不會每次問；團隊擋掉的工具照舊在 `disabled_tools`。omp 不用設定：它本來就讀 `.mcp.json`、不會問。
 有人在 Claude 的 `/mcp` 把它關掉（記在 `disabledMcpjsonServers`，關掉的優先），下一次 `kit sync` 把它從那裡拿掉、重新打開，並說一聲（只動 kit 放的 MCP）。
+（上面這段是 Claude 太舊、kit 照舊寫的做法；0.10.0 起見下面「Claude 的 MCP 改了不用重開」。）
+
+**Claude 的 MCP 改了不用重開**（kit 0.10.0 起，Claude Code 2.1.330 以上；Windows 之後再做）：kit 把給 Claude 的 MCP 放在 kit 外掛清單裡的一個外掛：整個帳號的叫 `kit-mcp`（`--scope user`），一個資料夾的叫 `kit-mcp-<編號>`（在那個資料夾 `--scope local`）。`kit add|rm mcp`、`kit sync` 改它的 `.mcp.json`，**開著的 Claude 打 `/reload-plugins` 就連上新的、斷掉拿掉的**，不用重開。
+- 工具名字變成 `mcp__plugin_<外掛>_<server>__<工具>`（例如 `mcp__plugin_kit-mcp_gerrit__submit_change`）。kit 寫的 deny（團隊的 `tools.deny`、agent 的）兩種名字都寫。你自己在 settings 寫的 allow 是舊名字，會再問一次。`kit used` 兩種名字都算那個 server。
+- 搬家：第一次 `kit sync`，kit 先裝好 `kit-mcp`，**裝好了才**把 kit 以前寫進 `~/.claude.json` 的拿掉（只拿 kit 記得是自己的，你自己寫的一個都不動；你已經有同名的，kit 不放進外掛）。那時開著的 Claude 舊的還連著，重開一次最乾淨。
+- 資料夾的：`.mcp.json` 照舊寫（給 omp），Claude 那份 kit 寫進 `.claude/settings.local.json` 的 `disabledMcpjsonServers`（不問、不開），Claude 用外掛的那份；資料夾一樣設成信任的。
+- `${變數}` 照舊原樣放（值是 Claude 開的時候的環境：新設的變數要從有它的 shell 重開 Claude）。外掛資料夾只有你讀得到（700）。
+- `kit uninstall` 先移掉這些外掛。沒裝 Claude、Claude 比 2.1.330 舊（kit 說一次），或裝外掛失敗：照舊寫 `~/.claude.json`／`enabledMcpjsonServers`，改了要重開 Claude。
 
 omp 的工具限制：kit 把 Claude 的工具名字換成 omp 做同樣事的工具（例如 Read → read，Bash → bash 和 eval，Grep → grep 和 ast_grep），
 omp 要用被擋的工具時會被拒絕並說原因。tools.deny 的 `Bash(git push:*)` 這種寫法 omp 也照樣擋；別的工具的 `( )` 寫法（例如 `Read(./secret/**)`）omp 擋不到，kit 會說。
@@ -443,10 +451,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.14
+    kit api        →  1.15
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.14（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.15（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -511,6 +519,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
     }
 
 - `sources[].push`：`pr`（送出要開 PR）或 `direct`（直接推）。`sources[].changed`：`kit push --to <name>` 會送的檔案（相對來源資料夾，`/` 分隔；改過的 rule、skill、mcp、agent、外掛、`third_party.lock`、`descriptions-zh.txt`，加上只改了 `collect_sources` 的 `kit.yaml`）；沒有就是 `[]`，不是 git repo 也是 `[]`。
+- `claude_mcp`（1.15 起）：一定有。這個帳號的 Claude 怎麼拿到 kit 的 MCP：`"plugin"`（kit 的外掛 `kit-mcp`：改了打 `/reload-plugins` 就生效）或 `"config"`（寫在 `~/.claude.json`：沒裝 Claude、Claude 太舊、或裝外掛失敗；改了要重開 Claude）。畫面程式照它選 reload 還是重開。Windows 的 kit（kit.ps1）還沒做 `kit-mcp`，一律是 `"config"`。
 - `items[].kind`：`rule`、`skill`、`mcp`、`agent`、`plugin`（1.9 起）。`description`：skill、agent 是 frontmatter 的、mcp 是 yaml 的 `description:`、外掛是 `plugin.json` 的、規則是檔案第一行 `# ` 標題（1.9 起）。`description_zh`（1.9 起）：有人用 `kit describe` 寫了這個說明的中文版才有，畫面程式優先顯示它（見「中文說明」）。`status`：`required`（團隊必備）、`used`、`unused`、`agent`。`new`：還沒在 `kit list` 看過。`changed`：`kit push` 會送它（skill：它資料夾裡任何一個檔案）。
 - `needs` 只有 skill、mcp 和外掛有（外掛的是它的 hook 要跑的程式），`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。
 - 外掛（1.11 起）一定有 `"parts": {"skills": ["…"], "commands": ["…"], "agents": ["…"], "mcp": ["…"], "hooks": true}`：裡面帶了什麼（`skills/<名字>/SKILL.md`、`commands/*.md`、`agents/*.md`、`.mcp.json` 的 `mcpServers`、`hooks/*.json` 或 `plugin.json` 的 `hooks`），名字照 C 語系排序；畫面程式寫成一行「裡面有：…」。

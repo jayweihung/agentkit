@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.14'
+$script:KitApi = '1.15'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -6523,7 +6523,8 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '', [string]$her
         [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S (Url-Safe $s)), `"dir`": $(Json-S $d), `"push`": $(Json-S (Push-Mode $d)), `"changed`": $(Json-Arr $sf)}")
     }
     $tools = '"claude"'; if (Has-Codex) { $tools += ', "codex"' }; if (Has-Omp) { $tools += ', "omp"' }
-    [void]$sb.Append("`n  ],`n  `"tools`": [$tools],`n  `"items`": [")
+    # claude_mcp (api 1.15): kit.ps1 keeps Claude's MCP in ~/.claude.json (no kit-mcp plugin yet), so a change needs a restart
+    [void]$sb.Append("`n  ],`n  `"tools`": [$tools],`n  `"claude_mcp`": `"config`",`n  `"items`": [")
     $first = $true
     foreach ($i in Available) {
         $c = $i.IndexOf(':'); $k = $i.Substring(0, $c); $n = $i.Substring($c + 1)
