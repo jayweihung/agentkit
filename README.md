@@ -443,10 +443,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.13
+    kit api        →  1.14
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.13（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.14（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -496,7 +496,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - 字串照 JSON 規則跳脫；路徑是這台電腦的寫法。欄位順序固定，但程式應該照名字讀。
 - 來源資料夾（`dir`）是解開捷徑後的實際路徑（Mac 的 `/tmp/x` 會是 `/private/tmp/x`；Windows 也解開 junction 和 subst 的磁碟機）。程式拿自己的路徑來比時，先一樣解開。
 
-### `kit list --json [--dir 資料夾] [--pid 程式編號]`
+### `kit list --json [--dir 資料夾] [--pid 程式編號 [--tool claude|codex|omp]]`
 
     {
       "kit": "0.4.0",
@@ -519,6 +519,18 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
   `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
 - `sign`（1.8 起）：這台電腦簽過核准（`kit approve` 記下的核准紀錄還在）才有：`{"approvals": "<核准紀錄的 clone>", "serial": 19, "approved": [{"name": "team", "commit": "<40 字的 commit>"}]}`，畫面程式拿它說「已經簽了，等那台同步」、給簽章的指令。
 - `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items", "agent", "plugins"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。`here.folder.agent`（1.3 起）：那個資料夾是 `kit place` 放的 agent 時是它的名字，不是就 `null`；這時 `here.folder.items` 是 agent 的規則、skill、MCP（不含用 `kit rm --dir` 拿掉的）再加上另外加的。
+- 版本（1.14 起）：每一項一定有 `version`、`upstream`、`installed`、`held`（在每一項的最後面，`--pid` 時再多 `loaded`）：
+
+      "version": {"id": "a1b2c3d4", "date": "2026-11-21", "n": 1, "commit": "<40 字>", "message": "rules: shorter", "dirty": false},
+      "upstream": {"commit": "<40 字>", "date": "2026-11-10", "collected": "2026-11-15"},
+      "installed": {"claude": {"id": "a1b2c3d4", "at": 1763690000}, "codex": null, "omp": null},
+      "held": null, "loaded": "old"
+
+  - `version`：來源**最新**的那一版。「最新」＝上次 `kit sync` 抓到的遠端分支（`origin/<分支>`，這台的 clone 還沒 pull 也算）；clone 比它新（有還沒送出的 commit）或沒有遠端分支時是 clone 的 HEAD。`id`：內容的指紋（8 個 16 進位字），內容一樣，在哪台、哪個來源都一樣：規則、MCP、agent 是那個檔的 git blob hash（`git hash-object`）前 8 個字；技能、外掛是一份清單的 git blob hash 前 8 個字，清單是資料夾裡每個檔一行 `<那個檔的 git blob hash> <資料夾裡的路徑>`（`/` 分隔，照路徑的位元組排序，每行最後換行），不算 `.DS_Store`、`__pycache__/`、`.pyc`、`.pyo`。`date`：最後一次改到這一項的 commit 的日期（`YYYY-MM-DD`，commit 的時區）；`n`：那天有幾個 commit 改到它（至少 1）；`commit`、`message`：那個 commit 和它的第一行。`dirty`：來源裡這一項有還沒 commit 的改動，這時 `id` 是現在檔案的指紋、`commit` 是 `null`（`date`、`n`、`message` 還是最後一次 commit 的，沒有就是 `null`）。來源不是 git repo：`id` 照檔案算，`date`、`n`、`commit`、`message` 是 `null`。
+  - `upstream`：`kit collect` 收來的技能、外掛才有（其他是 `null`）：`commit` 是收的那個原作者的 commit，`date` 是那個 commit 自己的日期（不知道是 `null`：0.9.0 以前收的，`kit collect --dates` 補），`collected` 是收進來的日期。
+  - `installed`：這台每個工具現在用的那一份，`claude`、`codex`、`omp` 三個都有，沒裝那個工具或沒給那個工具就是 `null`。`id`：那一份的指紋（跟 `version.id` 一樣算；不一樣就是「這台還沒同步」）。`at`：這台換上這個指紋的時間（1970 起的秒數，不知道是 `null`）。kit 每次寫各工具的檔案時記在 `state.tsv`；0.9.0 第一次 `kit sync` 時，已經裝的那些用它的檔案（技能的資料夾、`AGENTS.md`、`~/.claude.json` …）最後改的時間。Claude 的規則是 `@` 直接讀來源 clone 裡的檔：`id` 是那個檔現在的內容，`at` 是那個檔最後改的時間。`--dir`：那個資料夾自己的（`kit add --dir`、`kit place`）優先，沒有才用整個帳號的。agent 那一種一定是三個 `null`。
+  - `held`：這一版一定是 `null`（之後的「固定在某一版」用）。
+  - `loaded`（只有 `--pid`）：這個 agent 讀到的是 `"new"`（最新裝的那份）還是 `"old"`（開始的時候還是舊的那份），`"unknown"`：看不出來（不知道是哪種 agent、找不到開始時間、或技能要看對話紀錄卻找不到）；這個工具沒有這一項是 `null`。`--tool` 指定是哪種 agent，沒給就從程式名字猜。規則、MCP、外掛在對話開始時讀：agent 開始的時間早於 `installed.<工具>.at` 就是 `old`（要開新對話；Claude 的技能、外掛也可以 `/reload-plugins`）。技能開始時只讀說明，用到才讀內容：這次對話在 `at` 之前就讀過它才是 `old`，沒讀過或之後才讀是 `new`（Codex、omp 的紀錄沒有讀的時間，用那一輪開始的時間）。
 - `here.folder.plugins`（1.13 起）：一定有（沒有就是 `[]`）。這個資料夾加的外掛（`kit add --dir … plugin`，也在 `here.folder.items` 裡，`plugin:<名字>`），一個一筆：`{"name": "unslop", "tools": ["claude", "omp"], "note": "Codex 只能整個帳號裝"}`。`tools`：kit 已經在這個資料夾幫哪些工具裝好了（`claude`、`omp`；沒裝那個工具、git 有記錄那個檔案、或裝失敗就不在裡面）；`note`：給人看的一句話，畫面程式照樣顯示（Codex 沒有資料夾的範圍，在這裡開的 Codex 沒有它）。
 
 ### `kit agents --json`
@@ -732,6 +744,9 @@ README 會一起帶過去（它就是使用說明），跟其他檔案一樣要�
     kit collect <原作者 repo 網址> [--to 來源]   收進來（帶原作者的 LICENSE，記在 third_party.lock）
     kit outdated [--json]                    看原作者有沒有新版
     kit collect <名字>                        再收一次＝整份換成新版
+    kit collect --dates [--to 來源]           0.9.0 以前收的，補上原作者那個 commit 的日期（一次就好）
+
+- `third_party.lock` 一行一項，用 TAB 分開：`名字 網址 路徑 分支 commit 授權 收的日期 skip 原作者日期`。`skip` 是外掛的 `--skip`（逗號分開，沒有寫 `-`）；`原作者日期` 是那個 commit 自己的日期（`YYYY-MM-DD`，不知道寫 `-`）。0.9.0 以前的行只到 `收的日期`（skill）或 `skip`（外掛），照樣能用；舊的 kit 讀新的行也照樣能用（多的欄不看）。`kit collect --dates` 補日期時只跟原作者的 repo 要那一個 commit、不下載檔案（`git fetch --depth 1 --filter=blob:none`）；問不到（不在 `collect_sources`、連不到、commit 不在了）就留空，畫面程式改顯示收的日期。
 
 - 可以直接貼瀏覽器上的網址：`https://git.example.org/作者/repo/tree/main/skills/tdd`（GitHub 的 `tree`／`blob`、GitLab 的 `/-/tree/`、Gitea 的 `/src/branch/`）會拆成 repo 網址、`--ref main`、`--path skills/tdd`。
 - 沒給 `--path` 時：repo 最外層有 `SKILL.md` 就收它；不然 repo 裡只有一個 `SKILL.md` 就收那個資料夾；有好幾個就列出來讓你用 `--path` 選。
