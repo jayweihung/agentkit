@@ -4679,73 +4679,82 @@ used_first() { # used_first TOOL LOG : "skill TAB seconds since 1970" of the fir
         $5 == "skill" { e = ep($1); if (e == "") e = ta; if (e != "" && (!($6 in f) || e < f[$6])) f[$6] = e }
         END { for (n in f) print n "\t" f[n] }'
 }
-ver_list_prep() { # (cmd_list_json's) what ver_item_json reads for every item, each found once: VER (ver_scan's lines),
-    # INST (state.tsv's ver lines: A = the account's, F = the --dir folder's), MT (the time of Claude's rules), LOCKS
-    # (third_party.lock), and with --pid L_TOOL, L_START (when it started), L_USE (used_first, or "none": no log)
-    local d n
-    VER=$LF$(ver_all | tr '\t' "$US")$LF
-    [ -n "${HERE_DIR:-}" ] && [ -d "$HERE_DIR" ] && froot=$(dir_root "$HERE_DIR") && fitems=$LF$(dir_items "$froot")$LF
-    INST=$LF$([ -f "$STATE" ] && awk -F'\t' -v f="dir:$froot:ver" '$1 == "ver" { print "A" $2 "\t" $3 } $1 == f { print "F" $2 "\t" $3 }' "$STATE")$LF
-    for n in $(printf '%s\n' "$want$fitems" | sed -n 's/^rule://p' | awk '!seen[$0]++'); do rp="$rp$(find_item rule "$n")$LF"; done
-    MT=$LF$( (IFS=$LF; mtimes $rp) | tr '\t' "$US")$LF
-    LOCKS=$LF$(while IFS= read -r d; do [ -f "$d/third_party.lock" ] && awk -F'\t' -v d="$d" -v u="$US" '{ sub(/\r$/, "") } !/^#/ && NF { print d u $1 u $5 u $7 u $9 }' "$d/third_party.lock"; done <<< "$SRC_DIRS_LIST")$LF
-    [ -n "${HERE_PID:-}" ] || return 0
-    agent_guess "$HERE_PID" "${HERE_TOOL:-}" "${HERE_DIR:-}"
-    case $A_TOOL in claude|codex|omp) L_TOOL=$A_TOOL;; *) return 0;; esac
-    L_START=$(proc_epoch "$HERE_PID")
-    agent_log "$HERE_PID" "$L_TOOL" "$A_DIR"
-    if [ -n "$A_LOG" ]; then L_USE=$LF$(used_first "$L_TOOL" "$A_LOG" | tr '\t' "$US")$LF; else L_USE=none; fi
-}
-json_sn() { if [ -n "$1" ] && [ "$1" != - ]; then json_s "$1"; else printf null; fi; }   # a JSON string, or null when empty
-ver_inst() { # ver_inst TOOL : V_ID, V_AT of what TOOL has of item $i ($k $n $p, cmd_list_json's): the folder's first, then
-    # the account's; Claude's rules are the source's file itself
-    local x
-    V_ID=""; V_AT=""
-    [ "$k" = agent ] && return 1
-    if [ "$1:$k" = claude:rule ]; then
-        case $want$fitems in *"$LF$i$LF"*) ;; *) return 1;; esac
-        x=${MT#*"$LF$p$US"}; [ "$x" = "$MT" ] || V_AT=${x%%"$LF"*}
-        V_ID=$vw; return 0
+ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version" …' part of every item, all worked out by one
+    # awk (bash looking things up in long strings is slow): "kind:name TAB part" lines, in the order of the items of ALL
+    # a source has, read on fd 5 by ver_item_json. With --pid also "loaded" (L: that agent's tool, start, skill uses).
+    local d n i k rel t froot="" lt="" ls="" nouse=""
+    t=$(mktemp -d "${TMPDIR:-/tmp}/kit-verl.XXXXXX") || return 0
+    ver_all > "$t/ver"
+    : > "$t/fitems"; : > "$t/inst"; : > "$t/use"
+    [ -n "${HERE_DIR:-}" ] && [ -d "$HERE_DIR" ] && froot=$(dir_root "$HERE_DIR") && dir_items "$froot" > "$t/fitems"
+    [ -f "$STATE" ] && awk -F'\t' -v f="dir:$froot:ver" '$1 == "ver" { print "A" $2 "\t" $3 } $1 == f { print "F" $2 "\t" $3 }' "$STATE" > "$t/inst"
+    while IFS= read -r d; do
+        [ -f "$d/third_party.lock" ] && awk -F'\t' -v d="$d" '{ sub(/\r$/, "") } !/^#/ && NF { print d "\t" $1 "\t" $5 "\t" $7 "\t" $9 }' "$d/third_party.lock"
+    done <<< "$SRC_DIRS_LIST" > "$t/locks"
+    for i in $ALL; do                                        # each one's source, as find_item finds it (no program run)
+        k=${i%%:*}; n=${i#*:}
+        case $k in rule) rel=/rules/$n.md;; skill) rel=/skills/$n/SKILL.md;; mcp) rel=/mcp/$n.yaml;; agent) rel=/agents/$n.md;;
+                   plugin) rel=/plugins/$n/.claude-plugin/plugin.json;; *) continue;; esac
+        while IFS= read -r d; do [ -f "$d$rel" ] && { printf '%s\t%s\t%s\n' "$i" "$d" "$d$rel"; break; }; done <<< "$SRC_DIRS_LIST"
+    done > "$t/items"
+    ( IFS=$LF; mtimes $(awk -F'\t' 'index($1, "rule:") == 1 { print $3 }' "$t/items") ) > "$t/mt"   # Claude reads the rule's file itself
+    printf '%s\n' "$want" > "$t/want"
+    if [ -n "${HERE_PID:-}" ]; then
+        agent_guess "$HERE_PID" "${HERE_TOOL:-}" "${HERE_DIR:-}"
+        case $A_TOOL in claude|codex|omp)
+            lt=$A_TOOL; ls=$(proc_epoch "$HERE_PID")
+            # the conversation's log (can be big) only when a skill changed after the agent started
+            if awk -F'\t' -v p="A$lt:skill:" -v q="F$lt:skill:" -v s="$ls" '
+                   index($1, p) == 1 || index($1, q) == 1 { split($2, r, " "); if (s == "" || r[2] + 0 > s + 0) f = 1 } END { exit !f }' "$t/inst"; then
+                agent_log "$HERE_PID" "$lt" "$A_DIR"
+                if [ -n "$A_LOG" ]; then used_first "$lt" "$A_LOG" > "$t/use"; else nouse=1; fi
+            fi;;
+        esac
     fi
-    for x in "F" "A"; do
-        [ $x = F ] && case $fitems in *"$LF$i$LF"*) ;; *) continue;; esac
-        x=${INST#*"$LF$x$1:$i$TAB"}; [ "$x" = "$INST" ] && continue
-        x=${x%%"$LF"*}; V_ID=${x%% *}; x=${x#* }; V_AT=${x%% *}; return 0
-    done
-    return 1
+    LC_ALL=C awk -F'\t' -v t="$t" -v pid="${HERE_PID:-}" -v lt="$lt" -v ls="$ls" -v nouse="$nouse" '
+        function js(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, "\\t", s); gsub(/\r/, "\\r", s); gsub(/[\001-\037]/, "", s); return "\"" s "\"" }
+        function jn(s) { return s == "" || s == "-" ? "null" : js(s) }
+        BEGIN { while ((getline x < (t "/ver")) > 0) { split(x, a, "\t"); ver[a[1], a[2]] = x }
+                while ((getline x < (t "/inst")) > 0) { split(x, a, "\t"); inst[a[1]] = a[2] }
+                while ((getline x < (t "/locks")) > 0) { split(x, a, "\t"); lk[a[1], a[2]] = a[3] "\t" a[4] "\t" a[5] }
+                while ((getline x < (t "/mt")) > 0) { split(x, a, "\t"); mt[a[1]] = a[2] }
+                while ((getline x < (t "/use")) > 0) { split(x, a, "\t"); use[a[1]] = a[2] }
+                while ((getline x < (t "/want")) > 0) want[x] = 1
+                while ((getline x < (t "/fitems")) > 0) fit[x] = 1
+                tl[1] = "claude"; tl[2] = "codex"; tl[3] = "omp" }
+        {   i = $1; d = $2; p = $3; k = substr(i, 1, index(i, ":") - 1); n = substr(i, index(i, ":") + 1)
+            vid = vw = vdate = vn = vcm = vmsg = ""; vdirty = "false"
+            if ((d, i) in ver) { m = split(ver[d, i], a, "\t"); vid = a[3]; vw = a[4]; vdate = a[5]; vn = a[6]; vcm = a[7]; vdirty = a[8]
+                                 vmsg = a[9]; for (j = 10; j <= m; j++) vmsg = vmsg "\t" a[j] }
+            o = ", \"version\": {\"id\": " jn(vid) ", \"date\": " jn(vdate) ", \"n\": " (vdate == "" ? "null" : vn) ", \"commit\": " jn(vcm) \
+                ", \"message\": " jn(vmsg) ", \"dirty\": " vdirty "}, \"upstream\": "
+            if ((k == "skill" || k == "plugin") && ((d, n) in lk)) { split(lk[d, n], u, "\t"); o = o "{\"commit\": " jn(u[1]) ", \"date\": " jn(u[3]) ", \"collected\": " jn(u[2]) "}" }
+            else o = o "null"
+            o = o ", \"installed\": {"; lgot = 0; lat = ""
+            for (j = 1; j <= 3; j++) {         # the folder s own first (--dir), then the account s; Claude s rules: the source s file
+                got = 0; id = ""; at = ""
+                if (k == "agent") got = 0
+                else if (tl[j] == "claude" && k == "rule") { if ((i in want) || (i in fit)) { got = 1; id = vw; at = mt[p] } }
+                else if ((i in fit) && (("F" tl[j] ":" i) in inst)) { got = 1; split(inst["F" tl[j] ":" i], r, " "); id = r[1]; at = r[2] }
+                else if (("A" tl[j] ":" i) in inst) { got = 1; split(inst["A" tl[j] ":" i], r, " "); id = r[1]; at = r[2] }
+                o = o (j > 1 ? ", " : "") "\"" tl[j] "\": " (got ? "{\"id\": " jn(id) ", \"at\": " (at == "" ? "null" : at) "}" : "null")
+                if (got && tl[j] == lt) { lgot = 1; lat = at }
+            }
+            o = o "}, \"held\": null"
+            if (pid != "") {                   # rules, MCP and plugins are read when the conversation starts, a skill when it is used
+                if (lt == "") l = "unknown"; else if (!lgot) l = ""; else if (ls == "" || lat == "") l = "unknown"
+                else if (ls + 0 >= lat + 0) l = "new"; else if (k != "skill") l = "old"; else if (nouse != "") l = "unknown"
+                else l = ((n in use) && use[n] + 0 < lat + 0) ? "old" : "new"
+                o = o ", \"loaded\": " jn(l)
+            }
+            print i "\t" o
+        }' "$t/items" > "$t/out"
+    exec 5< "$t/out"; rm -rf "$t"                            # (read on fd 5 after the folder is gone)
 }
-ver_item_json() { # (cmd_list_json's, for item $i) , "version", "upstream", "installed", "held" and, with --pid, "loaded"
-    local v vid="" vw="" vdate="" vn="" vcm="" vdirty=false vmsg="" t c u lid="" lat="" l
-    v=${VER#*"$LF$d$US$i$US"}
-    [ "$v" = "$VER" ] || IFS=$US read -r vid vw vdate vn vcm vdirty vmsg <<< "${v%%"$LF"*}"
-    printf ', "version": {"id": '; json_sn "$vid"; printf ', "date": '; json_sn "$vdate"
-    [ -n "$vdate" ] || vn=null
-    printf ', "n": %s, "commit": ' "$vn"; json_sn "$vcm"
-    printf ', "message": '; json_sn "$vmsg"; printf ', "dirty": %s}, "upstream": ' "$vdirty"
-    u=${LOCKS#*"$LF$d$US$n$US"}
-    if [ "$u" != "$LOCKS" ] && { [ "$k" = skill ] || [ "$k" = plugin ]; }; then
-        IFS=$US read -r vcm c v <<< "${u%%"$LF"*}"
-        printf '{"commit": '; json_sn "$vcm"; printf ', "date": '; json_sn "$v"; printf ', "collected": '; json_sn "$c"; printf '}'
-    else printf null; fi
-    printf ', "installed": {'
-    for t in claude codex omp; do
-        [ $t = claude ] || printf ', '
-        if ver_inst $t; then
-            printf '"%s": {"id": ' $t; json_sn "$V_ID"; printf ', "at": %s}' "${V_AT:-null}"
-            [ "$t" != "$L_TOOL" ] || { lid=$V_ID; lat=$V_AT; }
-        else printf '"%s": null' $t; fi
-    done
-    printf '}, "held": null'
-    [ -n "${HERE_PID:-}" ] || return 0
-    # loaded: rules, MCP and plugins are read when the conversation starts, a skill when it is used
-    if [ -z "$L_TOOL" ]; then l=unknown
-    elif [ -z "$lid" ]; then l=""
-    elif [ -z "$L_START" ] || [ -z "$lat" ]; then l=unknown
-    elif [ "$L_START" -ge "$lat" ]; then l=new
-    elif [ "$k" != skill ]; then l=old
-    elif [ "$L_USE" = none ]; then l=unknown
-    else u=${L_USE#*"$LF$n$US"}; l=new; [ "$u" = "$L_USE" ] || [ "${u%%"$LF"*}" -ge "$lat" ] || l=old; fi
-    printf ', "loaded": '; json_sn "$l"
+ver_item_json() { # (cmd_list_json's, for item $i) its line from ver_list_prep
+    local x; IFS= read -r x <&5 || return 0
+    [ "${x%%"$TAB"*}" = "$i" ] && printf '%s' "${x#*"$TAB"}"
+    return 0
 }
 sign_json() { # ,"sign": the approvals repo this computer signs with (kit approve remembered it): its serial and what it
     # approved ({name, commit}); nothing when this computer hasn't signed
@@ -4761,7 +4770,7 @@ cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a k
     seen=$LF$([ -f "$STATE" ] && awk -F'\t' '$1 == "seen" && $3 != "" { print $2 }' "$STATE")$LF
     KIT_REQS=$(while IFS= read -r d; do [ -f "$d/kit.yaml" ] && yaml "$d/kit.yaml" | awk -v f="$d/kit.yaml:" '/^requires\./ { print f $0 }'; done <<< "$SRC_DIRS_LIST")
     tool_cache                                               # each program looked at once, not once per skill
-    local VER INST MT LOCKS froot="" fitems="" rp="" L_TOOL="" L_START="" L_USE=""
+    local ALL; ALL=$(available)
     ver_list_prep
     printf '{\n  "kit": %s,\n  "sources": [' "$(json_s "$KIT_VERSION")"
     first=1
@@ -4777,7 +4786,7 @@ EOF
     tools='"claude"'; has_codex && tools="$tools, \"codex\""; has_omp && tools="$tools, \"omp\""
     printf '\n  ],\n  "tools": [%s],\n  "items": [' "$tools"
     first=1
-    for i in $(available); do
+    for i in $ALL; do
         k=${i%%:*}; n=${i#*:}
         p=$(find_item "$k" "$n") || continue
         status=unused
@@ -4807,6 +4816,7 @@ EOF
         ver_item_json
         printf '}'
     done
+    exec 5<&-
     printf '\n  ],\n  "blocked": ['
     first=1
     [ -f "$BLOCKED" ] && while IFS="$TAB" read -r i k n s d p _; do   # (tool kind name scope dir path: kit sync wrote them)
