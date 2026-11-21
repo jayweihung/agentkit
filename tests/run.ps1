@@ -332,7 +332,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.13)' { $rc -eq 0 -and $out -ceq '1.13' }
+Check 'api: one line, major.minor (1.14)' { $rc -eq 0 -and $out -ceq '1.14' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -347,9 +347,9 @@ Check 'help: --json --dir is under kit list' { $out -match "(?m)^  kit list .*`n
 $teamYaml = ReadT "$TEAM/kit.yaml"
 function Team-Version([string]$v) { W "$TEAM/kit.yaml" ($teamYaml.TrimEnd("`n") + "`nkit_version: $v`n") }
 function State-Nag { @((ReadT "$H/.config/agentkit/state.tsv") -split "`n" | Where-Object { $_.StartsWith("nag`t") }).Count }
-Team-Version '0.9.0'
+Team-Version '9.9.0'
 Kit sync
-Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 0.9.0 以上，你的是 ' + $KitVer + '。請打  kit self-update') }
+Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 9.9.0 以上，你的是 ' + $KitVer + '。請打  kit self-update') }
 Kit sync; $o1 = $out; Kit list
 Check 'old kit: told only once' { -not ($o1 + $out).Contains('團隊要') }
 Team-Version '0.10.0'
@@ -1550,6 +1550,18 @@ Check 'collect skips binaries, links and dot folders' { -not (Test-Path "$CO/ski
 Check 'collect points at files that run' { $out -match '會執行的檔案' -and $out -match 'scripts/run.sh' }
 $v1 = "$(& git -C $UP rev-parse HEAD)".Trim()
 Check 'third_party.lock records author, commit, license' { @((ReadT "$CO/third_party.lock") -split "`n" | Where-Object { $f = $_.Split("`t"); $f[0] -eq 'foo' -and $f[1] -eq (FileUrl $UP) -and $f[2] -eq 'skills/foo' -and $f[4] -eq $v1 -and $f[5] -eq 'MIT' }).Count -eq 1 }
+$ud = "$(& git -C $UP log -1 --format=%cd --date=short)".Trim()
+function Lock-Foo { @((ReadT "$CO/third_party.lock") -split "`n" | Where-Object { $_.StartsWith("foo`t") })[0].Split("`t") }
+Check "third_party.lock: the upstream commit's own date (column 9; column 8, skip, is - for a skill)" { $f = Lock-Foo; $f.Count -eq 9 -and $f[7] -ceq '-' -and $f[8] -ceq $ud }
+# a line from before kit 0.9.0 (7 columns): kit collect --dates asks the author for that commit's date
+$lock7 = ((ReadT "$CO/third_party.lock") -split "`n" | ForEach-Object { if ($_ -and -not $_.StartsWith('#')) { ($_.Split("`t")[0..6]) -join "`t" } else { $_ } }) -join "`n"
+W "$CO/third_party.lock" $lock7
+Kit collect --dates
+Check 'collect --dates: fills in the date from the author''s repo' { $f = Lock-Foo; $rc -eq 0 -and $f.Count -eq 9 -and $f[7] -ceq '-' -and $f[8] -ceq $ud -and $out.Contains('補了 1 個日期') }
+Kit collect --dates
+Check 'collect --dates: nothing left to ask' { $out.Contains('補了 0 個日期') }
+W "$CO/third_party.lock" $lock7; Rename-Item -LiteralPath $UP 'upstream-away'; Kit collect --dates; Rename-Item -LiteralPath (Join-Path $T 'upstream-away') 'upstream'
+Check 'collect --dates: an author gone: left empty, said so' { (Lock-Foo).Count -eq 7 -and $out.Contains('foo：問不到') }
 Kit collect (FileUrl "$T/elsewhere")
 Check 'collect refuses authors not in collect_sources' { $rc -ne 0 -and $out -match '不在 collect_sources' }
 Kit collect (FileUrl $NL) --path skills/bar
@@ -2023,9 +2035,9 @@ if ($tool -eq 'codex' -and $rest[0] -eq 'app-server') {   # Codex's JSON-RPC on 
 }
 exit 0
 '@
-foreach ($t in 'claude', 'codex', 'omp') {
-    if ($OnWindows) { W "$PB/$t.cmd" "@`"$Exe`" -NoProfile -ExecutionPolicy Bypass -File `"$PB\fake.ps1`" $t %*`r`n" }
-    else { W "$PB/$t" "#!/bin/sh`nexec '$Exe' -NoProfile -File '$PB/fake.ps1' $t `"`$@`"`n"; & chmod +x "$PB/$t" }
+foreach ($tn in 'claude', 'codex', 'omp') {
+    if ($OnWindows) { W "$PB/$tn.cmd" "@`"$Exe`" -NoProfile -ExecutionPolicy Bypass -File `"$PB\fake.ps1`" $tn %*`r`n" }
+    else { W "$PB/$tn" "#!/bin/sh`nexec '$Exe' -NoProfile -File '$PB/fake.ps1' $tn `"`$@`"`n"; & chmod +x "$PB/$tn" }
 }
 $env:FAKE_LOG = "$PG/log"; $env:FAKE_DIR = $PG; $env:PATH = $PB + $sep + $env:PATH
 W "$PG/src/rules/pr.md" "Plugin rule.`n"
@@ -2112,7 +2124,7 @@ Check 'collect --look: a plugin is one item, kind plugin' { $s = @(($out | Conve
 Kit collect (FileUrl $PU) --skip hooks/band.json --skip hooks/band
 Check 'collect: a plugin into plugins/<name>, only the parts the tools load' { $rc -eq 0 -and (Test-Path "$CL/plugins/up/hooks/a.json") -and (Test-Path "$CL/plugins/up/pi-ext/index.js") -and (Test-Path "$CL/plugins/up/skills/one/SKILL.md") -and (Test-Path "$CL/plugins/up/LICENSE") -and -not (Test-Path "$CL/plugins/up/docs") -and -not (Test-Path "$CL/plugins/up/.github") -and $out.Contains('kit add plugin up') }
 Check 'collect --skip: left out, and out of plugin.json (hooks, a key naming it); no backup left in the copy' { -not (Test-Path "$CL/plugins/up/hooks/band.json") -and -not (Test-Path "$CL/plugins/up/hooks/band") -and -not (ReadT "$CL/plugins/up/.claude-plugin/plugin.json").Contains('band') -and (ReadT "$CL/plugins/up/.claude-plugin/plugin.json").Contains('./hooks/a.json') -and -not (Test-Path "$CL/plugins/up/.claude-plugin/plugin.json.kit-backup") -and -not (Test-Path "$CL/plugins/up/.claude-plugin/marketplace.json") }
-Check 'collect --skip: the lock remembers it' { @((ReadT "$CL/third_party.lock") -split "`n" | Where-Object { $f = $_.Split("`t"); $f[0] -eq 'up' -and $f.Count -eq 8 -and $f[7] -eq 'hooks/band.json,hooks/band' }).Count -eq 1 -and (ReadT "$CL/third_party.lock").StartsWith('# third_party.lock - written by kit collect; name url path ref commit license date [skip]') }
+Check 'collect --skip: the lock remembers it' { @((ReadT "$CL/third_party.lock") -split "`n" | Where-Object { $f = $_.Split("`t"); $f[0] -eq 'up' -and $f.Count -eq 9 -and $f[7] -eq 'hooks/band.json,hooks/band' -and $f[8] -match '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' }).Count -eq 1 -and (ReadT "$CL/third_party.lock").StartsWith('# third_party.lock - written by kit collect; name url path ref commit license date [skip] [upstream-date]') }
 G -C $CL add -A; G -C $CL commit -qm up; W "$PU/hooks/band.json.new" "{}`n"; G -C $PU add -A; G -C $PU commit -qm up2
 Kit collect up
 Check 'collect <name> again: the same --skip' { $rc -eq 0 -and -not (Test-Path "$CL/plugins/up/hooks/band.json") -and (Test-Path "$CL/plugins/up/hooks/band.json.new") -and -not (ReadT "$CL/plugins/up/.claude-plugin/plugin.json").Contains('band.json"') }
@@ -2175,6 +2187,56 @@ Check "block: once kit has it, kit's entry goes and yours is back" { (JGet $S 's
 Kit uninstall
 Check 'block: uninstall puts everything back' { (JGet $S 'skillOverrides.npxed') -ceq '"on"' -and $null -eq (JGet $S 'skillOverrides.mine1') -and $null -eq (JGet $S 'deniedMcpServers') -and $null -eq (JGet $S 'enabledPlugins') -and (SameBytes $CX "$T/blockcx.orig") -and (SameBytes "$HB/.omp/agent/config.yml" "$T/blockomp.orig") -and -not (Test-Path $SLB) -and -not (Test-Path "$HB/.config/agentkit/blocked.tsv") }
 Remove-Item -Recurse -Force "$TEAM/skills/npxed"; Set-Home $hSave
+
+# ---------- versions: kit list --json version, upstream, installed, held, loaded (kit api 1.14) ----------
+$hSave = $H; Set-Home (Join-Path $T 'homev'); $VS = Join-Path $T 'versrc'
+function VItem([string]$kind, [string]$name) { @($out -split "`n" | Where-Object { $_.Contains("{`"kind`": `"$kind`", `"name`": `"$name`",") })[0] }
+function Blob8([string]$f) { "$(& git hash-object --no-filters -- $f)".Trim().Substring(0, 8) }
+function VCommit([string]$when, [string]$msg) { $env:GIT_AUTHOR_DATE = $when; $env:GIT_COMMITTER_DATE = $when; G -C $VS add -A; G -C $VS -c user.name=t -c user.email=t@t commit -qm $msg; Remove-Item env:GIT_AUTHOR_DATE, env:GIT_COMMITTER_DATE }
+W "$VS/rules/vr.md" "Be kind.`n"; W "$VS/skills/vs/sub/a.txt" "x`n"; W "$VS/skills/vs/SKILL.md" "---`nname: vs`ndescription: v`n---`nv1`n"
+W "$VS/plugins/vp/.claude-plugin/plugin.json" "{`"name`": `"vp`", `"description`": `"p`"}`n"; W "$VS/plugins/vp/skills/x/SKILL.md" "---`nname: x`ndescription: x`n---`nx`n"
+W "$VS/third_party.lock" ("# third_party.lock`nvs`tfile:///a/vs`tskills/vs`t-`t" + ('0' * 39) + "1`tMIT`t2026-11-15`t-`t2026-11-10`n")
+G -C $VS init -q; VCommit '2026-11-01T10:00:00Z' 'first'
+W "$VS/rules/vr.md" "Be kind, always.`n"; VCommit '2026-11-02T09:00:00Z' 'rule a'
+$rid = Blob8 "$VS/rules/vr.md"
+W "$T/vl" ("$((& git hash-object --no-filters -- "$VS/skills/vs/SKILL.md").Trim()) SKILL.md`n$((& git hash-object --no-filters -- "$VS/skills/vs/sub/a.txt").Trim()) sub/a.txt`n"); $sid = Blob8 "$T/vl"
+W "$T/vl" ("$((& git hash-object --no-filters -- "$VS/plugins/vp/.claude-plugin/plugin.json").Trim()) .claude-plugin/plugin.json`n$((& git hash-object --no-filters -- "$VS/plugins/vp/skills/x/SKILL.md").Trim()) skills/x/SKILL.md`n"); $plid = Blob8 "$T/vl"
+Kit init (FileUrl $VS); Kit add rule vr; Kit add skill vs
+KitJ list --json; $vj1 = $out
+$head = "$(& git -C $VS rev-parse HEAD)".Trim()
+Check "version: a rule's id is its file's blob; the last commit that changed it, n = how many that day" { (VItem rule vr).Contains("`"version`": {`"id`": `"$rid`", `"date`": `"2026-11-02`", `"n`": 1, `"commit`": `"$head`", `"message`": `"rule a`", `"dirty`": false}, `"upstream`": null, `"installed`": {`"claude`": {`"id`": `"$rid`", `"at`": ") }
+Check "version: a skill's id is the blob of its listing; upstream from third_party.lock; installed with a time" { $l = VItem skill vs; $l.Contains("`"version`": {`"id`": `"$sid`", `"date`": `"2026-11-01`", `"n`": 1,") -and $l.Contains("`"upstream`": {`"commit`": `"$(('0' * 39) + '1')`", `"date`": `"2026-11-10`", `"collected`": `"2026-11-15`"}") -and $l -cmatch "`"installed`": \{`"claude`": \{`"id`": `"$sid`", `"at`": [0-9]{10}\}, `"codex`": null, `"omp`": null\}, `"held`": null\}" }
+Check "version: a plugin's id is the blob of its listing too; not installed" { (VItem plugin vp).Contains("`"version`": {`"id`": `"$plid`",") -and (VItem plugin vp).Contains('"installed": {"claude": null, "codex": null, "omp": null}, "held": null}') }
+Check 'installed: state.tsv keeps the version and its time' { (ReadT "$H/.config/agentkit/state.tsv") -cmatch "(?m)^ver`tclaude:skill:vs`t$sid [0-9]+ " }
+# the same content elsewhere (a folder, not git; with .DS_Store and Python caches): the same ids, no date or commit
+$VC = Join-Path $T 'vcopy'; [void](New-Item -ItemType Directory -Force -Path $VC); foreach ($x in 'rules', 'skills', 'plugins') { Copy-Item -Recurse "$VS/$x" "$VC/$x" }
+W "$VC/skills/vs/.DS_Store" "x"; W "$VC/skills/vs/sub/__pycache__/a.pyc" "c"
+Set-Home (Join-Path $T 'homev2'); Kit init $VC; KitJ list --json
+Check 'version: the same content not in git (with .DS_Store and caches): the same ids, no date or commit' { (VItem rule vr).Contains("`"version`": {`"id`": `"$rid`", `"date`": null, `"n`": null, `"commit`": null, `"message`": null, `"dirty`": false}") -and (VItem skill vs).Contains("`"id`": `"$sid`"") -and (VItem plugin vp).Contains("`"id`": `"$plid`"") }
+Set-Home (Join-Path $T 'homev')
+# a change not committed in the clone: dirty, the files' id; installed still the old one
+$CLV = "$H/agentkit/versrc"; Add-Content -LiteralPath "$CLV/skills/vs/SKILL.md" 'more'
+KitJ list --json
+Check 'version: a change not committed: dirty, commit null, installed still the old one' { $l = VItem skill vs; $l.Contains('"commit": null, "message": "first", "dirty": true}') -and -not $l.Contains("`"version`": {`"id`": `"$sid`"") -and $l.Contains("`"installed`": {`"claude`": {`"id`": `"$sid`"") }
+G -C $CLV checkout -q -- .
+# the source changes: the latest is what kit sync fetched; then kit sync: the new id, a new time
+W "$VS/rules/vr.md" "Be kind, really.`n"; VCommit '2026-11-03T10:00:00Z' 'rule c'; G -C $CLV fetch -q
+$rid2 = Blob8 "$VS/rules/vr.md"
+KitJ list --json
+Check 'version: the latest is the remote branch kit sync fetched; installed is older' { (VItem rule vr).Contains("`"version`": {`"id`": `"$rid2`", `"date`": `"2026-11-03`"") -and (VItem rule vr).Contains("`"installed`": {`"claude`": {`"id`": `"$rid`"") }
+Kit sync; KitJ list --json
+Check 'installed: kit sync took the new one' { (VItem rule vr).Contains("`"installed`": {`"claude`": {`"id`": `"$rid2`"") }
+$sa = @{ FilePath = $Exe; ArgumentList = @('-NoProfile', '-Command', 'Start-Sleep 600'); PassThru = $true }; if ($OnWindows) { $sa.WindowStyle = 'Hidden' }
+$sp = Start-Process @sa
+KitJ list --json --pid $sp.Id --tool claude; $l1 = VItem rule vr; $l2 = VItem plugin vp
+KitJ list --json --pid $sp.Id; $l3 = VItem rule vr
+Check 'loaded: an agent started after kit sync: new; not installed: null; one kit cannot tell (no --tool): unknown; no --pid: none' { $l1.EndsWith('"held": null, "loaded": "new"},') -and $l2.EndsWith('"held": null, "loaded": null}') -and $l3.EndsWith('"held": null, "loaded": "unknown"},') -and -not $vj1.Contains('"loaded"') }
+Stop-Process -Id $sp.Id -Force -ErrorAction SilentlyContinue
+if (-not $OnWindows) {
+    KitJ list --json; $bash = (& /bin/sh -c "cd '$Repo' && HOME='$H' unix/kit list --json 2>/dev/null") -join "`n"
+    Check 'version: unix/kit prints the same' { $bash -ceq $out }
+}
+Set-Home $hSave
 
 # ---------- the script files themselves ----------
 Check 'kit.ps1 and install.ps1 start with a UTF-8 BOM (needed by PowerShell 5.1)' {

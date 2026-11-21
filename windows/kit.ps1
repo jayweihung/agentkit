@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.13'
+$script:KitApi = '1.14'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -2582,6 +2582,7 @@ function Apply-All {
         if ($hj -ne $old) { State-Set 'hook' 'SessionStart' $hj }
         if ($hj2 -ne $old2) { State-Set 'hook' 'UserPromptSubmit' $hj2 }
     }
+    Ver-Record                                               # (the folders' too: kit writes them before this)
 }
 
 function Replace-TopBlock([string]$f, [string]$begin, [string]$end, [string]$body) { # Replace-Block, but at the top of FILE
@@ -3004,7 +3005,7 @@ function Dir-AddRm([string]$verb, [string]$dir, [string]$k, [string]$n) { # only
     if ($items.Count -gt 0 -or (Dir-Mark $root 'agent')) { Dirs-Set $root 'add' } else { Dirs-Set $root 'rm' }
     Apply-Dir $root
     # Codex: the folder's trust and the root marker; a plugin: kit's copy and what is blocked (a folder's plugin is kit's)
-    if ((Has-Codex) -or $k -eq 'plugin') { Apply-All }
+    if ((Has-Codex) -or $k -eq 'plugin') { Apply-All } else { Ver-Record }
     if ($verb -eq 'add') { Say "kit：$i 加到 ${root}（只有在這裡和子資料夾開的 agent 讀得到，開新的才會讀到）"
         if ($k -eq 'plugin') { Say "     Codex 只能整個帳號裝：在這裡開的 Codex 沒有外掛 ${n}（Codex 也要的話：kit add plugin ${n}，整個帳號都有）" } }
     else { Say "kit：$i 從 $root 拿掉了" }
@@ -5096,7 +5097,7 @@ function Files-Ptxt([string]$s, [int]$lv) { # the path after "*** Add File: " up
 }
 function Files-Scan([string]$tool, [string]$f, [int]$fi, [bool]$main, $Keys, $Vals, [bool]$used = $false, $mcps = @()) { # the rows of one
     # log: a sort key (time, file, n) in KEYS, in VALS @(tag, path, turn) (turn: the main log's turn number, - for a sub-agent's) or a
-    # turn's start @('turn', '', n, at, text); USED (kit used): the whole log, only the lines that can matter, and @(skill|mcp, name, turn)
+    # turn's start @('turn', '', n, at, text); USED (kit used): the whole log, only the lines that can matter, and @(skill|mcp, name, turn, time)
     $o = Ctx-Open $f $(if ($used) { 0 } else { $CtxTail }); if (-not $o) { return }
     $t = ''; $r = 0; $tn = 0; $last = ''; $touched = $false
     try {
@@ -5111,7 +5112,7 @@ function Files-Scan([string]$tool, [string]$f, [int]$fi, [bool]$main, $Keys, $Va
                         if ($x) { $t = (($x -creplace '[^0-9]', '') + $FilesZero).Substring(0, 17) } elseif (-not $t) { $t = $FilesZero }
                     } else { $t = $FilesZero }
                     $tu = if ($main) { [string]$tn } else { '-' }
-                    foreach ($e in $ua) { $r++; $Keys.Add($t + $fi.ToString('D6', $Inv) + $r.ToString('D10', $Inv)); $Vals.Add(@($e[0], $e[1], $tu)) }
+                    foreach ($e in $ua) { $r++; $Keys.Add($t + $fi.ToString('D6', $Inv) + $r.ToString('D10', $Inv)); $Vals.Add(@($e[0], $e[1], $tu, $t)) }
                 }
             }
             $add = New-Object 'System.Collections.Generic.List[object]'; $traw = $null; $tat = ''
@@ -6217,6 +6218,286 @@ function Here-Json([string]$dir, [string]$hpid) { # the "here" part of kit list 
     $out + "`n  ]}"
 }
 function Push-Mode([string]$dir) { $m = @(YGet (Join-Path $dir 'kit.yaml') 'push'); if ($m.Count -gt 0 -and $m[0]) { [string]$m[0] } else { 'pr' } }   # pr (the default) or direct
+# ---------- versions (kit list --json: version, upstream, installed, loaded) ----------
+# An item's version id: the first 8 hex digits of a git blob hash, so the same content has the same id on every machine
+# and in every source. A rule, MCP or agent: the file's own blob. A skill or plugin: the blob of its listing, one line
+# "<the file's blob> <its path in the item's folder>" per file, sorted bytewise by path, without .DS_Store and Python's
+# caches. unix/kit does the same (one git pass per source, no git call per item).
+$script:VerDirs = @('rules', 'skills', 'mcp', 'agents', 'plugins')
+# a path in a source that is part of an item (as unix/kit's VER_KEY): a rule, agent or MCP file, or a file in a skill's or plugin's folder
+$script:VerRx = New-Object regex '^(?:(rules|agents)/([^/]*)\.md|mcp/([^/]*)\.yaml|(skills|plugins)/([^/]*)/(.+))\z'
+$script:VerSkipRx = New-Object regex '(^|/)\.DS_Store\z|(^|/)__pycache__/|\.py[co]\z'   # not part of a skill or plugin
+function Ver-Key([string]$p) { # @(kind:name, path in its folder: '' for a one-file item) of a path in a source, $null: not part of an item
+    $m = $VerRx.Match($p); if (-not $m.Success) { return $null }
+    $g = $m.Groups
+    if ($g[1].Success) { return , @(($(if ($g[1].Value -ceq 'rules') { 'rule:' } else { 'agent:' }) + $g[2].Value), '') }
+    if ($g[3].Success) { return , @(('mcp:' + $g[3].Value), '') }
+    if ($VerSkipRx.IsMatch($g[6].Value)) { return $null }
+    , @(($(if ($g[4].Value -ceq 'skills') { 'skill:' } else { 'plugin:' }) + $g[5].Value), $g[6].Value)
+}
+function Ver-Rows($map, $lines, [int]$col) { # each "META TAB path" line (META's word COL: the file's blob) into MAP: a one-file item's id, else a line of its listing
+    foreach ($l in $lines) {   # (no function call per file: a source can have thousands)
+        $t = $l.IndexOf("`t"); if ($t -le 0) { continue }
+        $m = $VerRx.Match($l.Substring($t + 1)); if (-not $m.Success) { continue }
+        $blob = $l.Substring(0, $t).Split(' ')[$col]; if ($blob.Length -lt 8) { continue }
+        $g = $m.Groups
+        if ($g[1].Success) { $map[$(if ($g[1].Value -ceq 'rules') { 'rule:' } else { 'agent:' }) + $g[2].Value] = $blob.Substring(0, 8); continue }
+        if ($g[3].Success) { $map['mcp:' + $g[3].Value] = $blob.Substring(0, 8); continue }
+        $rel = $g[6].Value; if ($VerSkipRx.IsMatch($rel)) { continue }
+        $k = $(if ($g[4].Value -ceq 'skills') { 'skill:' } else { 'plugin:' }) + $g[5].Value
+        $x = $null; if (-not $map.TryGetValue($k, [ref]$x)) { $x = New-Object 'System.Collections.Generic.List[string[]]'; $map[$k] = $x }
+        $x.Add(@($rel, $blob))
+    }
+}
+function Ver-Id($map, [string]$k) { # the id of item K in MAP ('' when MAP does not have it): a skill's or plugin's is the git blob of its listing
+    $v = $null; if (-not $map.TryGetValue($k, [ref]$v)) { return '' }
+    if ($v -is [string]) { return $v }
+    $a = $v.ToArray(); $ks = New-Object 'string[]' $a.Length; for ($i = 0; $i -lt $a.Length; $i++) { $ks[$i] = $a[$i][0] }
+    [Array]::Sort($ks, $a, [StringComparer]::Ordinal)
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($e in $a) { [void]$sb.Append($e[1]).Append(' ').Append($e[0]).Append("`n") }
+    $b = $Utf8.GetBytes($sb.ToString()); $h = [Text.Encoding]::ASCII.GetBytes("blob $($b.Length)`0")   # (git hash-object --no-filters)
+    $sha = [Security.Cryptography.SHA1]::Create()
+    try { [void]$sha.TransformBlock($h, 0, $h.Length, $null, 0); [void]$sha.TransformFinalBlock($b, 0, $b.Length); $x = $sha.Hash } finally { $sha.Dispose() }
+    [BitConverter]::ToString($x, 0, 4).Replace('-', '').ToLowerInvariant()
+}
+function Git-Lines { # Git-Q without a pipeline step per line (git's output can be thousands of lines)
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { [string[]]@(& git @args 2>$null) } finally { $ErrorActionPreference = $old }
+}
+function Git-In([string]$dir, $a, [string]$in) { # git -C DIR ARGS with IN on its stdin (UTF-8): its output lines, nothing when it fails
+    $c = @(Get-Command git -CommandType Application -ErrorAction SilentlyContinue); if ($c.Count -eq 0) { return @() }
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = [string]$c[0].Path; $psi.Arguments = (@(foreach ($x in @('-C', $dir) + @($a)) { Ctx-Arg "$x" }) -join ' ')
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $Utf8
+    $p = $null
+    try {
+        $p = [Diagnostics.Process]::Start($psi)
+        $out = $p.StandardOutput.ReadToEndAsync(); [void]$p.StandardError.ReadToEndAsync()
+        $b = $Utf8.GetBytes($in); $p.StandardInput.BaseStream.Write($b, 0, $b.Length); $p.StandardInput.BaseStream.Close()
+        $p.WaitForExit()
+        if ($p.ExitCode -ne 0) { return @() }
+        @($out.Result -split "`n" | Where-Object { $_ })
+    } catch { @() }
+    finally { if ($p) { try { $p.Dispose() } catch { } } }
+}
+function Ver-Scan([string]$d) { # each item of the source D: kind:name -> @(id, wtid, date, n, commit, dirty, message), as unix/kit's ver_scan
+    # id: the latest version: the remote branch as kit sync last fetched it (HEAD when the clone is ahead of it or has
+    # none), or, when the item has changes not committed (dirty), the working tree's. wtid: the working tree's (what kit
+    # sync copies, and what Claude's @import reads). date, n, commit, message: the last commit that changed the item
+    # (n: how many changed it that day). Not a git repo: both ids from the files, no commit. One git pass per source.
+    $rmap = New-Object 'System.Collections.Generic.Dictionary[string,object]'; $imap = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+    $wmap = New-Object 'System.Collections.Generic.Dictionary[string,object]'; $dt = New-Dict 'int'
+    $lc = New-Dict 'string'; $ld = New-Dict 'string'; $lm = New-Dict 'string'; $ln = New-Dict 'int'
+    $wt = New-List
+    $g = [bool]"$(Git-Q -C $d rev-parse -q --verify HEAD)".Trim()
+    if ($g) {
+        $ref = "$(Git-Q -C $d rev-parse -q --verify '@{upstream}')".Trim()
+        if ($ref) { [void](Git-Q -C $d merge-base --is-ancestor HEAD $ref); if ($LASTEXITCODE -ne 0) { $ref = '' } }
+        if (-not $ref) { $ref = 'HEAD' }
+        Ver-Rows $rmap @(Git-Lines -C $d -c core.quotePath=false ls-tree -r $ref '--' @VerDirs) 2
+        Ver-Rows $imap @(Git-Lines -C $d -c core.quotePath=false ls-files -s '--' @VerDirs) 1
+        foreach ($l in @(Git-Q -C $d -c core.quotePath=false diff --name-only --relative HEAD '--' @VerDirs) + @(Git-Q -C $d -c core.quotePath=false ls-files -o --exclude-standard '--' @VerDirs)) {
+            $kr = Ver-Key $l; if ($null -ne $kr) { $dt[$kr[0]] = 1 }
+        }
+        # the working tree of the changed items: their folders (a rule: its file) as git sees them
+        $dp = @(foreach ($k in $dt.Keys) { $c = $k.IndexOf(':'); $kk = $k.Substring(0, $c); $n = $k.Substring($c + 1)
+            if ($kk -ceq 'rule') { "rules/$n.md" } elseif ($kk -ceq 'agent') { "agents/$n.md" } elseif ($kk -ceq 'mcp') { "mcp/$n.yaml" } else { "${kk}s/$n" } })
+        if ($dp.Count -gt 0) { foreach ($l in @(Uniq @(Git-Q -C $d -c core.quotePath=false ls-files -co --exclude-standard '--' @dp))) { $wt.Add($l) } }
+        $cm = ''; $cd = ''; $ms = ''; $seen = New-Dict 'string'
+        foreach ($x in @(Git-Lines -C $d log '--format=%x01%H%x09%cd%x09%s' --date=short --name-only --relative $ref '--' @VerDirs)) {
+            if ($x.StartsWith([string][char]1, $Ord)) { $c = $x.Substring(1).Split("`t", 3); $cm = $c[0]; $cd = $(if ($c.Count -gt 1) { $c[1] } else { '' }); $ms = $(if ($c.Count -gt 2) { $c[2] } else { '' }); continue }
+            if (-not $x) { continue }
+            $m = $VerRx.Match($x); if (-not $m.Success) { continue }; $gr = $m.Groups   # (Ver-Key's, without a call per file)
+            if ($gr[1].Success) { $key = $(if ($gr[1].Value -ceq 'rules') { 'rule:' } else { 'agent:' }) + $gr[2].Value } elseif ($gr[3].Success) { $key = 'mcp:' + $gr[3].Value }
+            elseif ($VerSkipRx.IsMatch($gr[6].Value)) { continue } else { $key = $(if ($gr[4].Value -ceq 'skills') { 'skill:' } else { 'plugin:' }) + $gr[5].Value }
+            $y = $null; if ($seen.TryGetValue($key, [ref]$y) -and $y -ceq $cm) { continue }; $seen[$key] = $cm
+            if (-not $lc.ContainsKey($key)) { $lc[$key] = $cm; $ld[$key] = $cd; $lm[$key] = $ms; $ln[$key] = 1 } elseif ($cd -ceq $ld[$key]) { $ln[$key]++ }
+        }
+    } else {
+        $all = New-List
+        foreach ($v in $VerDirs) {
+            $b = Join-Path $d $v; if (-not (Test-Path -LiteralPath $b -PathType Container)) { continue }
+            foreach ($e in @(Walk-Tree $b)) { if (-not $e.PSIsContainer -and -not (Is-Link $e)) { $all.Add($v + '/' + (Rel-Path $b $e.FullName)) } }
+        }
+        $wa = $all.ToArray(); [Array]::Sort($wa, [StringComparer]::Ordinal); foreach ($l in $wa) { $wt.Add($l) }
+    }
+    $wf = @($wt | Where-Object { Test-Path -LiteralPath (Join-Path $d $_) -PathType Leaf })
+    if ($wf.Count -gt 0) {
+        $hs = @(Git-In $d @('hash-object', '--stdin-paths') (($wf | ForEach-Object { "$_`n" }) -join ''))
+        if ($hs.Count -eq $wf.Count) { Ver-Rows $wmap @(for ($j = 0; $j -lt $wf.Count; $j++) { $hs[$j].Trim() + "`t" + $wf[$j] }) 0 }
+    }
+    $out = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+    foreach ($k in @(Uniq (@($rmap.Keys) + @($imap.Keys) + @($wmap.Keys)))) {
+        if (-not $g) { $v = Ver-Id $wmap $k; $w = $v; $dd = $false }
+        else { $dd = $dt.ContainsKey($k); if ($dd) { $v = Ver-Id $wmap $k; $w = $v } else { $v = Ver-Id $rmap $k; $w = Ver-Id $imap $k } }
+        $out[$k] = @($v, $w, (Dict-Get $ld $k ''), [string](Dict-Get $ln $k 0), $(if ($dd) { '' } else { Dict-Get $lc $k '' }), $(if ($dd) { 'true' } else { 'false' }), (Dict-Get $lm $k ''))
+    }
+    , $out
+}
+function Ver-All { # @(the item rows of each source, "DIR TAB kind:name" -> Ver-Scan's row; kind:name -> its row): only the source kit
+    # takes each from (the first that has it), as unix/kit's ver_all
+    $by = New-Object 'System.Collections.Generic.Dictionary[string,object]'; $first = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+    foreach ($d in @(Src-Dirs)) {
+        if (-not $d) { continue }
+        $s = Ver-Scan $d
+        foreach ($k in $s.Keys) { if (-not $first.ContainsKey($k)) { $first[$k] = $s[$k]; $by["$d`t$k"] = $s[$k] } }
+    }
+    , @($by, $first)
+}
+function Ver-Mtime([string]$p) { # when P last changed (seconds since 1970), '' when it is not there
+    try { [string]([DateTimeOffset](Get-Item -LiteralPath $p -Force -ErrorAction Stop).LastWriteTimeUtc).ToUnixTimeSeconds() } catch { '' }
+}
+function Proc-Epoch([string]$p) { # when the process started (seconds since 1970), or ''
+    try { return [string]([DateTimeOffset](Get-Process -Id ([int]$p) -ErrorAction Stop).StartTime).ToUnixTimeSeconds() } catch { }
+    if ($OnWindows) {   # (another user's or an elevated process: Get-Process may not tell its start)
+        try { $c = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$p)" -ErrorAction Stop; if ($c) { return [string]([DateTimeOffset]$c.CreationDate).ToUnixTimeSeconds() } } catch { }
+    }
+    ''
+}
+# state.tsv "ver" lines (a folder's own: "dir:<folder>:ver"): for each item a tool has from kit, "<tool>:<kind>:<name>"
+# and "<id> <at> <mark>": its version id and since when (seconds since 1970) this machine has it. mark: kit's own hash of
+# what it put there for skills and plugins (a copy kit skipped keeps its version), "=" for rules (Codex, omp) and MCP,
+# which every sync writes again from the source. Claude's rules are not kept: Claude reads the source's file itself
+# (installed: that file's version and time). The first sync that keeps them (kit 0.9.0) takes the time from the file
+# kit wrote it to, as the time it last changed. (unix/kit's are the same.)
+function Ver-Targets { # what each tool has from kit: @(verkind, tool:kind:name, mark, file) (verkind: ver or dir:<folder>:ver)
+    $cx = Has-Codex; $om = Has-Omp; $pr = Plugin-Root
+    $o = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($r in @(State-Rows)) {
+        $f = $r.Split("`t"); $k = $f[0]; $s = ''
+        if ($k.StartsWith('dir:', $Ord)) { $s = $k.Substring(4); $c = $s.LastIndexOf(':'); $k = $s.Substring($c + 1); $s = $s.Substring(0, $c) }
+        $v = if ($s) { "dir:${s}:ver" } else { 'ver' }
+        $n = if ($f.Count -gt 1) { $f[1] } else { '' }; $m = if ($f.Count -gt 2) { $f[2] } else { '' }
+        if ($k -ceq 'skill') { $o.Add(@($v, "claude:skill:$n", $m, (Join-Path $(if ($s) { Join-Path $s '.claude/skills' } else { Join-Path $ClaudeDir 'skills' }) $n))) }
+        elseif ($k -ceq 'skill.agents') { $p = Join-Path $(if ($s) { Join-Path $s '.agents/skills' } else { $AgentsSkills }) $n; if ($cx) { $o.Add(@($v, "codex:skill:$n", $m, $p)) }; if ($om) { $o.Add(@($v, "omp:skill:$n", $m, $p)) } }
+        elseif ($k -ceq 'mcp') { $o.Add(@($v, "claude:mcp:$n", '=', $(if ($s) { Join-Path $s '.mcp.json' } else { $ClaudeJson }))); if ($s -and $om) { $o.Add(@($v, "omp:mcp:$n", '=', (Join-Path $s '.mcp.json'))) } }
+        elseif ($k -ceq 'mcp.omp' -and -not $s) { $o.Add(@($v, "omp:mcp:$n", '=', (Join-Path $OmpDir 'mcp.json'))) }
+        elseif ($k -cmatch '^plugin\.(claude|codex|omp)$') { $o.Add(@($v, "$($k.Substring(7)):plugin:$n", $m, (Join-Path $pr $n))) }
+    }
+    $w = Wanted
+    foreach ($n in @(Of-Kind $w 'rule')) {
+        if ($cx) { $o.Add(@('ver', "codex:rule:$n", '=', (Join-Path $CodexDir 'AGENTS.md'))) }
+        if ($om) { $o.Add(@('ver', "omp:rule:$n", '=', (Join-Path $OmpDir 'AGENTS.md'))) }
+    }
+    if ($cx) { foreach ($n in @(Of-Kind $w 'mcp')) { $o.Add(@('ver', "codex:mcp:$n", '=', (Join-Path $CodexDir 'config.toml'))) } }
+    foreach ($d in @(Dirs-Registered)) {                   # a folder's rules (Codex, omp) and Codex MCP: in kit's blocks
+        if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
+        $am = Join-Path $d 'AGENTS.md'; $ct = Join-Path $d '.codex/config.toml'
+        $ra = (Test-Path -LiteralPath $am -PathType Leaf) -and (Read-Text $am).Contains($BeginMark)
+        $ca = (Test-Path -LiteralPath $ct -PathType Leaf) -and (Read-Text $ct).Contains($TomlBegin)
+        foreach ($i in @(Dir-Items $d)) {
+            $n = $i.Substring($i.IndexOf(':') + 1)
+            if ($i.StartsWith('rule:', $Ord) -and $ra) { if ($cx) { $o.Add(@("dir:${d}:ver", "codex:rule:$n", '=', $am)) }; if ($om) { $o.Add(@("dir:${d}:ver", "omp:rule:$n", '=', $am)) } }
+            elseif ($i.StartsWith('mcp:', $Ord) -and $ca) { $o.Add(@("dir:${d}:ver", "codex:mcp:$n", '=', $ct)) }
+        }
+    }
+    , $o
+}
+function Ver-Record { # after kit wrote the tools' files: the "ver" lines of state.tsv for what each tool has now
+    if (-not (Test-Path -LiteralPath $State)) { return }
+    $keep = New-List; $old = New-Dict 'string'
+    foreach ($r in @(State-Rows)) {
+        $f = $r.Split("`t")
+        if ($f[0] -ceq 'ver' -or ($f[0].StartsWith('dir:', $Ord) -and $f[0].EndsWith(':ver', $Ord))) { if ($f.Count -gt 1) { $old[$f[0] + "`t" + $f[1]] = $(if ($f.Count -gt 2) { $f[2] } else { '' }) } }
+        else { $keep.Add($r) }
+    }
+    $first = $old.Count -eq 0
+    $w = (Ver-All)[1]; $now = [string](Unix-Now); $done = New-Dict 'int'
+    foreach ($t in (Ver-Targets)) {
+        $key = $t[0] + "`t" + $t[1]; if ($done.ContainsKey($key)) { continue }; $done[$key] = 1
+        $k = $t[1].Substring($t[1].IndexOf(':') + 1); $id = if ($w.ContainsKey($k)) { $w[$k][1] } else { '' }; if (-not $id) { continue }
+        if ($old.ContainsKey($key)) {
+            $o = @($old[$key] -split ' +'); $o3 = if ($o.Count -gt 2) { $o[2] } else { '' }
+            if (($t[2] -ceq '=' -and $o[0] -ceq $id) -or ($t[2] -cne '=' -and $o3 -ceq $t[2])) { $keep.Add("$key`t" + $old[$key]); continue }
+        }
+        $at = $now; if ($first) { $mt = Ver-Mtime $t[3]; if ($mt) { $at = $mt } }
+        $keep.Add("$key`t$id $at " + $t[2])
+    }
+    $tf = Temp-Next $State
+    Write-Text $tf (($keep | ForEach-Object { "$_`n" }) -join '')
+    Swap-In $tf $State $false
+}
+function Ver-Epoch([string]$x) { # a time's digits (YYYYMMDDHHMMSS…, UTC) as seconds since 1970, '' when none
+    $x = $x -creplace '[^0-9]', ''; if ($x.Length -lt 14 -or $x -cmatch '^0+$') { return '' }
+    try { [string]([DateTimeOffset](New-Object DateTime ([int]$x.Substring(0, 4)), ([int]$x.Substring(4, 2)), ([int]$x.Substring(6, 2)), ([int]$x.Substring(8, 2)), ([int]$x.Substring(10, 2)), ([int]$x.Substring(12, 2)), ([DateTimeKind]::Utc))).ToUnixTimeSeconds() } catch { '' }
+}
+function Used-First([string]$tool, [string]$log) { # skill -> seconds since 1970 of the first time that conversation read it
+    # (Codex and omp log no time for it: the start of its turn)
+    $f = New-Dict 'long'; $ta = ''
+    foreach ($v in (Files-Rows $tool $log $true)) {
+        if ($v[0] -ceq 'turn') { $ta = Ver-Epoch ([string]$v[3]); continue }
+        if ($v[0] -cne 'skill') { continue }
+        $e = Ver-Epoch ([string]$v[3]); if (-not $e) { $e = $ta }
+        if ($e -and (-not $f.ContainsKey($v[1]) -or [long]$e -lt $f[$v[1]])) { $f[$v[1]] = [long]$e }
+    }
+    , $f
+}
+function Ver-Prep([string]$hereDir, [string]$herePid, [string]$hereTool, $want) { # (Cmd-ListJson's) what Ver-Json reads for every item, each found once
+    $c = @{ want = New-Dict 'int'; fit = New-Dict 'int'; inst = New-Dict 'string'; lk = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+            pid = $herePid; lt = ''; ls = ''; use = (New-Dict 'long'); nouse = $false }
+    $c.ver = (Ver-All)[0]
+    foreach ($i in @($want)) { if ($i) { $c.want[$i] = 1 } }
+    $froot = ''
+    if ($hereDir -and (Test-Path -LiteralPath $hereDir -PathType Container)) { $froot = Dir-Root $hereDir; foreach ($i in @(Dir-Items $froot)) { $c.fit[$i] = 1 } }
+    foreach ($r in @(State-Rows)) {
+        $f = $r.Split("`t"); if ($f.Count -lt 2) { continue }; $v = if ($f.Count -gt 2) { $f[2] } else { '' }
+        if ($f[0] -ceq 'ver') { $c.inst['A' + $f[1]] = $v } elseif ($froot -and $f[0] -ceq "dir:${froot}:ver") { $c.inst['F' + $f[1]] = $v }
+    }
+    foreach ($d in @(Src-Dirs)) {
+        $lf = Join-Path $d 'third_party.lock'; if (-not (Test-Path -LiteralPath $lf -PathType Leaf)) { continue }
+        foreach ($l in @((Read-Text $lf) -split "`n")) {
+            $l = $l.TrimEnd("`r"); if (-not $l -or $l.StartsWith('#')) { continue }
+            $f = $l.Split("`t"); $g = { param($j) if ($f.Count -gt $j) { $f[$j] } else { '' } }
+            $c.lk["$d`t" + $f[0]] = @((& $g 4), (& $g 6), (& $g 8))
+        }
+    }
+    if ($herePid) {
+        $a = Agent-Guess $herePid $hereTool $hereDir
+        if (@('claude', 'codex', 'omp') -ccontains [string]$a[0]) {
+            $c.lt = [string]$a[0]; $c.ls = Proc-Epoch $herePid
+            # the conversation's log (can be big) only when a skill changed after the agent started
+            $need = $false
+            foreach ($k in $c.inst.Keys) {
+                if (-not ($k.StartsWith("A$($c.lt):skill:", $Ord) -or $k.StartsWith("F$($c.lt):skill:", $Ord))) { continue }
+                $at = @($c.inst[$k] -split ' +'); $at = if ($at.Count -gt 1 -and $at[1] -cmatch '^[0-9]+$') { [long]$at[1] } else { 0 }
+                if (-not $c.ls -or $at -gt [long]$c.ls) { $need = $true; break }
+            }
+            if ($need) { $al = Agent-Log $herePid $c.lt ([string]$a[1]); if ($al[0]) { $c.use = Used-First $c.lt $al[0] } else { $c.nouse = $true } }
+        }
+    }
+    $c
+}
+function Jn([string]$s) { if ($s -ceq '' -or $s -ceq '-') { 'null' } else { Json-S $s } }   # a JSON string, or null when empty
+function Ver-Json($c, [string]$i, [string]$k, [string]$n, [string]$d, [string]$p) { # , "version", "upstream", "installed", "held" and, with --pid, "loaded"
+    $v = @('', '', '', '', '', 'false', ''); $x = $null; if ($c.ver.TryGetValue("$d`t$i", [ref]$x)) { $v = $x }
+    $o = ', "version": {"id": ' + (Jn $v[0]) + ', "date": ' + (Jn $v[2]) + ', "n": ' + $(if ($v[2]) { $v[3] } else { 'null' }) + ', "commit": ' + (Jn $v[4]) +
+        ', "message": ' + (Jn $v[6]) + ', "dirty": ' + $v[5] + '}, "upstream": '
+    if (($k -ceq 'skill' -or $k -ceq 'plugin') -and $c.lk.TryGetValue("$d`t$n", [ref]$x)) { $o += '{"commit": ' + (Jn $x[0]) + ', "date": ' + (Jn $x[2]) + ', "collected": ' + (Jn $x[1]) + '}' }
+    else { $o += 'null' }
+    $o += ', "installed": {'; $lgot = $false; $lat = ''; $j = 0
+    foreach ($t in 'claude', 'codex', 'omp') {   # the folder's own first (--dir), then the account's; Claude's rules: the source's file
+        $got = $false; $id = ''; $at = ''; $s = $null
+        if ($k -ceq 'agent') { }
+        elseif ($t -ceq 'claude' -and $k -ceq 'rule') { if ($c.want.ContainsKey($i) -or $c.fit.ContainsKey($i)) { $got = $true; $id = $v[1]; $at = Ver-Mtime $p } }
+        elseif ($c.fit.ContainsKey($i) -and $c.inst.TryGetValue("F${t}:$i", [ref]$s)) { $got = $true }
+        elseif ($c.inst.TryGetValue("A${t}:$i", [ref]$s)) { $got = $true }
+        if ($null -ne $s) { $r = @($s -split ' +'); $id = $r[0]; $at = if ($r.Count -gt 1) { $r[1] } else { '' } }
+        $o += $(if ($j++) { ', ' }) + '"' + $t + '": ' + $(if ($got) { '{"id": ' + (Jn $id) + ', "at": ' + $(if ($at) { $at } else { 'null' }) + '}' } else { 'null' })
+        if ($got -and $t -ceq $c.lt) { $lgot = $true; $lat = $at }
+    }
+    $o += '}, "held": null'
+    if ($c.pid) {   # rules, MCP and plugins are read when the conversation starts, a skill when it is used
+        $u = 0L
+        $l = if (-not $c.lt) { 'unknown' } elseif (-not $lgot) { '' } elseif (-not $c.ls -or -not $lat) { 'unknown' }
+             elseif ([long]$c.ls -ge [long]$lat) { 'new' } elseif ($k -cne 'skill') { 'old' } elseif ($c.nouse) { 'unknown' }
+             elseif ($c.use.TryGetValue($n, [ref]$u) -and $u -lt [long]$lat) { 'old' } else { 'new' }
+        $o += ', "loaded": ' + (Jn $l)
+    }
+    $o
+}
 function Sign-Json { # ,"sign": the approvals repo this computer signs with (kit approve remembered it), as unix/kit's sign_json
     $d = State-Get 'sign' 'approvals'; if (-not $d) { return '' }
     $f = Join-Path $d 'approved.txt'; if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return '' }
@@ -6229,8 +6510,9 @@ function Sign-Json { # ,"sign": the approvals repo this computer signs with (kit
     $sj = if ("$serial" -match '^[0-9]+$') { [string][long]$serial } else { 'null' }
     ",`n  `"sign`": {`"approvals`": $(Json-S $d), `"serial`": $sj, `"approved`": [$($ap.ToArray() -join ', ')]}"
 }
-function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit list shows, as JSON for programs (a screen like a kit panel); unix/kit prints the same
+function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '', [string]$hereTool = '') { # what kit list shows, as JSON for programs (a screen like a kit panel); unix/kit prints the same
     $want = Wanted; $req = Kit-Items 'required'
+    $vc = Ver-Prep $hereDir $herePid $hereTool $want
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"sources`": [")
     $first = $true; $chg = @{}
@@ -6262,7 +6544,7 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
         $nj = if ($k -eq 'skill') { ', "needs": ' + (Needs-Json (Split-Path -Parent $p) $dir) + (Packages-Json (Split-Path -Parent $p) $n) }
               elseif ($k -eq 'plugin') { $pd = Split-Path -Parent (Split-Path -Parent $p); ', "needs": ' + (Needs-Json $pd $dir) + ', "parts": ' + (Parts-Json $pd) } elseif ($k -eq 'mcp') { Mcp-ListJson $p $n } else { '' }
-        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"changed`": $changed, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S $desc)$zj, `"path`": $(Json-S $p)$nj}")
+        [void]$sb.Append("`n    {`"kind`": $(Json-S $k), `"name`": $(Json-S $n), `"status`": $(Json-S $status), `"new`": $new, `"changed`": $changed, `"source`": $(Json-S (Split-Path -Leaf $dir)), `"description`": $(Json-S $desc)$zj, `"path`": $(Json-S $p)$nj$(Ver-Json $vc $i $k $n $dir $p)}")
     }
     [void]$sb.Append("`n  ],`n  `"blocked`": [")
     $first = $true
@@ -6281,15 +6563,16 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '') { # what kit
 function Cmd-List($rest) {
     $rest = @($rest | Where-Object { $null -ne $_ })
     if ($rest.Count -ge 1 -and $rest[0] -eq '--json') {
-        $hd = ''; $hp = ''
+        $hd = ''; $hp = ''; $ht = ''
         for ($i = 1; $i -lt $rest.Count; $i++) {
             switch -CaseSensitive ($rest[$i]) {
                 '--dir' { if ($i + 1 -ge $rest.Count) { Die-C usage '--dir 後面要接資料夾' }; $i++; $hd = $rest[$i]; if (Test-Path -LiteralPath $hd -PathType Container) { $hd = Real-Dir $hd } }
                 '--pid' { if ($i + 1 -ge $rest.Count -or $rest[$i + 1] -notmatch '^[0-9]+$') { Die-C usage '--pid 後面要接數字' }; $i++; $hp = $rest[$i] }
+                '--tool' { if ($i + 1 -ge $rest.Count) { Die-C usage '--tool 後面要接 claude、codex 或 omp' }; $i++; $ht = $rest[$i] }
                 default { Die-C usage '用法：kit list --json [--dir 資料夾] [--pid 程式編號]' }
             }
         }
-        Need-Init; Cmd-ListJson $hd $hp; return
+        Need-Init; Cmd-ListJson $hd $hp $ht; return
     }
     if ($rest.Count -gt 0) { Die-C usage '用法：kit list [--json [--dir 資料夾] [--pid 程式編號]]' }
     Need-Init
@@ -6525,7 +6808,7 @@ function Cmd-Place($rest) { # kit place <agent> <dir> [--tool claude|codex|omp] 
     Dir-Write $d $items @("agent:$name", "tool:$tool")
     Dirs-Set $d 'add'
     Apply-Dir $d
-    if (Has-Codex) { Apply-All }                              # Codex: the folder's trust and the root marker
+    if (Has-Codex) { Apply-All } else { Ver-Record }          # Codex: the folder's trust and the root marker
     # what this tool cannot take from the agent in a folder (the README's table)
     $only = @(YGet-From $fm 'tools.only'); $deny = @(YGet-From $fm 'tools.deny')
     switch ($tool) {
@@ -7371,7 +7654,42 @@ function Cmd-Push($rest) {
 
 # ---------- collect / outdated: other people's skills, from their own repos ----------
 # third_party.lock: name<TAB>url<TAB>path<TAB>ref<TAB>commit<TAB>license<TAB>date
-$script:LockHead = '# third_party.lock - written by kit collect; name url path ref commit license date [skip]'
+# (date: when it was collected; skip: a plugin's --skip, "-" for none; upstream date: the commit's own date, YYYY-MM-DD,
+# "-" when not known. Lines written before kit 0.9.0 end after date or skip.)
+$script:LockHead = '# third_party.lock - written by kit collect; name url path ref commit license date [skip] [upstream-date]'
+function Commit-Day([string]$repo, [string]$sha) { $x = "$(Git-Q -C $repo log -1 --format=%cd --date=short $sha)".Trim(); if ($x) { $x } else { '-' } }   # its date (YYYY-MM-DD)
+function Collect-Dates([string]$dir) { # kit collect --dates: the upstream date of the lines of DIR's third_party.lock that
+    # have none (collected before kit 0.9.0), asked from each author's repo: only that commit, without its files
+    Check-Maintainer $dir
+    $lf = Join-Path $dir 'third_party.lock'
+    if (-not (Test-Path -LiteralPath $lf -PathType Leaf)) { Say "$(Split-Path -Leaf $dir) 沒有 third_party.lock（還沒用 kit collect 收過東西）"; return }
+    $tmp = New-TempDir 'kit-dates.'; $got = 0; $miss = 0
+    try {
+        foreach ($line in @((Read-Text $lf) -split "`n")) {
+            $line = $line.TrimEnd("`r"); if (-not $line -or $line.StartsWith('#')) { continue }
+            $f = $line.Split("`t"); if ($f.Count -gt 8 -and $f[8] -and $f[8] -cne '-') { continue }
+            $n = $f[0]; $url = if ($f.Count -gt 1) { $f[1] } else { '' }; $sha = if ($f.Count -gt 4) { $f[4] } else { '' }
+            $d = ''; $ok = Collect-Allowed $url $dir
+            if ($ok) {   # (as kit push checks hosts; a host not allowed: asked nothing)
+                $script:PushDir = $dir; $script:DieThrow = $true; $script:WarnOff = $true
+                try { Check-Host $url } catch { $ok = $false } finally { $script:PushDir = $null; $script:DieThrow = $false; $script:WarnOff = $false }
+            }
+            if ($ok) {
+                $r = Join-Path $tmp 'r'; Remove-Tree $r
+                [void](Git-Q init -q $r)
+                if ($LASTEXITCODE -eq 0) {
+                    [void](Git-Safe -C $r -c protocol.file.allow=always fetch -q --depth 1 --filter=blob:none --no-tags $url $sha)
+                    if ($LASTEXITCODE -eq 0) { $d = "$(Git-Q -C $r log -1 --format=%cd --date=short FETCH_HEAD)".Trim() }
+                }
+            }
+            if ($d) {
+                $nf = [Collections.Generic.List[string]]$f; while ($nf.Count -lt 8) { $nf.Add('-') }; if ($nf.Count -gt 8) { $nf[8] = $d } else { $nf.Add($d) }
+                Lock-Set $dir ($nf -join "`t"); Say "  ${n}：$d"; $got++
+            } else { Warn "${n}：問不到 $(Url-Id $url) 的 $($sha.Substring(0, [Math]::Min(12, $sha.Length)))（不在 collect_sources、連不到，或那個 commit 不在了），日期留空"; $miss++ }
+        }
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    Say "kit：補了 $got 個日期$(if ($miss -ne 0) { "，$miss 個問不到" })"
+}
 function Url-Id([string]$u) { # host/path of a git URL, without scheme, user, .git or trailing /
     ((($u -replace '^[a-z+]+://', '') -replace '^[^@/]*@', '') -replace '^([^/:]+):', '$1/').TrimEnd('/') -replace '\.git$', ''
 }
@@ -7520,7 +7838,7 @@ function Web-Repo([string]$u) { # a repo page's address (GitHub /tree/<ref>/<fol
     $null
 }
 function Cmd-Collect($rest) {
-    $arg = ''; $path = ''; $name = ''; $ref = ''; $to = ''; $force = $false; $allow = $false; $look = $false; $skip = ''
+    $arg = ''; $path = ''; $name = ''; $ref = ''; $to = ''; $force = $false; $allow = $false; $look = $false; $skip = ''; $dates = $false
     $r = @($rest | Where-Object { $_ })
     for ($i = 0; $i -lt $r.Count; $i++) {
         switch -CaseSensitive ($r[$i]) {
@@ -7531,6 +7849,7 @@ function Cmd-Collect($rest) {
             '--force' { $force = $true }
             '--allow' { $allow = $true }
             '--look' { $look = $true }
+            '--dates' { $dates = $true }
             '--skip' {
                 $sm = '--skip 後面要接外掛裡不要的檔案或資料夾（相對路徑）'
                 if ($i + 1 -ge $r.Count) { Die $sm }; $i++; $v = [string]$r[$i]
@@ -7540,6 +7859,7 @@ function Cmd-Collect($rest) {
             default { if ($r[$i].StartsWith('-')) { Die-C usage "不認得 $($r[$i])" }; if ($arg) { Die-C usage "多了一個參數：$($r[$i])" }; $arg = $r[$i] }
         }
     }
+    if ($dates) { if ($arg) { Die-C usage '用法：kit collect --dates [--to 來源]' }; Collect-Dates (Target-Dir $to); return }
     if (-not $arg) { Die-C usage '用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag] [--allow]，或 kit collect <名字>（再收一次）' }
     $dir = Target-Dir $to
     Check-Maintainer $dir
@@ -7596,7 +7916,7 @@ function Cmd-Collect($rest) {
             if ($LASTEXITCODE -ne 0) { foreach ($l in @($out)) { Warn "  $l" }; Die-C download_failed "沒辦法下載 $url" }
             $repo = Collect-Keep $repo
         }
-        $sha = "$(& git -C $repo rev-parse HEAD)".Trim()
+        $sha = "$(& git -C $repo rev-parse HEAD)".Trim(); $ud = Commit-Day $repo $sha
         $repo = Full-Path $repo
         # a plugin (.claude-plugin/plugin.json at the top, or in --path): the whole plugin, not its skills one by one
         if (Test-Path -LiteralPath (Join-Path $(if ($path) { Join-Path $repo $path } else { $repo }) '.claude-plugin/plugin.json') -PathType Leaf) { Collect-Plugin; return }
@@ -7650,7 +7970,7 @@ function Cmd-Collect($rest) {
         Copy-Item -LiteralPath $outDir -Destination $dst -Recurse
     } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
     $p2 = if ($path) { $path } else { '.' }; $r2 = if ($ref) { $ref } else { '-' }
-    Lock-Set $dir ((@($name, $url, $p2, $r2, $sha, $kind, (Get-Date -Format 'yyyy-MM-dd'))) -join "`t")
+    Lock-Set $dir ((@($name, $url, $p2, $r2, $sha, $kind, (Get-Date -Format 'yyyy-MM-dd'), '-', $ud)) -join "`t")
     if ($add) { Yaml-ListAdd (Join-Path $dir 'kit.yaml') 'collect_sources' (Url-Id $url); Say "已把 $(Url-Id $url) 加進 $(Split-Path -Leaf $dir)/kit.yaml 的 collect_sources" }
     Say "已收 skill:$name ← $(Url-Id $url)$(if ($path) { "/$path" }) @ $($sha.Substring(0, 12))（授權 $kind）"
     if ($kind -eq 'unknown') { Warn "認不出授權種類，請自己看 skills/$name/$licName" }
@@ -7728,7 +8048,7 @@ function Collect-Plugin { # (Cmd-Collect's, with its variables) the plugin in $r
     Remove-Tree $dst; Ensure-Dir (Join-Path $dir 'plugins')
     Copy-Item -LiteralPath $outDir -Destination $dst -Recurse -Force
     $p2 = if ($path) { $path } else { '.' }; $r2 = if ($ref) { $ref } else { '-' }; $s2 = if ($skip) { $skip } else { '-' }
-    Lock-Set $dir ((@($n, $url, $p2, $r2, $sha, $kind, (Get-Date -Format 'yyyy-MM-dd'), $s2)) -join "`t")
+    Lock-Set $dir ((@($n, $url, $p2, $r2, $sha, $kind, (Get-Date -Format 'yyyy-MM-dd'), $s2, $ud)) -join "`t")
     if ($add) { Yaml-ListAdd (Join-Path $dir 'kit.yaml') 'collect_sources' (Url-Id $url); Say "已把 $(Url-Id $url) 加進 $(Split-Path -Leaf $dir)/kit.yaml 的 collect_sources" }
     Say "已收外掛 plugin:$n ← $(Url-Id $url)$(if ($path) { "/$path" }) @ $($sha.Substring(0, 12))（授權 ${kind}$(if ($skip) { "；沒收：$skip" })）"
     if ($kind -eq 'unknown') { Warn "認不出授權種類，請自己看 plugins/$n/$licName" }
@@ -7998,6 +8318,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit collect <名字>                再收一次＝整份換成原作者的新版
   kit collect <原作者 repo 網址> --look [--path 資料夾] [--ref 分支] [--to 來源]
                                     只下載來看、什麼都不寫：找到的 skill、授權、會執行的檔案（JSON，給程式讀）
+  kit collect --dates [--to 來源]   以前收的補上原作者那個 commit 的日期（只問那個 commit，不下載檔案）
   kit outdated [--json]             看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：

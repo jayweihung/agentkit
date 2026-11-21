@@ -4558,7 +4558,7 @@ ver_scan() { # ver_scan DIR : a line per item of the source DIR: DIR TAB kind:na
           git -C "$d" -c core.quotePath=false ls-files -o --exclude-standard -- $VER_DIRS; } | awk "$VER_KEY"' key($0) { print K }' | sort -u > "$t/dirty"
         # the working tree of the changed items: their folders (a rule: its file) as git sees them
         dp=$(awk -F: '{ print ($1 == "rule" ? "rules/" $2 ".md" : $1 == "agent" ? "agents/" $2 ".md" : $1 == "mcp" ? "mcp/" $2 ".yaml" : $1 "s/" $2) }' "$t/dirty")
-        [ -z "$dp" ] || git -C "$d" -c core.quotePath=false ls-files -co --exclude-standard -- $dp | awk '!seen[$0]++' > "$t/wt"
+        [ -z "$dp" ] || git -C "$d" -c core.quotePath=false ls-files -co --exclude-standard -- $dp | LC_ALL=C sort -u > "$t/wt"   # (sorted: git lists new files first)
         git -C "$d" log --format='%x01%H%x09%cd%x09%s' --date=short --name-only --relative "$ref" -- $VER_DIRS > "$t/log" 2>/dev/null
     else
         : > "$t/dirty"; : > "$t/log"

@@ -6,7 +6,7 @@
 
 ## 0.9.0（2026-11-21）
 
-更新後要做：每台 `kit self-update`，再 `kit sync`（第一次 sync 記下每一項這台裝的是哪一版）。收過東西的來源，維護者跑一次 `kit collect --dates`（每個來源各一次，`--to <來源>`），再 `kit push`。畫面程式要顯示版本：先確認 `kit api` 至少 1.14。Windows 的 kit.ps1 還是 1.13，之後跟上。
+更新後要做：每台 `kit self-update`（Windows 也要），再 `kit sync`（第一次 sync 記下每一項這台裝的是哪一版）。收過東西的來源，維護者跑一次 `kit collect --dates`（每個來源各一次，`--to <來源>`），再 `kit push`。畫面程式要顯示版本：先確認 `kit api` 至少 1.14。
 
 - 每個規則、技能、MCP、外掛都看得到版本，寫的人什麼都不用做：`kit list --json` 每一項多了 `version`（來源最新的那一版：內容的指紋、最後改的日期、那天第幾次改、commit 和訊息、有沒有還沒送出的改動）、`installed`（這台的 Claude、Codex、omp 各用哪一版、從什麼時候開始）、`upstream`（收來的：原作者那個 commit 和它的日期、收進來的日期）、`held`（這一版一定是 `null`）。「最新」是上次 `kit sync` 抓到的遠端那一版，所以這台的 clone 還沒更新也看得出「這台還沒同步」。欄位和指紋怎麼算寫在 README「給程式讀的介面」（`kit api` 1.14）。
 - `kit list --json --pid <程式編號> [--tool claude|codex|omp]` 每一項多了 `loaded`：那個 agent 讀到的是新的還是舊的。規則、MCP、外掛看 agent 開始的時間，技能看這次對話是不是在換版之前就讀過它。
