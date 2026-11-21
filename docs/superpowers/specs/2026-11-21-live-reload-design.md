@@ -171,3 +171,20 @@ export const RELOAD = {
 - 事後：通知「<agent> 已接回同一個對話，新的 <種類> 已經可以用」（幾秒後消失），標題列短暫顯示「已接回」。
 - 接不回：遮罩改成紅字「接不回」，附可以複製的接回指令和「在這格重試」，對話紀錄在磁碟上不會丟。
 - 不重開：在做事、等人回覆、輸入框有草稿時先等（標「等它停下來」）；手機遠端連著的那格只提示，不自動做（手機之後另外設計）。
+
+## 第 0 步實測結果（2026-11-21，Mac）
+
+| | Claude 2.1.330 | Codex 0.169 | omp 18.18.6 |
+|---|---|---|---|
+| 從外面找 session id | `~/.claude/sessions/<pid>.json`，一開就有 | `lsof` 找不到（rollout 檔由共用的 app-server 開著）；改用畫面：`/status` 的 `Session:` 行，或 `/quit` 後印的 `codex resume <id>` | `lsof` 可以，但要第一句話之後才開檔；資料夾名稱不一定是 `--cwd--` 格式 |
+| 關掉 | `/exit`＋Enter（先出選單） | `/quit`（只斷開，daemon 裡的工作會繼續跑：一定要先確認閒著） | `/exit` |
+| 關掉後畫面印的接回指令 | `claude <原本旗標> --resume <id>` | `codex resume <id>` | `omp --resume <id>` |
+| 接回同一段、同一個 id | 是 | 是 | 是 |
+| 接回後重讀規則 | 是 | 是 | 是 |
+| 關＋開 | 約 5 秒 | 約 2 秒 | 約 4 秒 |
+
+- 結論：最穩的做法是送關掉指令後，**讀畫面上工具自己印的接回指令**再執行，三個工具都會印，Claude 還帶上原本的旗標。找 id 只拿來核對。
+- Codex 每次開會跳「有新版」選單，接回後要先 Esc，不然之後送的字會進選單。
+- omp 關掉後留下 `~/.omp/run/session-owners/<id>.lock`，不影響接回。
+- Claude 在 `/private/tmp/claude-*` 底下不讀資料夾的 CLAUDE.md（它自己的暫存區）。
+- 沒測：Ctrl+C／Ctrl+D 關、`kit run` 開的 agent、別台機器、Windows。
