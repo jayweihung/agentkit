@@ -45,7 +45,11 @@ jay 同時開很多 agent、好幾台機器（Mac、伺服器、公司、Windows
 - **「最新」是哪一份**（我的決定）：來源遠端上次 `kit sync` 抓到的最新 commit（`origin/<分支>`），不是這台 clone 的工作目錄。這樣「這台的 clone 還沒 pull」也算「這台還沒同步」。Claude 的規則是 `@` 直接指到 clone 裡的檔，所以它的「裝的」就是 clone 現在的內容；clone 落後遠端，就是舊。
 - **顯示的名字**：來源 repo 裡最後一次改到這一項的 commit 日期，例如「11/21 版」。同一天改好幾次：「11/21 版（3）」。滑鼠停上去：完整日期、commit 訊息、指紋。來源裡改了還沒 commit 的：「改了還沒送出」。
 
-收來的另外有「原作者的版本」：`third_party.lock` 裡的 commit 和收的日期；原作者現在的 commit 用既有的 `kit outdated` 問。
+收來的（2026-11-21 jay 同意）：**顯示原作者的時間**，不是收進來的時間，這樣跟原作者那邊對得起來。
+- 主要顯示「原作者 11/10 版」：收的那個 commit 在原作者 repo 的 commit 時間。收進來的日期放在滑鼠停上去的提示。
+- `third_party.lock` 多一欄記原作者 commit 的時間（`kit collect` 收的時候寫）；已經收的用一次性的補法填（問原作者的 repo，問不到的留空，那項退回顯示收進來的日期）。
+- 原作者有新版：「原作者有新版 11/25」（`kit outdated` 也給原作者現在那個 commit 的時間）。
+- 指紋照樣用內容算：同一份內容在各機器比對。
 
 ## 三種「舊」
 
@@ -76,10 +80,12 @@ root 這類只用核准版本的帳號：用的是核准的 commit，跟來源�
 
 ```json
 "version": {"id": "a1b2c3d4", "date": "2026-11-21", "n": 1, "commit": "<40 字>", "message": "…", "dirty": false},
+"upstream": {"commit": "<40 字>", "date": "2026-11-10", "collected": "2026-11-15"},
 "installed": {"claude": {"id": "a1b2c3d4", "at": 1763690000}, "codex": {"id": "…", "at": …}, "omp": null},
 "held": null
 ```
 
+- `upstream`：只有收來的有（其他是 null）。`date` 問不到時是 null。
 - `version`：來源最新的。`dirty`：來源有還沒 commit 的改動（這時 `id` 是現在內容的指紋，`commit` 是 null）。
 - `installed`：這台每個工具裝的那份（我的決定：分工具記，`state.tsv` 本來就分開記外掛和規則），沒裝的工具是 null。`at`：換上這個指紋的時間。`held`：固定的版本（`{"id", "by", "why", "at"}`）或 null。
 - 有 `--dir` 時，資料夾自己的那份（`kit add --dir`、`kit place`）也算「裝的」：在那個資料夾開的 agent 讀的是它，`installed` 用那份（我的決定）。`kit run` 帶的：那份在啟動時給，比的是啟動時間。
