@@ -11,9 +11,9 @@ Kit sync
 Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 9.9.0 以上，你的是 ' + $KitVer + '。請打  kit self-update') }
 Kit sync; $o1 = $out; Kit list
 Check 'old kit: told only once' { -not ($o1 + $out).Contains('團隊要') }
-Team-Version '0.10.0'
+Team-Version '0.10.1'
 Kit list
-Check 'team version changed: list tells again (numbers, not text)' { $out.Contains('團隊要 kit 0.10.0 以上') }
+Check 'team version changed: list tells again (numbers, not text)' { $out.Contains('團隊要 kit 0.10.1 以上') }
 $realKit = $Kit; $Kit = Join-Path $T 'dev/windows/kit.ps1'
 W $Kit ''; Copy-Item -LiteralPath $realKit -Destination $Kit -Force
 Team-Version '9.6.0'
