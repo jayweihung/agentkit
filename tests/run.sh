@@ -42,8 +42,8 @@ jget() { LC_ALL=C awk -f "$JA" -v get="$2" "$1" 2>/dev/null; }
 PWSH=$(command -v pwsh 2>/dev/null || true)
 kps() { "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" "$@"; }
 # kit.ps1 is still at kit api 1.13 (its port of 1.14 and 1.15 comes later): unix/kit's JSON without what 1.14 added
-# (1.15 changed no JSON), to compare
-v13() { sed -E 's/, "version": \{.*"held": null(, "loaded": [^}]*)?\}(,?)$/}\2/; s/"api": "1\.1[45]"/"api": "1.13"/'; }
+# and claude_mcp (1.15), to compare
+v13() { sed -E 's/, "version": \{.*"held": null(, "loaded": [^}]*)?\}(,?)$/}\2/; s/"api": "1\.1[45]"/"api": "1.13"/; /^  "claude_mcp": "[a-z]*",$/d'; }
 # capped SECS CMD... : CMD, stopped after SECS seconds (then 124)
 capped() { local s=$1 p w rc; shift; "$@" & p=$!; { sleep "$s"; kill "$p"; } >/dev/null 2>&1 & w=$!; wait "$p"; rc=$?; { kill "$w"; wait "$w"; } 2>/dev/null; [ $rc -lt 128 ] || rc=124; return $rc; }
 
@@ -2991,7 +2991,11 @@ printf '{"mcpServers":{"mine":{"command":"mine"},"kq":{"command":"my-kq"}}}\n' >
 echo 1.0.0 > "$MG/ver"; out0=$(mpk init "$MG/src" 2>&1)
 out=$(mpk add mcp kp kq 2>&1)
 check "mcp plugin: an older Claude -> ~/.claude.json as before, said once" '[ "$(jget "$MCJ" mcpServers.kp.command)" = "\"python3\"" ] && [ ! -e "$MPC/kit-mcp" ] && echo "$out0" | grep -qF "比 2.1.330 舊" && ! echo "$out" | grep -qF "比 2.1.330 舊" && ! grep -q "plugin install" "$MG/log" 2>/dev/null'
-echo 2.1.330 > "$MG/ver"; : > "$MG/log"; out=$(mpk sync 2>&1)
+check "mcp plugin: list --json claude_mcp config (an older Claude)" '[ "$(mpk list --json 2>/dev/null | jget /dev/stdin claude_mcp)" = "\"config\"" ]'
+echo 2.1.330 > "$MG/ver"; touch "$MG/fail"; mpk sync >/dev/null 2>&1
+check "mcp plugin: the install fails -> still in ~/.claude.json, claude_mcp config" '[ "$(jget "$MCJ" mcpServers.kp.command)" = "\"python3\"" ] && [ ! -e "$MPC/kit-mcp" ] && [ "$(mpk list --json 2>/dev/null | jget /dev/stdin claude_mcp)" = "\"config\"" ]'
+rm -f "$MG/fail"; : > "$MG/log"; out=$(mpk sync 2>&1)
+check "mcp plugin: list --json claude_mcp plugin" '[ "$(mpk list --json 2>/dev/null | jget /dev/stdin claude_mcp)" = "\"plugin\"" ]'
 check "mcp plugin: a new Claude -> kit's in kit-mcp, out of ~/.claude.json; yours stay; the env placeholder as it was" '[ "$(jget "$MPC/kit-mcp/.mcp.json" mcpServers.kp.env.TOKEN)" = "\"\${KP_TOKEN}\"" ] && [ -z "$(jget "$MCJ" mcpServers.kp)" ] && [ "$(jget "$MCJ" mcpServers.mine.command)" = "\"mine\"" ] && [ "$(jget "$MCJ" mcpServers.kq.command)" = "\"my-kq\"" ] && [ -z "$(jget "$MPC/kit-mcp/.mcp.json" mcpServers.kq)" ]'
 check "mcp plugin: installed once, account scope, listed in kit's marketplace (not Codex's)" '[ "$(grep -c "plugin install" "$MG/log")" = 1 ] && grep -qxF "claude plugin install kit-mcp@kit --scope user" "$MG/log" && grep -qF "\"name\":\"kit-mcp\"" "$MPC/.claude-plugin/marketplace.json" && ! grep -qF kit-mcp "$MPC/.agents/plugins/marketplace.json" && echo "$out" | grep -qF /reload-plugins'
 check "mcp plugin: the team's MCP deny in both names" 'grep -qF "\"mcp__kp__boom\"" "$MPH/.claude/settings.json" && grep -qF "\"mcp__plugin_kit-mcp_kp__boom\"" "$MPH/.claude/settings.json"'

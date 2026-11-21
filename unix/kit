@@ -1326,6 +1326,7 @@ apply_claude() {
         sync_mcp_json "$CLAUDE_JSON" mcp <<< "$mcps"
         [ -z "$(state_list mcp.claude)" ] || claude_mcp_put mcp "$CLAUDE_JSON" < /dev/null
     fi
+    if claude_mcp_ok && [ -z "$(state_list mcp)" ]; then state_set claude_mcp account plugin; else state_set claude_mcp account config; fi
     mcp_vars_warn <<< "$mcps"
 
     # Codex and omp share ~/.agents/skills
@@ -4896,7 +4897,9 @@ cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a k
 $(m_sources)
 EOF
     tools='"claude"'; has_codex && tools="$tools, \"codex\""; has_omp && tools="$tools, \"omp\""
-    printf '\n  ],\n  "tools": [%s],\n  "items": [' "$tools"
+    # how Claude gets kit's MCP: plugin (kit-mcp: /reload-plugins brings a change), config (~/.claude.json: a restart)
+    local cm; cm=$(state_get claude_mcp account); [ -n "$cm" ] || cm=config   # (kit sync writes it: no claude run here)
+    printf '\n  ],\n  "tools": [%s],\n  "claude_mcp": "%s",\n  "items": [' "$tools" "$cm"
     first=1
     for i in $ALL; do
         k=${i%%:*}; n=${i#*:}
