@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.13
+KIT_API=1.14
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -1300,6 +1300,7 @@ EOF
         [ "$hj2" = "$old2" ] || state_set hook UserPromptSubmit "$hj2"
     fi
     rm -f "$ops"
+    ver_record                                               # (the folders' too: kit writes them before this)
 }
 
 hook_json() { # hook_json [ARGS TIMEOUT] : a hook entry kit adds to settings.json (default: SessionStart's, kit sync --hook)
@@ -4524,6 +4525,228 @@ $(here_rows "$dir")
 EOF
     printf '\n  ]}'
 }
+# ---------- versions (kit list --json: version, upstream, installed, loaded) ----------
+# An item's version id: the first 8 hex digits of a git blob hash, so the same content has the same id on every machine
+# and in every source. A rule, MCP or agent: the file's own blob. A skill or plugin: the blob of its listing, one line
+# "<the file's blob> <its path in the item's folder>" per file, sorted bytewise by path, without .DS_Store and Python's
+# caches. kit.ps1 does the same.
+VER_DIRS="rules skills mcp agents plugins"
+VER_KEY='
+function key(p,   a, n) { # K: kind:name, REL: the path in its folder ("" for a one-file item); 0: not part of an item
+    n = split(p, a, "/"); REL = ""
+    if (n == 2 && a[1] == "rules" && a[2] ~ /\.md$/) K = "rule:" substr(a[2], 1, length(a[2]) - 3)
+    else if (n == 2 && a[1] == "agents" && a[2] ~ /\.md$/) K = "agent:" substr(a[2], 1, length(a[2]) - 3)
+    else if (n == 2 && a[1] == "mcp" && a[2] ~ /\.yaml$/) K = "mcp:" substr(a[2], 1, length(a[2]) - 5)
+    else if (n >= 3 && (a[1] == "skills" || a[1] == "plugins")) { K = (a[1] == "skills" ? "skill:" : "plugin:") a[2]; REL = substr(p, length(a[1]) + length(a[2]) + 3) }
+    else return 0
+    return REL !~ /(^|\/)\.DS_Store$/ && REL !~ /(^|\/)__pycache__\// && REL !~ /\.py[co]$/
+}'
+ver_scan() { # ver_scan DIR : a line per item of the source DIR: DIR TAB kind:name TAB id TAB wtid TAB date TAB n TAB commit TAB dirty TAB message
+    # id: the latest version: the remote branch as kit sync last fetched it (HEAD when the clone is ahead of it or has
+    # none), or, when the item has changes not committed (dirty), the working tree's. wtid: the working tree's (what kit
+    # sync copies, and what Claude's @import reads). date, n, commit, message: the last commit that changed the item
+    # (n: how many changed it that day). Not a git repo: both ids from the files, no commit. One git pass per source.
+    local d=$1 t ref="" g="" dp
+    t=$(mktemp -d "${TMPDIR:-/tmp}/kit-ver.XXXXXX") || return 0
+    if git -C "$d" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+        g=1
+        ref=$(git -C "$d" rev-parse -q --verify '@{upstream}' 2>/dev/null) && git -C "$d" merge-base --is-ancestor HEAD "$ref" 2>/dev/null || ref=HEAD
+        { git -C "$d" -c core.quotePath=false ls-tree -r "$ref" -- $VER_DIRS | awk -F'\t' '{ split($1, a, " "); print "R\t" a[3] "\t" $2 }'
+          git -C "$d" -c core.quotePath=false ls-files -s -- $VER_DIRS | awk -F'\t' '{ split($1, a, " "); print "I\t" a[2] "\t" $2 }'
+        } > "$t/rows"
+        { git -C "$d" -c core.quotePath=false diff --name-only --relative HEAD -- $VER_DIRS
+          git -C "$d" -c core.quotePath=false ls-files -o --exclude-standard -- $VER_DIRS; } | awk "$VER_KEY"' key($0) { print K }' | sort -u > "$t/dirty"
+        # the working tree of the changed items: their folders (a rule: its file) as git sees them
+        dp=$(awk -F: '{ print ($1 == "rule" ? "rules/" $2 ".md" : $1 == "agent" ? "agents/" $2 ".md" : $1 == "mcp" ? "mcp/" $2 ".yaml" : $1 "s/" $2) }' "$t/dirty")
+        [ -z "$dp" ] || git -C "$d" -c core.quotePath=false ls-files -co --exclude-standard -- $dp | awk '!seen[$0]++' > "$t/wt"
+        git -C "$d" log --format='%x01%H%x09%cd%x09%s' --date=short --name-only --relative "$ref" -- $VER_DIRS > "$t/log" 2>/dev/null
+    else
+        : > "$t/dirty"; : > "$t/log"
+        ( cd "$d" 2>/dev/null && find $VER_DIRS -type f 2>/dev/null | LC_ALL=C sort ) > "$t/wt"
+    fi
+    if [ -s "$t/wt" ]; then
+        while IFS= read -r dp; do [ -f "$d/$dp" ] && printf '%s\n' "$dp"; done < "$t/wt" > "$t/wt2"
+        ( cd "$d" && git hash-object --stdin-paths < "$t/wt2" ) 2>/dev/null | paste - "$t/wt2" | awk -F'\t' '{ print "W\t" $1 "\t" $2 }' >> "$t/rows"
+    fi
+    # a listing per skill or plugin (each a file, hashed with one git call); a one-file item's id is its blob's
+    LC_ALL=C awk -F'\t' -v t="$t" "$VER_KEY"'
+        key($3) { if (REL == "") print "O\t" $1 "\t" K "\t" substr($2, 1, 8); else { if (!(($1, K) in l)) o[++n] = $1 SUBSEP K; l[$1, K] = l[$1, K] $2 " " REL "\n" } }
+        END { for (i = 1; i <= n; i++) { split(o[i], a, SUBSEP); f = t "/l" i; printf "%s", l[o[i]] > f; close(f); print "H\t" a[1] "\t" a[2] "\t" f } }' "$t/rows" > "$t/ids"
+    awk -F'\t' '$1 == "H" { print $4 }' "$t/ids" | git hash-object --no-filters --stdin-paths > "$t/h" 2>/dev/null
+    LC_ALL=C awk -F'\t' -v src="$d" -v g="$g" -v hf="$t/h" -v df="$t/dirty" -v lf="$t/log" "$VER_KEY"'
+        BEGIN { while ((getline x < df) > 0) dt[x] = 1
+                while ((getline x < lf) > 0) {
+                    if (substr(x, 1, 1) == "\001") { split(substr(x, 2), c, "\t"); cm = c[1]; cd = c[2]; ms = substr(x, length(cm) + length(cd) + 4); continue }
+                    if (x == "" || !key(x) || seen[K] == cm) continue
+                    seen[K] = cm
+                    if (!(K in lc)) { lc[K] = cm; ld[K] = cd; lm[K] = ms; ln[K] = 1 } else if (cd == ld[K]) ln[K]++
+                } }
+        $1 == "H" { getline x < hf; $4 = substr(x, 1, 8) }
+        { id[$2, $3] = $4; ks[$3] = 1 }
+        END { for (k in ks) {
+                  if (!g) { v = id["W", k]; w = v; d = 0 }
+                  else { d = (k in dt); v = d ? id["W", k] : id["R", k]; w = d ? id["W", k] : id["I", k] }
+                  print src "\t" k "\t" v "\t" w "\t" ld[k] "\t" (ln[k] + 0) "\t" (d ? "" : lc[k]) "\t" (d ? "true" : "false") "\t" lm[k] } }' "$t/ids"
+    rm -rf "$t"
+}
+ver_all() { # a line per item, as ver_scan, of the source kit takes it from (the first that has it)
+    local d; while IFS= read -r d; do [ -n "$d" ] && ver_scan "$d"; done <<EOF | awk -F'\t' '!seen[$2]++'
+${SRC_DIRS_LIST:-$(src_dirs)}
+EOF
+}
+mtimes() { # mtimes FILE... : "FILE TAB seconds since 1970" of each (its last change)
+    [ $# -gt 0 ] || return 0
+    if stat -c %Y / >/dev/null 2>&1; then stat -c '%Y %n' "$@"; else stat -f '%m %N' "$@"; fi 2>/dev/null | awk '{ t = $1; sub(/^[^ ]* /, ""); print $0 "\t" t }'
+}
+proc_epoch() { # proc_epoch PID : when the process started (seconds since 1970), or nothing
+    local s; s=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//')
+    [ -n "$s" ] || return 0
+    LC_ALL=C date -d "$s" +%s 2>/dev/null || LC_ALL=C date -j -f '%a %b %d %T %Y' "$s" +%s 2>/dev/null
+    return 0
+}
+# state.tsv "ver" lines (a folder's own: "dir:<folder>:ver"): for each item a tool has from kit, "<tool>:<kind>:<name>"
+# and "<id> <at> <mark>": its version id and since when (seconds since 1970) this machine has it. mark: kit's own hash of
+# what it put there for skills and plugins (a copy kit skipped keeps its version), "=" for rules (Codex, omp) and MCP,
+# which every sync writes again from the source. Claude's rules are not kept: Claude reads the source's file itself
+# (installed: that file's version and time). The first sync that keeps them (kit 0.9.0) takes the time from the file
+# kit wrote it to, as the time it last changed.
+ver_targets() { # what each tool has from kit: "verkind TAB tool:kind:name TAB mark TAB file" (verkind: ver or dir:<folder>:ver)
+    local cx="" om="" n d k w
+    has_codex && cx=1; has_omp && om=1; w=$(wanted)
+    [ -f "$STATE" ] && awk -F'\t' -v cx="$cx" -v om="$om" -v cd="$CLAUDE_DIR" -v as="$AGENTS_SKILLS" -v cj="$CLAUDE_JSON" -v od="$OMP_DIR" -v pr="$(plugin_root)" '
+        function out(t, k, m, p) { print v "\t" t ":" k ":" $2 "\t" m "\t" p }
+        { k = $1; s = ""; if (k ~ /^dir:/) { s = substr(k, 5); i = match(s, /:[^:]*$/); k = substr(s, i + 1); s = substr(s, 1, i - 1) }
+          v = s == "" ? "ver" : "dir:" s ":ver" }
+        k == "skill" { out("claude", "skill", $3, (s == "" ? cd "/skills" : s "/.claude/skills") "/" $2) }
+        k == "skill.agents" { p = (s == "" ? as : s "/.agents/skills") "/" $2; if (cx) out("codex", "skill", $3, p); if (om) out("omp", "skill", $3, p) }
+        k == "mcp" { out("claude", "mcp", "=", s == "" ? cj : s "/.mcp.json"); if (s != "" && om) out("omp", "mcp", "=", s "/.mcp.json") }
+        k == "mcp.omp" && s == "" { out("omp", "mcp", "=", od "/mcp.json") }
+        k ~ /^plugin\.(claude|codex|omp)$/ { out(substr(k, 8), "plugin", $3, pr "/" $2) }' "$STATE"
+    for n in $(printf '%s\n' "$w" | sed -n 's/^rule://p'); do
+        [ -z "$cx" ] || printf 'ver\tcodex:rule:%s\t=\t%s\n' "$n" "$CODEX_DIR/AGENTS.md"
+        [ -z "$om" ] || printf 'ver\tomp:rule:%s\t=\t%s\n' "$n" "$OMP_DIR/AGENTS.md"
+    done
+    [ -z "$cx" ] || for n in $(printf '%s\n' "$w" | sed -n 's/^mcp://p'); do printf 'ver\tcodex:mcp:%s\t=\t%s\n' "$n" "$CODEX_DIR/config.toml"; done
+    while IFS= read -r d; do                                 # a folder's rules (Codex, omp) and Codex MCP: in kit's blocks
+        [ -n "$d" ] && [ -d "$d" ] || continue
+        for k in $(dir_items "$d"); do
+            n=${k#*:}
+            case $k in
+                rule:*) grep -qF -- "$BEGIN_MARK" "$d/AGENTS.md" 2>/dev/null || continue
+                    [ -z "$cx" ] || printf 'dir:%s:ver\tcodex:rule:%s\t=\t%s\n' "$d" "$n" "$d/AGENTS.md"
+                    [ -z "$om" ] || printf 'dir:%s:ver\tomp:rule:%s\t=\t%s\n' "$d" "$n" "$d/AGENTS.md";;
+                mcp:*) grep -qF -- "$TOML_BEGIN" "$d/.codex/config.toml" 2>/dev/null && printf 'dir:%s:ver\tcodex:mcp:%s\t=\t%s\n' "$d" "$n" "$d/.codex/config.toml";;
+            esac
+        done
+    done <<EOF
+$(dirs_registered)
+EOF
+    return 0
+}
+ver_record() { # ver_record : after kit wrote the tools' files, the "ver" lines of state.tsv for what each tool has now
+    local t first="" rows
+    [ -f "$STATE" ] || return 0
+    t=$(mktemp -d "${TMPDIR:-/tmp}/kit-verrec.XXXXXX") || return 0
+    awk -F'\t' '$1 == "ver" || $1 ~ /^dir:.*:ver$/ { print $1 "\t" $2 "\t" $3 }' "$STATE" > "$t/old"
+    [ -s "$t/old" ] || first=1
+    ver_targets > "$t/rows"
+    ver_all | cut -f 2,4 > "$t/map"
+    if [ -n "$first" ]; then rows=$(cut -f 4 "$t/rows" | awk '!seen[$0]++'); ( IFS=$LF; mtimes $rows ) > "$t/mt"; else : > "$t/mt"; fi
+    LC_ALL=C awk -F'\t' -v now="$(date +%s)" -v first="$first" -v mf="$t/mt" -v of="$t/old" -v vf="$t/map" '
+        BEGIN { while ((getline x < mf) > 0) { split(x, a, "\t"); mt[a[1]] = a[2] }
+                while ((getline x < of) > 0) { split(x, a, "\t"); old[a[1], a[2]] = a[3] }
+                while ((getline x < vf) > 0) { split(x, a, "\t"); w[a[1]] = a[2] } }
+        !(($1, $2) in done) {
+            done[$1, $2] = 1; k = substr($2, index($2, ":") + 1); if (w[k] == "") next
+            if (($1, $2) in old) { split(old[$1, $2], o, " ")
+                if (($3 == "=" && o[1] == w[k]) || ($3 != "=" && o[3] == $3)) { print $1 "\t" $2 "\t" old[$1, $2]; next } }
+            print $1 "\t" $2 "\t" w[k] " " (first && mt[$4] != "" ? mt[$4] : now) " " $3 }' "$t/rows" > "$t/new"
+    rows=$(mktemp "$STATE.XXXXXX") || die "沒辦法寫 $STATE"
+    { awk -F'\t' '!($1 == "ver" || $1 ~ /^dir:.*:ver$/)' "$STATE"; cat "$t/new"; } > "$rows" && mv -f "$rows" "$STATE"
+    rm -rf "$t"
+}
+used_first() { # used_first TOOL LOG : "skill TAB seconds since 1970" of the first time that conversation read each skill
+    # (Codex and omp log no time for it: the start of its turn)
+    files_rows "$1" "$2" used | LC_ALL=C awk -F'\t' '
+        function ep(x,   y, m, d, era, yoe, doe) {
+            gsub(/[^0-9]/, "", x); if (length(x) < 14 || x ~ /^0+$/) return ""
+            y = substr(x, 1, 4) + 0; m = substr(x, 5, 2) + 0; d = substr(x, 7, 2) + 0
+            y -= (m <= 2); era = int(y / 400); yoe = y - era * 400                    # (days from 1970-01-01: H. Hinnant)
+            doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
+            return (era * 146097 + doe - 719468) * 86400 + substr(x, 9, 2) * 3600 + substr(x, 11, 2) * 60 + substr(x, 13, 2)
+        }
+        $5 == "turn" { ta = ep($6); next }
+        $5 == "skill" { e = ep($1); if (e == "") e = ta; if (e != "" && (!($6 in f) || e < f[$6])) f[$6] = e }
+        END { for (n in f) print n "\t" f[n] }'
+}
+ver_list_prep() { # (cmd_list_json's) what ver_item_json reads for every item, each found once: VER (ver_scan's lines),
+    # INST (state.tsv's ver lines: A = the account's, F = the --dir folder's), MT (the time of Claude's rules), LOCKS
+    # (third_party.lock), and with --pid L_TOOL, L_START (when it started), L_USE (used_first, or "none": no log)
+    local d n
+    VER=$LF$(ver_all | tr '\t' "$US")$LF
+    [ -n "${HERE_DIR:-}" ] && [ -d "$HERE_DIR" ] && froot=$(dir_root "$HERE_DIR") && fitems=$LF$(dir_items "$froot")$LF
+    INST=$LF$([ -f "$STATE" ] && awk -F'\t' -v f="dir:$froot:ver" '$1 == "ver" { print "A" $2 "\t" $3 } $1 == f { print "F" $2 "\t" $3 }' "$STATE")$LF
+    for n in $(printf '%s\n' "$want$fitems" | sed -n 's/^rule://p' | awk '!seen[$0]++'); do rp="$rp$(find_item rule "$n")$LF"; done
+    MT=$LF$( (IFS=$LF; mtimes $rp) | tr '\t' "$US")$LF
+    LOCKS=$LF$(while IFS= read -r d; do [ -f "$d/third_party.lock" ] && awk -F'\t' -v d="$d" -v u="$US" '{ sub(/\r$/, "") } !/^#/ && NF { print d u $1 u $5 u $7 u $9 }' "$d/third_party.lock"; done <<< "$SRC_DIRS_LIST")$LF
+    [ -n "${HERE_PID:-}" ] || return 0
+    agent_guess "$HERE_PID" "${HERE_TOOL:-}" "${HERE_DIR:-}"
+    case $A_TOOL in claude|codex|omp) L_TOOL=$A_TOOL;; *) return 0;; esac
+    L_START=$(proc_epoch "$HERE_PID")
+    agent_log "$HERE_PID" "$L_TOOL" "$A_DIR"
+    if [ -n "$A_LOG" ]; then L_USE=$LF$(used_first "$L_TOOL" "$A_LOG" | tr '\t' "$US")$LF; else L_USE=none; fi
+}
+json_sn() { if [ -n "$1" ] && [ "$1" != - ]; then json_s "$1"; else printf null; fi; }   # a JSON string, or null when empty
+ver_inst() { # ver_inst TOOL : V_ID, V_AT of what TOOL has of item $i ($k $n $p, cmd_list_json's): the folder's first, then
+    # the account's; Claude's rules are the source's file itself
+    local x
+    V_ID=""; V_AT=""
+    [ "$k" = agent ] && return 1
+    if [ "$1:$k" = claude:rule ]; then
+        case $want$fitems in *"$LF$i$LF"*) ;; *) return 1;; esac
+        x=${MT#*"$LF$p$US"}; [ "$x" = "$MT" ] || V_AT=${x%%"$LF"*}
+        V_ID=$vw; return 0
+    fi
+    for x in "F" "A"; do
+        [ $x = F ] && case $fitems in *"$LF$i$LF"*) ;; *) continue;; esac
+        x=${INST#*"$LF$x$1:$i$TAB"}; [ "$x" = "$INST" ] && continue
+        x=${x%%"$LF"*}; V_ID=${x%% *}; x=${x#* }; V_AT=${x%% *}; return 0
+    done
+    return 1
+}
+ver_item_json() { # (cmd_list_json's, for item $i) , "version", "upstream", "installed", "held" and, with --pid, "loaded"
+    local v vid="" vw="" vdate="" vn="" vcm="" vdirty=false vmsg="" t c u lid="" lat="" l
+    v=${VER#*"$LF$d$US$i$US"}
+    [ "$v" = "$VER" ] || IFS=$US read -r vid vw vdate vn vcm vdirty vmsg <<< "${v%%"$LF"*}"
+    printf ', "version": {"id": '; json_sn "$vid"; printf ', "date": '; json_sn "$vdate"
+    [ -n "$vdate" ] || vn=null
+    printf ', "n": %s, "commit": ' "$vn"; json_sn "$vcm"
+    printf ', "message": '; json_sn "$vmsg"; printf ', "dirty": %s}, "upstream": ' "$vdirty"
+    u=${LOCKS#*"$LF$d$US$n$US"}
+    if [ "$u" != "$LOCKS" ] && { [ "$k" = skill ] || [ "$k" = plugin ]; }; then
+        IFS=$US read -r vcm c v <<< "${u%%"$LF"*}"
+        printf '{"commit": '; json_sn "$vcm"; printf ', "date": '; json_sn "$v"; printf ', "collected": '; json_sn "$c"; printf '}'
+    else printf null; fi
+    printf ', "installed": {'
+    for t in claude codex omp; do
+        [ $t = claude ] || printf ', '
+        if ver_inst $t; then
+            printf '"%s": {"id": ' $t; json_sn "$V_ID"; printf ', "at": %s}' "${V_AT:-null}"
+            [ "$t" != "$L_TOOL" ] || { lid=$V_ID; lat=$V_AT; }
+        else printf '"%s": null' $t; fi
+    done
+    printf '}, "held": null'
+    [ -n "${HERE_PID:-}" ] || return 0
+    # loaded: rules, MCP and plugins are read when the conversation starts, a skill when it is used
+    if [ -z "$L_TOOL" ]; then l=unknown
+    elif [ -z "$lid" ]; then l=""
+    elif [ -z "$L_START" ] || [ -z "$lat" ]; then l=unknown
+    elif [ "$L_START" -ge "$lat" ]; then l=new
+    elif [ "$k" != skill ]; then l=old
+    elif [ "$L_USE" = none ]; then l=unknown
+    else u=${L_USE#*"$LF$n$US"}; l=new; [ "$u" = "$L_USE" ] || [ "${u%%"$LF"*}" -ge "$lat" ] || l=old; fi
+    printf ', "loaded": '; json_sn "$l"
+}
 sign_json() { # ,"sign": the approvals repo this computer signs with (kit approve remembered it): its serial and what it
     # approved ({name, commit}); nothing when this computer hasn't signed
     local d f; d=$(state_get sign approvals); f="$d/approved.txt"
@@ -4538,6 +4761,8 @@ cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a k
     seen=$LF$([ -f "$STATE" ] && awk -F'\t' '$1 == "seen" && $3 != "" { print $2 }' "$STATE")$LF
     KIT_REQS=$(while IFS= read -r d; do [ -f "$d/kit.yaml" ] && yaml "$d/kit.yaml" | awk -v f="$d/kit.yaml:" '/^requires\./ { print f $0 }'; done <<< "$SRC_DIRS_LIST")
     tool_cache                                               # each program looked at once, not once per skill
+    local VER INST MT LOCKS froot="" fitems="" rp="" L_TOOL="" L_START="" L_USE=""
+    ver_list_prep
     printf '{\n  "kit": %s,\n  "sources": [' "$(json_s "$KIT_VERSION")"
     first=1
     while IFS= read -r s; do
@@ -4579,6 +4804,7 @@ EOF
             plugin) printf ', "needs": '; needs_json "${p%/.claude-plugin/plugin.json}" "$d"; printf ', "parts": '; parts_json "${p%/.claude-plugin/plugin.json}";;
             mcp) mcp_list_json "$p" "$n";;
         esac
+        ver_item_json
         printf '}'
     done
     printf '\n  ],\n  "blocked": ['
@@ -4598,13 +4824,14 @@ EOF
 cmd_list() {
     case ${1:-} in
         --json) shift
-            HERE_DIR=""; HERE_PID=""
+            HERE_DIR=""; HERE_PID=""; HERE_TOOL=""
             while [ $# -gt 0 ]; do
                 case $1 in
                     --dir) [ $# -ge 2 ] || die_c usage "--dir 後面要接資料夾"; HERE_DIR=$2; shift 2
                         [ -d "$HERE_DIR" ] && HERE_DIR=$(cd "$HERE_DIR" && pwd -P);;
                     --pid) [ $# -ge 2 ] || die_c usage "--pid 後面要接數字"; HERE_PID=$2; shift 2
                         case $HERE_PID in ""|*[!0-9]*) die_c usage "--pid 後面要接數字";; esac;;
+                    --tool) [ $# -ge 2 ] || die_c usage "--tool 後面要接 claude、codex 或 omp"; HERE_TOOL=$2; shift 2;;
                     *) die_c usage "用法：kit list --json [--dir 資料夾] [--pid 程式編號]";;
                 esac
             done
@@ -4697,7 +4924,7 @@ dir_add_rm() { # dir_add_rm add|rm DIR KIND NAME : only that folder (and below i
     if [ -n "$items$(dir_mark "$root" agent)" ]; then dirs_set "$root" add; else dirs_set "$root" rm; fi
     apply_dir "$root"
     # Codex: the folder's trust and the root marker; a plugin: kit's copy and what is blocked (a folder's plugin is kit's)
-    { has_codex || [ "$k" = plugin ]; } && apply_claude
+    if has_codex || [ "$k" = plugin ]; then apply_claude; else ver_record; fi
     if [ "$verb" = add ]; then say "kit：$i 加到 ${root}（只有在這裡和子資料夾開的 agent 讀得到，開新的才會讀到）"
         [ "$k" != plugin ] || say "     Codex 只能整個帳號裝：在這裡開的 Codex 沒有外掛 ${n}（Codex 也要的話：kit add plugin ${n}，整個帳號都有）"
     else say "kit：$i 從 $root 拿掉了"; fi
@@ -4875,7 +5102,7 @@ cmd_place() { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR
     dir_write "$d" "$items" "$marks"
     dirs_set "$d" add
     apply_dir "$d"
-    has_codex && apply_claude                                # Codex: the folder's trust and the root marker
+    if has_codex; then apply_claude; else ver_record; fi      # Codex: the folder's trust and the root marker
     # what this tool cannot take from the agent in a folder (the README's table)
     only=$(fm_val "$fm" tools.only); deny=$(fm_val "$fm" tools.deny)
     case $tool in
@@ -5739,8 +5966,36 @@ $(printf '%s\n' "$items" | awk -F'\t' '{ print "- " $1 " " $2 }')"
 }
 # ---------- collect / outdated: other people's skills, from their own repos ----------
 # third_party.lock (in the source that keeps them): one line per skill
-#   name<TAB>url<TAB>path<TAB>ref<TAB>commit<TAB>license<TAB>date
-LOCK_HEAD='# third_party.lock - written by kit collect; name url path ref commit license date [skip]'
+#   name<TAB>url<TAB>path<TAB>ref<TAB>commit<TAB>license<TAB>date<TAB>skip<TAB>upstream date
+# (date: when it was collected; skip: a plugin's --skip, "-" for none; upstream date: the commit's own date, YYYY-MM-DD,
+# "-" when not known. Lines written before kit 0.9.0 end after date or skip.)
+LOCK_HEAD='# third_party.lock - written by kit collect; name url path ref commit license date [skip] [upstream-date]'
+commit_day() { git -C "$1" log -1 --format=%cd --date=short "$2" 2>/dev/null || echo -; }   # commit_day REPO COMMIT : its date (YYYY-MM-DD)
+collect_dates() { # collect_dates DIR : kit collect --dates: the upstream date of the lines of DIR's third_party.lock that
+    # have none (collected before kit 0.9.0), asked from each author's repo: only that commit, without its files
+    local dir=$1 line n url sha d tmp got=0 miss=0
+    check_maintainer "$dir"
+    [ -f "$dir/third_party.lock" ] || { say "$(basename "$dir") 沒有 third_party.lock（還沒用 kit collect 收過東西）"; return 0; }
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-dates.XXXXXX")
+    while IFS= read -r line; do
+        line=${line%$'\r'}
+        case $line in ""|\#*) continue;; esac
+        d=$(printf '%s\n' "$line" | cut -f 9); [ -z "$d" ] || [ "$d" = - ] || continue
+        n=${line%%"$TAB"*}; url=$(printf '%s\n' "$line" | cut -f 2); sha=$(printf '%s\n' "$line" | cut -f 5)
+        d=""
+        if collect_allowed "$url" "$dir" && ( PUSH_DIR=$dir check_host "$url" ) 2>/dev/null; then
+            rm -rf "$tmp/r"; git init -q "$tmp/r" 2>/dev/null &&
+                git_safe -C "$tmp/r" -c protocol.file.allow=always fetch -q --depth 1 --filter=blob:none --no-tags "$url" "$sha" 2>/dev/null &&
+                d=$(git -C "$tmp/r" log -1 --format=%cd --date=short FETCH_HEAD 2>/dev/null)
+        fi
+        if [ -n "$d" ]; then
+            lock_set "$dir" "$(printf '%s\n' "$line" | awk -F'\t' -v OFS='\t' -v d="$d" '{ for (i = NF + 1; i <= 8; i++) $i = "-"; $9 = d; print }')"
+            say "  ${n}：$d"; got=$((got + 1))
+        else warn "${n}：問不到 $(url_id "$url") 的 $(printf %.12s "$sha")（不在 collect_sources、連不到，或那個 commit 不在了），日期留空"; miss=$((miss + 1)); fi
+    done < "$dir/third_party.lock"
+    rm -rf "$tmp"
+    say "kit：補了 $got 個日期$( [ $miss = 0 ] || printf '，%s 個問不到' $miss)"
+}
 url_id() { # host/path of a git URL, without scheme, user, .git or trailing /
     printf '%s\n' "$1" | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#^([^/:]+):#\1/#; s#/+$##; s#\.git$##'
 }
@@ -5875,7 +6130,7 @@ web_repo() { # web_repo URL : a repo page's address (GitHub /tree/<ref>/<folder>
             if (repo ~ /^https?:\/\/[^\/]+\/[^\/]+\/[^\/]+$/) print repo "\t" a[n] "\t" tail }'
 }
 cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to SOURCE] [--force] [--allow] [--look] [--skip P]...
-    local arg="" path="" name="" ref="" to="" force="" allow="" look="" skip=""
+    local arg="" path="" name="" ref="" to="" force="" allow="" look="" skip="" dates=""
     while [ $# -gt 0 ]; do
         case $1 in
             --path) path=${2:-}; shift 2 || die "--path 後面要接 repo 裡的資料夾";;
@@ -5885,11 +6140,16 @@ cmd_collect() { # kit collect <url|name> [--path P] [--name N] [--ref R] [--to S
             --force) force=1; shift;;
             --allow) allow=1; shift;;
             --look) look=1; shift;;
+            --dates) dates=1; shift;;
             --skip) case ${2:-} in ""|/*|*..*|*,*) die "--skip 後面要接外掛裡不要的檔案或資料夾（相對路徑）";; esac; skip="$skip${skip:+,}${2%/}"; shift 2;;
             -*) die_c usage "不認得 $1";;
             *) [ -z "$arg" ] || die_c usage "多了一個參數：$1"; arg=$1; shift;;
         esac
     done
+    if [ -n "$dates" ]; then
+        [ -z "$arg" ] || die_c usage "用法：kit collect --dates [--to 來源]"
+        local dd; dd=$(target_dir "$to") || exit 1; collect_dates "$dd"; return
+    fi
     [ -n "$arg" ] || die_c usage "用法：kit collect <原作者的 repo 網址> [--path repo 裡的資料夾] [--name 名字] [--ref 分支或 tag] [--allow]，或 kit collect <名字>（再收一次）"
     local dir url line add=""; dir=$(target_dir "$to") || exit 1
     check_maintainer "$dir"
@@ -6001,7 +6261,7 @@ $(printf '%s\n' "$found" | sed 's/^/  /')"
     collect_scan "$src" "$tmp/out"
     [ "$lic" = "$src/${lic##*/}" ] || cp "$lic" "$tmp/out/${lic##*/}"
     rm -rf "$dst"; mkdir -p "$dir/skills"; cp -R "$tmp/out" "$dst"
-    lock_set "$dir" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$name" "$url" "${path:-.}" "${ref:--}" "$sha" "$kind" "$(date +%Y-%m-%d)")"
+    lock_set "$dir" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t-\t%s' "$name" "$url" "${path:-.}" "${ref:--}" "$sha" "$kind" "$(date +%Y-%m-%d)" "$(commit_day "$repo" "$sha")")"
     rm -rf "$tmp"
     if [ -n "$add" ]; then yaml_list_add "$dir/kit.yaml" collect_sources "$(url_id "$url")"; say "已把 $(url_id "$url") 加進 $(basename "$dir")/kit.yaml 的 collect_sources"; fi
     say "已收 skill:$name ← $(url_id "$url")${path:+/$path} @ $(printf %.12s "$sha")（授權 ${kind}）"
@@ -6066,7 +6326,7 @@ collect_plugin() { # (cmd_collect's, with its variables) the plugin in $repo/$pa
     [ ! -s "$tmp/ops" ] || { json_edit "$tmp/out/.claude-plugin/plugin.json" "$tmp/ops"; rm -f "$tmp/out/.claude-plugin/plugin.json.kit-backup"; }
     rm -f "$tmp/out/.claude-plugin/marketplace.json"   # the author's own list (where to download it): kit has its own
     rm -rf "$dst"; mkdir -p "$dir/plugins"; cp -R "$tmp/out" "$dst"
-    lock_set "$dir" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$n" "$url" "${path:-.}" "${ref:--}" "$sha" "$kind" "$(date +%Y-%m-%d)" "${skip:--}")"
+    lock_set "$dir" "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$n" "$url" "${path:-.}" "${ref:--}" "$sha" "$kind" "$(date +%Y-%m-%d)" "${skip:--}" "$(commit_day "$repo" "$sha")")"
     rm -rf "$tmp"
     if [ -n "$add" ]; then yaml_list_add "$dir/kit.yaml" collect_sources "$(url_id "$url")"; say "已把 $(url_id "$url") 加進 $(basename "$dir")/kit.yaml 的 collect_sources"; fi
     say "已收外掛 plugin:$n ← $(url_id "$url")${path:+/$path} @ $(printf %.12s "$sha")（授權 ${kind}${skip:+；沒收：$skip}）"
@@ -6376,6 +6636,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit collect <名字>                再收一次＝整份換成原作者的新版
   kit collect <原作者 repo 網址> --look [--path 資料夾] [--ref 分支] [--to 來源]
                                     只下載來看、什麼都不寫：找到的 skill、授權、會執行的檔案（JSON，給程式讀）
+  kit collect --dates [--to 來源]   以前收的補上原作者那個 commit 的日期（只問那個 commit，不下載檔案）
   kit outdated [--json]             看收過的 skill 原作者有沒有新版
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：

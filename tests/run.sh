@@ -35,6 +35,8 @@ jget() { LC_ALL=C awk -f "$JA" -v get="$2" "$1" 2>/dev/null; }
 # kit.ps1 next to unix/kit (found now: some parts below run with a PATH of fakes only)
 PWSH=$(command -v pwsh 2>/dev/null || true)
 kps() { "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" "$@"; }
+# kit.ps1 is still at kit api 1.13 (its port of 1.14 comes later): unix/kit's JSON without what 1.14 added, to compare
+v13() { sed -E 's/, "version": \{.*"held": null(, "loaded": [^}]*)?\}(,?)$/}\2/; s/"api": "1\.14"/"api": "1.13"/'; }
 # capped SECS CMD... : CMD, stopped after SECS seconds (then 124)
 capped() { local s=$1 p w rc; shift; "$@" & p=$!; { sleep "$s"; kill "$p"; } >/dev/null 2>&1 & w=$!; wait "$p"; rc=$?; { kill "$w"; wait "$w"; } 2>/dev/null; [ $rc -lt 128 ] || rc=124; return $rc; }
 
@@ -241,7 +243,7 @@ rm -f "$TEAM/agents/crlf.md"
 check "list --json: tools and no version wanted" 'grep -q "^  \"tools\": \[\"claude\"" "$T/list.json" && [ "$(jget "$T/list.json" kit_version_wanted)" = "\"\"" ]'
 check "list --json does not mark items seen" '[ "$(kit list --json | grep -c "\"new\": true")" = 1 ]'
 if [ -n "$PWSH" ]; then
-    check "list --json: kit.ps1 prints the same" 'kps list --json 2>&1 | cmp -s - "$T/list.json"'
+    check "list --json: kit.ps1 prints the same" 'kps list --json 2>&1 | cmp -s - <(v13 < "$T/list.json")'
 fi
 out=$(kit list --bad 2>&1); rc=$?
 check "list with a wrong option: usage" '[ $rc -ne 0 ] && echo "$out" | grep -qF "kit list [--json"'
@@ -264,8 +266,8 @@ out=$(kit status 2>/dev/null); rc=$?
 check "status without --json: usage error as JSON" '[ $rc -ne 0 ] && [ "$out" = "{\"error\": {\"code\": \"usage\", \"message\": \"用法：kit status --json\"}}" ]'
 if [ -n "$PWSH" ]; then
     at0() { sed -E 's/^  "at": [0-9]+,$/  "at": 0,/'; }
-    check "status --json: kit.ps1 prints the same" '[ "$(kps status --json 2>/dev/null | at0)" = "$(at0 < "$T/status.json")" ]'
-    check "status --json before kit init, without --json: kit.ps1 prints the same" '[ "$(AGENTKIT_CONFIG="$T/noconf" kps status --json 2>/dev/null | at0)" = "$(AGENTKIT_CONFIG="$T/noconf" kit status --json 2>/dev/null | at0)" ] &&
+    check "status --json: kit.ps1 prints the same" '[ "$(kps status --json 2>/dev/null | at0)" = "$(v13 < "$T/status.json" | at0)" ]'
+    check "status --json before kit init, without --json: kit.ps1 prints the same" '[ "$(AGENTKIT_CONFIG="$T/noconf" kps status --json 2>/dev/null | at0)" = "$(AGENTKIT_CONFIG="$T/noconf" kit status --json 2>/dev/null | v13 | at0)" ] &&
         [ "$(kps status 2>/dev/null)" = "$out" ] && [ ! -e "$T/noconf" ]'
 fi
 echo more >>"$TEAM/skills/quote/SKILL.md"; echo x > "$TEAM/skills/gerrit-review/notes.md"; echo y >> "$TEAM/rules/security.md"; echo z > "$TEAM/README.md"
@@ -276,7 +278,7 @@ check "list --json: changed items (a skill by any file in its folder), the rest 
     grep -qF "\"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"changed\": true," "$T/list-chg.json" &&
     grep -qF "\"name\": \"gerrit\", \"status\": \"agent\", \"new\": false, \"changed\": false," "$T/list-chg.json"'
 if [ -n "$PWSH" ]; then
-    check "list --json changed: kit.ps1 prints the same" 'kps list --json 2>/dev/null | cmp -s - "$T/list-chg.json"'
+    check "list --json changed: kit.ps1 prints the same" 'kps list --json 2>/dev/null | cmp -s - <(v13 < "$T/list-chg.json")'
 fi
 git -C "$TEAM" checkout -q -- .; rm -f "$TEAM/skills/gerrit-review/notes.md" "$TEAM/README.md"; rm -rf "$TEAM/.git"
 # --dir: what an agent started in a folder reads besides kit's (the panel follows the agent you click)
@@ -316,7 +318,7 @@ check "list --json --dir: MCP omp reads (.mcp.json, mcp.json) and Codex's .codex
 check "list --json --dir: this account's own skill and MCP, not kit's" 'grep -qF "{\"scope\": \"user\", \"kind\": \"skill\", \"name\": \"mine\"" "$T/here.json" && grep -qF "{\"scope\": \"user\", \"kind\": \"mcp\", \"name\": \"um\"" "$T/here.json" &&
     ! grep -q "\"scope\": \"user\", \"kind\": \"skill\", \"name\": \"gerrit-review\"" "$T/here.json" && ! grep -q "\"scope\": \"user\", \"kind\": \"mcp\", \"name\": \"gerrit\"" "$T/here.json"'
 if [ -n "$PWSH" ]; then
-    check "list --json --dir: kit.ps1 prints the same" 'kps list --json --dir "$T/proj/sub" --pid $$ > /tmp/here-ps.json 2>&1; cmp -s /tmp/here-ps.json "$T/here.json"'
+    check "list --json --dir: kit.ps1 prints the same" 'kps list --json --dir "$T/proj/sub" --pid $$ > /tmp/here-ps.json 2>&1; cmp -s /tmp/here-ps.json <(v13 < "$T/here.json")'
 fi
 out=$(kit list --json --dir "$T/nope" 2>&1)
 check "list --json --dir: a folder that is not there" 'echo "$out" | grep -qF "\"here\": {\"dir\": \"$T/nope\", \"user\": null, \"agent\": null, \"error\": \"找不到這個資料夾\", \"items\": []}"'
@@ -329,7 +331,7 @@ check "list --json --pid: the agent kit run started there" 'grep -qF "\"user\": 
 check "list --json --pid: the marker of a kit run that ended is dropped" '[ ! -e "$RUND/$dp" ] && [ -e "$RUND/$$" ]'
 if [ -n "$PWSH" ]; then
     echo gone > "$RUND/$dp"
-    check "list --json --pid: kit.ps1 finds the same agent" 'kps list --json --dir "$T/proj/sub" --pid $$ 2>&1 | cmp -s - "$T/here2.json" && [ ! -e "$RUND/$dp" ]'
+    check "list --json --pid: kit.ps1 finds the same agent" 'kps list --json --dir "$T/proj/sub" --pid $$ 2>&1 | cmp -s - <(v13 < "$T/here2.json") && [ ! -e "$RUND/$dp" ]'
 fi
 rm -f "$RUND/$$"
 mkdir -p "$T/fakebin"; printf '#!/bin/sh\n"$FAKE_KIT" list --json --dir "$PWD" --pid $PPID > "$FAKE_OUT" 2>&1\n' > "$T/fakebin/claude"; chmod +x "$T/fakebin/claude"
@@ -407,9 +409,9 @@ check "check: an agent with tools.only: a note for its author (what Claude can't
 
 # ---------- kit_version: tell once when the team wants a newer kit ----------
 cp "$TEAM/kit.yaml" "$T/kit.yaml.orig"
-echo "kit_version: 0.9.0" >> "$TEAM/kit.yaml"
+echo "kit_version: 9.9.0" >> "$TEAM/kit.yaml"
 out=$(kit sync 2>&1)
-check "old kit: sync tells the user" 'echo "$out" | grep -qF "團隊要 kit 0.9.0 以上，你的是 $(cat "$HERE/../VERSION")。請打  kit self-update"'
+check "old kit: sync tells the user" 'echo "$out" | grep -qF "團隊要 kit 9.9.0 以上，你的是 $(cat "$HERE/../VERSION")。請打  kit self-update"'
 out=$(kit sync 2>&1; kit list 2>&1)
 check "old kit: told only once" '! echo "$out" | grep -q 團隊要'
 cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 0.10.0" >> "$TEAM/kit.yaml"
@@ -1342,7 +1344,7 @@ nd() { python3 -c "import json,sys;d={i['name']:i for i in json.load(open(sys.ar
 check "needs: SKILL.md runs node, package.json gives the lowest version, too old here, brew is there" '[ "$(nd drawer)" = "[{\"have\": \"16.2.0\", \"install\": \"brew upgrade node\", \"min\": \"18\", \"ok\": false, \"title\": \"Node.js\", \"tool\": \"node\"}]" ]'
 check "needs: a package.json or a .py of the author says nothing; kit.yaml requires does" 'nd plain | grep -q "\"tool\": \"git\"" && ! nd plain | grep -q "\"tool\": \"node\"" && ! nd plain | grep -q python'
 check "needs: SKILL.md requires, an unknown program has no install" 'nd told | grep -q "\"min\": \"20\"" && nd told | grep -q "\"install\": \"\", \"min\": \"\", \"ok\": false, \"title\": \"frob\", \"tool\": \"frob\""'
-check "needs: kit.ps1 prints the same list" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(cat "$T/needs.json")" ]'
+check "needs: kit.ps1 prints the same list" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(v13 < "$T/needs.json")" ]'
 check "needs: a program kit has no recipe for is not run to look at it" 'nd asks | grep -qF "\"have\": \"\", \"install\": \"\"" && [ ! -e "$T/noprobe.log" ]'
 out=$(kit tools 2>&1)
 check "tools: what this machine has and how kit would install it" 'echo "$out" | grep -qE "^node +16.2.0 +brew install node$"'
@@ -1403,7 +1405,7 @@ nl=$(cat "$T/npm.log")
 check "install-deps: npm ci in a new folder next to kit's, not the source, without the skill's .npmrc" '[ $rc -eq 0 ] && [ "${nl#"$S6".new.}" != "$nl" ] && [ "${nl#* }" = "ci --ignore-scripts --omit=dev --no-audit --no-fund" ] && [ -f "$S6/node_modules/left-pad/index.js" ] && [ ! -e "$NT/skills/packed/node_modules" ] && [ ! -e "$S6/.npmrc" ] && ! ls -d "$S6".new.* >/dev/null 2>&1'
 check "install-deps: the copy kit put gets node_modules linked to it" '[ -L "$C6/node_modules" ] && [ -f "$C6/node_modules/left-pad/index.js" ]'
 check "packages: installed now" '[ "$(pk packed)" = "{\"bad\": \"\", \"had\": true, \"install\": \"npm ci --ignore-scripts --omit=dev --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": true}" ]'
-check "packages: kit.ps1 sees the same" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]'
+check "packages: kit.ps1 sees the same" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null | v13)" ]'
 out=$(kit install-deps packed 2>&1)
 check "install-deps again: already there, npm not run" 'echo "$out" | grep -qF "已經裝好了" && [ "$(wc -l < "$T/npm.log")" -eq 1 ]'
 out=$(kit sync 2>&1)
@@ -1451,13 +1453,13 @@ fi
 # what kit does not install: git, a URL, another registry without your ~/.npmrc
 check "packages: a git dependency is shown as refused" '[ "$(pk npmgit)" = "{\"bad\": \"package.json: optionalDependencies.tool = github:someone/tool\", \"had\": false, \"install\": \"npm install --ignore-scripts --omit=dev --no-audit --no-fund\", \"kind\": \"npm\", \"ok\": false}" ]'
 check "packages: a lock with a package from git, or from another registry, is refused" 'pk npmlock | grep -qF "\"bad\": \"package-lock.json: node_modules/tool: resolved git+ssh://git@git.example.org/someone/tool.git#abc\"" && pk npmreg | grep -qF "\"bad\": \"package-lock.json: node_modules/tool: resolved https://npm.example.com/r/tool/-/tool-1.0.0.tgz\""'
-check "packages (refused): kit.ps1 says the same" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]'
+check "packages (refused): kit.ps1 says the same" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null | v13)" ]'
 rm -f "$T/npm.log"
 out=$(kit install-deps npmgit 2>&1); rc=$?
 check "install-deps: refuses a git dependency, npm not run" '[ $rc -ne 0 ] && echo "$out" | grep -qF "kit 不裝這些 npm 套件" && echo "$out" | grep -qF "github:someone/tool" && [ ! -e "$T/npm.log" ] && [ ! -e "$H6/.config/agentkit/deps/npmgit" ]'
 printf 'registry = https://npm.example.com/r\n' > "$H6/.npmrc"
 check "packages: your own ~/.npmrc registry is fine" '[ "$(pk npmreg | grep -o "\"bad\": \"[^\"]*\"")" = "\"bad\": \"\"" ]'
-check "packages (your registry): kit.ps1 says the same" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]'
+check "packages (your registry): kit.ps1 says the same" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null | v13)" ]'
 rm -f "$H6/.npmrc"
 out=$(kit install-deps drawer 2>&1); rc=$?
 check "install-deps: a skill without packages" '[ $rc -eq 0 ] && echo "$out" | grep -qF "不用另外裝套件"'
@@ -1470,7 +1472,7 @@ PIPX="-m pip install --only-binary=:all: --no-input --disable-pip-version-check 
 check "packages (pip): a requirements.txt -> a venv and pip with wheels only" '[ "$(pk pyskill pip)" = "{\"bad\": \"\", \"had\": false, \"install\": \"python3 -m venv venv; venv/bin/python $PIPX\", \"kind\": \"pip\", \"ok\": false}" ] && [ "$(pk packed pip)" = null ]'
 check "packages (pip): a requirements.txt with options is shown as refused" 'pk pybad pip | grep -qF "\"bad\": \"2: --index-url http://elsewhere.invalid/\""'
 check "packages (pip): an option after a marker is refused too" 'pk pymark pip | grep -qF "\"bad\": \"1: requests ; python_version >= \\\"3.8\\\" --config-settings=x=y\""'
-check "packages (pip): kit.ps1 sees the same" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]'
+check "packages (pip): kit.ps1 sees the same" '[ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null | v13)" ]'
 out=$(kit install-deps pybad 2>&1); rc=$?
 check "install-deps (pip): refuses options in requirements.txt, nothing made" '[ $rc -ne 0 ] && echo "$out" | grep -qF "第 2: --index-url" && [ ! -e "$H6/.config/agentkit/pydeps/pybad" ] && [ ! -e "$T/pip.log" ]'
 kit add skill pyskill >/dev/null 2>&1
@@ -1487,7 +1489,7 @@ check "rm --dir with kit's venv: the folder exactly as before" 'cmp -s "$PD/CLAU
 kit rm skill pyskill >/dev/null 2>&1
 check "python line: gone with the skill (kit's venv stays)" '[ -x "$S7/venv/bin/python" ] && ! grep -qF ".venv/bin/python" "$H6/.claude/CLAUDE.md" 2>/dev/null'
 kit add skill pyskill >/dev/null 2>&1
-check "packages (pip): installed now; kit.ps1 sees the same" 'pk pyskill pip | grep -qF "\"ok\": true" && { [ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null)" ]; }'
+check "packages (pip): installed now; kit.ps1 sees the same" 'pk pyskill pip | grep -qF "\"ok\": true" && { [ -z "$PWSH" ] || [ "$(kps list --json 2>/dev/null)" = "$(kit list --json 2>/dev/null | v13)" ]; }'
 out=$(kit sync 2>&1)
 check "sync (pip): the link is not a change to the skill" '! echo "$out" | grep -q "手動" && [ -L "$C7/.venv" ]'
 printf 'requests==2.33.0\n' > "$NT/skills/pyskill/requirements.txt"; kit sync >/dev/null 2>&1
@@ -2178,6 +2180,18 @@ check "collect skips binaries, links and dot folders" '[ ! -e "$CO/skills/foo/lo
 check "collect points at files that run" 'echo "$out" | grep -q "會執行的檔案" && echo "$out" | grep -q scripts/run.sh'
 v1=$(git -C "$UP" rev-parse HEAD)
 check "third_party.lock records author, commit, license" 'awk -F"\t" -v u="file://$UP" -v s="$v1" "\$1 == \"foo\" && \$2 == u && \$3 == \"skills/foo\" && \$5 == s && \$6 == \"MIT\"" "$CO/third_party.lock" | grep -q .'
+ud=$(git -C "$UP" log -1 --format=%cd --date=short)
+check "third_party.lock: the upstream commit's own date (column 9; column 8, skip, is - for a skill)" '[ "$(awk -F"\t" "\$1 == \"foo\" { print \$8 \" \" \$9 }" "$CO/third_party.lock")" = "- $ud" ]'
+# a line from before kit 0.9.0 (7 columns): still read; kit collect --dates asks the author for that commit's date
+awk -F'\t' -v OFS='\t' '/^#/ { print; next } { NF = 7; print }' "$CO/third_party.lock" > "$T/lock7" && cp "$T/lock7" "$CO/third_party.lock"
+out=$(kit outdated --json 2>/dev/null)
+check "third_party.lock: an old line without the date still works" 'echo "$out" | grep -qF "\"commit\": \"$v1\", \"now\": \"$v1\", \"state\": \"latest\""'
+out=$(kit collect --dates 2>&1); rc=$?
+check "collect --dates: fills in the date from the author's repo" '[ $rc -eq 0 ] && [ "$(awk -F"\t" "\$1 == \"foo\" { print NF \" \" \$8 \" \" \$9 }" "$CO/third_party.lock")" = "9 - $ud" ] && echo "$out" | grep -q "補了 1 個日期"'
+out=$(kit collect --dates 2>&1)
+check "collect --dates: nothing left to ask" 'echo "$out" | grep -q "補了 0 個日期"'
+cp "$T/lock7" "$CO/third_party.lock"; mv "$UP" "$UP.away"; out=$(kit collect --dates 2>&1); mv "$UP.away" "$UP"
+check "collect --dates: an author gone: left empty, said so" '[ "$(awk -F"\t" "\$1 == \"foo\" { print NF }" "$CO/third_party.lock")" = 7 ] && echo "$out" | grep -q "foo：問不到"'
 out=$(kit collect "file://$T/elsewhere" 2>&1); rc=$?
 check "collect refuses authors not in collect_sources" '[ $rc -ne 0 ] && echo "$out" | grep -q "不在 collect_sources"'
 out=$(kit collect "file://$T/nolic" --path skills/bar 2>&1); rc=$?
@@ -2340,7 +2354,7 @@ out=$(HOME="$RH" AGENTKIT_CONFIG="$NC/conf" AGENTKIT_SOURCES="$NC/src" "$KIT" st
 check "status --json: no approvals clone yet: not valid, none made" '[ $rc -eq 0 ] && echo "$out" | grep -qxF "  \"approvals\": {\"serial\": null, \"used\": null, \"valid\": false}," &&
     echo "$out" | grep -qxF "    {\"name\": \"srcA\", \"source\": \"file://$SA/srcA.git\", \"dir\": \"$NC/src/srcA\", \"commit\": null, \"approved\": null}" && [ ! -e "$NC/src" ] && [ "$(ls "$NC/conf")" = machine.yaml ]'
 if [ -n "$PWSH" ]; then
-    rk status --json 2>/dev/null | grep -v '"at":' > "$T/bst"
+    rk status --json 2>/dev/null | v13 | grep -v '"at":' > "$T/bst"
     HOME="$RH" AGENTKIT_CONFIG="$RH/.config/agentkit" AGENTKIT_SOURCES="$RH/agentkit" kps status --json 2>/dev/null | tr -d '\r' | grep -v '"at":' > "$T/pst"; rc=${PIPESTATUS[0]}
     check "status --json with approvals: kit.ps1 says the same as unix/kit (serial, used, valid, approved)" '[ $rc -eq 0 ] && grep -qxF "  \"approvals\": {\"serial\": 2, \"used\": 2, \"valid\": true}," "$T/pst" && diff "$T/bst" "$T/pst"'
 fi
@@ -2369,10 +2383,10 @@ check "list --json: sign, the approvals this computer signs with" 'printf "%s" "
 
 # ---------- api: the output format programs read ----------
 out=$(kit api 2>&1); rc=$?
-check "api: one line, major.minor (1.13)" '[ $rc -eq 0 ] && [ "$out" = 1.13 ]'
+check "api: one line, major.minor (1.14)" '[ $rc -eq 0 ] && [ "$out" = 1.14 ]'
 if [ -n "$PWSH" ]; then
     out=$(kps api 2>&1); rc=$?
-    check "api: kit.ps1 says the same" '[ $rc -eq 0 ] && [ "$out" = 1.13 ]'
+    check "api: kit.ps1 still 1.13 (its port of 1.14 comes later)" '[ $rc -eq 0 ] && [ "$out" = 1.13 ]'
 fi
 # errors of the commands programs read: JSON on stdout, the words on stderr, exit not 0
 out=$(AGENTKIT_CONFIG="$T/noconf" kit list --json 2>"$T/err"); rc=$?
@@ -2665,7 +2679,7 @@ check "list --json: a not_secret field is no variable" 'mj "$MT/list-ns.json" "i
 if [ -n "$PWSH" ]; then
   out=$(mkp check "$MS" 2>&1); rc=$?
   check "kit.ps1 check: not_secret honoured too" '[ $rc -eq 0 ]'
-  a=$(mk list --json 2>/dev/null); b=$(mkp list --json 2>/dev/null)
+  a=$(mk list --json 2>/dev/null | v13); b=$(mkp list --json 2>/dev/null)
   check "kit.ps1: the same list --json with not_secret" '[ "$a" = "$b" ]'
 fi
 rm -f "$MS/mcp/leak.yaml"
@@ -2725,7 +2739,7 @@ if [ -n "$PWSH" ]; then
   check "kit.ps1: new mcp --look --to nosuch: the same error JSON, exit 1" '[ "$a" = "$b" ] && echo "$a" | grep -qx "rc=1"'
   out=$(printf '%s\n' "claude mcp add u8 -e NOTE=é漢 -- uvx u8-srv@2.0.0" | mkp new mcp --config - --look 2>/dev/null)
   check "kit.ps1: --config - reads UTF-8" 'mj /dev/stdin "assert \"é漢\" in d[\"yaml\"]" <<< "$out"'
-  a=$(mk list --json 2>/dev/null); b=$(mkp list --json 2>/dev/null)
+  a=$(mk list --json 2>/dev/null | v13); b=$(mkp list --json 2>/dev/null)
   check "kit.ps1: the same list --json with MCP packages, installed and not" '[ "$a" = "$b" ]'
   mkp sync >/dev/null 2>&1
   check "kit.ps1 sync: the same Claude JSON and Codex block" 'mj "$CJ" "s=d[\"mcpServers\"];assert s[\"github-server\"][\"command\"]==\"node\" and s[\"web\"][\"type\"]==\"http\"" && grep -qxF "bearer_token_env_var = \"WEB_TOKEN\"" "$CT" && grep -qxF "env_vars = [\"DOCS_TOKEN\"]" "$CT"'
@@ -2824,7 +2838,7 @@ out=$(AGENTKIT_CONFIG="$NT/conf" "$KIT" status --json 2>/dev/null); rc=$?
 check "status --json: owner items, the agent's gone one not listed, the same id again waits since the first time" '[ $rc -eq 0 ] && printf "%s" "$out" | mj /dev/stdin "p=d[\"pending\"]; assert [x[\"id\"] for x in p]==[\"core-0001\",\"svc\"], p; a,b=p; assert a[\"kind\"]==\"owner\" and a[\"pid\"]==$CP and a[\"what\"]==\"要你同意：裝伺服器的 core 0001\" and a[\"dir\"].endswith(\"/note/w\") and a[\"since\"]>1e12 and a[\"machine\"]; assert b[\"pid\"] is None and b[\"since\"]==1000000 and b[\"what\"].endswith(\"（第二次）\")"'
 check "status --json: still writes nothing (the gone agent's item is left for kit pending)" 'snap "$NT/conf" | cmp -s - "$T/pd.snap"'
 if [ -n "$PWSH" ]; then
-    a=$(AGENTKIT_CONFIG="$NT/conf" "$KIT" status --json 2>/dev/null | at0); b=$(AGENTKIT_CONFIG="$NT/conf" kps status --json 2>/dev/null | at0)
+    a=$(AGENTKIT_CONFIG="$NT/conf" "$KIT" status --json 2>/dev/null | v13 | at0); b=$(AGENTKIT_CONFIG="$NT/conf" kps status --json 2>/dev/null | at0)
     check "kit.ps1 status --json: the same owner items" '[ -n "$a" ] && [ "$a" = "$b" ]'
     a=$(note_sh "$KIT" pending 2>&1); b=$(note_sh "$PWSH" -NoProfile -File "$HERE/../windows/kit.ps1" pending 2>&1)
     check "kit.ps1 pending: the same list" '[ "$a" = "$b" ]'
@@ -2991,6 +3005,69 @@ echo "$pass $fail" > "$T/sub"
 )
 read pass fail < "$T/sub"
 rm -rf "$TEAM/skills/npxed"
+
+# ---------- versions: kit list --json version, installed, held, loaded (kit api 1.14) ----------
+# vj FILE KIND NAME A.B : that field of that item ("null", true/false as JSON)
+vj() { python3 -Ic 'import json,sys
+d = json.load(open(sys.argv[1])); v = [i for i in d["items"] if i["kind"] == sys.argv[2] and i["name"] == sys.argv[3]][0]
+for k in sys.argv[4].split("."): v = None if v is None else v.get(k)
+print("null" if v is None else json.dumps(v) if isinstance(v, bool) else v)' "$@" 2>/dev/null; }
+HV="$T/homev"; VS="$T/versrc"; mkdir -p "$HV/.codex" "$VS/rules" "$VS/skills/vs/sub" "$VS/skills/vt" "$T/vdir"
+(
+export HOME="$HV"
+vc() { git -C "$VS" add -A && GIT_COMMITTER_DATE="$1" GIT_AUTHOR_DATE="$1" git -C "$VS" -c user.name=t -c user.email=t@t commit -qm "$2"; }
+printf 'Be kind.\n' > "$VS/rules/vr.md"; echo x > "$VS/skills/vs/sub/a.txt"
+printf -- '---\nname: vs\ndescription: v\n---\nv1\n' > "$VS/skills/vs/SKILL.md"; printf -- '---\nname: vt\ndescription: t\n---\nt1\n' > "$VS/skills/vt/SKILL.md"
+{ printf '# third_party.lock\n'; printf 'vs\tfile:///a/vs\tskills/vs\t-\t%040d\tMIT\t2026-11-15\n' 1; printf 'vt\tfile:///a/vt\tskills/vt\t-\t%040d\tMIT\t2026-11-16\t-\t2026-11-10\n' 2; } > "$VS/third_party.lock"
+git -C "$VS" init -q; vc 2026-11-01T10:00:00Z first
+printf 'Be kind, always.\n' > "$VS/rules/vr.md"; vc 2026-11-02T09:00:00Z "rule a"
+printf 'Be kind, always!\n' > "$VS/rules/vr.md"; vc 2026-11-02T11:00:00Z "rule b"
+kit init "file://$VS" >/dev/null 2>&1; kit add rule vr >/dev/null 2>&1; kit add skill vs vt >/dev/null 2>&1
+CL="$HV/agentkit/versrc"; J="$T/v1.json"; kit list --json > "$J" 2>/dev/null
+rid=$(git -C "$VS" hash-object rules/vr.md); rid=${rid:0:8}
+sid=$( { printf '%s SKILL.md\n' "$(git -C "$VS" hash-object skills/vs/SKILL.md)"; printf '%s sub/a.txt\n' "$(git -C "$VS" hash-object skills/vs/sub/a.txt)"; } | git hash-object --stdin); sid=${sid:0:8}
+check "version: a rule's id is its file's blob, the last commit that changed it, n = how many that day" '[ "$(vj "$J" rule vr version.id)" = "$rid" ] && [ "$(vj "$J" rule vr version.date)" = 2026-11-02 ] && [ "$(vj "$J" rule vr version.n)" = 2 ] && [ "$(vj "$J" rule vr version.message)" = "rule b" ] && [ "$(vj "$J" rule vr version.commit)" = "$(git -C "$VS" rev-parse HEAD)" ] && [ "$(vj "$J" rule vr version.dirty)" = false ]'
+check "version: a skill's id is the blob of its listing (files sorted, blob and path); its own last commit" '[ "$(vj "$J" skill vs version.id)" = "$sid" ] && [ "$(vj "$J" skill vs version.date)" = 2026-11-01 ] && [ "$(vj "$J" skill vs version.n)" = 1 ] && [ "$(vj "$J" skill vs version.message)" = first ]'
+check "upstream: a collected one: the author's commit, its date (an old lock line: null), when collected; held null" '[ "$(vj "$J" skill vt upstream.commit)" = "$(printf %040d 2)" ] && [ "$(vj "$J" skill vt upstream.date)" = 2026-11-10 ] && [ "$(vj "$J" skill vt upstream.collected)" = 2026-11-16 ] && [ "$(vj "$J" skill vs upstream.date)" = null ] && [ "$(vj "$J" skill vs upstream.collected)" = 2026-11-15 ] && [ "$(vj "$J" rule vr upstream)" = null ] && [ "$(vj "$J" skill vs held)" = null ] && grep -q "\"held\": null}" "$J"'
+check "installed: each tool that has it, the same id, a time; state.tsv keeps it" '[ "$(vj "$J" skill vs installed.claude.id)" = "$sid" ] && [ "$(vj "$J" skill vs installed.codex.id)" = "$sid" ] && [ "$(vj "$J" rule vr installed.claude.id)" = "$rid" ] && [ "$(vj "$J" rule vr installed.codex.id)" = "$rid" ] && [ "$(vj "$J" skill vs installed.claude.at)" -gt 1700000000 ] && grep -q "^ver	claude:skill:vs	$sid [0-9]* " "$HV/.config/agentkit/state.tsv"'
+# the same content elsewhere (a folder, not git; with .DS_Store and Python caches): the same ids, no date or commit
+mkdir -p "$T/vcopy"; cp -R "$VS/rules" "$VS/skills" "$T/vcopy/"; touch "$T/vcopy/skills/vs/.DS_Store"; mkdir -p "$T/vcopy/skills/vs/sub/__pycache__"; echo c > "$T/vcopy/skills/vs/sub/__pycache__/a.pyc"
+HOME="$T/homev2" kit init "$T/vcopy" >/dev/null 2>&1; HOME="$T/homev2" kit list --json > "$T/v2.json" 2>/dev/null
+check "version: the same content in another source (not git, with .DS_Store and caches): the same ids, no date or commit" '[ "$(vj "$T/v2.json" skill vs version.id)" = "$sid" ] && [ "$(vj "$T/v2.json" rule vr version.id)" = "$rid" ] && [ "$(vj "$T/v2.json" rule vr version.date)" = null ] && [ "$(vj "$T/v2.json" rule vr version.commit)" = null ] && [ "$(vj "$T/v2.json" rule vr version.n)" = null ]'
+# a change not committed in the clone: dirty, the id of the files now; nothing installed yet
+echo more >> "$CL/skills/vs/SKILL.md"; kit list --json > "$T/v3.json" 2>/dev/null
+check "version: a change not committed: dirty, commit null, the files' id; installed still the old one" '[ "$(vj "$T/v3.json" skill vs version.dirty)" = true ] && [ "$(vj "$T/v3.json" skill vs version.commit)" = null ] && [ "$(vj "$T/v3.json" skill vs version.id)" != "$sid" ] && [ "$(vj "$T/v3.json" skill vs installed.claude.id)" = "$sid" ] && [ "$(vj "$T/v3.json" skill vt version.dirty)" = false ]'
+git -C "$CL" checkout -q -- .
+# the source changes: the latest is what kit sync fetched (origin), not the clone's files
+printf 'Be kind, really.\n' > "$VS/rules/vr.md"; printf -- '---\nname: vs\ndescription: v\n---\nv2\n' > "$VS/skills/vs/SKILL.md"; printf -- '---\nname: vt\ndescription: t\n---\nt2\n' > "$VS/skills/vt/SKILL.md"
+vc 2026-11-03T10:00:00Z "rule c"; git -C "$CL" fetch -q
+kit list --json > "$T/v4.json" 2>/dev/null; rid2=$(git -C "$VS" hash-object rules/vr.md); rid2=${rid2:0:8}
+check "version: the latest is the remote branch kit sync fetched; the clone not pulled yet: installed is older" '[ "$(vj "$T/v4.json" rule vr version.id)" = "$rid2" ] && [ "$(vj "$T/v4.json" rule vr version.date)" = 2026-11-03 ] && [ "$(vj "$T/v4.json" rule vr installed.claude.id)" = "$rid" ] && [ "$(vj "$T/v4.json" rule vr installed.codex.id)" = "$rid" ]'
+# loaded: an agent that started before kit sync changed them, one after (Claude: its session file and log)
+vsess() { mkdir -p "$HV/.claude/sessions" "$HV/.claude/projects/$(printf '%s' "$T/vdir" | sed 's|[^A-Za-z0-9]|-|g')"
+          printf '{"pid":%s,"sessionId":"%s","cwd":"%s"}\n' "$1" "$2" "$T/vdir" > "$HV/.claude/sessions/$1.json"; : > "$HV/.claude/projects/$(printf '%s' "$T/vdir" | sed 's|[^A-Za-z0-9]|-|g')/$2.jsonl"; }
+sleep 60 & P1=$!; vsess $P1 5e55-1
+printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /x/skills/vs\\n\\nv1"}]},"isMeta":true,"timestamp":"2000-01-01T00:00:00.000Z"}\n' > "$HV/.claude/projects/$(printf '%s' "$T/vdir" | sed 's|[^A-Za-z0-9]|-|g')/5e55-1.jsonl"
+sleep 2; at0=$(vj "$T/v4.json" skill vs installed.claude.at); kit sync >/dev/null 2>&1; sleep 2
+sleep 60 & P2=$!; vsess $P2 5e55-2
+kit list --json --dir "$T/vdir" --pid $P1 --tool claude > "$T/v5.json" 2>/dev/null; kit list --json --dir "$T/vdir" --pid $P2 --tool claude > "$T/v6.json" 2>/dev/null
+kit list --json --dir "$T/vdir" --pid $P1 > "$T/v7.json" 2>/dev/null
+check "installed: kit sync changed them: the new id, a new time" '[ "$(vj "$T/v5.json" rule vr installed.claude.id)" = "$rid2" ] && [ "$(vj "$T/v5.json" rule vr installed.codex.id)" = "$rid2" ] && [ "$(vj "$T/v5.json" skill vs installed.claude.at)" -gt "$at0" ] && [ "$(vj "$T/v5.json" skill vs installed.claude.id)" = "$(vj "$T/v5.json" skill vs version.id)" ]'
+check "loaded: started before the change: a rule old; a skill it read before: old; one it never read: new" '[ "$(vj "$T/v5.json" rule vr loaded)" = old ] && [ "$(vj "$T/v5.json" skill vs loaded)" = old ] && [ "$(vj "$T/v5.json" skill vt loaded)" = new ]'
+check "loaded: started after the change: new; no --pid: no loaded" '[ "$(vj "$T/v6.json" rule vr loaded)" = new ] && [ "$(vj "$T/v6.json" skill vs loaded)" = new ] && ! grep -q "\"loaded\"" "$T/v4.json"'
+check "loaded: not an agent kit can tell (no --tool, a sleep): unknown" '[ "$(vj "$T/v7.json" rule vr loaded)" = unknown ]'
+kill $P1 $P2 2>/dev/null; wait $P1 $P2 2>/dev/null
+# a folder's own: its version and time for agents there
+kit add --dir "$T/vdir" skill vt >/dev/null 2>&1; kit list --json --dir "$T/vdir" > "$T/v8.json" 2>/dev/null
+fl=$(awk -F'\t' -v k="dir:$T/vdir:ver" '$1 == k && $2 == "claude:skill:vt" { print $3 }' "$HV/.config/agentkit/state.tsv")
+check "installed --dir: the folder's own copy (its state.tsv line)" '[ -n "$fl" ] && [ "$(vj "$T/v8.json" skill vt installed.claude.id) $(vj "$T/v8.json" skill vt installed.claude.at)" = "${fl% *}" ]'
+# kit 0.8.0's state.tsv (no ver lines): the first sync takes the time from the files kit wrote
+awk -F'\t' '$1 != "ver" && $1 !~ /:ver$/' "$HV/.config/agentkit/state.tsv" > "$T/st" && cp "$T/st" "$HV/.config/agentkit/state.tsv"
+touch -t 202001020304 "$HV/.claude/skills/vt"; kit sync >/dev/null 2>&1; kit list --json > "$T/v9.json" 2>/dev/null
+check "installed: an old state.tsv: the first sync takes each one's time from its file" '[ "$(vj "$T/v9.json" skill vt installed.claude.at)" -lt 1600000000 ] && [ "$(vj "$T/v9.json" skill vt installed.claude.id)" = "$(vj "$T/v9.json" skill vt version.id)" ]'
+echo "$pass $fail" > "$T/sub"
+)
+read pass fail < "$T/sub"
 
 # ---------- code checks ----------
 check "no \$var directly before non-ASCII (bash 3.2 reads it as part of the name)" '! LC_ALL=C grep -nE "\\\$[A-Za-z_][A-Za-z0-9_]*[^ -~]" "$KIT" "$HERE/../unix/install.sh"'
