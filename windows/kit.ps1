@@ -5095,13 +5095,19 @@ function Files-Ptxt([string]$s, [int]$lv) { # the path after "*** Add File: " up
     }
     $o.ToString().TrimEnd([char]' ', [char]"`t")
 }
-function Files-Scan([string]$tool, [string]$f, [int]$fi, [bool]$main, $Keys, $Vals, [bool]$used = $false, $mcps = @()) { # the rows of one
+function Files-Scan([string]$tool, [string]$f, [int]$fi, [bool]$main, $Keys, $Vals, [bool]$used = $false, $mcps = @(), [long]$from = 0, [long]$to = -1) { # the rows of one
     # log: a sort key (time, file, n) in KEYS, in VALS @(tag, path, turn) (turn: the main log's turn number, - for a sub-agent's) or a
     # turn's start @('turn', '', n, at, text); USED (kit used): the whole log, only the lines that can matter, and @(skill|mcp, name, turn, time)
-    $o = Ctx-Open $f $(if ($used) { 0 } else { $CtxTail }); if (-not $o) { return }
-    $t = ''; $r = 0; $tn = 0; $last = ''; $touched = $false
+    # FROM, TO (Used-First): only the lines from byte FROM up to byte TO (whole lines: TO is just after an LF)
+    if ($to -ge 0) {
+        try { $fs = New-Object IO.FileStream($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+              [void]$fs.Seek($from, [IO.SeekOrigin]::Begin); $o = @((New-Object IO.StreamReader($fs, $Utf8)), $false) } catch { return }
+    } else { $o = Ctx-Open $f $(if ($used) { 0 } else { $CtxTail }); if (-not $o) { return } }
+    $t = ''; $r = 0; $tn = 0; $last = ''; $touched = $false; $got = $from
     try {
         while ($null -ne ($l = $o[0].ReadLine())) {
+            # shortcut: counts LF line ends (all three tools write them); a CR would make it read a little past TO
+            if ($to -ge 0) { if ($got -ge $to) { break }; $got += $Utf8.GetByteCount($l) + 1 }
             if ($used) {
                 if (-not $UsedPick[$tool].IsMatch($l)) { continue }
                 $ua = Used-Line $tool $l $mcps
@@ -6444,13 +6450,60 @@ function Ver-Epoch([string]$x) { # a time's digits (YYYYMMDDHHMMSS…, UTC) as s
     try { [string]([DateTimeOffset](New-Object DateTime ([int]$x.Substring(0, 4)), ([int]$x.Substring(4, 2)), ([int]$x.Substring(6, 2)), ([int]$x.Substring(8, 2)), ([int]$x.Substring(10, 2)), ([int]$x.Substring(12, 2)), ([DateTimeKind]::Utc))).ToUnixTimeSeconds() } catch { '' }
 }
 function Used-First([string]$tool, [string]$log) { # skill -> seconds since 1970 of the first time that conversation read it
-    # (Codex and omp log no time for it: the start of its turn)
-    $f = New-Dict 'long'; $ta = ''
-    foreach ($v in (Files-Rows $tool $log $true)) {
-        if ($v[0] -ceq 'turn') { $ta = Ver-Epoch ([string]$v[3]); continue }
-        if ($v[0] -cne 'skill') { continue }
-        $e = Ver-Epoch ([string]$v[3]); if (-not $e) { $e = $ta }
-        if ($e -and (-not $f.ContainsKey($v[1]) -or [long]$e -lt $f[$v[1]])) { $f[$v[1]] = [long]$e }
+    # (Codex and omp log no time for it: the start of its turn). A log only grows, and a long Claude one (its sub-agents'
+    # too) is hundreds of MB that kit list --pid reads every few seconds: for each file, what was found and how far it was
+    # read are kept (KitConf/cache/used, as unix/kit), and only the whole lines written since are read (shorter: all again).
+    $f = New-Dict 'long'
+    if (@('claude', 'codex', 'omp') -cnotcontains $tool -or -not $log -or -not (Test-Path -LiteralPath $log -PathType Leaf)) { return , $f }
+    $fs = @($log); $mf = $log
+    if ($tool -ceq 'claude') {   # the oldest file first (as Files-Rows)
+        $sd = Join-Path $log.Substring(0, $log.Length - 6) 'subagents'
+        $mf = (Get-Item -LiteralPath $log).FullName
+        $all = @(Get-Item -LiteralPath $log) + @(Get-ChildItem -LiteralPath $sd -Filter '*.jsonl' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name.EndsWith('.jsonl', $Ord) })
+        $fs = @($all | Sort-Object @{ Expression = { $_.LastWriteTimeUtc }; Ascending = $true }, @{ Expression = { $_.FullName }; Descending = $true } | ForEach-Object { $_.FullName })
+    }
+    $cd = Join-Path $KitConf 'cache/used'; Ensure-Dir $cd
+    $sha = [Security.Cryptography.SHA256]::Create(); $fi = 0
+    foreach ($p in $fs) {
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }; $fi++
+        $cf = Join-Path $cd (([BitConverter]::ToString($sha.ComputeHash($Utf8.GetBytes($p))) -replace '-', '').Substring(0, 16))
+        $off = [long]0; $ta = ''; $seen = New-Dict 'long'
+        if (Test-Path -LiteralPath $cf) {
+            foreach ($x in ([IO.File]::ReadAllText($cf) -split "`n")) {
+                $a = $x -split "`t"
+                if ($a[0] -ceq 'P' -and $a.Count -ge 4 -and $a[1] -ceq $p) { $off = [long]$a[2]; $ta = $a[3] }
+                elseif ($a[0] -ceq 'S' -and $a.Count -ge 3) { $seen[$a[1]] = [long]$a[2] }
+            }
+        }
+        $sz = (Get-Item -LiteralPath $p).Length
+        if ($sz -lt $off -or ($off -eq 0 -and $seen.Count -gt 0)) { $off = 0; $ta = ''; $seen = New-Dict 'long' }
+        if ($sz -gt $off) {
+            $end = $sz   # a line still being written: read next time
+            try {
+                $h = New-Object IO.FileStream($p, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                try { $n = [int][Math]::Min([long]65536, $sz - $off); [void]$h.Seek($sz - $n, [IO.SeekOrigin]::Begin); $b = New-Object byte[] $n; $m = 0
+                      while ($m -lt $n) { $nr = $h.Read($b, $m, $n - $m); if ($nr -le 0) { break }; $m += $nr }
+                      $i = [Array]::LastIndexOf($b, [byte]10); $end = if ($i -ge 0) { $sz - $n + $i + 1 } else { $off } } finally { $h.Dispose() }
+            } catch { $end = $off }
+            if ($end -gt $off) {
+                $rk = New-List; $rv = New-Object 'System.Collections.Generic.List[object]'
+                Files-Scan $tool $p $fi ($p -ceq $mf) $rk $rv $true @() $off $end
+                $ka = $rk.ToArray(); $ix = New-Object 'int[]' $ka.Length; for ($i = 0; $i -lt $ix.Length; $i++) { $ix[$i] = $i }
+                [Array]::Sort($ka, $ix, [StringComparer]::Ordinal)
+                foreach ($i in $ix) {
+                    $row = $rv[$i]
+                    if ($row[0] -ceq 'turn') { $ta = Ver-Epoch ([string]$row[3]); continue }
+                    if ($row[0] -cne 'skill') { continue }
+                    $e = Ver-Epoch ([string]$row[3]); if (-not $e) { $e = $ta }
+                    if ($e -and (-not $seen.ContainsKey($row[1]) -or [long]$e -lt $seen[$row[1]])) { $seen[$row[1]] = [long]$e }
+                }
+                $off = $end
+            }
+            $sb = New-Object Text.StringBuilder; [void]$sb.Append("P`t$p`t$off`t$ta`n")
+            foreach ($sk in $seen.Keys) { [void]$sb.Append("S`t$sk`t$($seen[$sk])`n") }
+            try { [IO.File]::WriteAllText($cf, $sb.ToString(), $Utf8) } catch { }
+        }
+        foreach ($sk in $seen.Keys) { if (-not $f.ContainsKey($sk) -or $seen[$sk] -lt $f[$sk]) { $f[$sk] = $seen[$sk] } }
     }
     , $f
 }

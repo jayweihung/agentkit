@@ -66,6 +66,17 @@ check "installed: kit sync changed them: the new id, a new time" '[ "$(vj "$T/v5
 check "loaded: started before the change: a rule old; a skill it read before: old; one it never read: new" '[ "$(vj "$T/v5.json" rule vr loaded)" = old ] && [ "$(vj "$T/v5.json" skill vs loaded)" = old ] && [ "$(vj "$T/v5.json" skill vt loaded)" = new ]'
 check "loaded: started after the change: new; no --pid: no loaded" '[ "$(vj "$T/v6.json" rule vr loaded)" = new ] && [ "$(vj "$T/v6.json" skill vs loaded)" = new ] && ! grep -q "\"loaded\"" "$T/v4.json"'
 check "loaded: not an agent kit can tell (no --tool, a sleep): unknown" '[ "$(vj "$T/v7.json" rule vr loaded)" = unknown ]'
+# the conversation goes on: kit keeps how far it read each log (cache/used) and reads only the whole lines written since
+LG="$HV/.claude/projects/$(printf '%s' "$T/vdir" | sed 's|[^A-Za-z0-9]|-|g')/5e55-1.jsonl"
+vline() { printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /x/skills/%s\\n\\nv1"}]},"isMeta":true,"timestamp":"2000-01-0%sT00:00:00.000Z"}' "$1" "$2"; }
+{ vline vt 2; printf '\n'; vline zz 3; } >> "$LG"                # (zz: a line still being written, no LF yet)
+kit list --json --dir "$T/vdir" --pid $P1 --tool claude > "$T/v5b.json" 2>/dev/null
+check "loaded: the log grew: what was written since is read (a skill read before the change: old), not a line still being written" '[ "$(vj "$T/v5b.json" skill vt loaded)" = old ] && [ "$(vj "$T/v5b.json" skill vs loaded)" = old ] && grep -q "	vt	" "$HV/.config/agentkit/cache/used/"* && ! grep -q zz "$HV/.config/agentkit/cache/used/"*'
+[ -z "$PWSH" ] || check "loaded: the log grew: kit.ps1 says the same" 'kps list --json --dir "$T/vdir" --pid $P1 --tool claude 2>/dev/null | cmp -s - "$T/v5b.json"'
+{ vline vt 2; printf '\n'; } > "$LG"                                # a shorter log under that name: read from the start
+kit list --json --dir "$T/vdir" --pid $P1 --tool claude > "$T/v5c.json" 2>/dev/null
+check "loaded: the log got shorter (a new one): read again from the start" '[ "$(vj "$T/v5c.json" skill vs loaded)" = new ] && [ "$(vj "$T/v5c.json" skill vt loaded)" = old ]'
+[ -z "$PWSH" ] || check "loaded: the log got shorter: kit.ps1 says the same" 'kps list --json --dir "$T/vdir" --pid $P1 --tool claude 2>/dev/null | cmp -s - "$T/v5c.json"'
 kill $P1 $P2 2>/dev/null; wait $P1 $P2 2>/dev/null
 # a folder's own: its version and time for agents there
 kit add --dir "$T/vdir" skill vt >/dev/null 2>&1; kit list --json --dir "$T/vdir" > "$T/v8.json" 2>/dev/null

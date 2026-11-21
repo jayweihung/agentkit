@@ -35,7 +35,7 @@ function Regions([string[]]$lines) {
 }
 # the sections for what changed since BASE, each with why (said on the screen)
 function Changed-Sections([string]$base) {
-    if (-not $base) { try { $base = (GitOut merge-base HEAD master)[0] } catch { try { $base = (GitOut merge-base HEAD origin/master)[0] } catch { throw '-Changed: 找不到 master（給一個 <base>）' } } }
+    if (-not $base) { try { $base = @(GitOut merge-base HEAD master)[0] } catch { try { $base = @(GitOut merge-base HEAD origin/master)[0] } catch { throw '-Changed: 找不到 master（給一個 <base>）' } } }
     try { [void](GitOut rev-parse -q --verify "$base^{commit}") } catch { throw "-Changed: 沒有 $base 這個 commit" }
     $keys = New-Object System.Collections.Generic.List[string]
     $files = @(GitOut diff --name-only $base --) + @(GitOut ls-files --others --exclude-standard) | Where-Object { $_ } | Sort-Object -Unique

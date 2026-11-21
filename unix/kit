@@ -4054,13 +4054,19 @@ END {
         print "T\t" u "\t" at[u] "\t" tx[u]; for (i = 1; i <= tc[u]; i++) print "P\t" tl[u, i]
     }
 }'
+used_prog() { # used_prog TOOL : U_PROG, the awk of kit used for that tool's log, and U_PAT, the lines it can need (grep -E)
+    case $1 in
+        claude) U_PROG=$USED_CLAUDE$FILES_CLAUDE; U_PAT='"message":\{"role":"user","content":("|\[\{"type":"text")|"type":"tool_use","id":"[^"]*","name":"mcp__';;
+        codex) U_PROG=$USED_CODEX$FILES_CODEX; U_PAT='"user_message"|"UserMessage"|SKILL\.md|"McpToolCall"|"mcp_tool_call_end"';;
+        omp) U_PROG=$USED_OMP$FILES_OMP; U_PAT='"role":"user"|skill://|SKILL\.md|mcp__';;
+        *) return 1;;
+    esac
+}
 files_rows() { # files_rows TOOL LOG [used] : the rows of every file the log (and, Claude, its sub-agents) shows, oldest first
     local f i=0 m prog pat=""
     case ${3:-}$1 in
         claude) prog=$FILES_CLAUDE;; codex) prog=$FILES_CODEX;; omp) prog=$FILES_OMP;;
-        usedclaude) prog=$USED_CLAUDE$FILES_CLAUDE; pat='"message":\{"role":"user","content":("|\[\{"type":"text")|"type":"tool_use","id":"[^"]*","name":"mcp__';;
-        usedcodex) prog=$USED_CODEX$FILES_CODEX; pat='"user_message"|"UserMessage"|SKILL\.md|"McpToolCall"|"mcp_tool_call_end"';;
-        usedomp) prog=$USED_OMP$FILES_OMP; pat='"role":"user"|skill://|SKILL\.md|mcp__';;
+        used*) used_prog "$1" || return 0; prog=$U_PROG; pat=$U_PAT;;
         *) return 0;;
     esac
     [ -n "$2" ] && [ -f "$2" ] || return 0
@@ -4445,14 +4451,20 @@ item_desc() { # item_desc KIND FILE : the description of a skill or agent (front
 DESC_ZH=descriptions-zh.txt
 desc_hash() { local h; h=$(printf '%s' "$1" | git hash-object --stdin 2>/dev/null); printf '%s\n' "${h:0:12}"; }   # the same as kit.ps1's Desc-Hash
 has_cjk() { LC_ALL=C grep -q "$(printf '[\343-\351]')" <<< "$1"; }   # already Chinese (or Japanese): nothing to translate
-desc_zh() { # desc_zh SOURCE_DIR KIND:NAME DESCRIPTION : its Chinese description, when written for this very description
+# desc_zh_v SOURCE_DIR KIND:NAME DESCRIPTION : sets DZ to its Chinese description, when written for this very description.
+# Each source's file is read once (kept in DZ_ALL as DIR US LINE), so kit list does not read it again for every item.
+DZ_SEEN=$LF; DZ_ALL=$LF; DZ=""
+desc_zh_v() {
     local l r
+    DZ=""
     [ -n "$3" ] && [ -f "$1/$DESC_ZH" ] || return 0
-    while IFS= read -r l || [ -n "$l" ]; do case $l in "$2$TAB"*) break;; esac; l=""; done < "$1/$DESC_ZH"
-    l=${l//$'\r'/}; r=${l#*"$TAB"}                           # r: HASH TAB 中文
-    [ -n "$l" ] && [ "${r%%"$TAB"*}" = "$(desc_hash "$3")" ] && case $r in *"$TAB"*) printf '%s\n' "${r#*"$TAB"}";; esac
+    case $DZ_SEEN in *"$LF$1$LF"*) ;; *) DZ_SEEN=$DZ_SEEN$1$LF; DZ_ALL=$DZ_ALL$(awk -v p="$1$US" '{ gsub(/\r/, ""); print p $0 }' "$1/$DESC_ZH")$LF;; esac
+    case $DZ_ALL in *"$LF$1$US$2$TAB"*) ;; *) return 0;; esac
+    l=${DZ_ALL#*"$LF$1$US$2$TAB"}; r=${l%%"$LF"*}               # r: HASH TAB 中文
+    [ "${r%%"$TAB"*}" = "$(desc_hash "$3")" ] && case $r in *"$TAB"*) DZ=${r#*"$TAB"};; esac
     return 0
 }
+desc_zh() { desc_zh_v "$@"; [ -z "$DZ" ] || printf '%s\n' "$DZ"; }   # desc_zh … : desc_zh_v's answer, printed
 cmd_describe() { # kit describe --todo | kit describe KIND NAME "<中文說明>"
     local i k n p d t orig f tmp
     if [ "${1:-}" = --todo ] && [ $# -eq 1 ]; then
@@ -4795,19 +4807,47 @@ ver_record() { # ver_record : after kit wrote the tools' files, the "ver" lines 
     { awk -F'\t' '!($1 == "ver" || $1 ~ /^dir:.*:ver$/)' "$STATE"; cat "$t/new"; } > "$rows" && mv -f "$rows" "$STATE"
     rm -rf "$t"
 }
-used_first() { # used_first TOOL LOG : "skill TAB seconds since 1970" of the first time that conversation read each skill
-    # (Codex and omp log no time for it: the start of its turn)
-    files_rows "$1" "$2" used | LC_ALL=C awk -F'\t' '
-        function ep(x,   y, m, d, era, yoe, doe) {
-            gsub(/[^0-9]/, "", x); if (length(x) < 14 || x ~ /^0+$/) return ""
-            y = substr(x, 1, 4) + 0; m = substr(x, 5, 2) + 0; d = substr(x, 7, 2) + 0
-            y -= (m <= 2); era = int(y / 400); yoe = y - era * 400                    # (days from 1970-01-01: H. Hinnant)
-            doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
-            return (era * 146097 + doe - 719468) * 86400 + substr(x, 9, 2) * 3600 + substr(x, 11, 2) * 60 + substr(x, 13, 2)
-        }
-        $5 == "turn" { ta = ep($6); next }
-        $5 == "skill" { e = ep($1); if (e == "") e = ta; if (e != "" && (!($6 in f) || e < f[$6])) f[$6] = e }
-        END { for (n in f) print n "\t" f[n] }'
+# used_first TOOL LOG : "skill TAB seconds since 1970" of the first time that conversation read each skill (Codex and
+# omp log no time for it: the start of its turn). A log only grows, and a long Claude one (its sub-agents' too) is
+# hundreds of MB that kit list --pid reads every few seconds: for each file, what was found and how far it was read
+# are kept ($KIT_CONF/cache/used), and only the whole lines written since are read (a file that got shorter: all again).
+USED_EP='
+function ep(x,   y, m, d, era, yoe, doe) {
+    gsub(/[^0-9]/, "", x); if (length(x) < 14 || x ~ /^0+$/) return ""
+    y = substr(x, 1, 4) + 0; m = substr(x, 5, 2) + 0; d = substr(x, 7, 2) + 0
+    y -= (m <= 2); era = int(y / 400); yoe = y - era * 400                    # (days from 1970-01-01: H. Hinnant)
+    doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
+    return (era * 146097 + doe - 719468) * 86400 + substr(x, 9, 2) * 3600 + substr(x, 11, 2) * 60 + substr(x, 13, 2)
+}'
+used_first() {
+    local f i=0 m c cf off sz end ta p part k
+    [ -n "$2" ] && [ -f "$2" ] && used_prog "$1" || return 0
+    c="$KIT_CONF/cache/used"; mkdir -p "$c" 2>/dev/null || return 0
+    { if [ "$1" = claude ]; then ls -tr "$2" "${2%.jsonl}/subagents/"*.jsonl 2>/dev/null; else printf '%s\n' "$2"; fi; } |
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue; i=$((i + 1)); m=0; [ "$f" = "$2" ] && m=1
+        cf="$c/$(printf '%s' "$f" | cksum | awk '{ print $1 "-" $2 }')"
+        p=""; off=0; ta=""; [ -f "$cf" ] && IFS="$TAB" read -r k p off ta < "$cf"
+        sz=$(wc -c < "$f" | tr -d ' ')
+        case $off in ""|*[!0-9]*) off=0;; esac
+        [ "$p" = "$f" ] && [ "${sz:-0}" -ge "$off" ] || { off=0; ta=""; : > "$cf"; }
+        [ "$sz" = "$off" ] && { awk -F'\t' '$1 == "S" { print $2 "\t" $3 }' "$cf"; continue; }   # not grown: as found before
+        end=$sz                                              # a line still being written: read next time (dd seeks:
+                                                             # macOS tail -c +N reads byte by byte)
+        if [ "$sz" -gt "$off" ] && [ "$(tail -c 1 "$f" | od -An -tx1 | tr -d ' \n')" != 0a ]; then
+            part=$(tail -c 65536 "$f" | LC_ALL=C awk '{ n = length($0) } END { print n + 0 }'); end=$((sz - part))
+            [ "$end" -gt "$off" ] || end=$off
+        fi
+        { [ "$end" -le "$off" ] || { dd bs=1 skip="$off" count=0 2>/dev/null; head -c $((end - off)); } < "$f" | LC_ALL=C grep -E -- "$U_PAT" |
+              LC_ALL=C awk -v cut=0 "BEGIN { fi = $i; main = $m }$CTX_AWK$FILES_AWK$U_PROG" | LC_ALL=C sort -t "$TAB" -k1,1 -k2,2n -k3,3n
+        } | LC_ALL=C awk -F'\t' -v cf="$cf" -v path="$f" -v end="$end" -v ta="$ta" "$USED_EP"'
+            BEGIN { while ((getline x < cf) > 0) { split(x, a, "\t"); if (a[1] == "S") f[a[2]] = a[3] }; close(cf) }
+            $5 == "turn" { ta = ep($6); next }
+            $5 == "skill" { e = ep($1); if (e == "") e = ta; if (e != "" && (!($6 in f) || e < f[$6])) f[$6] = e }
+            END { print "P\t" path "\t" end "\t" ta > (cf ".new"); for (n in f) print "S\t" n "\t" f[n] > (cf ".new") }'
+        mv -f "$cf.new" "$cf" 2>/dev/null
+        awk -F'\t' '$1 == "S" { print $2 "\t" $3 }' "$cf"
+    done | LC_ALL=C awk -F'\t' '!($1 in f) || $2 < f[$1] { f[$1] = $2 } END { for (n in f) print n "\t" f[n] }'
 }
 ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version" …' part of every item, all worked out by one
     # awk (bash looking things up in long strings is slow): "kind:name TAB part" lines, in the order of the items of ALL
@@ -4938,7 +4978,7 @@ EOF
         [ $first = 1 ] || printf ','; first=0
         printf '\n    {"kind": '; json_s "$k"; printf ', "name": '; json_s "$n"; printf ', "status": '; json_s "$status"
         printf ', "new": %s, "changed": %s, "source": ' "$new" "$changed"; json_s "${d##*/}"; printf ', "description": '; json_s "$desc"
-        zh=$(desc_zh "$d" "$i" "$desc"); [ -z "$zh" ] || { printf ', "description_zh": '; json_s "$zh"; }
+        desc_zh_v "$d" "$i" "$desc"; [ -z "$DZ" ] || { printf ', "description_zh": '; json_s "$DZ"; }
         printf ', "path": '; json_s "$p"
         case $k in
             skill) printf ', "needs": '; needs_json "${p%/*}" "$d"; packages_json "${p%/*}" "$n";;
