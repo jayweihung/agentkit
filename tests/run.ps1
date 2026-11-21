@@ -332,7 +332,7 @@ if (-not $OnWindows) {
     Check 'kit run: the agent in the pane is known while it runs, the marker goes after' { $rc -eq 0 -and (ReadT "$T/fake.json").Contains('"agent": {"name": "gerrit", "source": "team",') -and @(Get-ChildItem -LiteralPath $rund).Count -eq 0 }
 }
 Kit api
-Check 'api: one line, major.minor (1.14)' { $rc -eq 0 -and $out -ceq '1.14' }
+Check 'api: one line, major.minor (1.15)' { $rc -eq 0 -and $out -ceq '1.15' }
 $env:AGENTKIT_CONFIG = Join-Path $T 'noconf'
 KitJ list --json
 Check 'list --json before kit init: error not_init, only JSON on stdout' { $rc -ne 0 -and $out -ceq '{"error": {"code": "not_init", "message": "還沒設定：先打  kit init <網址或資料夾>"}}' }
@@ -352,9 +352,9 @@ Kit sync
 Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 9.9.0 以上，你的是 ' + $KitVer + '。請打  kit self-update') }
 Kit sync; $o1 = $out; Kit list
 Check 'old kit: told only once' { -not ($o1 + $out).Contains('團隊要') }
-Team-Version '0.10.0'
+Team-Version '0.10.1'
 Kit list
-Check 'team version changed: list tells again (numbers, not text)' { $out.Contains('團隊要 kit 0.10.0 以上') }
+Check 'team version changed: list tells again (numbers, not text)' { $out.Contains('團隊要 kit 0.10.1 以上') }
 $realKit = $Kit; $Kit = Join-Path $T 'dev/windows/kit.ps1'
 W $Kit ''; Copy-Item -LiteralPath $realKit -Destination $Kit -Force
 Team-Version '9.6.0'
