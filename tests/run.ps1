@@ -14,7 +14,7 @@ $Here = Split-Path -Parent $PSCommandPath
 $Root = Split-Path -Parent $Here
 $Exe = (Get-Process -Id $PID).Path
 # the slowest first (measured), so the run is not left waiting on one started last
-$Slow = @('context', 'tools', 'mcp', 'plugins', 'place', 'files', 'basics', 'list-json', 'dir', 'collect', 'push-direct', 'push')
+$Slow = @('place', 'plugins', 'basics', 'dir', 'tools', 'list-json', 'hook', 'mcp', 'push-direct', 'context', 'authoring', 'agents', 'push', 'files')
 $All = @(Get-ChildItem -LiteralPath (Join-Path $Here 'ps') -Filter '*.ps1' | Sort-Object Name | ForEach-Object { $_.BaseName })
 if ($List) { $All | ForEach-Object { [Console]::WriteLine($_) }; exit 0 }
 if ($Jobs -le 0) { $Jobs = [Environment]::ProcessorCount }
@@ -35,7 +35,7 @@ function Regions([string[]]$lines) {
 }
 # the sections for what changed since BASE, each with why (said on the screen)
 function Changed-Sections([string]$base) {
-    if (-not $base) { try { $base = (GitOut merge-base HEAD master)[0] } catch { throw '-Changed: 找不到 master（給一個 <base>）' } }
+    if (-not $base) { try { $base = (GitOut merge-base HEAD master)[0] } catch { try { $base = (GitOut merge-base HEAD origin/master)[0] } catch { throw '-Changed: 找不到 master（給一個 <base>）' } } }
     try { [void](GitOut rev-parse -q --verify "$base^{commit}") } catch { throw "-Changed: 沒有 $base 這個 commit" }
     $keys = New-Object System.Collections.Generic.List[string]
     $files = @(GitOut diff --name-only $base --) + @(GitOut ls-files --others --exclude-standard) | Where-Object { $_ } | Sort-Object -Unique

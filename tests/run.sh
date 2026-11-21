@@ -19,7 +19,7 @@ if [ "${1:-}" = --one ]; then
 fi
 
 # the slowest first (measured), so the run is not left waiting on one started last
-SLOW="context mcp tools place files list-json basics plugins dir collect push-direct push"
+SLOW="place mcp context tools dir files list-json basics versions push-direct codex-block hook"
 all() { ls "$HERE/sh" | sed -n 's/\.sh$//p'; }
 
 # the functions a diff of unix/kit or windows/kit.ps1 touches: each hunk's old lines in the old file, new lines in the
@@ -50,7 +50,7 @@ BEGIN { regions(old, "o"); regions(new, "n") }
 changed() {
     local base=$1 root ks f k why
     root=$(cd "$HERE/.." && pwd)
-    if [ -z "$base" ]; then base=$(git -C "$root" merge-base HEAD master 2>/dev/null) || { echo "--changed: 找不到 master（給一個 <base>）" >&2; return 1; }; fi
+    if [ -z "$base" ]; then base=$(git -C "$root" merge-base HEAD master 2>/dev/null || git -C "$root" merge-base HEAD origin/master 2>/dev/null) || { echo "--changed: 找不到 master（給一個 <base>）" >&2; return 1; }; fi
     git -C "$root" rev-parse -q --verify "$base^{commit}" >/dev/null || { echo "--changed: 沒有 $base 這個 commit" >&2; return 1; }
     # one key per changed file; per changed function in unix/kit and windows/kit.ps1 ("FILE:" for code outside one)
     ks=$( { git -C "$root" diff --name-only "$base" -- 2>/dev/null; git -C "$root" ls-files --others --exclude-standard 2>/dev/null; } | LC_ALL=C sort -u |
