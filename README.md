@@ -804,3 +804,14 @@ kit 會記住這次用的核准紀錄和金鑰（0.6.8 起），之後只要給�
     tests/json_test.sh
     tests/run.sh          在暫時的 HOME 裡跑，不會動到你的設定
     powershell -NoProfile -ExecutionPolicy Bypass -File tests\run.ps1    （Windows 版）
+
+測試分成一段一段（section：`tests/sh/*.sh`、`tests/ps/*.ps1`），每段有自己的暫時 HOME，可以同時跑；不帶參數就是全部，同時跑的數量預設是 CPU 核心數（`-j N`／`-Jobs N` 改）。最後一行一定是 `kit: N passed, M failed`（Windows 版 `kit.ps1: …`），失敗的會寫 `FAIL: [section] 名稱`。
+
+改程式的時候只跑跟改動有關的：
+
+    tests/run.sh --changed            跟 master 分岔以來改的（含還沒 commit 的），會說選了哪些、為什麼
+    tests/run.sh --changed <base>     跟 <base> 比
+    tests/run.sh context mcp          只跑這幾段（tests/run.sh --list 看有哪些）
+    ... tests\run.ps1 -Changed [<base>]、tests\run.ps1 context mcp、-List   （Windows 版一樣）
+
+哪些改動對到哪些段寫在 `tests/sections.txt`；對不到的（共用的函式、json.awk、測試共用的 `tests/lib.sh`、`tests/lib.ps1`）就全部跑。全部跑一次留到最後、要送出之前。

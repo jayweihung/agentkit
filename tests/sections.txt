@@ -1,0 +1,89 @@
+# Which test sections cover which change: tests/run.sh --changed and tests/run.ps1 -Changed read this (each suite runs
+# the sections of these names it has). A changed file, or a changed function of unix/kit or windows/kit.ps1, that no
+# line here names runs every section, so only what is used by one family of commands alone is listed (helpers shared
+# with kit sync and the rest are not: a change there runs everything).
+#   <sections> : <files, or FILE:FUNCTION; * and ? match anything>   (a line starting with a space goes on)
+#   "-" for no section; "always" for every change
+export-self code : always
+- : tests/json_test.sh
+export-self : *.md docs/* LICENSE
+install hook : templates/gitea-kit-check.yaml
+install review code : unix/install.sh
+install code : windows/install.ps1
+context : unix/kit:num_of unix/kit:after_key unix/kit:setting_window unix/kit:model_window unix/kit:model_size
+    unix/kit:claude_pid unix/kit:ctx_json unix/kit:claude_limit unix/kit:cmd_statusline unix/kit:cmd_handoff_hook
+    unix/kit:ctx_read unix/kit:claude_ctx unix/kit:codex_pct unix/kit:codex_ctx unix/kit:omp_window unix/kit:omp_ctx
+    unix/kit:cmd_context unix/kit:omp_usage_parse unix/kit:omp_usage_refresh unix/kit:cmd_usage unix/kit:ctx_stream
+    unix/kit:ctx_big unix/kit:ctx_files unix/kit:ctx_up unix/kit:claude_probe unix/kit:claude_probe_rows
+    unix/kit:claude_msg_rows unix/kit:claude_msg_scale unix/kit:claude_detail unix/kit:codex_instr_files
+    unix/kit:codex_detail unix/kit:omp_instr_files unix/kit:omp_skill_files unix/kit:omp_detail unix/kit:ctx_rows
+    unix/kit:ctx_detail windows/kit.ps1:Num-Of windows/kit.ps1:After-Key windows/kit.ps1:Sum-Of
+    windows/kit.ps1:Setting-Window windows/kit.ps1:Model-Window windows/kit.ps1:Model-Size windows/kit.ps1:Claude-Pid
+    windows/kit.ps1:Ctx-Json windows/kit.ps1:Claude-Limit windows/kit.ps1:Ctx-Pct windows/kit.ps1:Cmd-Statusline
+    windows/kit.ps1:Cmd-HandoffHook windows/kit.ps1:Claude-Scan windows/kit.ps1:Claude-Ctx windows/kit.ps1:Codex-Pct
+    windows/kit.ps1:Codex-Last windows/kit.ps1:Codex-Limit windows/kit.ps1:Codex-Ctx windows/kit.ps1:Omp-Window
+    windows/kit.ps1:Omp-Scan windows/kit.ps1:Omp-Ctx windows/kit.ps1:Codex-Usage windows/kit.ps1:Omp-UsageParse
+    windows/kit.ps1:Omp-UsageRefresh windows/kit.ps1:Cmd-Usage windows/kit.ps1:Cmd-Context windows/kit.ps1:Dict-Add
+    windows/kit.ps1:Dict-Keys windows/kit.ps1:Ctx-Rnd windows/kit.ps1:Ctx-Num windows/kit.ps1:Ctx-Val
+    windows/kit.ps1:Ctx-Imgs windows/kit.ps1:Ctx-Wt windows/kit.ps1:Ctx-Short windows/kit.ps1:Ctx-Head
+    windows/kit.ps1:Ctx-Head80 windows/kit.ps1:Ctx-Parts windows/kit.ps1:Ctx-Up windows/kit.ps1:Ctx-Files
+    windows/kit.ps1:Ctx-Stream windows/kit.ps1:Ctx-LastCompact windows/kit.ps1:Ctx-Q windows/kit.ps1:Ctx-B
+    windows/kit.ps1:Ctx-Nul windows/kit.ps1:Ctx-Name windows/kit.ps1:Ctx-Less windows/kit.ps1:Ctx-Before
+    windows/kit.ps1:Ctx-Items windows/kit.ps1:Ctx-Assemble windows/kit.ps1:Row-H windows/kit.ps1:Rows-Add
+    windows/kit.ps1:Claude-Bin windows/kit.ps1:Claude-ProbeStart windows/kit.ps1:Claude-ProbeEnd
+    windows/kit.ps1:Claude-ProbeRows windows/kit.ps1:Ctx-V windows/kit.ps1:Ctx-Top windows/kit.ps1:Claude-Content
+    windows/kit.ps1:Claude-MsgScan windows/kit.ps1:Claude-MsgRows windows/kit.ps1:Claude-Detail
+    windows/kit.ps1:Ctx-Int windows/kit.ps1:Codex-InstrFiles windows/kit.ps1:Codex-Reset windows/kit.ps1:Codex-Tools
+    windows/kit.ps1:Codex-Skills windows/kit.ps1:Codex-List windows/kit.ps1:Codex-Scan windows/kit.ps1:Codex-Detail
+    windows/kit.ps1:Omp-InstrFiles windows/kit.ps1:Omp-SkillFiles windows/kit.ps1:Omp-Num windows/kit.ps1:Omp-MsgText
+    windows/kit.ps1:Omp-DetailScan windows/kit.ps1:Omp-Detail windows/kit.ps1:Ctx-Rows windows/kit.ps1:Ctx-Detail
+files : unix/kit:files_git unix/kit:cmd_files unix/kit:used_plugin unix/kit:omp_mcp_names unix/kit:cmd_used
+    windows/kit.ps1:Files-Git windows/kit.ps1:Files-Abs windows/kit.ps1:Files-Pick windows/kit.ps1:Files-Turns
+    windows/kit.ps1:Used-Plugin windows/kit.ps1:Cmd-Used windows/kit.ps1:Cmd-Files
+note context : unix/kit:note_read unix/kit:codex_thread_of unix/kit:note_find unix/kit:note_json unix/kit:cmd_note
+    windows/kit.ps1:Agent-Pid windows/kit.ps1:Note-Read windows/kit.ps1:Codex-ThreadOf windows/kit.ps1:Note-Find
+    windows/kit.ps1:Note-Json windows/kit.ps1:Note-Ago windows/kit.ps1:Cmd-Note windows/kit.ps1:Pend-Prune
+    windows/kit.ps1:Cmd-Pending
+collect plugins : unix/kit:commit_day unix/kit:collect_dates unix/kit:url_id unix/kit:collect_allowed
+    unix/kit:is_maintainer unix/kit:check_maintainer unix/kit:license_kind unix/kit:lock_get unix/kit:lock_set
+    unix/kit:skill_dirs unix/kit:collect_license unix/kit:collect_scan unix/kit:remote_sha unix/kit:collect_cache
+    unix/kit:collect_cached unix/kit:collect_keep unix/kit:web_repo unix/kit:cmd_collect unix/kit:collect_plugin
+    unix/kit:outdated_json unix/kit:cmd_outdated windows/kit.ps1:Commit-Day windows/kit.ps1:Collect-Dates
+    windows/kit.ps1:Url-Id windows/kit.ps1:Collect-Allowed windows/kit.ps1:Is-Maintainer
+    windows/kit.ps1:Check-Maintainer windows/kit.ps1:License-Kind windows/kit.ps1:Lock-Rows windows/kit.ps1:Lock-Get
+    windows/kit.ps1:Lock-Set windows/kit.ps1:Skill-Dirs windows/kit.ps1:Collect-License windows/kit.ps1:Collect-Scan
+    windows/kit.ps1:Remote-Sha windows/kit.ps1:Collect-Cached windows/kit.ps1:Collect-Keep windows/kit.ps1:Web-Repo
+    windows/kit.ps1:Cmd-Collect windows/kit.ps1:Collect-Plugin windows/kit.ps1:Outdated-Json
+    windows/kit.ps1:Cmd-Outdated
+signed plugins : unix/kit:cmd_approve
+export-self : unix/kit:kit_repo unix/kit:export_skip unix/kit:mask_paths unix/kit:install_md unix/kit:cmd_export_self
+    windows/kit.ps1:Kit-Repo windows/kit.ps1:Export-Skip windows/kit.ps1:Install-Md windows/kit.ps1:Mask-Path
+    windows/kit.ps1:Cmd-ExportSelf
+push push-direct review : unix/kit:push_urls unix/kit:check_push_urls unix/kit:url_path unix/kit:push_items
+    unix/kit:git_add_commit unix/kit:author_check unix/kit:token_file_ok unix/kit:push_direct unix/kit:push_json
+    unix/kit:cmd_push windows/kit.ps1:Push-Urls windows/kit.ps1:Check-PushUrls windows/kit.ps1:Url-Path
+    windows/kit.ps1:Push-Items windows/kit.ps1:Git-AddCommit windows/kit.ps1:Author-Check windows/kit.ps1:Rev-Count
+    windows/kit.ps1:Push-Direct windows/kit.ps1:Push-Json windows/kit.ps1:Cmd-Push
+list-json : unix/kit:has_cjk unix/kit:cmd_describe windows/kit.ps1:Item-Src windows/kit.ps1:Has-Cjk
+    windows/kit.ps1:Cmd-Describe
+agents api : unix/kit:git_state unix/kit:cmd_agents unix/kit:agents_json unix/kit:fm_set_list unix/kit:cmd_agent
+    windows/kit.ps1:Git-State windows/kit.ps1:Agent-Body windows/kit.ps1:Cmd-Agents windows/kit.ps1:Fm-SetList
+    windows/kit.ps1:Cmd-Agent
+tools mcp : unix/kit:tool_title unix/kit:tool_cmd unix/kit:cmd_tools unix/kit:cmd_install_tool unix/kit:install_npm
+    unix/kit:install_pip unix/kit:link_copies unix/kit:mcp_install unix/kit:cmd_install_deps
+    windows/kit.ps1:Mcp-Install windows/kit.ps1:Tool-Cmd windows/kit.ps1:Cmd-Tools windows/kit.ps1:Cmd-InstallTool
+    windows/kit.ps1:Remove-Store windows/kit.ps1:Install-Npm windows/kit.ps1:Pip-Back windows/kit.ps1:Install-Pip
+    windows/kit.ps1:Link-Copies windows/kit.ps1:Cmd-InstallDeps
+authoring mcp push push-direct : unix/kit:state_from_old unix/kit:item_hash unix/kit:stage_from unix/kit:put_item
+    unix/kit:skeleton unix/kit:parse_item_args unix/kit:guess_kind unix/kit:mcp_latest unix/kit:ver_top
+    unix/kit:mcp_paste_err unix/kit:mcp_new_config unix/kit:cmd_new unix/kit:cmd_diff_update
+    windows/kit.ps1:State-From-Old windows/kit.ps1:Ver-Top windows/kit.ps1:Mcp-Latest windows/kit.ps1:Mcp-PasteErr
+    windows/kit.ps1:Mcp-NewConfig windows/kit.ps1:File-Hash windows/kit.ps1:Item-Hash windows/kit.ps1:Stage-From
+    windows/kit.ps1:Put-Item windows/kit.ps1:Skeleton windows/kit.ps1:Parse-ItemArgs windows/kit.ps1:Guess-Kind
+    windows/kit.ps1:Cmd-New windows/kit.ps1:Cmd-DiffUpdate
+authoring agents push push-direct review mcp : unix/kit:cmd_check windows/kit.ps1:Cmd-Check
+place tools : unix/kit:cmd_place windows/kit.ps1:Cmd-Place
+hook place : unix/kit:json_unq unix/kit:codex_guard_says unix/kit:cmd_codex_guard windows/kit.ps1:Codex-GuardSays
+    windows/kit.ps1:Cmd-CodexGuard
+install hook : unix/kit:cmd_self_update unix/kit:cmd_ci_template windows/kit.ps1:Cmd-SelfUpdate
+    windows/kit.ps1:Cmd-CiTemplate
