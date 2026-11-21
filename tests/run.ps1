@@ -19,32 +19,32 @@ $All = @(Get-ChildItem -LiteralPath (Join-Path $Here 'ps') -Filter '*.ps1' | Sor
 if ($List) { $All | ForEach-Object { [Console]::WriteLine($_) }; exit 0 }
 if ($Jobs -le 0) { $Jobs = [Environment]::ProcessorCount }
 
-function Git { $o = & git -C $Root @args 2>$null; if ($LASTEXITCODE -ne 0) { throw "git $args" }; @($o) }
+function GitOut { $o = & git -C $Root @args 2>$null; if ($LASTEXITCODE -ne 0) { throw "git $args" }; @($o) }
 # the functions of FILE (its text, as lines) at each line: "name() {" or "function Name" to the next "}" at the start of a
 # line (or that line alone when its braces close there); "" outside any
 function Regions([string[]]$lines) {
-    $fn = @(''); $name = ''; $open = $false
+    $fn = New-Object System.Collections.Generic.List[string]; $fn.Add(''); $name = ''; $open = $false
     foreach ($l in $lines) {
         if ($l -match '^(function +[A-Za-z][A-Za-z0-9-]*|[A-Za-z_][A-Za-z0-9_]*\(\))') {
             $name = ($l -replace '^function +', '') -replace '[^A-Za-z0-9_-].*$', ''
-            $open = ([regex]::Matches($l, '\{').Count -gt [regex]::Matches($l, '\}').Count); $fn += $name; continue
+            $open = ([regex]::Matches($l, '\{').Count -gt [regex]::Matches($l, '\}').Count); $fn.Add($name); continue
         }
-        if ($open) { $fn += $name; if ($l.StartsWith('}')) { $open = $false } } else { $fn += '' }
+        if ($open) { $fn.Add($name); if ($l.StartsWith('}')) { $open = $false } } else { $fn.Add('') }
     }
     , $fn
 }
 # the sections for what changed since BASE, each with why (said on the screen)
 function Changed-Sections([string]$base) {
-    if (-not $base) { try { $base = (Git merge-base HEAD master)[0] } catch { throw '-Changed: 找不到 master（給一個 <base>）' } }
-    try { [void](Git rev-parse -q --verify "$base^{commit}") } catch { throw "-Changed: 沒有 $base 這個 commit" }
+    if (-not $base) { try { $base = (GitOut merge-base HEAD master)[0] } catch { throw '-Changed: 找不到 master（給一個 <base>）' } }
+    try { [void](GitOut rev-parse -q --verify "$base^{commit}") } catch { throw "-Changed: 沒有 $base 這個 commit" }
     $keys = New-Object System.Collections.Generic.List[string]
-    $files = @(Git diff --name-only $base --) + @(Git ls-files --others --exclude-standard) | Where-Object { $_ } | Sort-Object -Unique
+    $files = @(GitOut diff --name-only $base --) + @(GitOut ls-files --others --exclude-standard) | Where-Object { $_ } | Sort-Object -Unique
     foreach ($f in $files) {
         if ($f -ne 'unix/kit' -and $f -ne 'windows/kit.ps1') { $keys.Add($f); continue }
-        $old = @(); try { $old = @(Git show "${base}:$f") } catch { }
+        $old = @(); try { $old = @(GitOut show "${base}:$f") } catch { }
         $new = @(); $p = Join-Path $Root $f; if (Test-Path -LiteralPath $p) { $new = @([IO.File]::ReadAllText($p).Replace("`r", '') -split "`n") }
         $fo = Regions $old; $fnw = Regions $new
-        foreach ($h in @(Git diff -U0 $base -- $f) | Where-Object { $_ -match '^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@' }) {
+        foreach ($h in @(GitOut diff -U0 $base -- $f) | Where-Object { $_ -match '^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@' }) {
             [void]($h -match '^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
             foreach ($side in @(@([int]$Matches[1], $(if ($Matches[2]) { [int]$Matches[2] } else { 1 }), $fo), @([int]$Matches[3], $(if ($Matches[4]) { [int]$Matches[4] } else { 1 }), $fnw))) {
                 for ($i = $side[0]; $i -lt $side[0] + $side[1]; $i++) { $n = ''; if ($i -lt $side[2].Count) { $n = $side[2][$i] }; $keys.Add("${f}:$n") }

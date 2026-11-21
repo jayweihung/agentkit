@@ -53,7 +53,7 @@ changed() {
     if [ -z "$base" ]; then base=$(git -C "$root" merge-base HEAD master 2>/dev/null) || { echo "--changed: 找不到 master（給一個 <base>）" >&2; return 1; }; fi
     git -C "$root" rev-parse -q --verify "$base^{commit}" >/dev/null || { echo "--changed: 沒有 $base 這個 commit" >&2; return 1; }
     # one key per changed file; per changed function in unix/kit and windows/kit.ps1 ("FILE:" for code outside one)
-    ks=$( { git -C "$root" diff --name-only "$base" --; git -C "$root" ls-files --others --exclude-standard; } | LC_ALL=C sort -u |
+    ks=$( { git -C "$root" diff --name-only "$base" -- 2>/dev/null; git -C "$root" ls-files --others --exclude-standard 2>/dev/null; } | LC_ALL=C sort -u |
         while IFS= read -r f; do
             if [ "$f" = unix/kit ] || [ "$f" = windows/kit.ps1 ]; then
                 git -C "$root" show "$base:$f" > "$O/old" 2>/dev/null || : > "$O/old"
