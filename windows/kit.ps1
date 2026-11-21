@@ -5793,7 +5793,7 @@ function Plan-Hash($rows) { # the number kit sync --expect checks (its own hash:
     $b = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes((@($rows) -join "`n") + "`n"))
     [string][BitConverter]::ToUInt32($b, 0)
 }
-function Sync-DryRun { # kit sync --dry-run [--force] : the sources brought up to date (as kit sync does), then what it would do with skills
+function Sync-DryRun { # kit sync --dry-run [--force] : the sources brought up to date (in a copy: Dry-Sources), then what it would do with skills
     $rows = @(Plan-All); $f = $(if ($script:Force) { ' --force' } else { '' }); $shown = $false
     Say "kit sync$f 會這樣改 skill（只看 skill；rule、MCP 等照常更新）："
     $what = @{ add = '新增'; update = '更新'; replace = '你改過的先備份，再換新的'; remove = '拿掉'; drop = '你改過的先備份，再拿掉'
@@ -5808,11 +5808,30 @@ function Sync-DryRun { # kit sync --dry-run [--force] : the sources brought up t
     $h = Plan-Hash $rows
     Say "清單的雜湊：${h}。要照這份做：kit sync$f --expect ${h}（到時候清單變了就什麼都不改）"
 }
+# kit sync --dry-run: the sources brought up to date in a copy, so the clones (rules point into them) and machine.yaml stay
+# as they are (the same as unix/kit); the caller removes the copy. kit sync --expect brings the real ones to the same commits.
+function Dry-Sources {
+    $t = New-TempDir 'kit-dry.'; $src = Join-Path $t 'src'; Ensure-Dir $src
+    foreach ($s in M-Sources) {
+        if (-not (Is-Url $s)) { continue }
+        $d = Src-Dir $s
+        if (Test-Path -LiteralPath $d -PathType Container) { Copy-Item -LiteralPath $d -Destination (Join-Path $src (Src-Name $s)) -Recurse -Force }
+    }
+    $a = Approvals-Dir; if (Test-Path -LiteralPath $a -PathType Container) { Copy-Item -LiteralPath $a -Destination (Join-Path $src '.approvals') -Recurse -Force }   # (kit init --approvals)
+    Copy-Item -LiteralPath $Machine -Destination (Join-Path $t 'machine.yaml') -Force
+    $script:KitSrc = $src; $script:Machine = Join-Path $t 'machine.yaml'
+    $t
+}
 function Cmd-Sync([string]$dry = '', [string]$expect = '') { # kit sync [--force] [--dry-run | --expect HASH]
     Need-Init
+    if ($dry) {
+        $t = Dry-Sources
+        try { foreach ($s in M-Sources) { Fetch-Source $s }; Add-Includes; Sync-DryRun }
+        finally { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue }
+        return
+    }
     foreach ($s in M-Sources) { Fetch-Source $s }
     Add-Includes
-    if ($dry) { Sync-DryRun; return }
     if ($expect -and (Plan-Hash @(Plan-All)) -ne $expect) {
         Die-C 'plan-changed' "skill 的清單跟 --dry-run 那時候不一樣了（來源更新了，或你改了某個 skill）：什麼都沒改。再打一次  kit sync$(if ($script:Force) { ' --force' }) --dry-run  看新的清單"
     }

@@ -4,6 +4,15 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.10.0（2026-11-22）
+
+更新後要做：每台 `kit self-update`（Windows 也要），再 `kit sync`（Claude 的 MCP 第一次搬進 kit 的外掛 `kit-mcp`）；開著的 Claude 打 `/reload-plugins`。root 這類只用核准版本的帳號：先在 Mac 上 `kit approve`。
+
+- Claude 的 MCP 改放在 kit 自己的外掛 `kit-mcp`（一個資料夾的：`kit-mcp-<編號>`），改了打 `/reload-plugins` 就生效，不用重開。kit 原本寫在 `~/.claude.json` 的會搬過去；Claude 比 2.1.330 舊或裝外掛失敗，照舊寫在 `~/.claude.json`。工具名稱變成 `mcp__plugin_kit-mcp_<名字>__…`，擋掉的工具兩種名字都寫。Windows 還沒做，照舊寫在 `~/.claude.json`。
+- `kit list --json` 多了 `claude_mcp`：`plugin`（打 `/reload-plugins`）或 `config`（要重開），畫面程式照它選（kit api 1.15）。
+- `kit sync --dry-run` 不再動你這台的來源：以前它會先把來源 clone 換到最新（root 是換到核准的版本），規則就跟著換了；現在在一份暫存的複本裡抓最新的來看，看完就刪，`kit sync --expect` 才真的換。
+- Windows 的 kit（kit.ps1）跟上 0.9.0 的版本：`kit list --json` 的 `version`、`installed`、`upstream`、`held`、`loaded`，`kit collect --dates`，跟 Mac 版逐字一樣。
+
 ## 0.9.0（2026-11-21）
 
 更新後要做：每台 `kit self-update`（Windows 也要），再 `kit sync`（第一次 sync 記下每一項這台裝的是哪一版）。收過東西的來源，維護者跑一次 `kit collect --dates`（每個來源各一次，`--to <來源>`），再 `kit push`。畫面程式要顯示版本：先確認 `kit api` 至少 1.14。

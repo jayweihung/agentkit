@@ -54,6 +54,7 @@ die_c() { DIE_CODE=$1; shift; die "$@"; }       # die_c CODE MESSAGE : the code 
 on_exit() {
     [ -z "${KIT_TMPDIR:-}" ] || rm -rf "$KIT_TMPDIR"
     [ -z "${KIT_STAGE:-}" ] || rm -rf "$KIT_STAGE"
+    [ -z "${KIT_DRY:-}" ] || rm -rf "$KIT_DRY"
     [ -z "${KIT_RUN_TMP:-}" ] || { rm -rf "$KIT_RUN_TMP"; rm -f "$KIT_CONF/run/$$"; }
     [ -z "${KIT_PIP_STORE:-}" ] || pip_back "$KIT_PIP_STORE"
     [ -z "${KIT_LOCK_MINE:-}" ] || rmdir "$KIT_CONF/sync.lock" 2>/dev/null
@@ -4368,7 +4369,7 @@ EOF
 }
 plan_hash() { printf '%s\n' "$1" | cksum | awk '{ print $1 }'; }   # plan_hash ROWS : the number kit sync --expect checks
 
-sync_dry_run() { # kit sync --dry-run [--force] : the sources brought up to date (as kit sync does), then what it would do with skills
+sync_dry_run() { # kit sync --dry-run [--force] : the sources brought up to date (in a copy: dry_sources), then what it would do with skills
     local rows a d n s shown=0 what
     rows=$(plan_all)
     say "kit sync$([ -z "${FORCE:-}" ] || printf ' --force') 會這樣改 skill（只看 skill；rule、MCP 等照常更新）："
@@ -4388,9 +4389,25 @@ EOF
     say "清單的雜湊：$(plan_hash "$rows")。要照這份做：kit sync$([ -z "${FORCE:-}" ] || printf ' --force') --expect $(plan_hash "$rows")（到時候清單變了就什麼都不改）"
 }
 
+# kit sync --dry-run: the sources brought up to date in a copy, so the clones (rules point into them) and machine.yaml stay
+# as they are; the copy goes when kit ends. kit sync --expect brings the real ones to the same commits.
+dry_sources() {
+    local s d
+    KIT_DRY=$(mktemp -d "${TMPDIR:-/tmp}/kit-dry.XXXXXX") || die "沒辦法開暫存資料夾"
+    mkdir -p "$KIT_DRY/src"
+    while IFS= read -r s; do
+        is_url "$s" || continue; d=$(src_dir "$s")
+        [ ! -d "$d" ] || cp -Rp "$d" "$KIT_DRY/src/$(src_name "$s")" || die "沒辦法複製來源 $(src_name "$s")"
+    done <<< "$(m_sources)"
+    d=$(approvals_dir); [ ! -d "$d" ] || cp -Rp "$d" "$KIT_DRY/src/.approvals" || die "沒辦法複製核准紀錄"   # (root: kit init --approvals)
+    cp -p "$MACHINE" "$KIT_DRY/machine.yaml" || die "沒辦法複製 machine.yaml"
+    KIT_SRC="$KIT_DRY/src"; MACHINE="$KIT_DRY/machine.yaml"
+}
+
 cmd_sync() { # kit sync [--force] [--dry-run | --expect HASH]
     need_init
     local s dry=${1:-} expect=${2:-}
+    [ "$dry" = dry ] && dry_sources
     while IFS= read -r s; do [ -z "$s" ] || fetch_source "$s"; done <<< "$(m_sources)"
     add_includes
     [ "$dry" = dry ] && { sync_dry_run; return 0; }
