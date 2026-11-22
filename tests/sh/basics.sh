@@ -80,6 +80,10 @@ echo "team change 2" >> "$TEAM/skills/gerrit-review/SKILL.md"
 out=$(kit sync 2>&1)
 check "... the skill still updates; the source's caches are not copied" 'grep -q "team change 2" "$G/SKILL.md" && [ ! -e "$G/scripts/__pycache__" ] && ! echo "$out" | grep -q 手動改過'
 rm -rf "$TEAM/skills/gerrit-review/scripts"
+# the copy already became the source's new version some other way (another tool, a copy by hand): not a hand edit
+echo "team change 3" >> "$TEAM/skills/gerrit-review/SKILL.md"; cp "$TEAM/skills/gerrit-review/SKILL.md" "$G/SKILL.md"
+out=$(kit sync 2>&1)
+check "a copy that already equals the source's new version: not a hand edit, kit's again" '! echo "$out" | grep -q 手動改過 && grep -q "team change 3" "$G/SKILL.md" && ! echo "$(kit sync 2>&1)" | grep -q 手動改過'
 mkdir -p "$TEAM/skills/team-build"; printf -- '---\nname: team-build\ndescription: b\n---\nx\n' > "$TEAM/skills/team-build/SKILL.md"
 out=$(kit sync 2>&1)
 check "new item announced" 'echo "$out" | grep -q "新： skill:team-build"'

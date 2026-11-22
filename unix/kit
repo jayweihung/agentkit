@@ -580,7 +580,8 @@ skills_plan() { # skills_plan DIR STATEKIND : what sync_skills will do with the 
             else printf 'takeover\t%s\t%s\t%s\n' "$n" "$h" "$p"; fi
             continue
         fi
-        if [ -n "$old" ] && [ -d "$dst" ] && cur=$(dir_hash "$dst") && [ "$cur" != "$old" ]; then
+        # already what kit would put there (the new version came in some other way): not your change, kit's again
+        if [ -n "$old" ] && [ -d "$dst" ] && cur=$(dir_hash "$dst") && [ "$cur" != "$old" ] && [ "$cur" != "$h" ]; then
             if [ -n "${FORCE:-}" ]; then printf 'replace\t%s\t%s %s\t%s\n' "$n" "$cur" "$h" "$p"
             else printf 'modified\t%s\t%s\t\n' "$n" "$cur"; fi
             continue

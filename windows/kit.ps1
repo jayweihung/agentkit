@@ -1726,7 +1726,8 @@ function Skills-Plan([string]$dir, [string]$kind, $names) { # what Sync-Skills w
         }
         if ($old -and (Test-Path -LiteralPath $dst)) {
             $cur = Dir-Hash $dst
-            if ($cur -ne $old) {
+            # already what kit would put there (the new version came in some other way): not your change, kit's again
+            if ($cur -ne $old -and $cur -ne $h) {
                 if ($script:Force) { @{ a = 'replace'; n = $n; sum = "$cur $h"; src = $src } } else { @{ a = 'modified'; n = $n; sum = $cur; src = '' } }
                 continue
             }

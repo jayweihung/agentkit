@@ -68,6 +68,12 @@ Check 'python caches in a skill''s copy: not a hand edit' { -not $out.Contains('
 Kit sync
 Check '... the skill still updates; the source''s caches are not copied' { (ReadT "$G/SKILL.md").Contains('team change 2') -and -not (Test-Path "$G/scripts/__pycache__") -and -not $out.Contains('手動改過') }
 Remove-Item -LiteralPath "$TEAM/skills/gerrit-review/scripts" -Recurse -Force
+# the copy already became the source's new version some other way: not a hand edit, kit's again
+[IO.File]::AppendAllText("$TEAM/skills/gerrit-review/SKILL.md", "team change 3`n"); Copy-Item -LiteralPath "$TEAM/skills/gerrit-review/SKILL.md" -Destination "$G/SKILL.md" -Force
+Kit sync
+Check 'a copy that already equals the source''s new version: not a hand edit, kit''s again' { -not $out.Contains('手動改過') -and (ReadT "$G/SKILL.md").Contains('team change 3') }
+Kit sync
+Check '... and the next sync is quiet about it too' { -not $out.Contains('手動改過') }
 W "$TEAM/skills/team-build/SKILL.md" "---`nname: team-build`ndescription: b`n---`nx`n"
 Kit sync
 Check 'new item announced' { $out.Contains('新： skill:team-build') }
