@@ -4481,7 +4481,11 @@ desc_zh_v() {
     case $DZ_SEEN in *"$LF$1$LF"*) ;; *) DZ_SEEN=$DZ_SEEN$1$LF; DZ_ALL=$DZ_ALL$(awk -v p="$1$US" '{ gsub(/\r/, ""); print p $0 }' "$1/$DESC_ZH")$LF;; esac
     case $DZ_ALL in *"$LF$1$US$2$TAB"*) ;; *) return 0;; esac
     l=${DZ_ALL#*"$LF$1$US$2$TAB"}; r=${l%%"$LF"*}               # r: HASH TAB 中文
-    [ "${r%%"$TAB"*}" = "$(desc_hash "$3")" ] && case $r in *"$TAB"*) DZ=${r#*"$TAB"};; esac
+    dz_check "$r" "$3"
+}
+dz_check() { # dz_check "HASH TAB 中文" DESCRIPTION : DZ is the 中文 when HASH is that description's
+    DZ=""
+    [ -n "$2" ] && [ "${1%%"$TAB"*}" = "$(desc_hash "$2")" ] && case $1 in *"$TAB"*) DZ=${1#*"$TAB"};; esac
     return 0
 }
 desc_zh() { desc_zh_v "$@"; [ -z "$DZ" ] || printf '%s\n' "$DZ"; }   # desc_zh … : desc_zh_v's answer, printed
@@ -4878,7 +4882,9 @@ used_first() {
 }
 ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version" …' part of every item, all worked out by one
     # awk (bash looking things up in long strings is slow): "kind:name TAB part" lines, in the order of the items of ALL
-    # a source has, read on fd 5 by ver_item_json. With --pid also "loaded" (L: that agent's tool, start, skill uses).
+    # a source has, read on fd 5 by ver_item_read. With --pid also "loaded" (L: that agent's tool, start, skill uses).
+    # After a US: its line of its source's descriptions-zh.txt (HASH TAB 中文), for dz_check (bash cutting it out of
+    # the whole file, as desc_zh_v does, takes seconds for 100 items).
     local d n i k rel t froot="" lt="" ls="" nouse=""
     t=$(mktemp -d "${TMPDIR:-/tmp}/kit-verl.XXXXXX") || return 0
     ver_all > "$t/ver"
@@ -4888,6 +4894,9 @@ ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version"
     while IFS= read -r d; do
         [ -f "$d/third_party.lock" ] && awk -F'\t' -v d="$d" '{ sub(/\r$/, "") } !/^#/ && NF { print d "\t" $1 "\t" $5 "\t" $7 "\t" $9 }' "$d/third_party.lock"
     done <<< "$SRC_DIRS_LIST" > "$t/locks"
+    while IFS= read -r d; do
+        [ -f "$d/$DESC_ZH" ] && awk -v d="$d" '{ gsub(/\r/, ""); print d "\t" $0 }' "$d/$DESC_ZH"
+    done <<< "$SRC_DIRS_LIST" > "$t/zh"
     for i in $ALL; do                                        # each one's source, as find_item finds it (no program run)
         k=${i%%:*}; n=${i#*:}
         case $k in rule) rel=/rules/$n.md;; skill) rel=/skills/$n/SKILL.md;; mcp) rel=/mcp/$n.yaml;; agent) rel=/agents/$n.md;;
@@ -4918,6 +4927,7 @@ ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version"
                 while ((getline x < (t "/use")) > 0) { split(x, a, "\t"); use[a[1]] = a[2] }
                 while ((getline x < (t "/want")) > 0) want[x] = 1
                 while ((getline x < (t "/fitems")) > 0) fit[x] = 1
+                while ((getline x < (t "/zh")) > 0) { split(x, a, "\t"); if (!((a[1], a[2]) in zh)) zh[a[1], a[2]] = substr(x, length(a[1] a[2]) + 3) }
                 tl[1] = "claude"; tl[2] = "codex"; tl[3] = "omp" }
         {   i = $1; d = $2; p = $3; k = substr(i, 1, index(i, ":") - 1); n = substr(i, index(i, ":") + 1)
             vid = vw = vdate = vn = vcm = vmsg = ""; vdirty = "false"
@@ -4944,14 +4954,14 @@ ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version"
                 else l = ((n in use) && use[n] + 0 < lat + 0) ? "old" : "new"
                 o = o ", \"loaded\": " jn(l)
             }
-            print i "\t" o
+            print i "\t" o "\037" zh[d, i]
         }' "$t/items" > "$t/out"
     exec 5< "$t/out"; rm -rf "$t"                            # (read on fd 5 after the folder is gone)
 }
-ver_item_json() { # (cmd_list_json's, for item $i) its line from ver_list_prep
-    local x; IFS= read -r x <&5 || return 0
-    [ "${x%%"$TAB"*}" = "$i" ] && printf '%s' "${x#*"$TAB"}"
-    return 0
+ver_item_read() { # (cmd_list_json's, for item $i) its line from ver_list_prep: VO (', "version" …'), VZ (HASH TAB 中文)
+    local x; VO=""; VZ=""; IFS= read -r x <&5 || return 0
+    [ "${x%%"$TAB"*}" = "$i" ] || return 0
+    x=${x#*"$TAB"}; VO=${x%%"$US"*}; VZ=${x#*"$US"}
 }
 sign_json() { # ,"sign": the approvals repo this computer signs with (kit approve remembered it): its serial and what it
     # approved ({name, commit}); nothing when this computer hasn't signed
@@ -4961,7 +4971,7 @@ sign_json() { # ,"sign": the approvals repo this computer signs with (kit approv
         "$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:" { print $1 "\t" $2 }' "$f" | while IFS="$TAB" read -r n s; do printf '%s{"name": %s, "commit": %s}' "${c:+, }" "$(json_s "$n")" "$(json_s "$s")"; c=1; done)"
 }
 cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a kit panel); kit.ps1 prints the same
-    local want req i k n p d status new first s tools sf chg="" changed rel f desc zh seen SRC_DIRS_LIST KIT_REQS KIT_FM
+    local want req i k n p d status new first s tools sf chg="" changed rel f desc zh seen SRC_DIRS_LIST KIT_REQS KIT_FM VO VZ
     # each item below without a program run for what is the same for all of them (a slow machine: seconds per fork)
     want=$LF$(wanted)$LF; req=$LF$(required_items)$LF; SRC_DIRS_LIST=$(src_dirs)
     seen=$LF$([ -f "$STATE" ] && awk -F'\t' '$1 == "seen" && $3 != "" { print $2 }' "$STATE")$LF
@@ -5005,15 +5015,14 @@ EOF
         [ $first = 1 ] || printf ','; first=0
         printf '\n    {"kind": '; json_s "$k"; printf ', "name": '; json_s "$n"; printf ', "status": '; json_s "$status"
         printf ', "new": %s, "changed": %s, "source": ' "$new" "$changed"; json_s "${d##*/}"; printf ', "description": '; json_s "$desc"
-        desc_zh_v "$d" "$i" "$desc"; [ -z "$DZ" ] || { printf ', "description_zh": '; json_s "$DZ"; }
+        ver_item_read; dz_check "$VZ" "$desc"; [ -z "$DZ" ] || { printf ', "description_zh": '; json_s "$DZ"; }
         printf ', "path": '; json_s "$p"
         case $k in
             skill) printf ', "needs": '; needs_json "${p%/*}" "$d"; packages_json "${p%/*}" "$n";;
             plugin) printf ', "needs": '; needs_json "${p%/.claude-plugin/plugin.json}" "$d"; printf ', "parts": '; parts_json "${p%/.claude-plugin/plugin.json}";;
             mcp) mcp_list_json "$p" "$n";;
         esac
-        ver_item_json
-        printf '}'
+        printf '%s}' "$VO"
     done
     exec 5<&-
     printf '\n  ],\n  "blocked": ['
