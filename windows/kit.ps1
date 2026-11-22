@@ -2111,17 +2111,21 @@ function Block-Say([string]$t, [string]$k, [string]$n, [string]$p) { # one line 
 function Codex-SkillsOff($plan) { # [[skills.config]] tables turning off PLAN's Codex skills (in kit's block)
     -join @(foreach ($r in @($plan)) { $f = $r.Split("`t"); if ($f[0] -ceq 'codex' -and $f[1] -ceq 'skill') { "[[skills.config]]`nname = $(Json-Str $f[2])`nenabled = false`n`n" } })
 }
+function Still-There([string]$p, [string]$n) { # a blocked row's item is still where it was found (its folder; its name in that file)
+    if (-not $p -or (Test-Path -LiteralPath $p -PathType Container)) { return $true }
+    (Test-Path -LiteralPath $p -PathType Leaf) -and (Read-Text $p).Contains($n)
+}
 function Sync-Blocks($plan) { # Block-Plan's rows turned off in the tools' settings, kit's entries no longer in it put back; blocked.tsv
     # says what kit wrote. Tells what it newly turned off (the first kit sync after kit self-update too).
     $plan = @($plan | Where-Object { $_ }); $old = @(Block-Rows)
     $inPlan = Ord-Set; foreach ($r in $plan) { $f = $r.Split("`t"); $inPlan["$($f[0])`t$($f[1])`t$($f[2])`t$($f[6])"] = 1 }
     $prev = Ord-Set
-    $out = New-List; $new = New-List; $back = New-List
+    $out = New-List; $new = New-List; $back = New-List; $gone = New-List
     foreach ($r in $old) {
         $f = $r.Split("`t"); if ($f.Count -lt 8) { continue }
         $key = "$($f[0])`t$($f[1])`t$($f[2])`t$($f[6])"; if (-not $prev.ContainsKey($key)) { $prev[$key] = $f[7] }
         if ($inPlan.ContainsKey($key)) { continue }
-        if (Block-Undo $f[0] $f[1] $f[2] $f[6] $f[7]) { $back.Add((Block-Say $f[0] $f[1] $f[2] $f[5])) } else { $out.Add($r) }   # (else again next time)
+        if (Block-Undo $f[0] $f[1] $f[2] $f[6] $f[7]) { if (Still-There $f[5] $f[2]) { $back.Add((Block-Say $f[0] $f[1] $f[2] $f[5])) } else { $gone.Add((Block-Say $f[0] $f[1] $f[2] $f[5])) } } else { $out.Add($r) }   # (else again next time)
     }
     foreach ($r in $plan) {
         $f = $r.Split("`t"); $key = "$($f[0])`t$($f[1])`t$($f[2])`t$($f[6])"
@@ -2136,6 +2140,7 @@ function Sync-Blocks($plan) { # Block-Plan's rows turned off in the tools' setti
     if ($out.Count -gt 0) { Write-Text $Blocked (($out -join "`n") + "`n") } elseif (Test-Path -LiteralPath $Blocked) { Remove-Item -LiteralPath $Blocked -Force }
     if ($new.Count -gt 0) { Say ("kit：這些不是 kit 放的、也不是公司的，已經讓工具不載入（檔案沒動）：`n" + ($new -join "`n") + "`n要用的話收進 kit：有原本網址的用  kit collect <網址>，沒有的用  kit new skill <名字> --from <資料夾>，再  kit add。被擋下的都列在  kit list --json  的 blocked。") }
     if ($back.Count -gt 0) { Say ("kit：這些現在是 kit 的或公司的，不再擋：`n" + ($back -join "`n")) }
+    if ($gone.Count -gt 0) { Say ("kit：這些已經刪掉了，不用再擋：`n" + ($gone -join "`n")) }
 }
 
 # ---------- plugins ----------
@@ -6041,7 +6046,8 @@ function Here-Short([string]$dir, [string]$f) { # inside DIR relative to it, els
     if ($f.StartsWith($UserHome + $sep)) { return '~' + $f.Substring($UserHome.Length) }
     $f
 }
-function Sorted-Names($items) { $a = [string[]]@($items | ForEach-Object { $_.Name }); [Array]::Sort($a, [StringComparer]::Ordinal); $a }
+# (no items: $null, which is not one item)
+function Sorted-Names($items) { $a = [string[]]@($items | Where-Object { $_ } | ForEach-Object { $_.Name }); [Array]::Sort($a, [StringComparer]::Ordinal); $a }
 function Kit-Only([string]$f) { # FILE has nothing but kit's block (kit made it for a folder's own)
     $in = $false
     foreach ($l in (Read-Text $f) -split "`n") { $l = $l.TrimEnd("`r"); if ($l -eq $BeginMark) { $in = $true }; if (-not $in -and $l.Trim()) { return $false }; if ($l -eq $EndMark) { $in = $false } }
@@ -6625,6 +6631,7 @@ function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '', [string]$her
     $first = $true
     foreach ($r in Block-Rows) {                              # (tool kind name scope dir path: kit sync wrote them)
         $f = $r.Split("`t"); if ($f.Count -lt 6) { continue }
+        if (-not (Still-There $f[5] $f[2])) { continue }   # removed since the last kit sync
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
         $dj = if ($f[4] -ne '-') { ", `"dir`": $(Json-S $f[4])" } else { '' }
         [void]$sb.Append("`n    {`"kind`": $(Json-S $f[1]), `"name`": $(Json-S $f[2]), `"tool`": $(Json-S $f[0]), `"path`": $(Json-S $f[5]), `"scope`": $(if ($f[3] -ceq 'folder') { '"folder"' } else { '"account"' })$dj}")

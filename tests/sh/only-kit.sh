@@ -35,12 +35,14 @@ out=$(kit list --json 2>/dev/null)
 check "block: kit list --json has blocked" 'echo "$out" | grep -qF "{\"kind\": \"skill\", \"name\": \"npxed\", \"tool\": \"claude\", \"path\": \"$HB/.claude/skills/npxed\", \"scope\": \"account\"}" && echo "$out" | grep -qF "\"name\": \"loose\", \"tool\": \"claude\", \"path\": \"$PB/.claude/skills/loose\", \"scope\": \"folder\", \"dir\": \"$PB\"}"'
 check "block: an omp plugin omp has off already is left alone (not disabled, not in blocked); the other one is" '! grep -qF "off@mkt" "$T/omp.log" && grep -qxF "plugin disable --scope user on@mkt" "$T/omp.log" && ! echo "$out" | grep -qF "\"name\": \"off@mkt\"" && echo "$out" | grep -qF "{\"kind\": \"plugin\", \"name\": \"on@mkt\", \"tool\": \"omp\""'
 mv "$HB/.claude/skills/npxed" "$T/npxed.away"; mv "$PB/.claude" "$T/pbclaude.away"; out2=$(kit list --json 2>/dev/null)
-check "block: kit list --json: blocked from what kit sync kept (the tools' files not looked at again)" 'bl() { printf "%s\n" "$1" | sed -n "/\"blocked\": \[/,/^  \]/p"; }; echo "$out2" | grep -qF "\"name\": \"npxed\"" && [ "$(bl "$out2")" = "$(bl "$out")" ]'
+check "block: kit list --json: blocked from what kit sync kept, less what is gone since (removed by hand)" '! echo "$out2" | grep -qF "\"name\": \"npxed\"" && ! echo "$out2" | grep -qF "\"name\": \"loose\"" && echo "$out2" | grep -qF "\"name\": \"selfmcp\"" && echo "$out2" | grep -qF "\"name\": \"cxown\""'
 mv "$T/npxed.away" "$HB/.claude/skills/npxed"; mv "$T/pbclaude.away" "$PB/.claude"
 sed -i.bak '/"npxed": "off"/d' "$S"; rm -f "$S.bak"; out=$(kit sync 2>&1)
 check "block: told once; taken out by hand: back on the next sync (the project too)" '! echo "$out" | grep -q "已經讓工具不載入" && [ "$(jget "$S" skillOverrides.npxed)" = "\"off\"" ] && [ "$(jget "$PB/.claude/settings.local.json" skillOverrides.loose)" = "\"off\"" ]'
 sk "$TEAM/skills/npxed"; out=$(kit add skill npxed 2>&1)
 check "block: once kit has it, kit's entry goes and yours is back" '[ "$(jget "$S" skillOverrides.npxed)" = "\"on\"" ] && ! grep -A1 -F "[[skills.config]]" "$CX" | grep -qF "\"npxed\"" && ! LC_ALL=C awk -f "$HERE/../unix/yaml.awk" "$HB/.omp/agent/config.yml" | grep -qF skill:npxed && echo "$out" | grep -q "不再擋"'
+rm -rf "$HB/.codex/skills/cxown"; out=$(kit sync 2>&1)
+check "block: removed by hand: kit sync says it is gone (not that it is kit's now)" 'echo "$out" | grep -A3 "已經刪掉了" | grep -qF cxown && ! echo "$out" | grep -A3 "不再擋" | grep -qF cxown && ! grep -qF "\"cxown\"" "$CX"'
 kit uninstall >/dev/null 2>&1
 check "block: uninstall puts everything back" '[ "$(jget "$S" skillOverrides.npxed)" = "\"on\"" ] && [ -z "$(jget "$S" skillOverrides.mine1)$(jget "$S" deniedMcpServers)$(jget "$S" enabledPlugins)" ] && cmp -s "$CX" "$T/blockcx.orig" && cmp -s "$HB/.omp/agent/config.yml" "$T/blockomp.orig" && [ ! -e "$PB/.claude/settings.local.json" ] && [ ! -e "$HB/.config/agentkit/blocked.tsv" ]'
 echo "$pass $fail" > "$T/sub"

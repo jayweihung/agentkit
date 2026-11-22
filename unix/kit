@@ -1276,15 +1276,19 @@ codex_skills_off() { # codex_skills_off PLAN : [[skills.config]] tables turning 
     printf '%s\n' "$1" | awk -F'\t' '$1 == "codex" && $2 == "skill" { print $3 }' | while IFS= read -r n; do
         printf '[[skills.config]]\nname = %s\nenabled = false\n\n' "$(json_str "$n")"; done
 }
+still_there() { # still_there PATH NAME : a blocked row's item is still where it was found (its folder; its name in that file)
+    [ -z "$1" ] || [ -d "$1" ] || { [ -f "$1" ] && grep -qF -- "$2" "$1"; }
+}
 sync_blocks() { # sync_blocks PLAN : block_plan's rows turned off in the tools' settings, kit's entries no longer in it put
     # back; blocked.tsv says what kit wrote. Tells what it newly turned off (the first kit sync after kit self-update too).
-    local plan=$1 t k n s d p g v old tmp new="" back=""
+    local plan=$1 t k n s d p g v old tmp new="" back="" gone=""
     old=$(cat "$BLOCKED" 2>/dev/null)
     mkdir -p "$KIT_CONF"; tmp=$(mktemp "$BLOCKED.XXXXXX") || return 0
     while IFS="$TAB" read -r t k n s d p g v; do
         [ -n "$t" ] || continue
         printf '%s\n' "$plan" | block_has "$t" "$k" "$n" "$g" && continue
-        if block_undo "$t" "$k" "$n" "$g" "$v"; then back="$back$(block_say "$t" "$k" "$n" "$p")$LF"
+        if block_undo "$t" "$k" "$n" "$g" "$v"; then
+            if still_there "$p" "$n"; then back="$back$(block_say "$t" "$k" "$n" "$p")$LF"; else gone="$gone$(block_say "$t" "$k" "$n" "$p")$LF"; fi
         else printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$t" "$k" "$n" "$s" "$d" "$p" "$g" "$v" >> "$tmp"; fi   # again next time
     done <<EOF
 $old
@@ -1306,6 +1310,8 @@ EOF
 ${new}要用的話收進 kit：有原本網址的用  kit collect <網址>，沒有的用  kit new skill <名字> --from <資料夾>，再  kit add。被擋下的都列在  kit list --json  的 blocked。"
     [ -z "$back" ] || say "kit：這些現在是 kit 的或公司的，不再擋：
 ${back%"$LF"}"
+    [ -z "$gone" ] || say "kit：這些已經刪掉了，不用再擋：
+${gone%"$LF"}"
     return 0
 }
 
@@ -4997,6 +5003,7 @@ EOF
     first=1
     [ -f "$BLOCKED" ] && while IFS="$TAB" read -r i k n s d p _; do   # (tool kind name scope dir path: kit sync wrote them)
         [ -n "$i" ] || continue
+        still_there "$p" "$n" || continue   # removed since the last kit sync
         [ $first = 1 ] || printf ','; first=0
         printf '\n    {"kind": %s, "name": %s, "tool": %s, "path": %s, "scope": %s%s}' "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$i")" \
             "$(json_s "$p")" "$( [ "$s" = folder ] && echo '"folder"' || echo '"account"')" "$( [ "$d" = - ] || printf ', "dir": %s' "$(json_s "$d")")"
