@@ -5012,7 +5012,7 @@ EOF
     printf '\n  ],\n  "tools": [%s],\n  "claude_mcp": "%s",\n  "items": [' "$tools" "$cm"
     first=1
     local zt=${KIT_TMPDIR:-} zn=0                            # (ver_list_prep's folder; without it, no VZ)
-    [ -z "$zt" ] || exec 6>&1 > "$zt/json"                   # the items there first: desc_zh_fill puts in description_zh
+    [ -z "$zt" ] || exec 6>&1 > "$zt/json" || zt=""         # the items there first: desc_zh_fill puts in description_zh
     for i in $ALL; do
         k=${i%%:*}; n=${i#*:}
         if ! ver_item_read; then                             # (no ver_list_prep: find it here)
@@ -5037,7 +5037,7 @@ EOF
         [ $first = 1 ] || printf ','; first=0
         printf '\n    {"kind": '; json_s "$k"; printf ', "name": '; json_s "$n"; printf ', "status": '; json_s "$status"
         printf ', "new": %s, "changed": %s, "source": ' "$new" "$changed"; json_s "${d##*/}"; printf ', "description": '; json_s "$desc"
-        case $VZ in *"$TAB"?*) if [ -n "$desc" ]; then      # a Chinese one (HASH TAB 中文): desc_zh_fill checks HASH
+        case $VZ in *"$TAB"?*) if [ -n "$desc" ] && [ -n "$zt" ]; then   # a Chinese one (HASH TAB 中文): desc_zh_fill checks HASH
             zn=$((zn + 1)); printf '%s' "$desc" > "$zt/d$zn"; printf '%s\n' "$zt/d$zn" >> "$zt/paths"
             { printf '%s\t' "${VZ%%"$TAB"*}"; json_s "${VZ#*"$TAB"}"; echo; } >> "$zt/zh"
             printf '%s%s%s' "$US" "$zn" "$US"
@@ -5730,7 +5730,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
         for f in "$d"/skills/*/SKILL.md "$d"/agents/*.md; do
             [ -f "$f" ] || continue
             rel=${f#"$d"/}
-            case $f in */SKILL.md) n=${f%/*}; n=${n##*/};; *) n=$(basename "$f" .md);; esac
+            case $f in */SKILL.md) n=$(basename "$(dirname "$f")");; *) n=$(basename "$f" .md);; esac
             valid_name "$n" || problem "$rel: 名字只能用小寫英文、數字和 -"
             fm_starts "$f" && fm=$(fm_of "$f") || { problem "$rel: 開頭要有 --- 包起來的 name、description"; continue; }
             [ "$(fm_val "$fm" name)" = "$n" ] || problem "$rel: name 要寫 $n"

@@ -15,7 +15,7 @@
 - 被擋下的東西刪掉之後：`kit list` 不再列出它（以前要等下次 `kit sync`）；`kit sync` 說「已經刪掉了，不用再擋」，不再說成「現在是 kit 的」。Windows 的 `kit sync` 在 `~/.codex/skills` 只剩 `.system` 時不再中斷。
 - 修：用 `sudo -i` 跑的 agent（例如 root 那格），`kit context` 以前會拿同一個資料夾裡別的 agent 的對話來算，Kit 視窗和手機顯示的是別人的 context %；現在讀不到就不給數字，並寫出是哪個帳號、為什麼（`user`、`why`，`--detail` 也是），畫面照著顯示。那個帳號如果把細項放在這個帳號讀得到的地方（`/var/lib/kit-root-view/context-<它的 agent 的 pid>.json`，五分鐘內寫的；`KIT_ROOT_VIEW` 可換資料夾），就回那份，多 `user` 和 `age`（幾秒前）。
 - `kit list --pid` 快很多（Kit 視窗每幾秒問一次）：以前每次都把那個 agent 的整個對話紀錄從頭掃一遍（一個開了幾天的 Claude 對話有幾百 MB，一次 18 秒），現在記下每個紀錄讀到哪裡（`~/.config/agentkit/cache/used/`），只讀新寫的（0.9 秒）；中文說明檔每個來源只讀一次。Mac 和 Windows 都是。
-- `kit list --json` 又快很多（Kit 視窗每次加、刪之後都要等它）：每個項目的中文說明以前是在整份 `descriptions-zh.txt` 裡用 bash 找（一百多個項目要好幾秒），現在開頭一次對好。
+- `kit list --json` 又快很多（Kit 視窗每次加、刪之後都要等它；這台 Mac 約 6 秒變 1.7 秒，輸出一模一樣）：每個項目的中文說明以前是在整份 `descriptions-zh.txt` 裡用 bash 找（一百多個項目要好幾秒），現在開頭一次對好；中文說明是不是最新的，一次用一個 git 算完，不是每個項目跑一次；每個項目也少跑好幾個小程式（找來源、讀 skill 要什麼程式、`--dir` 的那一段）。只改了 Mac／Linux 版，Windows 版本來就不會這樣慢。
 - Windows 的 kit（kit.ps1）跟上 0.9.0 的版本：`kit list --json` 的 `version`、`installed`、`upstream`、`held`、`loaded`，`kit collect --dates`，跟 Mac 版逐字一樣。
 
 ## 0.9.0（2026-11-21）

@@ -30,7 +30,13 @@ if [ -n "$PWSH" ]; then
 fi
 cp "$TP/skills/gerrit-workflow/SKILL.md" "$T/gw.md"; sed 's/^description: upstream$/description: upstream v2/' "$T/gw.md" > "$TP/skills/gerrit-workflow/SKILL.md"
 check "describe: a changed description is not shown in Chinese until translated again" '! kit list --json 2>&1 | grep -q description_zh && kit describe --todo 2>&1 | grep -qxF "skill:gerrit-workflow	upstream v2"'
-cp "$T/gw.md" "$TP/skills/gerrit-workflow/SKILL.md"; rm -f "$TP/descriptions-zh.txt"
+cp "$T/gw.md" "$TP/skills/gerrit-workflow/SKILL.md"
+printf 'skill:gerrit-review\t%s\t審查\nskill:quote\tffffffffffff\t舊的\n' "$(printf 'review a change' | git hash-object --stdin | cut -c1-12)" > "$TEAM/descriptions-zh.txt"
+printf 'skill:gerrit-workflow\t%s\t上游\n' "$(printf upstream | git hash-object --stdin | cut -c1-12)" > "$TP/descriptions-zh.txt"
+out=$(kit list --json 2>&1)
+check "list --json: each item its own Chinese line (two sources, a stale one between)" 'printf "%s\n" "$out" | grep -qF "\"description\": \"review a change\", \"description_zh\": \"審查\", \"path\": " &&
+    printf "%s\n" "$out" | grep -qF "\"description\": \"upstream\", \"description_zh\": \"上游\", \"path\": " && [ "$(printf "%s\n" "$out" | grep -c description_zh)" = 2 ]'
+rm -f "$TEAM/descriptions-zh.txt" "$TP/descriptions-zh.txt"
 out=$(kit describe skill nope "x" 2>&1); rc=$?
 check "describe: unknown item or no text refused" '[ $rc -ne 0 ] && echo "$out" | grep -q "找不到 skill:nope" && ! kit describe skill gerrit-workflow "  " >/dev/null 2>&1 && [ ! -e "$TP/descriptions-zh.txt" ]'
 printf -- '---\r\nname: crlf\r\ndescription: Written on Windows\r\n---\r\nx\r\n' > "$TEAM/agents/crlf.md"   # CRLF line ends
