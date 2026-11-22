@@ -2138,10 +2138,10 @@ skill_needs() { # skill_needs SKILLDIR [SOURCEDIR] -> name<TAB>min per program t
         v=${d%/}; v=${v##*/}
         if [ -n "${KIT_REQS+x}" ]; then fm_val "$KIT_REQS" "$src/kit.yaml:requires.$v"   # (kit list --json read them once)
         elif [ -n "$src" ]; then yget "$src/kit.yaml" "requires.$v"; fi
-        if [ -f "$d/SKILL.md" ]; then
-            LC_ALL=C grep -qE '(^|[^A-Za-z0-9_-])(node[ 	]+(-[A-Za-z-]+[ 	]+)*[./A-Za-z0-9_-]+\.(mjs|cjs|js)([^A-Za-z0-9]|$)|npx[ 	]+[A-Za-z@]|npm[ 	]+(run|install|ci|exec)([^A-Za-z]|$))' "$d/SKILL.md" && echo node
-            LC_ALL=C grep -qE '(^|[^A-Za-z0-9_-])(python3?[ 	]+(-m[ 	]+[A-Za-z]|[./A-Za-z0-9_-]+\.py([^A-Za-z0-9]|$))|pip3?[ 	]+install|uv[ 	]+run)' "$d/SKILL.md" && echo python
-        fi
+        [ -f "$d/SKILL.md" ] && LC_ALL=C awk '   # (one awk, not a grep each: kit list --json runs this for every skill)
+            /(^|[^A-Za-z0-9_-])(node[ 	]+(-[A-Za-z-]+[ 	]+)*[.\/A-Za-z0-9_-]+\.(mjs|cjs|js)([^A-Za-z0-9]|$)|npx[ 	]+[A-Za-z@]|npm[ 	]+(run|install|ci|exec)([^A-Za-z]|$))/ { j = 1 }
+            /(^|[^A-Za-z0-9_-])(python3?[ 	]+(-m[ 	]+[A-Za-z]|[.\/A-Za-z0-9_-]+\.py([^A-Za-z0-9]|$))|pip3?[ 	]+install|uv[ 	]+run)/ { py = 1 }
+            END { if (j) print "node"; if (py) print "python" }' "$d/SKILL.md"
         if [ -f "$d/package.json" ]; then
             v=$(json_get "$d/package.json" engines.node | tr -d '"' | grep -oE '[0-9]+(\.[0-9]+)*' | head -n 1)
             [ -n "$v" ] && echo "node>=$v.min"
@@ -4485,7 +4485,7 @@ desc_zh_v() {
 }
 dz_check() { # dz_check "HASH TAB 中文" DESCRIPTION : DZ is the 中文 when HASH is that description's
     DZ=""
-    [ -n "$2" ] && [ "${1%%"$TAB"*}" = "$(desc_hash "$2")" ] && case $1 in *"$TAB"*) DZ=${1#*"$TAB"};; esac
+    [ -n "$1" ] && [ -n "$2" ] && [ "${1%%"$TAB"*}" = "$(desc_hash "$2")" ] && case $1 in *"$TAB"*) DZ=${1#*"$TAB"};; esac
     return 0
 }
 desc_zh() { desc_zh_v "$@"; [ -z "$DZ" ] || printf '%s\n' "$DZ"; }   # desc_zh … : desc_zh_v's answer, printed
@@ -4954,14 +4954,18 @@ ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version"
                 else l = ((n in use) && use[n] + 0 < lat + 0) ? "old" : "new"
                 o = o ", \"loaded\": " jn(l)
             }
-            print i "\t" o "\037" zh[d, i]
+            print i "\t" d "\t" p "\t" o "\037" zh[d, i]
         }' "$t/items" > "$t/out"
     exec 5< "$t/out"; rm -rf "$t"                            # (read on fd 5 after the folder is gone)
 }
-ver_item_read() { # (cmd_list_json's, for item $i) its line from ver_list_prep: VO (', "version" …'), VZ (HASH TAB 中文)
-    local x; VO=""; VZ=""; IFS= read -r x <&5 || return 0
-    [ "${x%%"$TAB"*}" = "$i" ] || return 0
-    x=${x#*"$TAB"}; VO=${x%%"$US"*}; VZ=${x#*"$US"}
+ver_item_read() { # (cmd_list_json's, for item $i) its line from ver_list_prep: d (its source), p (its file), VO
+    # (', "version" …'), VZ (HASH TAB 中文); 1: no line for it (no source has it: the line, kept in VX, is the next item's)
+    local x
+    VO=""; VZ=""
+    [ -n "$VX" ] || IFS= read -r VX <&5 || return 1
+    [ "${VX%%"$TAB"*}" = "$i" ] || return 1
+    x=${VX#*"$TAB"}; VX=""
+    d=${x%%"$TAB"*}; x=${x#*"$TAB"}; p=${x%%"$TAB"*}; x=${x#*"$TAB"}; VO=${x%%"$US"*}; VZ=${x#*"$US"}
 }
 sign_json() { # ,"sign": the approvals repo this computer signs with (kit approve remembered it): its serial and what it
     # approved ({name, commit}); nothing when this computer hasn't signed
@@ -4971,7 +4975,7 @@ sign_json() { # ,"sign": the approvals repo this computer signs with (kit approv
         "$(awk 'NF == 2 && $1 !~ /^#/ && $1 != "serial:" { print $1 "\t" $2 }' "$f" | while IFS="$TAB" read -r n s; do printf '%s{"name": %s, "commit": %s}' "${c:+, }" "$(json_s "$n")" "$(json_s "$s")"; c=1; done)"
 }
 cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a kit panel); kit.ps1 prints the same
-    local want req i k n p d status new first s tools sf chg="" changed rel f desc zh seen SRC_DIRS_LIST KIT_REQS KIT_FM VO VZ
+    local want req i k n p d status new first s tools sf chg="" changed rel f desc zh seen SRC_DIRS_LIST KIT_REQS KIT_FM VO VZ VX=""
     # each item below without a program run for what is the same for all of them (a slow machine: seconds per fork)
     want=$LF$(wanted)$LF; req=$LF$(required_items)$LF; SRC_DIRS_LIST=$(src_dirs)
     seen=$LF$([ -f "$STATE" ] && awk -F'\t' '$1 == "seen" && $3 != "" { print $2 }' "$STATE")$LF
@@ -4997,13 +5001,16 @@ EOF
     first=1
     for i in $ALL; do
         k=${i%%:*}; n=${i#*:}
-        p=$(find_item "$k" "$n") || continue
+        if ! ver_item_read; then                             # (no ver_list_prep: find it here)
+            [ -z "$VX" ] || continue
+            p=$(find_item "$k" "$n") || continue; d=${p%"$(item_path "" "$k" "$n")"}
+        fi
         status=unused
         case $want in *"$LF$i$LF"*) status=used;; esac
         case $req in *"$LF$i$LF"*) status=required;; esac
         [ "$k" = agent ] && status=agent
         case $seen in *"$LF$i$LF"*) new=false;; *) new=true;; esac
-        rel=$(item_path "" "$k" "$n"); d=${p%"$rel"}            # the source folder that has it
+        rel=${p#"$d"}                                        # d: the source folder that has it
         # changed: kit push would send it (a skill: any file in its folder)
         changed=false
         case $k in skill) case $chg in *"$TAB$d${rel%/*}/"*) changed=true;; esac;;
@@ -5015,7 +5022,7 @@ EOF
         [ $first = 1 ] || printf ','; first=0
         printf '\n    {"kind": '; json_s "$k"; printf ', "name": '; json_s "$n"; printf ', "status": '; json_s "$status"
         printf ', "new": %s, "changed": %s, "source": ' "$new" "$changed"; json_s "${d##*/}"; printf ', "description": '; json_s "$desc"
-        ver_item_read; dz_check "$VZ" "$desc"; [ -z "$DZ" ] || { printf ', "description_zh": '; json_s "$DZ"; }
+        dz_check "$VZ" "$desc"; [ -z "$DZ" ] || { printf ', "description_zh": '; json_s "$DZ"; }
         printf ', "path": '; json_s "$p"
         case $k in
             skill) printf ', "needs": '; needs_json "${p%/*}" "$d"; packages_json "${p%/*}" "$n";;
