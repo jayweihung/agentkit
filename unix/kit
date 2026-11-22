@@ -2824,7 +2824,7 @@ agent_guess() { # agent_guess PID TOOL DIR : A_TOOL (TOOL, else guessed from the
     [ -n "$A_DIR" ] || A_DIR=$(proc_cwd "$p")
 }
 cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [--detail [--fresh]] : how full that agent's context is (JSON)
-    local pid="" tool="" dir="" detail="" fresh="" f p use="用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]"
+    local pid="" tool="" dir="" detail="" fresh="" f p t use="用法：kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]"
     while [ $# -gt 0 ]; do
         case $1 in
             --pid|--tool|--dir) [ $# -ge 2 ] || die "$use"
@@ -2838,8 +2838,17 @@ cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [-
     agent_guess "$pid" "$tool" "$dir"; tool=$A_TOOL; dir=$A_DIR
     # an agent run as another user (sudo -i): its conversation is in that user's home, not readable here; the folder's
     # newest would be another agent's (no numbers rather than someone else's)
-    # (not pid 1: everything is under it)
-    [ "$pid" = 1 ] || [ -z "$(other_user "$pid")" ] || { ctx_json "$tool" "" "" "" ""; return 0; }
+    # (not pid 1: everything is under it). That user may keep its agents' kit context --detail where this one can read it
+    # (KIT_ROOT_VIEW/context-<its agent's pid>.json, from its cron): that, with user and age (s); else user, why: for the
+    # screens to say so (--detail too: no categories)
+    [ "$pid" = 1 ] || { p=$(other_user "$pid"); [ -z "$p" ]; } || {
+        f=$(other_agent "$pid" "$p"); [ -z "$f" ] || f="${KIT_ROOT_VIEW:-/var/lib/kit-root-view}/context-$f.json"
+        if [ -n "$f" ] && [ -r "$f" ] && t=$(mtimes "$f") && t=$(( $(date +%s) - ${t##*"$TAB"} )) && [ "$t" -le 300 ] && f=$(head -c 1048576 "$f") \
+            && case $f in "{"*"}") true;; *) false;; esac; then
+            printf '%s, "user": %s, "age": %s}\n' "${f%\}}" "$(json_s "$p")" "$t"; return 0
+        fi
+        printf '{"tool": %s, "used": null, "window": null, "pct": null, "source": "", "model": "", "user": %s, "why": %s}\n' "$(json_s "$tool")" "$(json_s "$p")" \
+            "$(json_s "這個 agent 用 $p 帳號跑，這個帳號讀不到它的對話（在它自己那格用 $p 跑 kit context 才看得到）")"; return 0; }
     # the kept numbers (and details) of processes that are gone
     for f in "$CTX_DIR"/claude-*.json "$CTX_DIR"/detail-*.json; do
         [ -f "$f" ] || continue; p=${f##*/}; p=${p#*-}; p=${p%.json}
@@ -4620,6 +4629,13 @@ other_user() { # other_user PID : the user of a process under PID that is not me
         $2 ~ /^[0-9]+$/ && $4 !~ /(^|\/)ps$/ { u[$2] = $1; p[$2] = $3 }
         END { for (x in p) { y = x; for (i = 0; i < 64 && y != top && (y in p); i++) y = p[y]
                              if (y == top && x != top && u[x] != me) { print u[x]; exit } } }'
+}
+other_agent() { # other_agent PID USER : USER's claude / codex / omp process under PID (the agent of a sudo -i), if any
+    { ps -A -o user= -o pid= -o ppid= -o comm= 2>/dev/null || ps -o user,pid,ppid,comm 2>/dev/null; } | awk -v top="$1" -v who="$2" '
+        $2 ~ /^[0-9]+$/ { u[$2] = $1; p[$2] = $3; c[$2] = $4 }
+        END { for (x in p) { if (u[x] != who || c[x] !~ /(^|\/)(claude|codex|omp)$/) continue
+                             y = x; for (i = 0; i < 64 && y != top && (y in p); i++) y = p[y]
+                             if (y == top) { print x; exit } } }'
 }
 pid_tree() { # pid_tree PID : PID and every process under it
     { ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid,ppid 2>/dev/null; } | awk -v top="$1" '

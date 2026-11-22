@@ -4073,7 +4073,19 @@ function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] 
     if ($cpid -cnotmatch '^[0-9]+\z') { Die $use }
     $g = Agent-Guess $cpid $tool $dir; $tool = $g[0]; $dir = $g[1]
     # an agent run as another user (sudo -i): its conversation isn't readable here; the folder's newest would be another agent's
-    if ($cpid -ne '1' -and (Other-User $cpid)) { [Console]::Out.Write((Ctx-Json $tool '' '' '' '') + "`n"); return }
+    # That user may keep its agents' kit context --detail where this one can read it (KIT_ROOT_VIEW/context-<its agent's
+    # pid>.json, from its cron): that, with user and age (s); else user, why: for the screens to say so (--detail too)
+    $ou = if ($cpid -ne '1') { Other-User $cpid } else { '' }
+    $ap = if ($ou) { Other-Agent $cpid $ou } else { '' }
+    if ($ap) {
+        $vf = Join-Path $(if ($env:KIT_ROOT_VIEW) { $env:KIT_ROOT_VIEW } else { '/var/lib/kit-root-view' }) "context-$ap.json"
+        try {
+            $vi = Get-Item -LiteralPath $vf -ErrorAction Stop; $age = [long]([DateTimeOffset]::UtcNow - [DateTimeOffset]$vi.LastWriteTimeUtc).TotalSeconds
+            $vj = ([IO.File]::ReadAllText($vf)).Trim()
+            if ($age -le 300 -and $vj.StartsWith('{') -and $vj.EndsWith('}')) { [Console]::Out.Write($vj.Substring(0, $vj.Length - 1) + ", `"user`": $(Json-S $ou), `"age`": $age}`n"); return }
+        } catch {}
+    }
+    if ($ou) { [Console]::Out.Write("{`"tool`": $(Json-S $tool), `"used`": null, `"window`": null, `"pct`": null, `"source`": `"`", `"model`": `"`", `"user`": $(Json-S $ou), `"why`": $(Json-S "這個 agent 用 $ou 帳號跑，這個帳號讀不到它的對話（在它自己那格用 $ou 跑 kit context 才看得到）")}`n"); return }
     # the kept numbers (and details) of processes that are gone
     if (Test-Path -LiteralPath $CtxDir) {
         foreach ($f in @(Get-ChildItem -LiteralPath $CtxDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -clike 'claude-*.json' -or $_.Name -clike 'detail-*.json' })) {
@@ -6179,6 +6191,22 @@ function Here-Rows([string]$dir) { # what an agent started in DIR gets that kit 
     $f = Join-Path $OmpDir 'mcp.json'
     if (Test-Path -LiteralPath $f -PathType Leaf) { foreach ($n in Json-Keys $f @('mcpServers')) { if ($null -eq (State-Get 'mcp.omp' $n)) { $rows.Add(@('user', 'mcp', $n, $f, 'omp')) } } }
     $rows
+}
+function Other-Agent([string]$top, [string]$who) { # WHO's claude / codex / omp process under PID (the agent of a sudo -i), if any
+    if ($OnWindows) { return '' }
+    $u = @{}; $p = @{}; $c = @{}
+    foreach ($l in @(& ps -A -o user= -o pid= -o ppid= -o comm= 2>$null)) {
+        $f = @("$l".Trim() -split '\s+')
+        if ($f.Count -lt 4 -or $f[1] -notmatch '^[0-9]+$') { continue }
+        $u[$f[1]] = $f[0]; $p[$f[1]] = $f[2]; $c[$f[1]] = $f[3]
+    }
+    foreach ($x in $p.Keys) {
+        if ($u[$x] -cne $who -or $c[$x] -notmatch '(^|/)(claude|codex|omp)$') { continue }
+        $y = $x; $i = 0
+        while ($i -lt 64 -and $y -ne $top -and $p.ContainsKey($y)) { $y = $p[$y]; $i++ }
+        if ($y -eq $top) { return $x }
+    }
+    ''
 }
 function Other-User([string]$top) { # the user of a process under PID that is not me (an agent started with sudo -i), if any
     if ($OnWindows) { return '' }
