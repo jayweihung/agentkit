@@ -2179,9 +2179,9 @@ parts_json() { # parts_json PLUGINDIR -> {"skills", "commands", "agents", "mcp":
     for f in "$d"/hooks/*.json; do [ -f "$f" ] && h=true; done
     [ $h = true ] || { json_get "$d/.claude-plugin/plugin.json" hooks >/dev/null && h=true; }
     printf '{"skills": %s, "commands": %s, "agents": %s, "mcp": %s, "hooks": %s}' \
-        "$(for f in "$d"/skills/*/SKILL.md; do [ -f "$f" ] && basename "$(dirname "$f")"; done | LC_ALL=C sort | json_arr)" \
-        "$(for f in "$d"/commands/*.md; do [ -f "$f" ] && basename "$f" .md; done | LC_ALL=C sort | json_arr)" \
-        "$(for f in "$d"/agents/*.md; do [ -f "$f" ] && basename "$f" .md; done | LC_ALL=C sort | json_arr)" \
+        "$(for f in "$d"/skills/*/SKILL.md; do [ -f "$f" ] && { f=${f%/*}; printf '%s\n' "${f##*/}"; }; done | LC_ALL=C sort | json_arr)" \
+        "$(for f in "$d"/commands/*.md; do [ -f "$f" ] && { f=${f##*/}; printf '%s\n' "${f%.md}"; }; done | LC_ALL=C sort | json_arr)" \
+        "$(for f in "$d"/agents/*.md; do [ -f "$f" ] && { f=${f##*/}; printf '%s\n' "${f%.md}"; }; done | LC_ALL=C sort | json_arr)" \
         "$( [ -f "$d/.mcp.json" ] && json_keys "$d/.mcp.json" mcpServers | json_arr || printf '[]')" "$h"
 }
 needs_json() { # needs_json SKILLDIR SOURCEDIR -> [{"tool", "title", "min", "have", "ok", "install"}] (after tool_cache)
@@ -4575,7 +4575,7 @@ here_rows() { # here_rows DIR : what an agent started in DIR gets that kit does 
         if [ "$a/.claude" != "$CLAUDE_DIR" ]; then
             for f in "$a"/.claude/rules/*.md; do [ -f "$f" ] && printf 'dir\trule\t%s\t%s\tclaude\n' "$(here_short "$dir" "$f")" "$f"; done
             for f in "$a"/.claude/skills/*/SKILL.md; do
-                [ -f "$f" ] || continue; n=$(basename "$(dirname "$f")")
+                [ -f "$f" ] || continue; n=${f%/*}; n=${n##*/}
                 [ "$a" = "$root" ] && printf '%s\n' "$mine" | grep -qxF "skill:$n" && continue
                 printf 'dir\tskill\t%s\t%s\tclaude%s\n' "$n" "$f" "$om"
             done
@@ -4584,7 +4584,7 @@ here_rows() { # here_rows DIR : what an agent started in DIR gets that kit does 
         if [ "$a/.agents/skills" != "$AGENTS_SKILLS" ]; then
             [ "$a/.agents/AGENTS.md" = "$ow" ] && printf 'dir\trule\t%s\t%s\tomp\n' "$(here_short "$dir" "$ow")" "$ow"
             for f in "$a"/.agents/skills/*/SKILL.md; do
-                [ -f "$f" ] || continue; n=$(basename "$(dirname "$f")")
+                [ -f "$f" ] || continue; n=${f%/*}; n=${n##*/}
                 [ "$a" = "$root" ] && printf '%s\n' "$mine" | grep -qxF "skill:$n" && continue
                 printf 'dir\tskill\t%s\t%s\tcodex%s\n' "$n" "$f" "$om"
             done
@@ -4592,7 +4592,7 @@ here_rows() { # here_rows DIR : what an agent started in DIR gets that kit does 
         if [ -n "$nat" ] && [ "$a" = "$nat" ]; then
             [ "$a/.omp/AGENTS.md" = "$ow" ] && printf 'dir\trule\t%s\t%s\tomp\n' "$(here_short "$dir" "$ow")" "$ow"
             [ -s "$a/.omp/RULES.md" ] && printf 'dir\trule\t%s\t%s\tomp\n' "$(here_short "$dir" "$a/.omp/RULES.md")" "$a/.omp/RULES.md"
-            for f in "$a"/.omp/skills/*/SKILL.md; do [ -f "$f" ] && printf 'dir\tskill\t%s\t%s\tomp\n' "$(basename "$(dirname "$f")")" "$f"; done
+            for f in "$a"/.omp/skills/*/SKILL.md; do [ -f "$f" ] && { n=${f%/*}; printf 'dir\tskill\t%s\t%s\tomp\n' "${n##*/}" "$f"; }; done
         fi
         [ "$a" = / ] && break
         a=$(dirname "$a")
@@ -4607,17 +4607,18 @@ here_rows() { # here_rows DIR : what an agent started in DIR gets that kit does 
         printf 'dir\tmcp\t%s\t%s\tcodex omp\n' "$n" "$dir/.codex/config.toml"; done
     [ -f "$CLAUDE_JSON" ] && json_keys "$CLAUDE_JSON" "projects$TAB$dir${TAB}mcpServers" | while IFS= read -r n; do
         printf 'dir\tmcp\t%s\t%s\tclaude\n' "$n" "$CLAUDE_JSON"; done
-    for f in "$CLAUDE_DIR"/skills/*/SKILL.md; do
-        [ -f "$f" ] || continue; n=$(basename "$(dirname "$f")")
-        [ -n "$(state_get skill "$n")" ] || printf 'user\tskill\t%s\t%s\tclaude\n' "$n" "$f"
+    local ks; ks=$LF$([ -f "$STATE" ] && awk -F'\t' '$1 == "skill" && !($2 in s) { s[$2] = 1; if ($3 != "") print $2 }' "$STATE")$LF
+    for f in "$CLAUDE_DIR"/skills/*/SKILL.md; do               # ks: the skills kit put (state_get's, read once)
+        [ -f "$f" ] || continue; n=${f%/*}; n=${n##*/}
+        case $ks in *"$LF$n$LF"*) ;; *) printf 'user\tskill\t%s\t%s\tclaude\n' "$n" "$f";; esac
     done
     [ -f "$CLAUDE_JSON" ] && json_keys "$CLAUDE_JSON" mcpServers | while IFS= read -r n; do
         [ -n "$(state_get mcp "$n")" ] || printf 'user\tmcp\t%s\t%s\tclaude\n' "$n" "$CLAUDE_JSON"; done
     for f in "$AGENTS_SKILLS"/*/SKILL.md; do
-        [ -f "$f" ] || continue; n=$(basename "$(dirname "$f")")
-        [ -n "$(state_get skill "$n")" ] || printf 'user\tskill\t%s\t%s\tcodex omp\n' "$n" "$f"
+        [ -f "$f" ] || continue; n=${f%/*}; n=${n##*/}
+        case $ks in *"$LF$n$LF"*) ;; *) printf 'user\tskill\t%s\t%s\tcodex omp\n' "$n" "$f";; esac
     done
-    for f in "$OMP_DIR"/skills/*/SKILL.md; do [ -f "$f" ] && printf 'user\tskill\t%s\t%s\tomp\n' "$(basename "$(dirname "$f")")" "$f"; done
+    for f in "$OMP_DIR"/skills/*/SKILL.md; do [ -f "$f" ] && { n=${f%/*}; printf 'user\tskill\t%s\t%s\tomp\n' "${n##*/}" "$f"; }; done
     [ -s "$OMP_DIR/RULES.md" ] && printf 'user\trule\t%s\t%s\tomp\n' "$(here_short "$dir" "$OMP_DIR/RULES.md")" "$OMP_DIR/RULES.md"
     [ -f "$OMP_DIR/mcp.json" ] && json_keys "$OMP_DIR/mcp.json" mcpServers | while IFS= read -r n; do
         [ -n "$(state_get mcp.omp "$n")" ] || printf 'user\tmcp\t%s\t%s\tomp\n' "$n" "$OMP_DIR/mcp.json"; done
@@ -4686,8 +4687,8 @@ here_json() { # here_json DIR PID : the "here" part of kit list --json --dir
             skill|rule) d=$(item_desc "$k" "$f");;
         esac
         [ $first = 1 ] || printf ','; first=0
-        printf '\n    {"scope": %s, "kind": %s, "name": %s, "path": %s, "tools": %s, "description": %s}' \
-            "$(json_s "$sc")" "$(json_s "$k")" "$(json_s "$n")" "$(json_s "$f")" "$(json_s "$t")" "$(json_s "$d")"
+        printf '\n    {"scope": '; json_s "$sc"; printf ', "kind": '; json_s "$k"; printf ', "name": '; json_s "$n"   # (no subshells)
+        printf ', "path": '; json_s "$f"; printf ', "tools": '; json_s "$t"; printf ', "description": '; json_s "$d"; printf '}'
     done <<EOF
 $(here_rows "$dir")
 EOF
@@ -5729,7 +5730,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
         for f in "$d"/skills/*/SKILL.md "$d"/agents/*.md; do
             [ -f "$f" ] || continue
             rel=${f#"$d"/}
-            case $f in */SKILL.md) n=$(basename "$(dirname "$f")");; *) n=$(basename "$f" .md);; esac
+            case $f in */SKILL.md) n=${f%/*}; n=${n##*/};; *) n=$(basename "$f" .md);; esac
             valid_name "$n" || problem "$rel: 名字只能用小寫英文、數字和 -"
             fm_starts "$f" && fm=$(fm_of "$f") || { problem "$rel: 開頭要有 --- 包起來的 name、description"; continue; }
             [ "$(fm_val "$fm" name)" = "$n" ] || problem "$rel: name 要寫 $n"
