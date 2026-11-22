@@ -11,6 +11,7 @@
 - Claude 的 MCP 改放在 kit 自己的外掛 `kit-mcp`（一個資料夾的：`kit-mcp-<編號>`），改了打 `/reload-plugins` 就生效，不用重開。kit 原本寫在 `~/.claude.json` 的會搬過去；Claude 比 2.1.330 舊或裝外掛失敗，照舊寫在 `~/.claude.json`。工具名稱變成 `mcp__plugin_kit-mcp_<名字>__…`，擋掉的工具兩種名字都寫。Windows 還沒做，照舊寫在 `~/.claude.json`。
 - `kit list --json` 多了 `claude_mcp`：`plugin`（打 `/reload-plugins`）或 `config`（要重開），畫面程式照它選（kit api 1.15）。
 - `kit sync --dry-run` 不再動你這台的來源：以前它會先把來源 clone 換到最新（root 是換到核准的版本），規則就跟著換了；現在在一份暫存的複本裡抓最新的來看，看完就刪，`kit sync --expect` 才真的換。
+- 修：用 `sudo -i` 跑的 agent（例如 root 那格），`kit context` 以前會拿同一個資料夾裡別的 agent 的對話來算，Kit 視窗和手機顯示的是別人的 context %；現在讀不到就不給數字。
 - `kit list --pid` 快很多（Kit 視窗每幾秒問一次）：以前每次都把那個 agent 的整個對話紀錄從頭掃一遍（一個開了幾天的 Claude 對話有幾百 MB，一次 18 秒），現在記下每個紀錄讀到哪裡（`~/.config/agentkit/cache/used/`），只讀新寫的（0.9 秒）；中文說明檔每個來源只讀一次。Mac 和 Windows 都是。
 - Windows 的 kit（kit.ps1）跟上 0.9.0 的版本：`kit list --json` 的 `version`、`installed`、`upstream`、`held`、`loaded`，`kit collect --dates`，跟 Mac 版逐字一樣。
 

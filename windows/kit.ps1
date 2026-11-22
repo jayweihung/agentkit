@@ -4067,6 +4067,8 @@ function Cmd-Context($rest) { # kit context --pid PID [--tool claude|codex|omp] 
     }
     if ($cpid -cnotmatch '^[0-9]+\z') { Die $use }
     $g = Agent-Guess $cpid $tool $dir; $tool = $g[0]; $dir = $g[1]
+    # an agent run as another user (sudo -i): its conversation isn't readable here; the folder's newest would be another agent's
+    if ($cpid -ne '1' -and (Other-User $cpid)) { [Console]::Out.Write((Ctx-Json $tool '' '' '' '') + "`n"); return }
     # the kept numbers (and details) of processes that are gone
     if (Test-Path -LiteralPath $CtxDir) {
         foreach ($f in @(Get-ChildItem -LiteralPath $CtxDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -clike 'claude-*.json' -or $_.Name -clike 'detail-*.json' })) {

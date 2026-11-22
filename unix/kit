@@ -2830,6 +2830,10 @@ cmd_context() { # kit context --pid PID [--tool claude|codex|omp] [--dir DIR] [-
     done
     case $pid in ""|*[!0-9]*) die "$use";; esac
     agent_guess "$pid" "$tool" "$dir"; tool=$A_TOOL; dir=$A_DIR
+    # an agent run as another user (sudo -i): its conversation is in that user's home, not readable here; the folder's
+    # newest would be another agent's (no numbers rather than someone else's)
+    # (not pid 1: everything is under it)
+    [ "$pid" = 1 ] || [ -z "$(other_user "$pid")" ] || { ctx_json "$tool" "" "" "" ""; return 0; }
     # the kept numbers (and details) of processes that are gone
     for f in "$CTX_DIR"/claude-*.json "$CTX_DIR"/detail-*.json; do
         [ -f "$f" ] || continue; p=${f##*/}; p=${p#*-}; p=${p%.json}
