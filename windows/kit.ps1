@@ -8170,20 +8170,45 @@ function Collect-Plugin { # (Cmd-Collect's, with its variables) the plugin in $r
     if ($own) { Say "下一步：用 git diff 看收進來的檔案；沒問題就  kit push  送出，要用它就  kit add plugin $n" }
     else { Say '下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR' }
 }
+function Remote-ShaOnce([string]$url, [string]$ref) { # Remote-Sha, asked once per URL and REF in this run (ShaSeen: set by the caller)
+    $k = "$url`t$ref"; if (-not $script:ShaSeen.ContainsKey($k)) { $script:ShaSeen[$k] = "$(Remote-Sha $url $ref)" }
+    $script:ShaSeen[$k]
+}
+function Same-Tree([string]$tmp, [string]$url, [string]$old, [string]$now, [string]$path) { # PATH (. = the whole repo) and the license
+    # files at the top are the same in both commits, i.e. the author changed only other things. Their folders only, no file
+    # contents (one shallow --filter=blob:none fetch per URL, into TMP); anything that fails or cannot be told: not the same
+    if (-not $tmp) { return $false }
+    $g = Join-Path $tmp ([BitConverter]::ToString([Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($url))).Replace('-', '').Substring(0, 16))
+    $old0 = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        if (-not (Test-Path -LiteralPath $g)) { & git init -q --bare $g 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { return $false } }
+        & git -C $g cat-file -e "$old^{commit}" 2>&1 | Out-Null; $have = $LASTEXITCODE -eq 0
+        if ($have) { & git -C $g cat-file -e "$now^{commit}" 2>&1 | Out-Null; $have = $LASTEXITCODE -eq 0 }
+        if (-not $have) { Git-Safe -C $g fetch -q --no-tags --depth=1 --filter=blob:none $url $old $now | Out-Null; if ($LASTEXITCODE -ne 0) { return $false } }
+        $p = $path -replace '^\./', ''; if ($p -eq '.') { $p = '' }
+        $a = "$(& git -C $g rev-parse -q --verify "${old}:$p" 2>$null)"; if ($LASTEXITCODE -ne 0 -or -not $a) { return $false }
+        $b = "$(& git -C $g rev-parse -q --verify "${now}:$p" 2>$null)"; if ($LASTEXITCODE -ne 0 -or $a -ne $b) { return $false }
+        $lic = { param($c) (@(& git -C $g ls-tree $c 2>$null) | Where-Object { "$_" -match '\t(licen[cs]e|copying)' }) -join "`n" }
+        return ((& $lic $old) -eq (& $lic $now))
+    } finally { $ErrorActionPreference = $old0 }
+}
 function Outdated-Json([string]$one) { # every collected skill (ONE's, else the folder you are in and every source) and what its author has now
     $dirs = if ($one) { @($one) } else {
         $seen = @{}; @(@($(if (Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) { Canon-Dir (Get-Location).ProviderPath }) + $(if (Test-Path -LiteralPath $Machine) { Src-Dirs })) |
             Where-Object { $_ -and -not $seen.ContainsKey($_) } | ForEach-Object { $seen[$_] = 1; $_ }) }
     $rows = New-Object System.Collections.Generic.List[string]
+    $tmp = New-TempDir 'kit-outd.'; $script:ShaSeen = @{}
+    try {
     foreach ($d in $dirs) {
         if (-not (Test-Path -LiteralPath (Join-Path $d 'third_party.lock')) -or -not (Is-Maintainer $d)) { continue }
         foreach ($row in Lock-Rows $d) {
             $f = $row.Split("`t"); $url = $f[1]; $ref = if ($f[3] -ne '-') { $f[3] } else { '' }; $sha = $f[4]; $now = ''
             if (-not (Collect-Allowed $url $d)) { $st = 'skipped' }
-            else { $now = "$(Remote-Sha $url $ref)"; $st = if (-not $now) { 'unreachable' } elseif ($now -eq $sha) { 'latest' } else { 'new' } }
+            else { $now = "$(Remote-ShaOnce $url $ref)"; $st = if (-not $now) { 'unreachable' } elseif ($now -eq $sha -or (Same-Tree $tmp $url $sha $now $f[2])) { 'latest' } else { 'new' } }
             $rows.Add("    {`"source`": $(Json-S (Split-Path -Leaf $d)), `"name`": $(Json-S $f[0]), `"url`": $(Json-S $url), `"path`": $(Json-S $f[2]), `"ref`": $(Json-S $ref), `"commit`": $(Json-S $sha), `"now`": $(Json-S $now), `"state`": $(Json-S $st)}")
         }
     }
+    } finally { Remove-Tree $tmp }
     $sk = if ($rows.Count) { "`n" + ($rows -join ",`n") + "`n  ]" } else { ']' }
     Out-Json "{`n  `"kit`": $(Json-S $KitVersion),`n  `"api`": $(Json-S $KitApi),`n  `"at`": $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),`n  `"skills`": [$sk`n}"
 }
@@ -8194,15 +8219,18 @@ function Cmd-Outdated($rest) {
     $dir = Target-Dir $to
     Check-Maintainer $dir
     if (-not (Test-Path -LiteralPath (Join-Path $dir 'third_party.lock'))) { Say "$(Split-Path -Leaf $dir) 沒有 third_party.lock（還沒用 kit collect 收過東西）"; return }
-    $new = 0
+    $new = 0; $tmp = New-TempDir 'kit-outd.'; $script:ShaSeen = @{}
+    try {
     foreach ($row in Lock-Rows $dir) {
         $f = $row.Split("`t"); $n = $f[0]; $url = $f[1]; $ref = $f[3]; $sha = $f[4]
         if (-not (Collect-Allowed $url $dir)) { Warn "${n}：$(Url-Id $url) 已經不在 collect_sources，不檢查"; continue }
-        $now = Remote-Sha $url $(if ($ref -ne '-') { $ref } else { '' })
+        $now = Remote-ShaOnce $url $(if ($ref -ne '-') { $ref } else { '' })
         if (-not $now) { Warn "${n}：連不到 $(Url-Id $url)" }
         elseif ($now -eq $sha) { Say "  ${n}：最新（$($sha.Substring(0, 12))）" }
+        elseif (Same-Tree $tmp $url $sha $now $f[2]) { Say "  ${n}：最新（原作者改的是 repo 裡別的地方，$($now.Substring(0, 12))）" }
         else { Say "  ${n}：有新版本 $($sha.Substring(0, 12)) → $($now.Substring(0, 12))，打  kit collect $n  收新的"; $new++ }
     }
+    } finally { Remove-Tree $tmp }
     if ($new -gt 0) { Say "kit：$new 個有新版本" }
 }
 

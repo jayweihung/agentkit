@@ -40,6 +40,16 @@ Check 'collect will not replace your own skill without --force' { $rc -ne 0 -and
 Remove-Item -Recurse -Force "$CO/skills/own"
 Kit outdated
 Check 'outdated: up to date' { $out -match 'foo：最新' }
+Add-Content -LiteralPath "$UP/NOTES.md" 'notes'; G -C $UP add NOTES.md; G -C $UP commit -qm notes
+Kit outdated
+Check "outdated: a commit elsewhere in the author's repo is not a new foo" { $out -match 'foo：最新（原作者改的是 repo 裡別的地方' }
+Kit outdated --json
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check 'outdated --json: the same, latest (now: the author''s commit)' { $j -and $j.skills[0].commit -eq $v1 -and $j.skills[0].now -eq "$(& git -C $UP rev-parse HEAD)".Trim() -and $j.skills[0].state -eq 'latest' }
+$lic0 = [IO.File]::ReadAllText("$UP/LICENSE"); [IO.File]::WriteAllText("$UP/LICENSE", 'MIT, changed'); G -C $UP commit -qam license
+Kit outdated
+Check "outdated: the author's license changed: a new version" { $out -match 'foo：有新版本' }
+[IO.File]::WriteAllText("$UP/LICENSE", $lic0); G -C $UP commit -qam 'license back'
 $src = [IO.File]::ReadAllText($Kit); $i = $src.IndexOf('function Web-Repo'); Invoke-Expression $src.Substring($i, $src.IndexOf('function Cmd-Collect') - $i)
 Check "a repo page's address: the repo, its branch and folder (GitHub tree / blob, GitLab, Gitea); a repo URL: nothing" { ((Web-Repo 'https://git.example.org/a/r/tree/main/skills/tdd/') -join '|') -eq 'https://git.example.org/a/r|main|skills/tdd' -and ((Web-Repo 'https://git.example.org/a/r/blob/v1/x/SKILL.md?plain=1') -join '|') -eq 'https://git.example.org/a/r|v1|x' -and ((Web-Repo 'https://gitlab.com/a/r/-/tree/dev') -join '|') -eq 'https://gitlab.com/a/r|dev|' -and ((Web-Repo 'https://git.example.org/a/r/src/branch/main/s') -join '|') -eq 'https://git.example.org/a/r|main|s' -and $null -eq (Web-Repo 'https://git.example.org/a/r') }
 Add-Content -LiteralPath "$UP/skills/foo/SKILL.md" 'foo v2'; G -C $UP commit -qam v2

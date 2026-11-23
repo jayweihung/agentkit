@@ -6585,10 +6585,29 @@ collect_plugin() { # (cmd_collect's, with its variables) the plugin in $repo/$pa
     if [ "$(push_mode "$dir")" = direct ]; then say "下一步：用 git diff 看收進來的檔案；沒問題就  kit push  送出，要用它就  kit add plugin $n"
     else say "下一步：kit diff 看不到第三方的差異，請用 git diff 看；沒問題就  kit push  開 PR"; fi
 }
+remote_sha_once() { # remote_sha_once URL REF : remote_sha, asked once per URL and REF in this run (kept in $KIT_TMPDIR)
+    local f; [ -n "${KIT_TMPDIR:-}" ] || { remote_sha "$1" "$2"; return; }
+    f="$KIT_TMPDIR/sha-$(printf '%s\t%s' "$1" "$2" | cksum | awk '{ print $1 }')"
+    [ -f "$f" ] || remote_sha "$1" "$2" > "$f"
+    cat "$f"
+}
+same_tree() { # same_tree URL OLD NOW PATH : PATH (. = the whole repo) and the license files at the top are the same in both
+    # commits, i.e. the author changed only other things. Their folders only, no file contents (one shallow --filter=blob:none
+    # fetch per URL, into $KIT_TMPDIR); anything that fails or cannot be told: not the same (the old answer: a new version)
+    local g p a b; [ -n "${KIT_TMPDIR:-}" ] || return 1
+    g="$KIT_TMPDIR/$(printf '%s' "$1" | cksum | awk '{ print $1 }')"
+    [ -d "$g" ] || git init -q --bare "$g" >/dev/null 2>&1 || return 1
+    { git -C "$g" cat-file -e "$2^{commit}" && git -C "$g" cat-file -e "$3^{commit}"; } 2>/dev/null ||
+        git_safe -C "$g" fetch -q --no-tags --depth=1 --filter=blob:none "$1" "$2" "$3" >/dev/null 2>&1 || return 1
+    p=${4#./}; [ "$p" != . ] || p=""
+    a=$(git -C "$g" rev-parse -q --verify "$2:$p" 2>/dev/null) && b=$(git -C "$g" rev-parse -q --verify "$3:$p" 2>/dev/null) && [ "$a" = "$b" ] || return 1
+    [ "$(git -C "$g" ls-tree "$2" | grep -iE '	(licen[cs]e|copying)' )" = "$(git -C "$g" ls-tree "$3" | grep -iE '	(licen[cs]e|copying)')" ]
+}
 outdated_json() { # outdated_json [DIR] : every collected skill (DIR's, else the folder you are in and every source) and what its author has now
     local d dirs n url path ref sha lic day now st first=1
     if [ -n "${1:-}" ]; then dirs=$1
     else dirs=$( { [ -f kit.yaml ] && pwd -P; [ -f "$MACHINE" ] && src_dirs; } | awk 'NF && !seen[$0]++'); fi
+    KIT_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/kit-outd.XXXXXX") || KIT_TMPDIR=     # same_tree's downloads; removed on exit
     printf '{\n  "kit": %s,\n  "api": %s,\n  "at": %s,\n  "skills": [' "$(json_s "$KIT_VERSION")" "$(json_s "$KIT_API")" "$(date +%s)"
     while IFS= read -r d; do
         [ -n "$d" ] && [ -f "$d/third_party.lock" ] && is_maintainer "$d" || continue
@@ -6596,8 +6615,8 @@ outdated_json() { # outdated_json [DIR] : every collected skill (DIR's, else the
             case $n in ""|\#*) continue;; esac
             now=""
             if ! collect_allowed "$url" "$d"; then st=skipped
-            else now=$(remote_sha "$url" "$( [ "$ref" = - ] || printf '%s' "$ref")")
-                if [ -z "$now" ]; then st=unreachable; elif [ "$now" = "$sha" ]; then st=latest; else st=new; fi; fi
+            else now=$(remote_sha_once "$url" "$( [ "$ref" = - ] || printf '%s' "$ref")")
+                if [ -z "$now" ]; then st=unreachable; elif [ "$now" = "$sha" ] || same_tree "$url" "$sha" "$now" "$path"; then st=latest; else st=new; fi; fi
             [ $first = 1 ] || printf ','; first=0
             printf '\n    {"source": %s, "name": %s, "url": %s, "path": %s, "ref": %s, "commit": %s, "now": %s, "state": %s}' \
                 "$(json_s "$(basename "$d")")" "$(json_s "$n")" "$(json_s "$url")" "$(json_s "$path")" "$(json_s "$( [ "$ref" = - ] || printf '%s' "$ref")")" \
@@ -6616,12 +6635,14 @@ cmd_outdated() { # kit outdated [--to SOURCE] [--json]
     check_maintainer "$dir"
     [ -f "$dir/third_party.lock" ] || { say "$(basename "$dir") 沒有 third_party.lock（還沒用 kit collect 收過東西）"; return 0; }
     local n url path ref sha lic day now new=0
+    KIT_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/kit-outd.XXXXXX") || KIT_TMPDIR=     # same_tree's downloads; removed on exit
     while IFS="$TAB" read -r n url path ref sha lic day; do
         case $n in ""|\#*) continue;; esac
         if ! collect_allowed "$url" "$dir"; then warn "${n}：$(url_id "$url") 已經不在 collect_sources，不檢查"; continue; fi
-        now=$(remote_sha "$url" "$( [ "$ref" = - ] || printf '%s' "$ref")")
+        now=$(remote_sha_once "$url" "$( [ "$ref" = - ] || printf '%s' "$ref")")
         if [ -z "$now" ]; then warn "${n}：連不到 $(url_id "$url")"
         elif [ "$now" = "$sha" ]; then say "  ${n}：最新（$(printf %.12s "$sha")）"
+        elif same_tree "$url" "$sha" "$now" "$path"; then say "  ${n}：最新（原作者改的是 repo 裡別的地方，$(printf %.12s "$now")）"
         else say "  ${n}：有新版本 $(printf %.12s "$sha") → $(printf %.12s "$now")，打  kit collect $n  收新的"; new=$((new+1)); fi
     done < "$dir/third_party.lock"
     [ $new = 0 ] || say "kit：$new 個有新版本"

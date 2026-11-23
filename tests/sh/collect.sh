@@ -41,6 +41,15 @@ check "collect will not replace your own skill without --force" '[ $rc -ne 0 ] &
 rm -rf "$CO/skills/own"
 out=$(kit outdated 2>&1)
 check "outdated: up to date" 'echo "$out" | grep -q "foo：最新"'
+( cd "$UP" && echo notes >> NOTES.md && git add NOTES.md && git commit -qm notes )
+out=$(kit outdated 2>&1)
+check "outdated: a commit elsewhere in the author's repo is not a new foo" 'echo "$out" | grep -q "foo：最新（原作者改的是 repo 裡別的地方"'
+out=$(kit outdated --json 2>/dev/null)
+check "outdated --json: the same, latest (now: the author's commit)" 'echo "$out" | grep -qF "\"commit\": \"$v1\", \"now\": \"$(git -C "$UP" rev-parse HEAD)\", \"state\": \"latest\""'
+( cd "$UP" && echo "MIT, changed" > LICENSE && git commit -qam license )
+out=$(kit outdated 2>&1)
+check "outdated: the author's license changed: a new version" 'echo "$out" | grep -q "foo：有新版本"'
+( cd "$UP" && git revert --no-edit HEAD >/dev/null )
 TAB=$(printf '\t'); eval "$(sed -n '/^web_repo()/,/^}/p' "$KIT")"
 check "a repo page's address: the repo, its branch and folder (GitHub tree / blob, GitLab, Gitea); a repo URL: nothing" '[ "$(web_repo https://git.example.org/a/r/tree/main/skills/tdd/)" = "https://git.example.org/a/r${TAB}main${TAB}skills/tdd" ] && [ "$(web_repo "https://git.example.org/a/r/blob/v1/x/SKILL.md?plain=1")" = "https://git.example.org/a/r${TAB}v1${TAB}x" ] && [ "$(web_repo https://gitlab.com/a/r/-/tree/dev)" = "https://gitlab.com/a/r${TAB}dev${TAB}" ] && [ "$(web_repo https://git.example.org/a/r/src/branch/main/s)" = "https://git.example.org/a/r${TAB}main${TAB}s" ] && [ -z "$(web_repo https://git.example.org/a/r)" ]'
 ( cd "$UP" && echo "foo v2" >> skills/foo/SKILL.md && git commit -qam v2 )
