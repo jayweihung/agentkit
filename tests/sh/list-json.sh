@@ -136,6 +136,10 @@ if [ -n "$PWSH" ]; then
     check "list --json --pid: kit.ps1 finds the same agent" 'kps list --json --dir "$T/proj/sub" --pid $$ 2>&1 | cmp -s - "$T/here2.json" && [ ! -e "$RUND/$dp" ]'
 fi
 rm -f "$RUND/$$"
+# macOS shows a ps that is ending as "(ps)", run as root (setuid): not an agent run as root; a root sudo under it is
+mkdir -p "$T/fakeps"; printf '#!/bin/sh\n/bin/ps "$@"; case "$*" in *user=*) printf "root 999998 %%s %%s\\n" "$FAKE_TOP" "$FAKE_COMM";; esac\n' > "$T/fakeps/ps"; chmod +x "$T/fakeps/ps"
+check "list --json --pid: a ps ending under it, (ps), is not another user" 'FAKE_TOP=$$ FAKE_COMM="(ps)" PATH="$T/fakeps:$PATH" kit list --json --dir "$T/proj/sub" --pid $$ 2>&1 | grep -qF "\"user\": null"'
+check "list --json --pid: a sudo under it is" 'FAKE_TOP=$$ FAKE_COMM=sudo PATH="$T/fakeps:$PATH" kit list --json --dir "$T/proj/sub" --pid $$ 2>&1 | grep -qF "\"user\": \"root\""'
 mkdir -p "$T/fakebin"; printf '#!/bin/sh\n"$FAKE_KIT" list --json --dir "$PWD" --pid $PPID > "$FAKE_OUT" 2>&1\n' > "$T/fakebin/claude"; chmod +x "$T/fakebin/claude"
 FAKE_KIT=$KIT FAKE_OUT="$T/fake.json" PATH="$T/fakebin:$PATH" kit run gerrit >/dev/null 2>&1; rc=$?
 check "kit run: the agent in the pane is known while it runs, the marker goes after" '[ $rc -eq 0 ] && grep -qF "\"agent\": {\"name\": \"gerrit\", \"source\": \"team\"," "$T/fake.json" && [ -z "$(ls "$RUND")" ]'

@@ -4626,9 +4626,10 @@ here_rows() { # here_rows DIR : what an agent started in DIR gets that kit does 
 }
 other_user() { # other_user PID : the user of a process under PID that is not me (an agent started with sudo -i), if any
     local me; me=$(id -un 2>/dev/null) || return 0
-    # (ps itself may run as root on macOS: not counted)
+    # (ps itself may run as root on macOS: not counted, nor one ending, which macOS shows as "(ps)": a Claude's status
+    # line runs ps often, most of all as it starts, and that one was taken for an agent run as root)
     { ps -A -o user= -o pid= -o ppid= -o comm= 2>/dev/null || ps -o user,pid,ppid,comm 2>/dev/null; } | awk -v top="$1" -v me="$me" '
-        $2 ~ /^[0-9]+$/ && $4 !~ /(^|\/)ps$/ { u[$2] = $1; p[$2] = $3 }
+        $2 ~ /^[0-9]+$/ && $4 !~ /(^|\/)ps$/ && $4 !~ /^\(.*\)$/ { u[$2] = $1; p[$2] = $3 }
         END { for (x in p) { y = x; for (i = 0; i < 64 && y != top && (y in p); i++) y = p[y]
                              if (y == top && x != top && u[x] != me) { print u[x]; exit } } }'
 }
