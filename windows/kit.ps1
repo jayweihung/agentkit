@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.17'
+$script:KitApi = '1.18'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -1490,7 +1490,7 @@ function Codex-Mcp-Toml($names, [string]$cfg = '', $more = @()) { # [mcp_servers
     $deny = Uniq (@(Required-Deny) + @($more))
     $sb = New-Object System.Text.StringBuilder
     foreach ($n in @($names | Where-Object { $_ })) {
-        $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found in any source"; continue }
+        $p = Item-File 'mcp' $n; if (-not $p) { Warn "mcp $n not found in any source"; continue }
         $pat = '^\s*\[mcp_servers\."?' + [regex]::Escape($n) + '"?[\]. ]'
         if (@($user | Where-Object { $_ -match $pat }).Count -gt 0) { Warn "Codex 的 config.toml 已經有自己的 mcp_servers.${n}，kit 不動它"; continue }
         $fl = Codex-Mcp-Fields $p $n ${function:Json-Str} ${function:Toml-Key} ' = ' ', '
@@ -1695,7 +1695,7 @@ function Replace-Block([string]$f, [string]$begin, [string]$end, [string]$body) 
 function Rules-Body($names, [string]$mode) { # text for the instructions file
     $sb = New-Object System.Text.StringBuilder
     foreach ($n in @($names | Where-Object { $_ })) {
-        $p = Find-Item 'rule' $n; if (-not $p) { Warn "rule $n not found in any source"; continue }
+        $p = Item-File 'rule' $n; if (-not $p) { Warn "rule $n not found in any source"; continue }
         if ($mode -eq 'import') { [void]$sb.Append('@' + $p.Replace('\', '/').Replace(' ', '\ ') + "`n") }
         else { $t = Read-Text $p; [void]$sb.Append("<!-- rule: $n -->`n").Append($t); if (-not $t.EndsWith("`n")) { [void]$sb.Append("`n") } }
     }
@@ -1718,8 +1718,8 @@ function Skills-Plan([string]$dir, [string]$kind, $names) { # what Sync-Skills w
     foreach ($n in $names) {
         $p = Find-Item 'skill' $n; if (-not $p) { @{ a = 'missing'; n = $n; sum = ''; src = '' }; continue }
         $dst = Join-Path $dir $n; $old = State-Get $kind $n
-        # kit hold: the copy here stays as it is (kit sync --only takes the source's even then)
-        if (-not $script:Only -and $old -and (Test-Path -LiteralPath $dst -PathType Container) -and (Is-Held 'skill' $n)) { @{ a = 'held'; n = $n; sum = $old; src = '' }; continue }
+        # one this machine has: its copy stays unless this sync takes the source's (Takes)
+        if ($old -and (Test-Path -LiteralPath $dst -PathType Container) -and -not (Takes 'skill' $n)) { @{ a = 'held'; n = $n; sum = $old; src = '' }; continue }
         $src = Split-Path -Parent $p; $h = Dir-Hash $src
         if ((Test-Path -LiteralPath $dst) -and -not $old) {
             if (@(Git-Q -C $dst ls-files | Select-Object -First 1).Count -gt 0) { @{ a = 'foreign'; n = $n; sum = ''; src = '' } }
@@ -1738,7 +1738,6 @@ function Skills-Plan([string]$dir, [string]$kind, $names) { # what Sync-Skills w
         elseif ($old -and (Test-Path -LiteralPath $dst)) { @{ a = 'update'; n = $n; sum = $h; src = $src } }
         else { @{ a = 'add'; n = $n; sum = $h; src = $src } }
     }
-    if ($script:Only) { return }                              # kit sync --only: just that one, nothing taken away
     foreach ($n in State-List $kind) {
         if ($names -contains $n) { continue }
         $dst = Join-Path $dir $n; $old = State-Get $kind $n
@@ -1762,7 +1761,7 @@ function Sync-Skills([string]$dir, [string]$kind, $names) { # copy wanted skills
             }
             'modified' { Warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）" }
             'same' { Link-Deps $n $dst }
-            'held' { }
+            'held' { Link-Deps $n $dst }
             { $_ -in 'add', 'update', 'replace', 'takeover' } {
                 $sum = $r.sum
                 if ($r.a -eq 'replace') {
@@ -1809,7 +1808,7 @@ function Sync-McpJson([string]$f, [string]$kind, $names) { # wanted MCP -> FILE'
     $names = @($names | Where-Object { $_ }); $ops = New-Object System.Collections.Generic.List[object]
     $sets = @(); $dels = @()
     foreach ($n in $names) {
-        $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found in any source"; continue }
+        $p = Item-File 'mcp' $n; if (-not $p) { Warn "mcp $n not found in any source"; continue }
         $k = Mcp-Json $p; if (-not $k) { continue }
         $sum = Text-Hash $k; $old = State-Get $kind $n
         if ($old -eq $sum) { continue }
@@ -2342,7 +2341,7 @@ function Plugin-Kits([string]$t) { # the plugins kit installed in TOOL, for the 
 function Sync-Plugins($names) { # wanted plugins -> kit's copies (the folders' too), and each tool installs them
     $names = @($names | Where-Object { $_ }); $r = Plugin-Root; $all = @(Uniq (@($names) + @(Dir-PluginNames)))
     if ($all.Count -eq 0 -and @(State-List 'plugin').Count -eq 0) { return }
-    foreach ($n in $all) { if (-not ((Is-Held 'plugin' $n) -and $null -ne (State-Get 'plugin' $n))) { [void](Plugin-Copy $n) } }
+    foreach ($n in $all) { if (-not ($null -ne (State-Get 'plugin' $n) -and -not (Takes 'plugin' $n))) { [void](Plugin-Copy $n) } }
     if (-not (Plugin-Market @(State-List 'plugin'))) { Warn "沒辦法寫 kit 的外掛清單（$r）"; return }
     foreach ($t in Plugin-Tools) {
         foreach ($n in @(State-List 'plugin')) {
@@ -2823,7 +2822,7 @@ function Dir-PluginFile([string]$t, [string]$d) {
 }
 function Dir-Plugins([string]$dir) { # the folder's plugins installed (again when kit's copy changed) or taken out, Claude and omp
     $names = @(Of-Kind @(Dir-Items $dir) 'plugin')
-    foreach ($n in $names) { if (-not ((Is-Held 'plugin' $n) -and $null -ne (State-Get 'plugin' $n))) { [void](Plugin-Copy $n) } }
+    foreach ($n in $names) { if (-not ($null -ne (State-Get 'plugin' $n) -and -not (Takes 'plugin' $n))) { [void](Plugin-Copy $n) } }
     if ($names.Count -gt 0 -and -not (Plugin-Market @(State-List 'plugin'))) { Warn "沒辦法寫 kit 的外掛清單（$(Plugin-Root)）"; return }
     foreach ($t in 'claude', 'omp') {
         $k = Dir-Kind $dir "plugin.$t"
@@ -5853,44 +5852,39 @@ function Dry-Sources {
     $script:KitSrc = $src; $script:Machine = Join-Path $t 'machine.yaml'
     $t
 }
-# kit hold: a skill or plugin this machine keeps as it is now while its source changes (state.tsv "held" KIND:NAME, when);
-# kit sync leaves its copies alone, kit sync --only KIND:NAME brings just that one (the same as unix/kit)
-$script:Only = ''
+# What the tools get from kit changes only when asked (the same as unix/kit): the automatic sync, kit add / rm and kit run
+# keep the version this machine has; kit sync typed ($script:All) brings everything to the source's newest, kit sync --only
+# KIND:NAME ($script:Only) just that one. Rules and MCP: from kit's own copy in store/ (Claude reads the rule there too).
+# kit hold KIND NAME: not even kit sync changes it.
+$script:Only = ''; $script:All = $false
+$script:StoreDir = Join-Path $KitConf 'store'
 function Is-Held([string]$k, [string]$n) { $null -ne (State-Get 'held' "${k}:$n") }
-function Cmd-Hold($a) { # kit hold skill|plugin NAME [--off]
-    $a = @($a | Where-Object { $null -ne $_ }); $use = '用法：kit hold skill|plugin <名字> [--off]'
+function Takes([string]$k, [string]$n) { # this sync brings the source's newest of something this machine already has
+    if ($script:Only) { return $script:Only -ceq "${k}:$n" }; $script:All -and -not (Is-Held $k $n) }
+function Item-File([string]$k, [string]$n) { # a rule's or MCP's file the tools get it from: kit's copy, the source's when this sync takes it
+    $p = Find-Item $k $n; if (-not $p) { return $null }
+    $d = Join-Path $script:StoreDir $(if ($k -ceq 'rule') { 'rules' } else { $k }); $s = Join-Path $d (Split-Path -Leaf $p)   # laid out as a source
+    if (-not (Test-Path -LiteralPath $s -PathType Leaf) -or (Takes $k $n)) {
+        try { Ensure-Dir $d; $tf = "$s.$PID"; Copy-Item -LiteralPath $p -Destination $tf -Force; Move-Item -LiteralPath $tf -Destination $s -Force }
+        catch { Warn "沒辦法複製 $k $n 到 $d"; if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { return $p } }
+    }
+    $s
+}
+function File-Blob8([string]$f) { # git hash-object of the file (no filters), its first 8
+    $b = [IO.File]::ReadAllBytes($f); $h = [Text.Encoding]::ASCII.GetBytes("blob $($b.Length)`0")
+    $sha = [Security.Cryptography.SHA1]::Create()
+    try { [void]$sha.TransformBlock($h, 0, $h.Length, $null, 0); [void]$sha.TransformFinalBlock($b, 0, $b.Length); $x = $sha.Hash } finally { $sha.Dispose() }
+    [BitConverter]::ToString($x, 0, 4).Replace('-', '').ToLowerInvariant()
+}
+function Cmd-Hold($a) { # kit hold KIND NAME [--off]
+    $a = @($a | Where-Object { $null -ne $_ }); $use = '用法：kit hold rule|skill|mcp|plugin <名字> [--off]'
     if (-not ($a.Count -eq 2 -or ($a.Count -eq 3 -and $a[2] -ceq '--off')) -or -not $a[1]) { Die-C 'usage' $use }
     $k = $a[0]; $n = $a[1]
-    if ($k -cin 'rule', 'mcp') { Die-C 'usage' '規則和 MCP 不能固定（Claude 直接讀來源裡的規則檔；它們是你自己的，改了就是要用）' }
-    if ($k -cnotin 'skill', 'plugin') { Die-C 'usage' $use }
+    if ($k -cnotin 'rule', 'skill', 'mcp', 'plugin') { Die-C 'usage' $use }
     Need-Init
     if (-not (Find-Item $k $n)) { Die-C 'not_found' "找不到 ${k}:${n}（打 kit list 看有哪些）" }
-    if ($a.Count -eq 3) { State-Del 'held' "${k}:$n"; Say "kit：$k $n 不再固定，下次 kit sync 換成來源最新的" }
-    else { State-Set 'held' "${k}:$n" ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()); Say "kit：$k $n 固定在這台現在用的這一版：kit sync 不換它；要換成來源最新的：kit sync --only ${k}:$n" }
-}
-function Cmd-SyncOnly([string]$i) { # kit sync --only KIND:NAME : that skill or plugin of the whole account, from the source as it is
-    # now (even held: it stays held, at this one); nothing else changes. shortcut: a folder's own copy (kit add --dir) waits for kit sync
-    $k = $i.Split(':', 2)[0]; $n = if ($i.Contains(':')) { $i.Split(':', 2)[1] } else { '' }
-    if ($k -cnotin 'skill', 'plugin' -or -not $n) { Die-C 'usage' 'kit sync --only 只能是 skill:<名字> 或 plugin:<名字>（規則、MCP 照舊用 kit sync）' }
-    Need-Init
-    if (-not (Find-Item $k $n)) { Die-C 'not_found' "找不到 ${k}:${n}（打 kit list 看有哪些）" }
-    if (@(Wanted) -cnotcontains "${k}:$n") { Die-C 'not_used' "這台的整個帳號沒有用 ${k}:${n}（kit add $k $n）" }
-    $script:Only = "${k}:$n"
-    try {
-        if ($k -ceq 'skill') {
-            Sync-Skills (Join-Path $ClaudeDir 'skills') 'skill' @($n)
-            if ((Has-Codex) -or (Has-Omp)) { Sync-Skills $AgentsSkills 'skill.agents' @($n) }
-        } else {
-            [void](Plugin-Copy $n)
-            if (-not (Plugin-Market @(State-List 'plugin'))) { Warn "沒辦法寫 kit 的外掛清單（$(Plugin-Root)）"; return }
-            $h = State-Get 'plugin' $n
-            foreach ($t in Plugin-Tools) {
-                if ((State-Get "plugin.$t" $n) -eq $h) { continue }
-                if (Plugin-Install $t $n) { State-Set "plugin.$t" $n $h; Say "  plugin $n → $t" }
-            }
-            if (Has-Codex) { $q = $script:Quiet; $script:Quiet = $true; try { Codex-Keep $(if (Test-Path -LiteralPath $CodexLast) { Read-Text $CodexLast } else { '' }) } finally { $script:Quiet = $q } }
-        }
-    } finally { $script:Only = '' }
+    if ($a.Count -eq 3) { State-Del 'held' "${k}:$n"; Say "kit：$k $n 不再固定，kit sync 會換成來源最新的" }
+    else { State-Set 'held' "${k}:$n" ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()); Say "kit：$k $n 固定在這台現在用的這一版：kit sync 也不換它；要換：kit sync --only ${k}:$n" }
 }
 function Cmd-Sync([string]$dry = '', [string]$expect = '') { # kit sync [--force] [--dry-run | --expect HASH]
     Need-Init
@@ -6485,6 +6479,7 @@ function Ver-Targets { # what each tool has from kit: @(verkind, tool:kind:name,
     }
     $w = Wanted
     foreach ($n in @(Of-Kind $w 'rule')) {
+        $o.Add(@('ver', "claude:rule:$n", '=', (Join-Path $ClaudeDir 'CLAUDE.md')))
         if ($cx) { $o.Add(@('ver', "codex:rule:$n", '=', (Join-Path $CodexDir 'AGENTS.md'))) }
         if ($om) { $o.Add(@('ver', "omp:rule:$n", '=', (Join-Path $OmpDir 'AGENTS.md'))) }
     }
@@ -6493,9 +6488,11 @@ function Ver-Targets { # what each tool has from kit: @(verkind, tool:kind:name,
         if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
         $am = Join-Path $d 'AGENTS.md'; $ct = Join-Path $d '.codex/config.toml'
         $ra = (Test-Path -LiteralPath $am -PathType Leaf) -and (Read-Text $am).Contains($BeginMark)
+        $cm = Join-Path $d 'CLAUDE.md'; $rc = (Test-Path -LiteralPath $cm -PathType Leaf) -and (Read-Text $cm).Contains($BeginMark)
         $ca = (Test-Path -LiteralPath $ct -PathType Leaf) -and (Read-Text $ct).Contains($TomlBegin)
         foreach ($i in @(Dir-Items $d)) {
             $n = $i.Substring($i.IndexOf(':') + 1)
+            if ($i.StartsWith('rule:', $Ord) -and $rc) { $o.Add(@("dir:${d}:ver", "claude:rule:$n", '=', $cm)) }
             if ($i.StartsWith('rule:', $Ord) -and $ra) { if ($cx) { $o.Add(@("dir:${d}:ver", "codex:rule:$n", '=', $am)) }; if ($om) { $o.Add(@("dir:${d}:ver", "omp:rule:$n", '=', $am)) } }
             elseif ($i.StartsWith('mcp:', $Ord) -and $ca) { $o.Add(@("dir:${d}:ver", "codex:mcp:$n", '=', $ct)) }
         }
@@ -6512,6 +6509,10 @@ function Ver-Record { # after kit wrote the tools' files: the "ver" lines of sta
     }
     $first = $old.Count -eq 0
     $w = (Ver-All)[1]; $now = [string](Unix-Now); $done = New-Dict 'int'
+    foreach ($k in 'rule', 'mcp') {                           # rules, MCP: what kit's copy is
+        $sd = Join-Path $script:StoreDir $(if ($k -ceq 'rule') { 'rules' } else { $k }); if (-not (Test-Path -LiteralPath $sd -PathType Container)) { continue }
+        foreach ($x in @(Get-ChildItem -LiteralPath $sd -File -Filter $(if ($k -ceq 'rule') { '*.md' } else { '*.yaml' }))) { $w["${k}:$([IO.Path]::GetFileNameWithoutExtension($x.Name))"] = @('', (File-Blob8 $x.FullName)) }
+    }
     foreach ($t in (Ver-Targets)) {
         $key = $t[0] + "`t" + $t[1]; if ($done.ContainsKey($key)) { continue }; $done[$key] = 1
         $k = $t[1].Substring($t[1].IndexOf(':') + 1); $id = if ($w.ContainsKey($k)) { $w[$k][1] } else { '' }; if (-not $id) { continue }
@@ -6635,7 +6636,6 @@ function Ver-Json($c, [string]$i, [string]$k, [string]$n, [string]$d, [string]$p
     foreach ($t in 'claude', 'codex', 'omp') {   # the folder's own first (--dir), then the account's; Claude's rules: the source's file
         $got = $false; $id = ''; $at = ''; $s = $null
         if ($k -ceq 'agent') { }
-        elseif ($t -ceq 'claude' -and $k -ceq 'rule') { if ($c.want.ContainsKey($i) -or $c.fit.ContainsKey($i)) { $got = $true; $id = $v[1]; $at = Ver-Mtime $p } }
         elseif ($c.fit.ContainsKey($i) -and $c.inst.TryGetValue("F${t}:$i", [ref]$s)) { $got = $true }
         elseif ($c.inst.TryGetValue("A${t}:$i", [ref]$s)) { $got = $true }
         if ($null -ne $s) { $r = @($s -split ' +'); $id = $r[0]; $at = if ($r.Count -gt 1) { $r[1] } else { '' } }
@@ -6755,6 +6755,8 @@ function Cmd-List($rest) {
     Version-Nag
 }
 function Cmd-AddRm([string]$verb, $rest) {
+    # a rule or MCP added again starts from the source's newest (kit's copy goes)
+    if ($verb -ceq 'add' -and @($rest).Count -ge 2 -and $rest[0] -cin 'rule', 'mcp') { foreach ($x in @($rest[1..($rest.Count - 1)])) { if ($x -and -not $x.StartsWith('--')) { Remove-Item -Path (Join-Path (Join-Path $script:StoreDir $(if ($rest[0] -ceq 'rule') { 'rules' } else { 'mcp' })) "$x.*") -Force -ErrorAction SilentlyContinue } } }
     $rest = @($rest); $dir = ''
     if ($rest.Count -gt 0 -and $rest[0] -eq '--dir') {
         if ($rest.Count -lt 2) { Die '--dir 後面要接資料夾' }
@@ -8566,10 +8568,10 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]
                                     讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
                                     （建立最後一層資料夾；之後用 kit add|rm --dir 改，每個資料夾各自獨立）
-  kit sync [--force]                現在更新（kit run 會自動做）
+  kit sync [--force]                全部換成來源最新的（自動的同步只裝新加的、拿掉不要的，已經在用的不換）
   kit sync --dry-run                先看 skill 會怎麼改，給一個雜湊；kit sync --expect 雜湊：清單一樣才改
-  kit sync --only skill:<名字>      只同步這一個 skill（或 plugin:<名字>），別的不動
-  kit hold skill|plugin <名字> [--off]  固定在這台現在用的這一版：kit sync 不換它（--off 取消）
+  kit sync --only <種類>:<名字>     只把這一個換成來源最新的（rule、skill、mcp、plugin），別的不動
+  kit hold <種類> <名字> [--off]    固定在這台現在用的這一版：kit sync 也不換它（--off 取消）
 
 寫內容的人用（只吃本機資料夾，不連網）：
   kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]
@@ -8625,14 +8627,18 @@ try {
             for ($i = 0; $i -lt $a.Count; $i++) {
                 switch ($a[$i]) {
                     '--force' { $script:Force = $true }
-                    '--only' { if ($i -ne 0 -or $a.Count -ne 2 -or -not $a[1]) { Die-C 'usage' '用法：kit sync --only skill|plugin:<名字>' }; Cmd-SyncOnly $a[1]; exit 0 }
+                    '--only' {
+                        if ($i -ne 0 -or $a.Count -ne 2 -or -not $a[1]) { Die-C 'usage' '用法：kit sync --only <種類>:<名字>' }
+                        $ok = $a[1].Split(':', 2); if ($ok.Count -ne 2 -or $ok[0] -cnotin 'rule', 'skill', 'mcp', 'plugin') { Die-C 'usage' 'kit sync --only rule|skill|mcp|plugin:<名字>' }
+                        Need-Init; if (-not (Find-Item $ok[0] $ok[1])) { Die-C 'not_found' "找不到 $($a[1])（打 kit list 看有哪些）" }
+                        $script:Only = $a[1]; Cmd-Sync; exit 0 }
                     '--dry-run' { $dry = 'dry' }
                     '--expect' { if ($i + 1 -ge $a.Count -or -not $a[$i + 1]) { Die-C 'usage' "用法：$use" }; $i++; $expect = $a[$i] }
                     default { Die-C 'usage' "用法：$use" }
                 }
             }
             if ($dry -and $expect) { Die-C 'usage' '--dry-run 和 --expect 不能一起用' }
-            Cmd-Sync $dry $expect
+            $script:All = $true; Cmd-Sync $dry $expect                # typed: everything to the source's newest
         }
         { $_ -in 'list', 'ls' } { Cmd-List $rest }
         'hold' { Cmd-Hold $rest }

@@ -9,9 +9,9 @@ out=$(kit sync 2>&1)
 check "old kit: sync tells the user" 'echo "$out" | grep -qF "團隊要 kit 9.9.0 以上，你的是 $(cat "$HERE/../VERSION")。請打  kit self-update"'
 out=$(kit sync 2>&1; kit list 2>&1)
 check "old kit: told only once" '! echo "$out" | grep -q 團隊要'
-cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 0.10.1" >> "$TEAM/kit.yaml"
+cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 9.10.1" >> "$TEAM/kit.yaml"
 out=$(kit list 2>&1)
-check "team version changed: list tells again (numbers, not text)" 'echo "$out" | grep -qF "團隊要 kit 0.10.1 以上"'
+check "team version changed: list tells again (numbers, not text)" 'echo "$out" | grep -qF "團隊要 kit 9.10.1 以上"'
 mkdir -p "$T/dev/unix"; cp "$HERE"/../unix/* "$T/dev/unix/"
 cp "$T/kit.yaml.orig" "$TEAM/kit.yaml"; echo "kit_version: 9.6.0" >> "$TEAM/kit.yaml"
 out=$("$T/dev/unix/kit" sync 2>&1)
@@ -77,7 +77,7 @@ echo "hook change" >> "$TEAM/skills/gerrit-review/SKILL.md"
 start=$(date +%s); kit sync --hook; rc=$?; took=$(( $(date +%s) - start ))
 check "hook returns at once, exit 0" '[ $rc -eq 0 ] && [ $took -le 1 ]'
 for i in 1 2 3 4 5 6 7 8 9 10; do [ -d "$HOME/.config/agentkit/sync.lock" ] || break; sleep 1; done
-check "hook synced in the background" 'grep -q "hook change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
+check "hook synced in the background: what this machine has stays (kit 0.13.0: kit sync typed brings it)" '[ ! -d "$HOME/.config/agentkit/sync.lock" ] && grep -q "^== " "$HOME/.config/agentkit/sync.log" && ! grep -q "hook change" "$HOME/.claude/skills/gerrit-review/SKILL.md"'
 check "hook logs" 'grep -q "^== " "$HOME/.config/agentkit/sync.log"'
 check "hook: kit_version not told in the background" '! grep -q 團隊要 "$HOME/.config/agentkit/sync.log" && [ -z "$(state_nag)" ]'
 echo "second change" >> "$TEAM/skills/gerrit-review/SKILL.md"

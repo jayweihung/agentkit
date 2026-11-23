@@ -6,8 +6,8 @@ Check 'init exit 0' { $rc -eq 0 }
 Check 'include pulled third-party' { (ReadT "$H/.config/agentkit/machine.yaml").Contains($TP) }
 Check 'recommended added' { (ReadT "$H/.config/agentkit/machine.yaml").Contains('added: [rule:coding-style, skill:gerrit-workflow]') }
 Check 'CLAUDE.md keeps user text' { (ReadT "$H/.claude/CLAUDE.md").StartsWith("# My notes`nBe brief.`n") }
-Check 'CLAUDE.md imports required rule (forward slashes: Claude reads @C:/... not @C:\...)' { (ReadT "$H/.claude/CLAUDE.md").Contains('@' + (Join-Path $TEAM 'rules/security.md').Replace('\', '/').Replace(' ', '\ ')) }
-Check 'CLAUDE.md imports recommended rule' { (ReadT "$H/.claude/CLAUDE.md").Contains('@' + (Join-Path $TEAM 'rules/coding-style.md').Replace('\', '/').Replace(' ', '\ ')) }
+Check 'CLAUDE.md imports required rule, kit''s copy of it (forward slashes: Claude reads @C:/... not @C:\...)' { (ReadT "$H/.claude/CLAUDE.md").Contains('@' + (Join-Path $H '.config/agentkit/store/rules/security.md').Replace('\', '/').Replace(' ', '\ ')) -and (ReadT "$H/.config/agentkit/store/rules/security.md") -ceq (ReadT "$TEAM/rules/security.md") }
+Check 'CLAUDE.md imports recommended rule' { (ReadT "$H/.claude/CLAUDE.md").Contains('@' + (Join-Path $H '.config/agentkit/store/rules/coding-style.md').Replace('\', '/').Replace(' ', '\ ')) }
 Check 'no BOM written' { $b = [IO.File]::ReadAllBytes("$H/.claude/CLAUDE.md"); $b[0] -ne 0xEF }
 Check 'third-party skill copied with LICENSE' { Test-Path "$H/.claude/skills/gerrit-workflow/LICENSE" }
 Check 'own skill untouched' { (ReadT "$H/.claude/skills/my-own/SKILL.md") -eq "my own skill`n" }

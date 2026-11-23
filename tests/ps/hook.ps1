@@ -11,9 +11,9 @@ Kit sync
 Check 'old kit: sync tells the user' { $out.Contains('團隊要 kit 9.9.0 以上，你的是 ' + $KitVer + '。請打  kit self-update') }
 Kit sync; $o1 = $out; Kit list
 Check 'old kit: told only once' { -not ($o1 + $out).Contains('團隊要') }
-Team-Version '0.10.1'
+Team-Version '9.10.1'
 Kit list
-Check 'team version changed: list tells again (numbers, not text)' { $out.Contains('團隊要 kit 0.10.1 以上') }
+Check 'team version changed: list tells again (numbers, not text)' { $out.Contains('團隊要 kit 9.10.1 以上') }
 $realKit = $Kit; $Kit = Join-Path $T 'dev/windows/kit.ps1'
 W $Kit ''; Copy-Item -LiteralPath $realKit -Destination $Kit -Force
 Team-Version '9.6.0'
@@ -76,7 +76,7 @@ $sw = [Diagnostics.Stopwatch]::StartNew(); Kit sync --hook; $sw.Stop()
 Check 'hook returns quickly, exit 0' { $rc -eq 0 -and $sw.Elapsed.TotalSeconds -lt 8 }
 for ($i = 0; $i -lt 30; $i++) { if (-not (Test-Path "$H/.config/agentkit/sync.lock")) { break }; Start-Sleep -Milliseconds 500 }
 Start-Sleep -Milliseconds 300
-Check 'hook synced in the background' { (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('hook change') }
+Check 'hook synced in the background: what this machine has stays (kit 0.13.0: kit sync typed brings it)' { -not (Test-Path "$H/.config/agentkit/sync.lock") -and (ReadT "$H/.config/agentkit/sync.log") -match '(?m)^== ' -and -not (ReadT "$H/.claude/skills/gerrit-review/SKILL.md").Contains('hook change') }
 Check 'hook logs' { (ReadT "$H/.config/agentkit/sync.log") -match '(?m)^== ' }
 Check 'hook: kit_version not told in the background' { -not (ReadT "$H/.config/agentkit/sync.log").Contains('團隊要') -and (State-Nag) -eq 0 }
 [IO.File]::AppendAllText("$TEAM/skills/gerrit-review/SKILL.md", "second change`n")

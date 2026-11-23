@@ -4,6 +4,15 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.13.0（2026-11-23）
+
+更新後要做：每台 `kit self-update`，再打一次 `kit sync`（把現在的規則、MCP 存成 kit 自己的那份）。
+
+- **預設不換**：自動的同步（Claude 開啟時）、`kit add`／`kit rm`、`kit place` 順便做的同步，只裝新加的、拿掉不要的，這台已經在用的規則、技能、MCP、外掛都不換。要換：`kit sync --only <種類>:<名字>`（四種都可以）只換那一個，自己打 `kit sync` 全部換。
+- 規則和 MCP 改成 kit 先存一份（`~/.config/agentkit/store/`）再給工具。Claude 的規則也改讀這一份，以前是直接讀倉庫裡的檔、倉庫一改就生效，現在要同步那一條才生效。
+- `kit hold` 四種都可以固定，固定了連 `kit sync` 都不換。
+- `kit list --json`：Claude 的規則的 `installed` 是 kit 存的那份的指紋（kit api 1.18）。
+
 ## 0.12.0（2026-11-23）
 
 更新後要做：每台 `kit self-update`（Kit 面板的「固定在這一版」「只同步這個」要這一版）。

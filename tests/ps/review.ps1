@@ -5,14 +5,14 @@ $Py = @('python3', 'python') | Where-Object { Get-Command $_ -ErrorAction Silent
 $DAY = Get-Date -Format yyyyMMdd
 # ---------- review fixes: the user's own MCP, state only after writing, CRLF / links / markers, URLs, push ----------
 function Imp([string]$p) { '@' + $p.Replace('\', '/').Replace(' ', '\ ') }
-$oldH = $H; Set-Home (Join-Path $T 'home-rf')
+$oldH = $H; Set-Home (Join-Path $T 'home rf')   # a space: kit's copy of the rule is under it
 $RS = Join-Path $T 'rf/src dir'; $CJ = "$H/.claude.json"; $ST = "$H/.config/agentkit/state.tsv"
 W "$RS/kit.yaml" "name: rfsrc`nrequired:`n  rules: [r1]`n"; W "$RS/rules/r1.md" "Rule one.`n"
 W "$RS/mcp/m1.yaml" "command: theirs`n"; W "$RS/mcp/m2.yaml" "command: kits`n"
 $cjOrig = "{`n  `"mcpServers`": {`n    `"m1`": {`n      `"command`": `"mine`"`n    }`n  }`n}`n"; W $CJ $cjOrig
 $crlf = "My line one`r`nMy line two`r`n"; W "$H/.claude/CLAUDE.md" $crlf
 Kit init $RS
-Check "@import: forward slashes, a space escaped (Claude's @path stops at a backslash or space)" { $rc -eq 0 -and (ReadT "$H/.claude/CLAUDE.md").Contains((Imp (Join-Path $RS 'rules/r1.md')) + "`r`n") }
+Check "@import: forward slashes, a space escaped (Claude's @path stops at a backslash or space)" { $rc -eq 0 -and (ReadT "$H/.claude/CLAUDE.md").Contains((Imp (Join-Path $H '.config/agentkit/store/rules/r1.md')) + "`r`n") }
 Kit sync
 Check 'CLAUDE.md with CRLF: one kit block after another sync' { ([regex]::Matches((ReadT "$H/.claude/CLAUDE.md"), 'agentkit:begin')).Count -eq 1 -and -not ((ReadT "$H/.claude/CLAUDE.md") -match "[^`r]`n") }
 Kit add mcp m1

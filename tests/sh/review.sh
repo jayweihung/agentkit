@@ -4,13 +4,13 @@
 cd "$T"; DAY=$(date +%Y%m%d)
 # ---------- review fixes: the user's own MCP, state only after writing, CRLF / links / markers, URLs, push ----------
 RF="$T/rf"; RS="$RF/src dir"; mkdir -p "$RF/home" "$RS/rules" "$RS/mcp"
-rf() { HOME="$RF/home" AGENTKIT_CONFIG="$RF/home/.config/agentkit" AGENTKIT_SOURCES="$RF/home/agentkit" "$KIT" "$@"; }
+rf() { HOME="$RF/home" AGENTKIT_CONFIG="$RF/home/.config/agent kit" AGENTKIT_SOURCES="$RF/home/agentkit" "$KIT" "$@"; }
 printf 'name: rfsrc\nrequired:\n  rules: [r1]\n' > "$RS/kit.yaml"; echo "Rule one." > "$RS/rules/r1.md"
 printf 'command: theirs\n' > "$RS/mcp/m1.yaml"; printf 'command: kits\n' > "$RS/mcp/m2.yaml"
 printf '{\n  "mcpServers": {\n    "m1": {\n      "command": "mine"\n    }\n  }\n}\n' > "$RF/home/.claude.json"; cp "$RF/home/.claude.json" "$RF/cj.orig"
 printf 'My line one\r\nMy line two\r\n' > "$RF/crlf.md"; mkdir -p "$RF/home/.claude"; cp "$RF/crlf.md" "$RF/home/.claude/CLAUDE.md"
 rf init "$RS" >/dev/null 2>&1
-check "@import: a folder with a space is escaped (Claude's @path stops at a space)" 'tr -d "\r" < "$RF/home/.claude/CLAUDE.md" | grep -qxF "@$(printf "%s" "$RS" | sed "s/ /\\\\ /g")/rules/r1.md"'
+check "@import: a folder with a space is escaped (Claude's @path stops at a space)" 'tr -d "\r" < "$RF/home/.claude/CLAUDE.md" | grep -qxF "@$(printf "%s" "$RF/home/.config/agent kit/store" | sed "s/ /\\\\ /g")/rules/r1.md"'
 check "CLAUDE.md with CRLF: kit's lines get CRLF too, the user's kept" '[ "$(head -c 24 "$RF/home/.claude/CLAUDE.md")" = "$(printf "My line one\r\nMy line two")" ] && [ "$(grep -c "agentkit:begin.*$(printf "\r")\$" "$RF/home/.claude/CLAUDE.md")" = 1 ]'
 rf sync >/dev/null 2>&1
 check "CLAUDE.md with CRLF: one kit block after another sync" '[ "$(grep -c "agentkit:begin" "$RF/home/.claude/CLAUDE.md")" = 1 ]'
@@ -20,7 +20,7 @@ rf add mcp m2 >/dev/null 2>&1; rf rm mcp m2 >/dev/null 2>&1
 check "the backup is the file before kit first changed it" 'cmp -s "$RF/home/.claude.json.kit-backup" "$RF/cj.orig"'
 cp "$RF/home/.claude.json" "$RF/cj.good"; printf '{"mcpServers": {' > "$RF/home/.claude.json"
 out=$(rf add mcp m2 2>&1); rc=$?
-check "a file kit cannot write stops kit, and state.tsv does not say it was done" '[ $rc -ne 0 ] && ! grep -q "^mcp	m2	" "$RF/home/.config/agentkit/state.tsv"'
+check "a file kit cannot write stops kit, and state.tsv does not say it was done" '[ $rc -ne 0 ] && ! grep -q "^mcp	m2	" "$RF/home/.config/agent kit/state.tsv"'
 printf '\357\273\277' > "$RF/home/.claude.json"; tr -d '\r' < "$RF/cj.good" | sed 's/$/\r/' >> "$RF/home/.claude.json"
 out=$(rf sync 2>&1); rc=$?
 check "the next sync adds it; a BOM and CRLF in .claude.json are kept" '[ $rc -eq 0 ] && [ "$(LC_ALL=C tr -d "\r" < "$RF/home/.claude.json" | tail -c +4 | LC_ALL=C awk -f "$JA" -v get=mcpServers.m2.command)" = "\"kits\"" ] && [ "$(od -An -tx1 -N3 "$RF/home/.claude.json" | tr -d " ")" = efbbbf ] && grep -q "$(printf "\r")\$" "$RF/home/.claude.json"'
@@ -35,12 +35,12 @@ printf 'Mine\n<!-- agentkit:begin (managed by kit, do not edit) -->\nkeep me\n' 
 out=$(rf init "$RS" 2>&1)
 check "a begin marker without an end: the file is not touched, kit says so" 'cmp -s "$RF/home/.claude/CLAUDE.md" "$RF/half.md" && echo "$out" | grep -q "找不到結束標記"'
 out=$(rf uninstall 2>&1); rc=$?
-check "uninstall with such a file: stops, state kept for another try" '[ $rc -ne 0 ] && [ -f "$RF/home/.config/agentkit/state.tsv" ]'
+check "uninstall with such a file: stops, state kept for another try" '[ $rc -ne 0 ] && [ -f "$RF/home/.config/agent kit/state.tsv" ]'
 cp "$RF/crlf.md" "$RF/home/.claude/CLAUDE.md"; rf uninstall >/dev/null 2>&1
-mkdir -p "$RF/home/.config/agentkit/sync.lock"
+mkdir -p "$RF/home/.config/agent kit/sync.lock"
 out=$(KIT_LOCK_WAIT=1 rf add mcp m2 2>&1); rc=$?
 check "another kit running (the lock): waits, then stops" '[ $rc -ne 0 ] && echo "$out" | grep -q "另一個 kit 正在跑"'
-rmdir "$RF/home/.config/agentkit/sync.lock"
+rmdir "$RF/home/.config/agent kit/sync.lock"
 out=$(rf init "https://me:s3cr3t-tok@gitea.example/acme/team.git" 2>&1); rc=$?
 check "init: a URL with a password or token is refused, the token never printed" '[ $rc -ne 0 ] && echo "$out" | grep -q "https://gitea.example/acme/team.git" && ! echo "$out" | grep -q s3cr3t'
 # kit check: URLs in MCP args only to listed hosts
