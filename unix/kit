@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.16
+KIT_API=1.17
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -573,8 +573,10 @@ skills_plan() { # skills_plan DIR STATEKIND : what sync_skills will do with the 
     names=$(cat)
     for n in $names; do
         p=$(find_item skill "$n" 2>/dev/null) || { printf 'missing\t%s\t\t\n' "$n"; continue; }
-        p=$(dirname "$p"); dst="$dir/$n"; h=$(dir_hash "$p")
-        old=$(state_get "$kind" "$n")
+        dst="$dir/$n"; old=$(state_get "$kind" "$n")
+        # kit hold: the copy here stays as it is (kit sync --only takes the source's even then)
+        if [ -z "${ONLY:-}" ] && [ -n "$old" ] && [ -d "$dst" ] && is_held skill "$n"; then printf 'held\t%s\t%s\t\n' "$n" "$old"; continue; fi
+        p=$(dirname "$p"); h=$(dir_hash "$p")
         if [ -e "$dst" ] && [ -z "$old" ]; then
             if [ -n "$(git -C "$dst" ls-files 2>/dev/null | head -n 1)" ]; then printf 'foreign\t%s\t\t\n' "$n"
             else printf 'takeover\t%s\t%s\t%s\n' "$n" "$h" "$p"; fi
@@ -590,6 +592,7 @@ skills_plan() { # skills_plan DIR STATEKIND : what sync_skills will do with the 
         elif [ -n "$old" ] && [ -d "$dst" ]; then printf 'update\t%s\t%s\t%s\n' "$n" "$h" "$p"
         else printf 'add\t%s\t%s\t%s\n' "$n" "$h" "$p"; fi
     done
+    [ -z "${ONLY:-}" ] || return 0                           # kit sync --only: just that one, nothing taken away
     for n in $(state_list "$kind"); do
         printf '%s\n' "$names" | grep -qxF "$n" && continue
         dst="$dir/$n"; old=$(state_get "$kind" "$n")
@@ -613,6 +616,7 @@ sync_skills() { # sync_skills DIR STATEKIND : copy wanted skills (names on stdin
                 [ -n "$(state_get skipped "$dst")" ] || { warn "$dst 已經存在，不是 kit 放的，跳過（只提醒這一次）"; state_set skipped "$dst" 1; };;
             modified) warn "skill ${n}（${dir}）被手動改過，跳過（kit sync --force 會蓋掉，你改的會先備份）";;
             same) link_deps "$n" "$dst";;
+            held) ;;
             add|update|replace|takeover)
                 if [ "$act" = replace ]; then
                     b=$(backup_skill "$dst" "$n") || { warn "沒辦法備份你改過的 skill ${n}（${dir}），沒有蓋掉"; continue; }
@@ -918,7 +922,7 @@ sync_plugins() { # sync_plugins : wanted plugin names on stdin -> kit's copies (
     local names all r n h t ok
     names=$(cat); r=$(plugin_root); all=$(printf '%s\n' "$names"; dir_plugin_names)
     [ -n "$(printf '%s' "$all" | tr -d '\n')$(state_list plugin)" ] || return 0
-    for n in $all; do plugin_copy "$n"; done
+    for n in $all; do { is_held plugin "$n" && [ -n "$(state_get plugin "$n")" ]; } || plugin_copy "$n"; done
     plugin_market "$(state_list plugin)" || { warn "沒辦法寫 kit 的外掛清單（${r}）"; return 0; }
     for t in $(plugin_tools); do
         for n in $(state_list plugin); do
@@ -1843,7 +1847,7 @@ dir_plugin_file() { # dir_plugin_file TOOL DIR -> the file the tool's folder sco
 dir_plugins() { # dir_plugins DIR : the folder's plugins installed (again when kit's copy changed) or taken out, Claude and omp
     local dir=$1 names t k f n h top
     names=$(dir_items "$dir" | sed -n 's/^plugin://p')
-    for n in $names; do plugin_copy "$n"; done
+    for n in $names; do { is_held plugin "$n" && [ -n "$(state_get plugin "$n")" ]; } || plugin_copy "$n"; done
     [ -z "$names" ] || plugin_market "$(state_list plugin)" || { warn "沒辦法寫 kit 的外掛清單（$(plugin_root)）"; return 0; }
     for t in claude omp; do
         k=$(dir_kind "$dir" "plugin.$t")
@@ -4405,6 +4409,7 @@ sync_dry_run() { # kit sync --dry-run [--force] : the sources brought up to date
             drop) what="你改過的先備份，再拿掉";; keep) what="不再要了，但你改過：留著，之後歸你";;
             modified) what="你改過：跳過（--force 會先備份再換）";; foreign) what="不是 kit 放的（git 有記錄）：跳過";; missing) what="來源裡找不到：跳過";;
             takeover) what="不是 kit 放的：先備份，再換成 kit 的";;
+            held) [ "$(dir_hash "$(dirname "$(find_item skill "$n")")")" != "$s" ] || continue; what="固定在這一版（kit hold）：不換";;
             *) continue;;
         esac
         say "  $(here_short "$PWD" "$d")/${n}：${what}"; shown=1
@@ -4428,6 +4433,43 @@ dry_sources() {
     d=$(approvals_dir); [ ! -d "$d" ] || cp -Rp "$d" "$KIT_DRY/src/.approvals" || die "沒辦法複製核准紀錄"   # (root: kit init --approvals)
     cp -p "$MACHINE" "$KIT_DRY/machine.yaml" || die "沒辦法複製 machine.yaml"
     KIT_SRC="$KIT_DRY/src"; MACHINE="$KIT_DRY/machine.yaml"
+}
+
+# kit hold: a skill or plugin this machine keeps as it is now while its source changes (state.tsv "held" KIND:NAME, when);
+# kit sync leaves its copies alone, kit sync --only KIND:NAME brings just that one. Rules and MCP are not held: Claude reads
+# a rule's file in the source itself, and they are your own.
+is_held() { [ -n "$(state_get held "$1:$2")" ]; }
+cmd_hold() { # kit hold skill|plugin NAME [--off]
+    local k=${1:-} n=${2:-}
+    [ -n "$n" ] && { [ $# -eq 2 ] || { [ $# -eq 3 ] && [ "$3" = --off ]; }; } || die_c usage "用法：kit hold skill|plugin <名字> [--off]"
+    case $k in skill|plugin) ;; rule|mcp) die_c usage "規則和 MCP 不能固定（Claude 直接讀來源裡的規則檔；它們是你自己的，改了就是要用）";;
+               *) die_c usage "用法：kit hold skill|plugin <名字> [--off]";; esac
+    need_init
+    find_item "$k" "$n" >/dev/null || die_c not_found "找不到 ${k}:${n}（打 kit list 看有哪些）"
+    if [ "${3:-}" = --off ]; then state_del held "$k:$n"; say "kit：$k $n 不再固定，下次 kit sync 換成來源最新的"
+    else state_set held "$k:$n" "$(date +%s)"; say "kit：$k $n 固定在這台現在用的這一版：kit sync 不換它；要換成來源最新的：kit sync --only $k:$n"; fi
+}
+cmd_sync_only() { # kit sync --only KIND:NAME : that skill or plugin of the whole account, from the source as it is now (even
+    # held: it stays held, at this one); nothing else changes. shortcut: a folder's own copy (kit add --dir) waits for kit sync
+    local k=${1%%:*} n=${1#*:} t h
+    case $k in skill|plugin) ;; *) die_c usage "kit sync --only 只能是 skill:<名字> 或 plugin:<名字>（規則、MCP 照舊用 kit sync）";; esac
+    need_init
+    find_item "$k" "$n" >/dev/null || die_c not_found "找不到 ${k}:${n}（打 kit list 看有哪些）"
+    wanted | grep -qxF "$k:$n" || die_c not_used "這台的整個帳號沒有用 ${k}:${n}（kit add $k $n）"
+    ONLY="$k:$n"
+    if [ "$k" = skill ]; then
+        sync_skills "$CLAUDE_DIR/skills" skill <<< "$n"
+        if has_codex || has_omp; then sync_skills "$AGENTS_SKILLS" skill.agents <<< "$n"; fi
+    else
+        plugin_copy "$n"; plugin_market "$(state_list plugin)" || { warn "沒辦法寫 kit 的外掛清單（$(plugin_root)）"; return 0; }
+        h=$(state_get plugin "$n")
+        for t in $(plugin_tools); do
+            [ "$(state_get "plugin.$t" "$n")" = "$h" ] && continue
+            plugin_install "$t" "$n" && { state_set "plugin.$t" "$n" "$h"; say "  plugin $n → $t"; }
+        done
+        has_codex && QUIET=1 codex_keep "$(cat "$CODEX_LAST" 2>/dev/null)"
+    fi
+    ONLY=
 }
 
 cmd_sync() { # kit sync [--force] [--dry-run | --expect HASH]
@@ -4904,6 +4946,7 @@ ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version"
     done > "$t/items"
     ( IFS=$LF; mtimes $(awk -F'\t' 'index($1, "rule:") == 1 { print $3 }' "$t/items") ) > "$t/mt"   # Claude reads the rule's file itself
     printf '%s\n' "$want" > "$t/want"
+    { [ -f "$STATE" ] && awk -F'\t' '$1 == "held" { print $2 }' "$STATE"; } > "$t/held"
     if [ -n "${HERE_PID:-}" ]; then
         agent_guess "$HERE_PID" "${HERE_TOOL:-}" "${HERE_DIR:-}"
         case $A_TOOL in claude|codex|omp)
@@ -4925,6 +4968,7 @@ ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version"
                 while ((getline x < (t "/mt")) > 0) { split(x, a, "\t"); mt[a[1]] = a[2] }
                 while ((getline x < (t "/use")) > 0) { split(x, a, "\t"); use[a[1]] = a[2] }
                 while ((getline x < (t "/want")) > 0) want[x] = 1
+                while ((getline x < (t "/held")) > 0) held[x] = 1
                 while ((getline x < (t "/fitems")) > 0) fit[x] = 1
                 while ((getline x < (t "/zh")) > 0) { split(x, a, "\t"); if (!((a[1], a[2]) in zh)) zh[a[1], a[2]] = substr(x, length(a[1] a[2]) + 3) }
                 tl[1] = "claude"; tl[2] = "codex"; tl[3] = "omp" }
@@ -4946,7 +4990,7 @@ ver_list_prep() { # (cmd_list_json's, before its loop over ALL) the ', "version"
                 o = o (j > 1 ? ", " : "") "\"" tl[j] "\": " (got ? "{\"id\": " jn(id) ", \"at\": " (at == "" ? "null" : at) "}" : "null")
                 if (got && tl[j] == lt) { lgot = 1; lat = at }
             }
-            o = o "}, \"held\": null"
+            o = o "}, \"held\": " ((i in held) ? "true" : "null")
             if (pid != "") {                   # rules, MCP and plugins are read when the conversation starts, a skill when it is used
                 if (lt == "") l = "unknown"; else if (!lgot) l = ""; else if (ls == "" || lat == "") l = "unknown"
                 else if (ls + 0 >= lat + 0) l = "new"; else if (k != "skill") l = "old"; else if (nouse != "") l = "unknown"
@@ -6965,6 +7009,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                     （建立最後一層資料夾；之後用 kit add|rm --dir 改，每個資料夾各自獨立）
   kit sync [--force]                現在更新（kit run 會自動做）
   kit sync --dry-run                先看 skill 會怎麼改，給一個雜湊；kit sync --expect 雜湊：清單一樣才改
+  kit sync --only skill:<名字>      只同步這一個 skill（或 plugin:<名字>），別的不動
+  kit hold skill|plugin <名字> [--off]  固定在這台現在用的這一版：kit sync 不換它（--off 取消）
 
 寫內容的人用（只吃本機資料夾，不連網）：
   kit new rule|skill|mcp|agent <名字> [--from 本機資料夾] [--to 來源]
@@ -7020,6 +7066,7 @@ case ${1:-} in
                while [ $# -gt 0 ]; do
                    case $1 in
                        --force) FORCE=1;;
+                       --only) [ -n "${2:-}" ] && [ $# -eq 2 ] && [ -z "$dry$expect${FORCE:-}" ] || die_c usage "用法：kit sync --only skill|plugin:<名字>"; cmd_sync_only "$2"; exit 0;;
                        --dry-run) dry=dry;;
                        --expect) [ -n "${2:-}" ] || die_c usage "用法：kit sync [--force] [--dry-run | --expect 雜湊]"; expect=$2; shift;;
                        *) die_c usage "用法：kit sync [--force] [--dry-run | --expect 雜湊]";;
@@ -7029,6 +7076,7 @@ case ${1:-} in
                [ -n "$dry" ] && [ -n "$expect" ] && die_c usage "--dry-run 和 --expect 不能一起用"
                cmd_sync "$dry" "$expect";;
     list|ls)   shift; cmd_list "$@";;
+    hold)      shift; cmd_hold "$@";;
     add)       shift; cmd_add_rm add "$@";;
     rm|remove) shift; cmd_add_rm rm "$@";;
     run)       shift; cmd_run "$@";;

@@ -4,6 +4,15 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.12.0（2026-11-23）
+
+更新後要做：每台 `kit self-update`（Kit 面板的「固定在這一版」「只同步這個」要這一版）。
+
+- `kit hold skill|plugin <名字>`：把這台現在用的那一版固定住，之後 `kit sync`（包括 Claude 開啟時自動的）都不換它；`kit hold … --off` 取消。規則和 MCP 不能固定（Claude 直接讀來源裡的規則檔；它們是你自己寫的）。
+- `kit sync --only skill:<名字>`（或 `plugin:<名字>`）：只把那一個換成來源現在的，別的都不動；固定的也可以這樣換（換完還是固定，固定在新的）。
+- `kit list --json` 的 `held`：固定了是 `true`，沒有是 `null`（kit api 1.17）。
+- Windows：`kit add skill a b` 一次加兩個以上時，`machine.yaml` 會被寫成一個錯的名字（`skill:askill:b`），修好了。之前這樣加過的，打開 `~/.config/agentkit/machine.yaml` 看 `added` 那行，有黏在一起的名字就重新 `kit add`。
+
 ## 0.11.0（2026-11-23）
 
 更新後要做：有用 `kit collect` 收別人技能的電腦 `kit self-update`（Kit 面板的「看改了什麼」要這一版）。

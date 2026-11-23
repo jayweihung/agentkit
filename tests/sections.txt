@@ -87,3 +87,5 @@ hook place : unix/kit:json_unq unix/kit:codex_guard_says unix/kit:cmd_codex_guar
     windows/kit.ps1:Cmd-CodexGuard
 install hook : unix/kit:cmd_self_update unix/kit:cmd_ci_template windows/kit.ps1:Cmd-SelfUpdate
     windows/kit.ps1:Cmd-CiTemplate
+hold dry-run : unix/kit:is_held unix/kit:cmd_hold unix/kit:cmd_sync_only windows/kit.ps1:Is-Held windows/kit.ps1:Cmd-Hold
+    windows/kit.ps1:Cmd-SyncOnly
