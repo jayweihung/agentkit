@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.15
+KIT_API=1.16
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -6627,9 +6627,13 @@ $dirs
 EOF
     [ $first = 1 ] && printf ']\n}\n' || printf '\n  ]\n}\n'
 }
-cmd_outdated() { # kit outdated [--to SOURCE] [--json]
-    local to="" json=""
-    while [ $# -gt 0 ]; do case $1 in --to) to=${2:-}; shift 2 || die "--to 後面要接來源";; --json) json=1; shift;; *) die "用法：kit outdated [--to 來源] [--json]";; esac; done
+cmd_outdated() { # kit outdated [--to SOURCE] [--json] | kit outdated --diff NAME [--file PATH] [--to SOURCE] [--json]
+    local to="" json="" diff="" file=""
+    while [ $# -gt 0 ]; do case $1 in --to) to=${2:-}; shift 2 || die "--to 後面要接來源";; --json) json=1; shift;;
+        --diff) diff=${2:-}; shift 2 || die "--diff 後面要接收來的 skill 名字";; --file) file=${2:-}; shift 2 || die "--file 後面要接檔案";;
+        *) die "用法：kit outdated [--to 來源] [--json]，或 kit outdated --diff <名字> [--file <檔案>] [--json]";; esac; done
+    if [ -n "$diff" ]; then [ -z "$json" ] || json_mode; outdated_diff "$diff" "$to" "$file" "$json"; return 0; fi
+    [ -z "$file" ] || die "--file 要跟 --diff 一起用"
     if [ -n "$json" ]; then local one=""; [ -z "$to" ] || one=$(target_dir "$to") || exit 1; outdated_json "$one"; return 0; fi
     local dir; dir=$(target_dir "$to") || exit 1
     check_maintainer "$dir"
@@ -6646,6 +6650,80 @@ cmd_outdated() { # kit outdated [--to SOURCE] [--json]
         else say "  ${n}：有新版本 $(printf %.12s "$sha") → $(printf %.12s "$now")，打  kit collect $n  收新的"; new=$((new+1)); fi
     done < "$dir/third_party.lock"
     [ $new = 0 ] || say "kit：$new 個有新版本"
+}
+
+OUTDATED_DIFF_MAX=200000   # bytes of one file's diff that --diff --file gives (the rest: "diff_cut": true)
+outdated_diff() { # outdated_diff NAME TO FILE JSON : what the author changed in collected NAME's folder since it was collected:
+    # the commits that touched it and its files (+/- lines), or with FILE that file's diff. Downloads the author's history
+    # since then without file contents, then only the contents the diff needs (a partial clone kept COLLECT_KEEP minutes
+    # under $KIT_CONF/cache/outdated, so opening one file after the list fetches nothing again)
+    local name=$1 to=$2 file=$3 json=$4 dirs d="" x row="" url path ref sha now g c p since lic=false out cut=false cs fs
+    if [ -n "$to" ]; then dirs=$(target_dir "$to") || exit 1
+    else dirs=$( { [ -f kit.yaml ] && pwd -P; [ -f "$MACHINE" ] && src_dirs; } | awk 'NF && !seen[$0]++'); fi
+    while IFS= read -r x; do
+        [ -n "$x" ] && [ -f "$x/third_party.lock" ] || continue
+        row=$(awk -F'\t' -v n="$name" '$1 == n { print; exit }' "$x/third_party.lock")
+        [ -z "$row" ] || { d=$x; break; }
+    done <<EOF
+$dirs
+EOF
+    [ -n "$row" ] || die_c not_found "沒有收過 ${name}（來源的 third_party.lock 裡沒有它）"
+    IFS="$TAB" read -r x url path ref sha x <<EOF
+$row
+EOF
+    [ "$ref" != - ] || ref=""
+    collect_allowed "$url" "$d" || die_c not_allowed "$(url_id "$url") 已經不在 $(basename "$d") 的 collect_sources"
+    now=$(remote_sha "$url" "$ref"); [ -n "$now" ] || die_c unreachable "連不到 $(url_id "$url")"
+    c="$KIT_CONF/cache/outdated"; g="$c/$(printf '%s' "$url" | cksum | awk '{ print $1 }')"
+    [ ! -d "$c" ] || find "$c" -mindepth 1 -maxdepth 1 -mmin +"$COLLECT_KEEP" -exec rm -rf {} + 2>/dev/null
+    if [ ! -d "$g" ]; then
+        mkdir -p "$c" && git init -q --bare "$g" && git -C "$g" remote add origin "$url" && git -C "$g" config core.repositoryformatversion 1 &&
+            git -C "$g" config extensions.partialClone origin && git -C "$g" config remote.origin.promisor true &&
+            git -C "$g" config remote.origin.partialclonefilter blob:none || { rm -rf "$g"; die "沒辦法在 $c 開暫存的 repo"; }
+    fi
+    touch "$g"
+    if ! { git -C "$g" cat-file -e "$sha^{commit}" && git -C "$g" cat-file -e "$now^{commit}"; } 2>/dev/null; then
+        git_safe -C "$g" fetch -q --no-tags --depth=1 --filter=blob:none origin "$sha" "$now" >/dev/null 2>&1 || die_c unreachable "從 $(url_id "$url") 抓不到這兩個版本"
+        since=$(git -C "$g" log -1 --format=%ct "$sha" 2>/dev/null)
+        [ -z "$since" ] || git_safe -C "$g" fetch -q --no-tags --filter=blob:none --shallow-since="$((since - 86400))" origin "$now" >/dev/null 2>&1 || true
+    fi
+    p=${path#./}; [ "$p" != . ] || p=""
+    [ "$(git -C "$g" ls-tree "$sha" | grep -iE '\t(licen[cs]e|copying)')" = "$(git -C "$g" ls-tree "$now" | grep -iE '\t(licen[cs]e|copying)')" ] || lic=true
+    if [ -n "$file" ]; then
+        case /$file/ in */../*) die "--file 不能有 ..";; esac
+        out=$(git_safe -C "$g" -c core.quotePath=false diff --no-renames --no-color ${p:+--relative="$p"} "$sha" "$now" -- "${p:+$p/}$file" 2>/dev/null | head -c $((OUTDATED_DIFF_MAX + 1)); printf x); out=${out%x}
+        [ ${#out} -le $OUTDATED_DIFF_MAX ] || { out=${out:0:$OUTDATED_DIFF_MAX}; cut=true; }
+        if [ -z "$json" ]; then printf '%s' "$out"; [ $cut = false ] || say "（太長，只印前 $OUTDATED_DIFF_MAX 個字元）"; return 0; fi
+        printf '{"kit": %s, "api": %s, "name": %s, "file": %s, "commit": %s, "now": %s, "diff": %s, "diff_cut": %s}\n' "$(json_s "$KIT_VERSION")" \
+            "$(json_s "$KIT_API")" "$(json_s "$name")" "$(json_s "$file")" "$(json_s "$sha")" "$(json_s "$now")" "$(json_s "$out")" "$cut" >&3
+        return 0
+    fi
+    cs=$(git -C "$g" log --no-merges -n 100 --format='%H%x09%cs%x09%s' "$sha..$now" -- ${p:+"$p"} 2>/dev/null)
+    # the files: status from the trees alone, +/- lines from the contents (fetched now, only these files)
+    fs=$( { git -C "$g" -c core.quotePath=false diff --no-renames --name-status ${p:+--relative="$p"} "$sha" "$now" 2>/dev/null | sed 's/^/S	/'
+            git_safe -C "$g" -c core.quotePath=false diff --no-renames --numstat ${p:+--relative="$p"} "$sha" "$now" 2>/dev/null | sed 's/^/N	/'; } |
+        awk -F'\t' '$1 == "S" { st[$3] = substr($2, 1, 1); o[++n] = $3 } $1 == "N" { a[$4] = $2; r[$4] = $3 }
+                    END { for (i = 1; i <= n; i++) print st[o[i]] "\t" (o[i] in a ? a[o[i]] : "-") "\t" (o[i] in r ? r[o[i]] : "-") "\t" o[i] }')
+    if [ -z "$json" ]; then
+        say "${name}：$(git -C "$g" log -1 --format=%cs "$sha" 2>/dev/null) 的版本（$(printf %.12s "$sha")）→ 原作者 $(git -C "$g" log -1 --format=%cs "$now" 2>/dev/null)（$(printf %.12s "$now")）"
+        [ -z "$cs" ] || printf '%s\n' "$cs" | awk -F'\t' '{ print "  " $2 "  " substr($1, 1, 7) "  " $3 }'
+        [ -z "$fs" ] || printf '%s\n' "$fs" | awk -F'\t' '{ print "  " $1 "  +" $2 " -" $3 "  " $4 }'
+        [ $lic = false ] || say "  原作者的授權檔也改了"
+        [ -n "$cs$fs" ] || [ $lic = true ] || say "  這個資料夾沒有改"
+        say "看一個檔：kit outdated --diff $name --file <檔案>；要收新版：kit collect $name --to $(basename "$d")"
+        return 0
+    fi
+    { printf '{"kit": %s, "api": %s, "source": %s, "name": %s, "url": %s, "path": %s, "ref": %s, "commit": %s, "commit_date": %s, "now": %s, "now_date": %s, "license": %s,\n "commits": [' \
+        "$(json_s "$KIT_VERSION")" "$(json_s "$KIT_API")" "$(json_s "$(basename "$d")")" "$(json_s "$name")" "$(json_s "$url")" "$(json_s "$path")" \
+        "$(json_s "$ref")" "$(json_s "$sha")" "$(json_s "$(git -C "$g" log -1 --format=%cs "$sha" 2>/dev/null)")" "$(json_s "$now")" \
+        "$(json_s "$(git -C "$g" log -1 --format=%cs "$now" 2>/dev/null)")" "$lic"
+      printf '%s\n' "$cs" | awk -F'\t' 'function j(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/[\001-\037]/, "", s); return "\"" s "\"" }
+          NF >= 3 { printf "%s\n  {\"commit\": %s, \"date\": %s, \"subject\": %s}", (n++ ? "," : ""), j($1), j($2), j($3) }'
+      printf '],\n "files": ['
+      printf '%s\n' "$fs" | awk -F'\t' 'function j(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/[\001-\037]/, "", s); return "\"" s "\"" }
+          function k(v) { return v ~ /^[0-9]+$/ ? v : "null" }
+          NF >= 4 { printf "%s\n  {\"path\": %s, \"status\": %s, \"added\": %s, \"removed\": %s}", (n++ ? "," : ""), j($4), j($1), k($2), k($3) }'
+      printf ']}\n'; } >&3
 }
 
 cmd_approve() { # kit approve [<approvals repo>] <source clone>... [--key <ssh key>] [--yes] [--push]
@@ -6907,6 +6985,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                     只下載來看、什麼都不寫：找到的 skill、授權、會執行的檔案（JSON，給程式讀）
   kit collect --dates [--to 來源]   以前收的補上原作者那個 commit 的日期（只問那個 commit，不下載檔案）
   kit outdated [--json]             看收過的 skill 原作者有沒有新版
+  kit outdated --diff <名字> [--file <檔案>]  看原作者在那個 skill 改了什麼
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml

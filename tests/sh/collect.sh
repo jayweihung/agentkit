@@ -59,6 +59,12 @@ kit outdated --json > "$T/outd.json" 2> "$T/outd.err"; rc=$?
 check "outdated --json: valid JSON, foo new, both commits, nothing on stderr" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/outd.json" > /dev/null && [ ! -s "$T/outd.err" ] && grep -qF "\"name\": \"foo\", \"url\": \"file://$UP\", \"path\": \"skills/foo\", \"ref\": \"\", \"commit\": \"$v1\", \"now\": \"$(git -C "$UP" rev-parse HEAD)\", \"state\": \"new\"" "$T/outd.json" && grep -q "\"source\": \"collector\"" "$T/outd.json"'
 mv "$UP" "$UP.away"; out=$(kit outdated --json 2>/dev/null); mv "$UP.away" "$UP"
 check "outdated --json: an author gone is unreachable" 'echo "$out" | grep -q "\"now\": \"\", \"state\": \"unreachable\""'
+kit outdated --diff foo --json > "$T/odiff.json" 2> "$T/odiff.err"; rc=$?
+check "outdated --diff --json: the commit that changed foo (not the ones elsewhere), its file with +/- lines" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/odiff.json" > /dev/null && [ ! -s "$T/odiff.err" ] && grep -qF "\"subject\": \"v2\"" "$T/odiff.json" && ! grep -q "\"subject\": \"notes\"" "$T/odiff.json" && grep -qF "{\"path\": \"SKILL.md\", \"status\": \"M\", \"added\": 1, \"removed\": 0}" "$T/odiff.json" && grep -qF "\"license\": false" "$T/odiff.json"'
+out=$(kit outdated --diff foo --file SKILL.md --json 2>/dev/null)
+check "outdated --diff --file: that file's diff" 'echo "$out" | grep -qF "+foo v2" && echo "$out" | grep -qF "\"diff_cut\": false"'
+out=$(kit outdated --diff nope --json 2>/dev/null); rc=$?
+check "outdated --diff: a name never collected: not_found" '[ $rc -ne 0 ] && echo "$out" | grep -q "\"code\": \"not_found\""'
 echo "local edit" >> "$CO/skills/foo/SKILL.md"
 out=$(kit collect foo 2>&1); rc=$?
 check "collect <name> replaces the whole copy with the new version" '[ $rc -eq 0 ] && grep -q "foo v2" "$CO/skills/foo/SKILL.md" && ! grep -q "local edit" "$CO/skills/foo/SKILL.md" && grep -q "$(git -C "$UP" rev-parse HEAD)" "$CO/third_party.lock" && [ "$(grep -c "^foo" "$CO/third_party.lock")" = 1 ]'

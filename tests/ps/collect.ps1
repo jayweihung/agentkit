@@ -61,6 +61,14 @@ Check 'outdated --json: foo new, both commits' { $rc -eq 0 -and $j -and @($j.ski
 Rename-Item -LiteralPath $UP 'upstream-away'; Kit outdated --json; Rename-Item -LiteralPath (Join-Path $T 'upstream-away') 'upstream'
 $j = $null; try { $j = $out | ConvertFrom-Json } catch { }
 Check 'outdated --json: an author gone is unreachable' { $j -and $j.skills[0].state -eq 'unreachable' -and $j.skills[0].now -eq '' }
+Kit outdated --diff foo --json
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check 'outdated --diff --json: the commit that changed foo (not the ones elsewhere), its file with +/- lines' { $rc -eq 0 -and $j -and (@($j.commits).subject -contains 'v2') -and -not (@($j.commits).subject -contains 'notes') -and @($j.files).Count -eq 1 -and $j.files[0].path -eq 'SKILL.md' -and $j.files[0].status -eq 'M' -and $j.files[0].added -eq 1 -and $j.files[0].removed -eq 0 -and $j.license -eq $false }
+Kit outdated --diff foo --file SKILL.md --json
+$j = $null; try { $j = $out | ConvertFrom-Json } catch { }
+Check "outdated --diff --file: that file's diff" { $j -and $j.diff -match '\+foo v2' -and $j.diff_cut -eq $false }
+Kit outdated --diff nope --json
+Check 'outdated --diff: a name never collected: not_found' { $rc -ne 0 -and $out -match '"code": "not_found"' }
 Add-Content -LiteralPath "$CO/skills/foo/SKILL.md" 'local edit'
 Kit collect foo
 $v2 = "$(& git -C $UP rev-parse HEAD)".Trim()

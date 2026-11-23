@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.15'
+$script:KitApi = '1.16'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -8212,9 +8212,93 @@ function Outdated-Json([string]$one) { # every collected skill (ONE's, else the 
     $sk = if ($rows.Count) { "`n" + ($rows -join ",`n") + "`n  ]" } else { ']' }
     Out-Json "{`n  `"kit`": $(Json-S $KitVersion),`n  `"api`": $(Json-S $KitApi),`n  `"at`": $([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()),`n  `"skills`": [$sk`n}"
 }
+$script:OutdatedDiffMax = 200000   # characters of one file's diff that --diff --file gives (the rest: "diff_cut": true)
+function Outdated-Diff([string]$name, [string]$to, [string]$file, [bool]$json) { # what the author changed in collected NAME's
+    # folder since it was collected: the commits that touched it and its files (+/- lines), or with FILE that file's diff
+    # (as unix/kit: a partial clone kept $CollectKeep minutes under $KitConf/cache/outdated)
+    $dirs = if ($to) { @(Target-Dir $to) } else {
+        $seen = @{}; @(@($(if (Test-Path -LiteralPath 'kit.yaml' -PathType Leaf) { Canon-Dir (Get-Location).ProviderPath }) + $(if (Test-Path -LiteralPath $Machine) { Src-Dirs })) |
+            Where-Object { $_ -and -not $seen.ContainsKey($_) } | ForEach-Object { $seen[$_] = 1; $_ }) }
+    $d = ''; $f = $null
+    foreach ($x in $dirs) {
+        if (-not (Test-Path -LiteralPath (Join-Path $x 'third_party.lock'))) { continue }
+        foreach ($row in Lock-Rows $x) { $c = $row.Split("`t"); if ($c[0] -eq $name) { $d = $x; $f = $c; break } }
+        if ($d) { break }
+    }
+    if (-not $d) { Die-C 'not_found' "沒有收過 ${name}（來源的 third_party.lock 裡沒有它）" }
+    $url = $f[1]; $path = $f[2]; $ref = if ($f[3] -ne '-') { $f[3] } else { '' }; $sha = $f[4]
+    if (-not (Collect-Allowed $url $d)) { Die-C 'not_allowed' "$(Url-Id $url) 已經不在 $(Split-Path -Leaf $d) 的 collect_sources" }
+    $now = "$(Remote-Sha $url $ref)"; if (-not $now) { Die-C 'unreachable' "連不到 $(Url-Id $url)" }
+    $c = Join-Path $KitConf 'cache/outdated'
+    $key = [BitConverter]::ToString([Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($url))).Replace('-', '').Substring(0, 16)
+    $g = Join-Path $c $key
+    if (Test-Path -LiteralPath $c) {
+        $old = (Get-Date).AddMinutes(-$CollectKeep)
+        foreach ($o in @(Get-ChildItem -LiteralPath $c -Directory -ErrorAction SilentlyContinue)) { if ($o.LastWriteTime -lt $old) { Remove-Tree $o.FullName } }
+    }
+    $e0 = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        if (-not (Test-Path -LiteralPath $g)) {
+            Ensure-Dir $c
+            & git init -q --bare $g 2>&1 | Out-Null; $ok = $LASTEXITCODE -eq 0
+            foreach ($a in @(@('remote', 'add', 'origin', $url), @('config', 'core.repositoryformatversion', '1'), @('config', 'extensions.partialClone', 'origin'),
+                             @('config', 'remote.origin.promisor', 'true'), @('config', 'remote.origin.partialclonefilter', 'blob:none'))) {
+                if ($ok) { & git -C $g @a 2>&1 | Out-Null; $ok = $LASTEXITCODE -eq 0 } }
+            if (-not $ok) { Remove-Tree $g; Die "沒辦法在 $c 開暫存的 repo" }
+        }
+        (Get-Item -LiteralPath $g).LastWriteTime = Get-Date
+        & git -C $g cat-file -e "$sha^{commit}" 2>&1 | Out-Null; $have = $LASTEXITCODE -eq 0
+        if ($have) { & git -C $g cat-file -e "$now^{commit}" 2>&1 | Out-Null; $have = $LASTEXITCODE -eq 0 }
+        if (-not $have) {
+            Git-Safe -C $g fetch -q --no-tags --depth=1 --filter=blob:none origin $sha $now | Out-Null
+            if ($LASTEXITCODE -ne 0) { Die-C 'unreachable' "從 $(Url-Id $url) 抓不到這兩個版本" }
+            $since = "$(& git -C $g log -1 --format=%ct $sha 2>$null)".Trim()
+            if ($since -match '^\d+$') { Git-Safe -C $g fetch -q --no-tags --filter=blob:none "--shallow-since=$([long]$since - 86400)" origin $now | Out-Null }
+        }
+        $p = $path -replace '^\./', ''; if ($p -eq '.') { $p = '' }
+        $rel = @(if ($p) { "--relative=$p" })
+        $licOf = { param($cm) (@(& git -C $g ls-tree $cm 2>$null) | Where-Object { "$_" -match '\t(licen[cs]e|copying)' }) -join "`n" }
+        $lic = if ((& $licOf $sha) -ne (& $licOf $now)) { 'true' } else { 'false' }
+        $dateOf = { param($cm) "$(& git -C $g log -1 --format=%cs $cm 2>$null)".Trim() }
+        if ($file) {
+            if ("/$file/" -match '/\.\./') { Die '--file 不能有 ..' }
+            $pf = if ($p) { "$p/$file" } else { $file }
+            $lines = @(& git -C $g -c core.quotePath=false diff --no-renames --no-color @rel $sha $now -- $pf 2>$null)
+            $out = if ($lines.Count) { ($lines -join "`n") + "`n" } else { '' }
+            $cut = 'false'; if ($out.Length -gt $OutdatedDiffMax) { $out = $out.Substring(0, $OutdatedDiffMax); $cut = 'true' }
+            if (-not $json) { [Console]::Out.Write($out); if ($cut -eq 'true') { Say "（太長，只印前 $OutdatedDiffMax 個字元）" }; return }
+            Out-Json "{`"kit`": $(Json-S $KitVersion), `"api`": $(Json-S $KitApi), `"name`": $(Json-S $name), `"file`": $(Json-S $file), `"commit`": $(Json-S $sha), `"now`": $(Json-S $now), `"diff`": $(Json-S $out), `"diff_cut`": $cut}"
+            return
+        }
+        $spec = @(if ($p) { '--', $p })
+        $cs = @(& git -C $g log --no-merges -n 100 '--format=%H%x09%cs%x09%s' "$sha..$now" @spec 2>$null | ForEach-Object { ,("$_".Split("`t", 3)) } | Where-Object { $_.Count -ge 3 })
+        $st = [ordered]@{}; $nm = @{}
+        foreach ($l in @(& git -C $g -c core.quotePath=false diff --no-renames --name-status @rel $sha $now 2>$null)) { $q = "$l".Split("`t"); if ($q.Count -ge 2) { $st[$q[1]] = $q[0].Substring(0, 1) } }
+        foreach ($l in @(& git -C $g -c core.quotePath=false diff --no-renames --numstat @rel $sha $now 2>$null)) { $q = "$l".Split("`t"); if ($q.Count -ge 3) { $nm[$q[2]] = $q } }
+        if (-not $json) {
+            Say "${name}：$(& $dateOf $sha) 的版本（$($sha.Substring(0, 12))）→ 原作者 $(& $dateOf $now)（$($now.Substring(0, 12))）"
+            foreach ($x in $cs) { Say "  $($x[1])  $($x[0].Substring(0, 7))  $($x[2])" }
+            foreach ($k in $st.Keys) { $a = if ($nm[$k]) { $nm[$k][0] } else { '-' }; $r = if ($nm[$k]) { $nm[$k][1] } else { '-' }; Say "  $($st[$k])  +$a -$r  $k" }
+            if ($lic -eq 'true') { Say '  原作者的授權檔也改了' }
+            if (-not $cs.Count -and -not $st.Count -and $lic -ne 'true') { Say '  這個資料夾沒有改' }
+            Say "看一個檔：kit outdated --diff $name --file <檔案>；要收新版：kit collect $name --to $(Split-Path -Leaf $d)"
+            return
+        }
+        $num = { param($v) if ("$v" -match '^\d+$') { "$v" } else { 'null' } }
+        $cj = @($cs | ForEach-Object { "`n  {`"commit`": $(Json-S $_[0]), `"date`": $(Json-S $_[1]), `"subject`": $(Json-S $_[2])}" }) -join ','
+        $fj = @($st.Keys | ForEach-Object { $q = $nm[$_]; "`n  {`"path`": $(Json-S $_), `"status`": $(Json-S $st[$_]), `"added`": $(& $num $(if ($q) { $q[0] })), `"removed`": $(& $num $(if ($q) { $q[1] }))}" }) -join ','
+        Out-Json ("{`"kit`": $(Json-S $KitVersion), `"api`": $(Json-S $KitApi), `"source`": $(Json-S (Split-Path -Leaf $d)), `"name`": $(Json-S $name), `"url`": $(Json-S $url), `"path`": $(Json-S $path), `"ref`": $(Json-S $ref), `"commit`": $(Json-S $sha), `"commit_date`": $(Json-S (& $dateOf $sha)), `"now`": $(Json-S $now), `"now_date`": $(Json-S (& $dateOf $now)), `"license`": $lic,`n `"commits`": [" + $cj + "],`n `"files`": [" + $fj + ']}')
+    } finally { $ErrorActionPreference = $e0 }
+}
 function Cmd-Outdated($rest) {
-    $to = ''; $json = $false; $r = @($rest | Where-Object { $_ })
-    for ($i = 0; $i -lt $r.Count; $i++) { if ($r[$i] -eq '--to' -and $i + 1 -lt $r.Count) { $i++; $to = $r[$i] } elseif ($r[$i] -eq '--json') { $json = $true } else { Die '用法：kit outdated [--to 來源] [--json]' } }
+    $to = ''; $json = $false; $diff = ''; $file = ''; $r = @($rest | Where-Object { $_ })
+    for ($i = 0; $i -lt $r.Count; $i++) {
+        if ($r[$i] -eq '--to' -and $i + 1 -lt $r.Count) { $i++; $to = $r[$i] } elseif ($r[$i] -eq '--json') { $json = $true }
+        elseif ($r[$i] -eq '--diff' -and $i + 1 -lt $r.Count) { $i++; $diff = $r[$i] } elseif ($r[$i] -eq '--file' -and $i + 1 -lt $r.Count) { $i++; $file = $r[$i] }
+        else { Die '用法：kit outdated [--to 來源] [--json]，或 kit outdated --diff <名字> [--file <檔案>] [--json]' }
+    }
+    if ($diff) { if ($json) { $script:JsonOut = $true }; Outdated-Diff $diff $to $file $json; return }
+    if ($file) { Die '--file 要跟 --diff 一起用' }
     if ($json) { $one = if ($to) { Target-Dir $to } else { '' }; Outdated-Json $one; return }
     $dir = Target-Dir $to
     Check-Maintainer $dir
@@ -8459,6 +8543,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                     只下載來看、什麼都不寫：找到的 skill、授權、會執行的檔案（JSON，給程式讀）
   kit collect --dates [--to 來源]   以前收的補上原作者那個 commit 的日期（只問那個 commit，不下載檔案）
   kit outdated [--json]             看收過的 skill 原作者有沒有新版
+  kit outdated --diff <名字> [--file <檔案>]  看原作者在那個 skill 改了什麼
   kit export-self <資料夾> [--version <版本>]   匯出 kit 的原始碼（給公司的 git server）
   kit ci-template [檔案]            Gitea Actions 範本（PR 自動跑 kit check --ci），例：
                                       kit ci-template .gitea/workflows/kit-check.yaml
