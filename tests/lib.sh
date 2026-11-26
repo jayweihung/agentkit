@@ -32,6 +32,8 @@ if CL=$(command -v claude 2>/dev/null); then
     mkdir -p "$T/stubcl"; printf '#!/bin/sh\n[ "$1" = --version ] && { echo "1.0.0 (Claude Code)"; exit 0; }\nexec "%s" "$@"\n' "$CL" > "$T/stubcl/claude"
     chmod +x "$T/stubcl/claude"; export PATH="$T/stubcl:$PATH"
 fi
+# Herdr's hc here is never asked (kit add / rm / sync tell the open agents through it): this one knows of no terminal
+mkdir -p "$T/stubhc"; printf '#!/bin/sh\nexit 1\n' > "$T/stubhc/hc"; chmod +x "$T/stubhc/hc"; export PATH="$T/stubhc:$PATH"
 unset CLAUDE_CONFIG_DIR AGENTKIT_CONFIG AGENTKIT_SOURCES KIT_GITEA_TOKEN
 export KIT_TRANSCRIPT_CHECK=0   # (kit sync --hook does not look at the Claude these tests may run in)
 pass=0; fail=0

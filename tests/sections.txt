@@ -89,3 +89,5 @@ install hook : unix/kit:cmd_self_update unix/kit:cmd_ci_template windows/kit.ps1
     windows/kit.ps1:Cmd-CiTemplate
 hold dry-run : unix/kit:is_held unix/kit:cmd_hold unix/kit:cmd_sync_only windows/kit.ps1:Is-Held windows/kit.ps1:Cmd-Hold
     windows/kit.ps1:Cmd-SyncOnly
+tell : unix/kit:tell_ver unix/kit:tell_send unix/kit:tell_after unix/kit:tool_title_of windows/kit.ps1:Tell-Ver windows/kit.ps1:Tell-Send
+    windows/kit.ps1:Tell-Norm windows/kit.ps1:Tell-Need windows/kit.ps1:Tell-After windows/kit.ps1:Tool-TitleOf

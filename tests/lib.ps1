@@ -48,6 +48,10 @@ $env:KIT_TRANSCRIPT_CHECK = '0'   # (kit sync --hook does not look at the Claude
 $savedPath = $env:PATH
 $sep = [IO.Path]::PathSeparator
 $env:PATH = (@($env:PATH.Split($sep) | Where-Object { -not ((Test-Path (Join-Path $_ 'codex')) -or (Test-Path (Join-Path $_ 'codex.cmd')) -or (Test-Path (Join-Path $_ 'codex.exe')) -or (Test-Path (Join-Path $_ 'omp')) -or (Test-Path (Join-Path $_ 'omp.exe'))) })) -join $sep
+# Herdr's hc here is never asked (kit add / rm / sync tell the open agents through it): this one knows of no terminal
+$StubHc = Join-Path $T 'stubhc'
+if ($OnWindows) { W "$StubHc/hc.cmd" "@exit /b 1`r`n" } else { W "$StubHc/hc" "#!/bin/sh`nexit 1`n"; & chmod +x "$StubHc/hc" }
+$env:PATH = $StubHc + $sep + $env:PATH
 
 
 # ---------- fixture sources ----------

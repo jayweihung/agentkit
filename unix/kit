@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.18
+KIT_API=1.19
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -1627,7 +1627,9 @@ sync_hook() { # run by Claude at start: warn when it saves no transcript; sync i
         trap 'rmdir "$lock" 2>/dev/null' EXIT
         printf '== %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
         KIT_LOCKED=1
+        TELL_BEFORE=$(tell_ver)
         KIT_HOOK_DIR=$(pwd -P) GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=20 NO_NAG=1 cmd_sync
+        tell_after sync
     ) </dev/null >>"$log" 2>&1 &
     exit 0
 }
@@ -2179,8 +2181,7 @@ tool_cache() { # every program kit has a recipe for: its title, what this machin
 }
 parts_json() { # parts_json PLUGINDIR -> {"skills", "commands", "agents", "mcp": [names], "hooks": bool}: what a plugin brings
     local d=$1 f h=false
-    for f in "$d"/hooks/*.json; do [ -f "$f" ] && h=true; done
-    [ $h = true ] || { json_get "$d/.claude-plugin/plugin.json" hooks >/dev/null && h=true; }
+    plugin_hooks "$d" && h=true
     printf '{"skills": %s, "commands": %s, "agents": %s, "mcp": %s, "hooks": %s}' \
         "$(for f in "$d"/skills/*/SKILL.md; do [ -f "$f" ] && { f=${f%/*}; printf '%s\n' "${f##*/}"; }; done | LC_ALL=C sort | json_arr)" \
         "$(for f in "$d"/commands/*.md; do [ -f "$f" ] && { f=${f##*/}; printf '%s\n' "${f%.md}"; }; done | LC_ALL=C sort | json_arr)" \
@@ -4451,6 +4452,143 @@ item_file() { # item_file rule|mcp NAME -> the file the tools get it from: kit's
     fi
     printf '%s\n' "$s"
 }
+# ---------- after kit add / rm / sync: the agents already open pick it up ----------
+# Herdr's hc lists this machine's terminals; what each tool needs about a kind added or changed is the Kit panel's
+# table (herdr-jay kit mod context.js RELOAD / needOf / reloadPlan, kit.ps1 has the same): "reload" (/reload-plugins),
+# "relaunch" (read only when a conversation starts: a kit pending for your OK, never closed by kit) or nothing. What
+# was taken off, and a rule added by kit add, is told in a message instead. What changed comes from state.tsv's ver
+# lines (what each tool has from kit, the account's and each folder's) before and after.
+HC_UNQ='function unq(s,   o, i, c) {
+    if (s !~ /^"/) return s == "null" ? "" : s
+    s = substr(s, 2, length(s) - 2); o = ""
+    for (i = 1; i <= length(s); i++) { c = substr(s, i, 1)
+        if (c == "\\") { i++; c = substr(s, i, 1); if (c == "n") c = "\n"; else if (c == "t") c = "\t"; else if (c == "r") c = "\r" }
+        o = o c }
+    return o
+}'
+hc_terms() { # this machine's live terminals that run an agent: "address TAB agent TAB status" (hc ls --json)
+    command -v hc >/dev/null 2>&1 || return 0
+    hc ls --json 2>/dev/null </dev/null | LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 2>/dev/null | LC_ALL=C awk -F'\t' "$HC_UNQ"'
+        $1 == "terminals" && NF == 4 { i = $2 + 0; if (i > n) n = i; v = unq($4)
+            if ($3 == "address") a[i] = v; else if ($3 == "agent") g[i] = v; else if ($3 == "state") s[i] = v; else if ($3 == "status") t[i] = v }
+        END { for (i = 0; i <= n; i++) if (a[i] != "" && index(a[i], "/") == 0 && g[i] != "" && s[i] == "live") print a[i] "\t" g[i] "\t" t[i] }'
+}
+hc_get() { # hc_get ADDRESS -> "pid US its program's pid US folder US status US status_ms US msg" (hc get --json)
+    hc get "$1" --json 2>/dev/null </dev/null | LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 2>/dev/null | LC_ALL=C awk -F'\t' "$HC_UNQ"'
+        { v = $NF; k = $0; sub(/\t[^\t]*$/, "", k) }
+        k == "pid" { p = v } k == "foreground\tpid" { fp = v } k == "foreground\tcwd" { fc = unq(v) } k == "cwd" { c = unq(v) }
+        k == "status\tstate" || k == "status" { st = unq(v) } k == "status_ms" { ms = v } k == "report\tmsg" { rm = unq(v) } k == "status\tmsg" { sm = unq(v) }
+        END { m = rm != "" ? rm : sm; gsub(/[\t\r\n]/, " ", m); printf "%s\037%s\037%s\037%s\037%s\037%s\n", p, fp, (fc != "" ? fc : c), st, ms, m }'
+}
+hc_tool() { case $1 in claude-code|claude) echo claude;; codex) echo codex;; omp|pi) echo omp;; esac; }   # Herdr's agent -> kit's tool
+tool_title_of() { case $1 in claude) echo Claude Code;; codex) echo Codex;; *) echo omp;; esac; }
+tell_ver() { [ -f "$STATE" ] && awk -F'\t' '$1 == "ver" || $1 ~ /^dir:.*:ver$/ { print $1 "\t" $2 "\t" $3 }' "$STATE"; return 0; }
+plugin_hooks() { # plugin_hooks PLUGINDIR : it brings hooks (hooks/*.json, or plugin.json's hooks)
+    local f; for f in "$1"/hooks/*.json; do [ -f "$f" ] && return 0; done
+    json_get "$1/.claude-plugin/plugin.json" hooks >/dev/null
+}
+tell_send() { # tell_send ADDRESS TEXT : 0 when hc took it: queued until it stops working (TELL_HC=queue), or, an hc
+    # without --queue (TELL_HC=old), typed only when it is idle. One queued entry per key: /reload-plugins once, a message by its text
+    local k=reload o
+    [ "$2" = /reload-plugins ] || k="reload:$2"
+    if [ "${TELL_HC:-}" != old ]; then
+        o=$(hc send --json --queue --key "$k" "$1" "$2" 2>&1 </dev/null) && case $o in *'"queued":true'*) TELL_HC=queue; return 0;; esac
+        case $o in *--queue*) TELL_HC=old;; *) return 1;; esac
+    fi
+    hc send --json --if idle "$1" "$2" >/dev/null 2>&1 </dev/null
+}
+tell_after() { # tell_after add|rm|sync : tell each open agent here what the change since TELL_BEFORE means for it
+    local verb=$1 rows ags="" a tool st p fp cwd x plans first=1 js="" ok q n texts t what
+    local sent="" queued="" left="" failed="" rl="" rlwhat="" nrl=0 cm h
+    rows=$( { printf '%s\n' "${TELL_BEFORE:-}"; echo @@after; tell_ver; } | awk -F'\t' '
+        function out(op, v, tkn, d,   t) { d = v == "ver" ? "" : substr(v, 5, length(v) - 8); split(tkn, t, ":")
+            print op "\t" t[1] "\t" t[2] "\t" substr(tkn, length(t[1]) + length(t[2]) + 3) "\t" d }
+        $0 == "@@after" { a = 1; next }
+        NF < 2 { next }
+        !a { b[$1 "\t" $2] = $3; next }
+        { k = $1 "\t" $2; s[k] = 1; if (!(k in b)) out("add", $1, $2); else if (b[k] != $3) out("chg", $1, $2) }
+        END { for (k in b) if (!(k in s)) { split(k, x, "\t"); out("gone", x[1], x[2]) } }' | LC_ALL=C sort)
+    if [ -n "$rows" ] && [ -z "${NO_TELL:-}" ]; then
+        while IFS="$TAB" read -r a tool st; do
+            tool=$(hc_tool "$tool"); [ -n "$tool" ] || continue
+            IFS=$US read -r p fp cwd x <<< "$(hc_get "$a")"
+            [ -z "$p" ] || [ -z "$(other_user "$p")" ] || continue   # run as another account (sudo -i): its own kit
+            ags="$ags$a$TAB$tool$TAB$cwd$LF"
+        done <<< "$(hc_terms)"
+    fi
+    if [ -n "$ags" ]; then
+        cm=$(state_get claude_mcp account); [ -n "$cm" ] || cm=config
+        # the plugins that bring hooks (omp reads those only when it starts; one taken off keeps running them), where
+        # each rule added is (the file the tools read: kit's copy)
+        h=$(printf '%s\n' "$rows" | awk -F'\t' '$3 == "plugin" && !s[$4]++ { print $4 }' | while IFS= read -r n; do
+            x=$(find_item plugin "$n") && plugin_hooks "${x%/.claude-plugin/plugin.json}" && printf 'hooks\t%s\n' "$n"; done
+            printf '%s\n' "$rows" | awk -F'\t' '$1 == "add" && $3 == "rule" && !s[$4]++ { print $4 }' | while IFS= read -r n; do
+            x="$STORE_DIR/rules/$n.md"; [ -f "$x" ] || x=$(find_item rule "$n") || x=""; printf 'rule\t%s\t%s\n' "$n" "$x"; done)
+        plans=$( { printf '%s\n' "$rows" | sed "s/^/row$TAB/"; printf '%s\n' "$h"; printf '%s' "$ags" | sed "s/^/agent$TAB/"; } |
+            awk -F'\t' -v verb="$verb" -v cm="$cm" '
+            function need(t, k, hk) { return t == "omp" && k == "plugin" && hk ? "relaunch" : t == "claude" && k == "mcp" && cm == "plugin" ? "reload" \
+                : t == "claude" && (k == "plugin") || t == "omp" && (k == "skill" || k == "plugin" || k == "mcp") ? "reload" \
+                : t == "claude" && (k == "mcp" || k == "rule") || t == "omp" && k == "rule" || t == "codex" && (k == "plugin" || k == "mcp") ? "relaunch" : "none" }
+            function list(a, n,   i, s) { s = ""; for (i = 1; i <= n; i++) s = s (i > 1 ? "、" : "") a[i]; return s }
+            $1 == "row" { nr++; op[nr] = $2; tl[nr] = $3; kd[nr] = $4; nm[nr] = $5; dr[nr] = $6; next }
+            $1 == "hooks" { hooks[$2] = 1; next }
+            $1 == "rule" { rp[$2] = $3; next }
+            $1 == "agent" {
+                t = $3; c = $4; split("", add); split("", gone); split("", gn); split("", gd); nra = 0; rd = 0; ah = 0; gh = 0; split("", seen)
+                for (i = 1; i <= nr; i++) {
+                    if (tl[i] != t || (dr[i] != "" && c != dr[i] && index(c, dr[i] "/") != 1)) continue
+                    k = kd[i]
+                    if (op[i] == "gone") { if (!seen[k, nm[i]]++) { gone[k, ++gn[k]] = nm[i]; if (dr[i] != "") gd[k] = 1 } if (k == "plugin" && hooks[nm[i]]) gh = 1 }
+                    else if (k == "rule" && verb == "add" && op[i] == "add") { if (!seen[k, nm[i]]++) { ra[++nra] = nm[i]; if (dr[i] != "") rd = 1 } }
+                    else { add[k] = 1; if (k == "plugin" && hooks[nm[i]]) ah = 1 }
+                }
+                rel = 0; rld = 0; what = ""; nw = 0
+                split("rule skill mcp plugin", K, " "); split("規則 技能 MCP 外掛", KN, " ")
+                for (j = 1; j <= 4; j++) if (add[K[j]]) { w = need(t, K[j], ah); if (w == "relaunch") { rel = 1; W[++nw] = KN[j] } else if (w == "reload") rld = 1 }
+                off = gh ? (t == "claude" ? "reload" : "relaunch") : ""
+                if (off == "relaunch") { rel = 1; for (j = 1; j <= nw && W[j] != "外掛"; j++); if (j > nw) W[++nw] = "外掛" }
+                texts = ""; nt = 0
+                if (nra && t != "codex") {   # a rule added: told as a message (where it is), so no one has to close anything
+                    ps = ""; for (j = 1; j <= nra; j++) if (rp[ra[j]] != "") ps = ps (ps == "" ? "" : "、") rp[ra[j]]
+                    texts = "kit 剛把規則 " list(ra, nra) " 加到" (rd ? "這個資料夾" : "整個帳號") "（這個對話開始時還沒有）：" (ps != "" ? "請先讀 " ps "，" : "") "之後照它做"; nt = 1 }
+                if (!rel) for (j = 1; j <= 4; j++) { k = K[j]; if (!gn[k] || (k == "rule" && t == "codex") || (k == "plugin" && off == "reload")) continue
+                    split("", g); for (m = 1; m <= gn[k]; m++) g[m] = gone[k, m]
+                    wh = gd[k] ? "這個資料夾" : "整個帳號"; l = list(g, gn[k])
+                    x = k == "rule" ? "kit 剛從" wh "拿掉規則 " l "：之後不用再照它做" : k == "skill" ? "kit 剛從" wh "拿掉技能 " l "：之後不要再用它" \
+                        : k == "mcp" ? "kit 剛從" wh "拿掉 MCP " l "：之後不要再用它的工具" : "kit 剛從" wh "拿掉外掛 " l "：之後不要再用它的技能和指令"
+                    texts = texts (nt++ ? "\036" : "") x }
+                if (!rel && (rld || off == "reload")) texts = texts (nt++ ? "\036" : "") "/reload-plugins"
+                print $2 "\037" t "\037" (rel ? "relaunch" : nt ? "reload" : "none") "\037" list(W, nw) "\037" texts
+            }')
+        while IFS=$US read -r a tool n what texts; do
+            [ -n "$a" ] || continue
+            ok=1; q=1; t=""
+            if [ -n "$texts" ]; then
+                while IFS= read -r x; do
+                    [ -n "$x" ] || continue
+                    if [ -z "$t" ] && tell_send "$a" "$x"; then [ "$TELL_HC" = queue ] || q=0; else ok=0; q=0; t="$t${t:+ ／ }$x"; fi
+                done <<< "$(printf '%s' "$texts" | tr '\036' '\n')"
+                if [ $ok = 1 ] && [ $q = 1 ]; then queued="$queued${queued:+、}$a"
+                elif [ $ok = 1 ]; then sent="$sent${sent:+、}$a"
+                elif [ "${TELL_HC:-}" = old ]; then left="$left${left:+；}${a}：$t"
+                else failed="$failed${failed:+；}${a}：$t"; fi
+            else ok=0; q=0; fi
+            if [ "$n" = relaunch ]; then nrl=$((nrl + 1)); rlwhat="$rlwhat$what$LF"   # (at most 6 named: kit pending takes one line of 300 bytes)
+                if [ $nrl -le 6 ]; then rl="$rl${rl:+、}$a $(tool_title_of "$tool")"; elif [ $nrl = 7 ]; then rl="${rl}…"; fi; fi
+            [ $first = 1 ] || js="$js, "; first=0
+            js="$js{\"address\": $(json_s "$a"), \"tool\": $(json_s "$tool"), \"need\": \"$n\", \"sent\": $([ $ok = 1 ] && [ $q = 0 ] && echo true || echo false), \"queued\": $([ $ok = 1 ] && [ $q = 1 ] && echo true || echo false)}"
+        done <<< "$plans"
+        [ -z "$queued" ] || say "kit：已排隊告訴 $queued 改了什麼（它停下來就送）"
+        [ -z "$sent" ] || say "kit：已告訴 $sent 改了什麼"
+        [ -z "$left" ] || say "kit：在忙的沒告訴（這台的 hc 還不能排隊，更新 Herdr 就可以）；要的話等它停下來自己打：$left"
+        [ -z "$failed" ] || say "kit：沒送出；要的話自己打：$failed"
+        # shortcut: one kit pending for all of them; a newer change replaces the list, so one still waiting from before may drop off it
+        rlwhat=$(printf '%s' "$rlwhat" | awk '{ n = split($0, a, "、"); for (i = 1; i <= n; i++) if (a[i] != "" && !s[a[i]]++) o = o (o == "" ? "" : "、") a[i] } END { print o }')
+        [ $nrl = 0 ] || kit_pending_ask relaunch "要你同意：重開 $nrl 個 agent（${rl}）才讀得到新的${rlwhat}"
+    fi
+    [ -z "${TELL_JSON:-}" ] || printf '{"kit": %s, "agents": [%s]}\n' "$(json_s "$KIT_VERSION")" "$js" >&3
+}
+
 cmd_hold() { # kit hold KIND NAME [--off]
     local k=${1:-} n=${2:-}
     [ -n "$n" ] && { [ $# -eq 2 ] || { [ $# -eq 3 ] && [ "$3" = --off ]; }; } || die_c usage "用法：kit hold rule|skill|mcp|plugin <名字> [--off]"
@@ -6975,6 +7113,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                     只加到這個資料夾：在這裡（含子資料夾）開的 agent 才有
                                     （外掛：Claude、omp 用它們自己的資料夾範圍裝；Codex 只能整個帳號裝）
   kit rm  --dir <資料夾> rule|skill|mcp|plugin <名字>
+     add、rm、sync 之後告訴開著的 agent（Herdr）：/reload-plugins、說拿掉了什麼，要重開的記成 kit pending 等你同意
+     （--no-tell：這次不說；--json：告訴了誰，給程式讀）
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
                                     用 kit 的裝法裝，太舊就升級（畫面程式的「安裝」按鈕也是用這個）
@@ -7042,12 +7182,16 @@ EOF
 
 # programs read JSON: list/agents/push/files --json, status, and collect/new --look print only JSON on stdout (errors too)
 case ${1:-} in
-    list|ls|agents|push|files|used|place) for a in "$@"; do [ "$a" = --json ] && { json_mode; break; }; done;;
+    list|ls|agents|push|files|used|place|add|rm|remove|sync) for a in "$@"; do [ "$a" = --json ] && { json_mode; break; }; done;;
     collect|new) for a in "$@"; do [ "$a" = --look ] && { json_mode; break; }; done;;
     status) json_mode;;
 esac
+# kit add / rm / sync tell the open agents what changed for them (tell_after); --no-tell: not this time, --json: who was told
+case ${1:-} in add|rm|remove|sync) TELL_JSON=; NO_TELL=
+    for a in "$@"; do shift; case $a in --json) TELL_JSON=1;; --no-tell) NO_TELL=1;; *) set -- "$@" "$a";; esac; done;; esac
 # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook takes it itself)
 case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent|install-deps|place) [ "${2:-}" = --hook ] || take_lock;; esac
+case ${1:-} in add|rm|remove|sync) TELL_BEFORE=$(tell_ver);; esac       # (what the tools have before: tell_after)
 case ${1:-} in
     init)      shift; cmd_init "$@";;
     sync)      shift
@@ -7059,7 +7203,7 @@ case ${1:-} in
                        --only) [ -n "${2:-}" ] && [ $# -eq 2 ] && [ -z "$dry$expect${FORCE:-}" ] || die_c usage "用法：kit sync --only <種類>:<名字>"
                                case ${2%%:*} in rule|skill|mcp|plugin) ;; *) die_c usage "kit sync --only rule|skill|mcp|plugin:<名字>";; esac
                                need_init; find_item "${2%%:*}" "${2#*:}" >/dev/null || die_c not_found "找不到 ${2}（打 kit list 看有哪些）"
-                               ONLY=$2; cmd_sync; exit 0;;
+                               ONLY=$2; cmd_sync; tell_after sync; exit 0;;
                        --dry-run) dry=dry;;
                        --expect) [ -n "${2:-}" ] || die_c usage "用法：kit sync [--force] [--dry-run | --expect 雜湊]"; expect=$2; shift;;
                        *) die_c usage "用法：kit sync [--force] [--dry-run | --expect 雜湊]";;
@@ -7067,11 +7211,12 @@ case ${1:-} in
                    shift
                done
                [ -n "$dry" ] && [ -n "$expect" ] && die_c usage "--dry-run 和 --expect 不能一起用"
-               ALL=1 cmd_sync "$dry" "$expect";;                  # typed: everything to the source's newest
+               ALL=1 cmd_sync "$dry" "$expect"                  # typed: everything to the source's newest
+               tell_after sync;;
     list|ls)   shift; cmd_list "$@";;
     hold)      shift; cmd_hold "$@";;
-    add)       shift; cmd_add_rm add "$@";;
-    rm|remove) shift; cmd_add_rm rm "$@";;
+    add)       shift; cmd_add_rm add "$@"; tell_after add;;
+    rm|remove) shift; cmd_add_rm rm "$@"; tell_after rm;;
     run)       shift; cmd_run "$@";;
     place)     shift; cmd_place "$@";;
     agents)    shift; cmd_agents "$@";;

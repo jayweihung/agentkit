@@ -4,6 +4,13 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.14.0（2026-11-26）
+
+更新後要做：每台跑 agent 的電腦 `kit self-update`（Windows 也要）。Herdr core 有 `hc send --queue` 的版本，在忙的 agent 才會排隊收到；舊的只送給閒著的。
+
+- `kit add`、`kit rm`、`kit sync`（自己打的、Claude 開啟時自動的）改到開著的 agent 用的東西時，kit 自己告訴這台每個開著的 agent，跟 Herdr 的 Kit 面板同一張表：要 `/reload-plugins` 的送 `/reload-plugins`，拿掉的、`kit add` 加的規則送一句話；要重開才讀得到的不幫你關，記一筆 `kit pending`（`relaunch`）等你同意。在忙的 agent 用 `hc send --queue --key reload` 排隊，它停下來才送。以前只有在 Kit 面板按的才會告訴，自己打的指令、手機、自動的同步都不會。
+- `--json`：最後印出告訴了誰（`agents`：`address`、`tool`、`need`、`sent`、`queued`；kit api 1.19）。`--no-tell`：這次不說（Kit 面板自己也送的話用它，免得送兩次）。
+
 ## 0.13.0（2026-11-23）
 
 更新後要做：每台 `kit self-update`，再打一次 `kit sync`（把現在的規則、MCP 存成 kit 自己的那份）。

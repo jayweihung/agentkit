@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.18'
+$script:KitApi = '1.19'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -3183,8 +3183,7 @@ function Parts-Json([string]$d) { # {"skills", "commands", "agents", "mcp": [nam
     $names = { param($glob, [bool]$dirs) # sorted as bash's LC_ALL=C sort
         [string[]]$a = @(Get-ChildItem -Path (Join-Path $d $glob) -ErrorAction SilentlyContinue | ForEach-Object { if ($dirs) { $_.Directory.Name } else { $_.BaseName } })
         [Array]::Sort($a, [StringComparer]::Ordinal); $a }
-    $hooks = @(Get-ChildItem -Path (Join-Path $d 'hooks/*.json') -File -ErrorAction SilentlyContinue).Count -gt 0
-    if (-not $hooks) { $pj = Join-Path $d '.claude-plugin/plugin.json'; if (Test-Path -LiteralPath $pj) { $hooks = $null -ne (Json-Get $pj 'hooks') } }
+    $hooks = Plugin-Hooks $d
     $mcp = if (Test-Path -LiteralPath (Join-Path $d '.mcp.json')) { Json-Keys (Join-Path $d '.mcp.json') @('mcpServers') } else { @() }
     '{"skills": ' + (Json-Arr (& $names 'skills/*/SKILL.md' $true)) + ', "commands": ' + (Json-Arr (& $names 'commands/*.md' $false)) +
         ', "agents": ' + (Json-Arr (& $names 'agents/*.md' $false)) + ', "mcp": ' + (Json-Arr $mcp) + ', "hooks": ' + $(if ($hooks) { 'true' } else { 'false' }) + '}'
@@ -5886,6 +5885,137 @@ function Cmd-Hold($a) { # kit hold KIND NAME [--off]
     if ($a.Count -eq 3) { State-Del 'held' "${k}:$n"; Say "kit：$k $n 不再固定，kit sync 會換成來源最新的" }
     else { State-Set 'held' "${k}:$n" ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()); Say "kit：$k $n 固定在這台現在用的這一版：kit sync 也不換它；要換：kit sync --only ${k}:$n" }
 }
+# ---------- after kit add / rm / sync: the agents already open pick it up (the same as unix/kit's tell_after) ----------
+# Herdr's hc lists this machine's terminals; what each tool needs about a kind added or changed is the Kit panel's
+# table (herdr-jay kit mod context.js RELOAD / needOf / reloadPlan): "reload" (/reload-plugins), "relaunch" (read only
+# when a conversation starts: a kit pending for your OK, never closed by kit) or nothing. What was taken off, and a rule
+# added by kit add, is told in a message instead. What changed comes from state.tsv's ver lines before and after.
+function Jp($o, [string]$name) { if ($o -is [psobject] -and $o.PSObject.Properties[$name]) { $o.$name } else { $null } }   # a field, $null when missing
+function Hc-Out([string[]]$a, [switch]$Err) { # what hc prints (-Err: its errors too); $script:HcRc its exit code
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $o = if ($Err) { (& hc @a 2>&1 | ForEach-Object { "$_" }) -join "`n" } else { (& hc @a 2>$null | ForEach-Object { "$_" }) -join "`n" }; $script:HcRc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $old }
+    $o
+}
+function Hc-Json([string[]]$a) { $j = $null; try { $j = (Hc-Out $a) | ConvertFrom-Json } catch { }; $j }
+function Hc-Terms { # this machine's live terminals that run an agent (hc ls --json): @{address, agent, status}
+    if (-not (Has-Command 'hc')) { return }
+    foreach ($t in @(Jp (Hc-Json @('ls', '--json')) 'terminals')) {
+        $a = [string](Jp $t 'address'); $g = [string](Jp $t 'agent')
+        if ($a -and -not $a.Contains('/') -and $g -and [string](Jp $t 'state') -ceq 'live') { @{ address = $a; agent = $g; status = [string](Jp $t 'status') } }
+    }
+}
+function Hc-Get([string]$a) { # its record (hc get --json): @{pid, fpid (its program's), cwd, status, ms (status_ms), msg}
+    $j = Hc-Json @('get', $a, '--json'); $f = Jp $j 'foreground'; $s = Jp $j 'status'; $r = Jp $j 'report'
+    $cwd = [string](Jp $f 'cwd'); if (-not $cwd) { $cwd = [string](Jp $j 'cwd') }
+    $msg = [string](Jp $r 'msg'); if (-not $msg) { $msg = [string](Jp $s 'msg') }
+    @{ pid = [string](Jp $j 'pid'); fpid = [string](Jp $f 'pid'); cwd = $cwd; status = $(if ($s -is [string]) { $s } else { [string](Jp $s 'state') }); ms = [string](Jp $j 'status_ms'); msg = ($msg -replace '[\t\r\n]', ' ') }
+}
+function Hc-Tool([string]$g) { switch -CaseSensitive ($g) { { $_ -in 'claude-code', 'claude' } { 'claude' } 'codex' { 'codex' } { $_ -in 'omp', 'pi' } { 'omp' } default { '' } } }   # Herdr's agent -> kit's tool
+function Tool-TitleOf([string]$t) { switch ($t) { 'claude' { 'Claude Code' } 'codex' { 'Codex' } default { 'omp' } } }
+function Tell-Ver { # state.tsv's ver lines (what each tool has from kit): "KIND TAB tool:kind:name" -> its value
+    $d = New-Dict 'string'
+    foreach ($r in @(State-Rows)) { $f = $r.Split("`t"); if ($f.Count -gt 1 -and ($f[0] -ceq 'ver' -or ($f[0].StartsWith('dir:', $Ord) -and $f[0].EndsWith(':ver', $Ord)))) { $d[$f[0] + "`t" + $f[1]] = $(if ($f.Count -gt 2) { $f[2] } else { '' }) } }
+    , $d
+}
+function Plugin-Hooks([string]$d) { # it brings hooks (hooks/*.json, or plugin.json's hooks)
+    if (@(Get-ChildItem -Path (Join-Path $d 'hooks/*.json') -File -ErrorAction SilentlyContinue).Count -gt 0) { return $true }
+    $pj = Join-Path $d '.claude-plugin/plugin.json'; (Test-Path -LiteralPath $pj) -and $null -ne (Json-Get $pj 'hooks')
+}
+function Tell-Send([string]$a, [string]$text) { # $true when hc took it: queued until it stops working ($script:TellHc 'queue'),
+    # or, an hc without --queue ('old'), typed only when it is idle. One queued entry per key: /reload-plugins once, a message by its text
+    $k = if ($text -ceq '/reload-plugins') { 'reload' } else { "reload:$text" }
+    if ($script:TellHc -cne 'old') {
+        $o = Hc-Out @('send', '--json', '--queue', '--key', $k, $a, $text) -Err
+        if ($script:HcRc -eq 0 -and $o.Contains('"queued":true')) { $script:TellHc = 'queue'; return $true }
+        if (-not $o.Contains('--queue')) { return $false }
+        $script:TellHc = 'old'
+    }
+    [void](Hc-Out @('send', '--json', '--if', 'idle', $a, $text) -Err); $script:HcRc -eq 0
+}
+function Tell-Norm([string]$p) { $s = $p.Replace('\', '/').TrimEnd('/'); if ($s -match '^[A-Za-z]:') { $s.ToLowerInvariant() } else { $s } }   # a Windows path compares without case
+function Tell-Need([string]$t, [string]$k, [bool]$hk, [string]$cm) { # what TOOL needs about a KIND added or changed (hk: a plugin with hooks)
+    if ($t -ceq 'omp' -and $k -ceq 'plugin' -and $hk) { return 'relaunch' }
+    if ($t -ceq 'claude' -and $k -ceq 'mcp' -and $cm -ceq 'plugin') { return 'reload' }
+    $tab = @{ claude = @{ skill = 'none'; plugin = 'reload'; mcp = 'relaunch'; rule = 'relaunch' }; omp = @{ skill = 'reload'; plugin = 'reload'; mcp = 'reload'; rule = 'relaunch' }; codex = @{ skill = 'none'; plugin = 'relaunch'; mcp = 'relaunch'; rule = 'none' } }
+    if ($tab.ContainsKey($t) -and $tab[$t].ContainsKey($k)) { $tab[$t][$k] } else { 'none' }
+}
+$script:TellBefore = $null; $script:TellJson = $false; $script:NoTell = $false; $script:TellHc = ''
+function Tell-After([string]$verb) { # tell each open agent here what the change since $TellBefore means for it
+    $js = New-List
+    $rows = New-List; $after = Tell-Ver; $b = if ($script:TellBefore) { $script:TellBefore } else { New-Dict 'string' }
+    $row = { param($op, $k) $f = $k.Split("`t"); $t = $f[1].Split(':', 3); $d = if ($f[0] -ceq 'ver') { '' } else { $f[0].Substring(4, $f[0].Length - 8) }; "$op`t$($t[0])`t$($t[1])`t$($t[2])`t$d" }
+    foreach ($k in $after.Keys) { if (-not $b.ContainsKey($k)) { $rows.Add((& $row 'add' $k)) } elseif ($b[$k] -cne $after[$k]) { $rows.Add((& $row 'chg' $k)) } }
+    foreach ($k in $b.Keys) { if (-not $after.ContainsKey($k)) { $rows.Add((& $row 'gone' $k)) } }
+    [string[]]$ra = $rows.ToArray(); [Array]::Sort($ra, [StringComparer]::Ordinal)
+    $ags = New-List 'object'
+    if ($ra.Count -and -not $script:NoTell) {
+        foreach ($x in @(Hc-Terms)) {
+            $t = Hc-Tool $x.agent; if (-not $t) { continue }
+            $g = Hc-Get $x.address
+            if ($g.pid -and (Other-User $g.pid)) { continue }   # run as another account (sudo -i): its own kit
+            $ags.Add(@{ address = $x.address; tool = $t; cwd = $g.cwd })
+        }
+    }
+    if ($ags.Count) {
+        $cm = State-Get 'claude_mcp' 'account'; if (-not $cm) { $cm = 'config' }
+        $rowT = @(foreach ($r in $ra) { $f = $r.Split("`t"); @{ op = $f[0]; tool = $f[1]; kind = $f[2]; name = $f[3]; dir = $f[4] } })
+        # the plugins that bring hooks (omp reads those only when it starts; one taken off keeps running them), where
+        # each rule added is (the file the tools read: kit's copy)
+        $hooks = @{}; $rp = @{}
+        foreach ($r in $rowT) {
+            if ($r.kind -ceq 'plugin' -and -not $hooks.ContainsKey($r.name)) { $p = Find-Item 'plugin' $r.name; $hooks[$r.name] = [bool]$p -and (Plugin-Hooks (Split-Path -Parent (Split-Path -Parent $p))) }
+            if ($r.op -ceq 'add' -and $r.kind -ceq 'rule' -and -not $rp.ContainsKey($r.name)) { $p = Join-Path $StoreDir "rules/$($r.name).md"; if (-not (Test-Path -LiteralPath $p)) { $p = Find-Item 'rule' $r.name }; $rp[$r.name] = [string]$p }
+        }
+        $kinds = @('rule', 'skill', 'mcp', 'plugin'); $kname = @{ rule = '規則'; skill = '技能'; mcp = 'MCP'; plugin = '外掛' }
+        $queued = New-List; $sent = New-List; $left = New-List; $failed = New-List; $rl = New-List; $rlw = New-List; $nrl = 0
+        foreach ($ag in $ags) {
+            $t = $ag.tool; $c = Tell-Norm $ag.cwd
+            $add = @{}; $gone = @{}; $gd = @{}; $ras = New-List; $rd = $false; $ah = $false; $gh = $false; $seen = @{}
+            foreach ($r in $rowT) {
+                $d = if ($r.dir) { Tell-Norm $r.dir } else { '' }
+                if ($r.tool -cne $t -or ($d -and $c -cne $d -and -not $c.StartsWith("$d/", $Ord))) { continue }
+                $k = $r.kind
+                if ($r.op -ceq 'gone') { if (-not $seen.ContainsKey("$k`t$($r.name)")) { $seen["$k`t$($r.name)"] = 1; if (-not $gone.ContainsKey($k)) { $gone[$k] = New-List }; $gone[$k].Add($r.name); if ($d) { $gd[$k] = $true } }; if ($k -ceq 'plugin' -and $hooks[$r.name]) { $gh = $true } }
+                elseif ($k -ceq 'rule' -and $verb -ceq 'add' -and $r.op -ceq 'add') { if (-not $seen.ContainsKey("$k`t$($r.name)")) { $seen["$k`t$($r.name)"] = 1; $ras.Add($r.name); if ($d) { $rd = $true } } }
+                else { $add[$k] = $true; if ($k -ceq 'plugin' -and $hooks[$r.name]) { $ah = $true } }
+            }
+            $rel = $false; $rld = $false; $whats = New-List
+            foreach ($k in $kinds) { if ($add[$k]) { $w = Tell-Need $t $k $ah $cm; if ($w -ceq 'relaunch') { $rel = $true; $whats.Add($kname[$k]) } elseif ($w -ceq 'reload') { $rld = $true } } }
+            $off = if ($gh) { if ($t -ceq 'claude') { 'reload' } else { 'relaunch' } } else { '' }
+            if ($off -ceq 'relaunch') { $rel = $true; if (-not $whats.Contains('外掛')) { $whats.Add('外掛') } }
+            $texts = New-List
+            if ($ras.Count -and $t -cne 'codex') {   # a rule added: told as a message (where it is), so no one has to close anything
+                $ps = @($ras | ForEach-Object { $rp[$_] } | Where-Object { $_ }) -join '、'
+                $texts.Add("kit 剛把規則 $($ras -join '、') 加到$(if ($rd) { '這個資料夾' } else { '整個帳號' })（這個對話開始時還沒有）：$(if ($ps) { "請先讀 $ps，" })之後照它做")
+            }
+            if (-not $rel) { foreach ($k in $kinds) {
+                if (-not $gone.ContainsKey($k) -or ($k -ceq 'rule' -and $t -ceq 'codex') -or ($k -ceq 'plugin' -and $off -ceq 'reload')) { continue }
+                $wh = if ($gd[$k]) { '這個資料夾' } else { '整個帳號' }; $l = $gone[$k] -join '、'
+                $texts.Add($(switch ($k) { 'rule' { "kit 剛從${wh}拿掉規則 ${l}：之後不用再照它做" } 'skill' { "kit 剛從${wh}拿掉技能 ${l}：之後不要再用它" } 'mcp' { "kit 剛從${wh}拿掉 MCP ${l}：之後不要再用它的工具" } default { "kit 剛從${wh}拿掉外掛 ${l}：之後不要再用它的技能和指令" } }))
+            } }
+            if (-not $rel -and ($rld -or $off -ceq 'reload')) { $texts.Add('/reload-plugins') }
+            $n = if ($rel) { 'relaunch' } elseif ($texts.Count) { 'reload' } else { 'none' }
+            $ok = $texts.Count -gt 0; $q = $ok; $un = New-List
+            foreach ($x in $texts) {
+                if (-not $un.Count -and (Tell-Send $ag.address $x)) { if ($script:TellHc -cne 'queue') { $q = $false } }
+                else { $ok = $false; $q = $false; $un.Add($x) }
+            }
+            if ($ok -and $q) { $queued.Add($ag.address) } elseif ($ok) { $sent.Add($ag.address) }
+            elseif ($un.Count -and $script:TellHc -ceq 'old') { $left.Add("$($ag.address)：$($un -join ' ／ ')") } elseif ($un.Count) { $failed.Add("$($ag.address)：$($un -join ' ／ ')") }
+            if ($rel) { $nrl++; foreach ($w in $whats) { if (-not $rlw.Contains($w)) { $rlw.Add($w) } }   # (at most 6 named: kit pending takes one line of 300 bytes)
+                if ($nrl -le 6) { $rl.Add("$($ag.address) $(Tool-TitleOf $t)") } elseif ($nrl -eq 7) { $rl[5] += '…' } }
+            $js.Add("{`"address`": $(Json-S $ag.address), `"tool`": $(Json-S $t), `"need`": `"$n`", `"sent`": $(if ($ok -and -not $q) { 'true' } else { 'false' }), `"queued`": $(if ($ok -and $q) { 'true' } else { 'false' })}")
+        }
+        if ($queued.Count) { Say "kit：已排隊告訴 $($queued -join '、') 改了什麼（它停下來就送）" }
+        if ($sent.Count) { Say "kit：已告訴 $($sent -join '、') 改了什麼" }
+        if ($left.Count) { Say "kit：在忙的沒告訴（這台的 hc 還不能排隊，更新 Herdr 就可以）；要的話等它停下來自己打：$($left -join '；')" }
+        if ($failed.Count) { Say "kit：沒送出；要的話自己打：$($failed -join '；')" }
+        # shortcut: one kit pending for all of them; a newer change replaces the list, so one still waiting from before may drop off it
+        if ($nrl) { Kit-PendingAsk 'relaunch' "要你同意：重開 $nrl 個 agent（$($rl -join '、')）才讀得到新的$($rlw -join '、')" }
+    }
+    if ($script:TellJson) { Out-Json "{`"kit`": $(Json-S $KitVersion), `"agents`": [$($js -join ', ')]}" }
+}
 function Cmd-Sync([string]$dry = '', [string]$expect = '') { # kit sync [--force] [--dry-run | --expect HASH]
     Need-Init
     if ($dry) {
@@ -6014,7 +6144,9 @@ function Sync-Bg { # the background half of Sync-Hook
     try {
         Say "== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
         $env:GIT_HTTP_LOW_SPEED_LIMIT = '1000'; $env:GIT_HTTP_LOW_SPEED_TIME = '20'
+        $script:TellBefore = Tell-Ver
         Cmd-Sync
+        Tell-After 'sync'
     } catch { Warn $_.Exception.Message }
     finally { Remove-Item -LiteralPath $lock -Force -Recurse -ErrorAction SilentlyContinue }
 }
@@ -8546,6 +8678,8 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                     只加到這個資料夾：在這裡（含子資料夾）開的 agent 才有
                                     （外掛：Claude、omp 用它們自己的資料夾範圍裝；Codex 只能整個帳號裝）
   kit rm  --dir <資料夾> rule|skill|mcp|plugin <名字>
+     add、rm、sync 之後告訴開著的 agent（Herdr）：/reload-plugins、說拿掉了什麼，要重開的記成 kit pending 等你同意
+     （--no-tell：這次不說；--json：告訴了誰，給程式讀）
   kit tools                         skill 會用到的程式（node、python…）：這台有沒有、怎麼裝
   kit install-tool <程式名> [--min 版本]
                                     用 kit 的裝法裝，太舊就升級（畫面程式的「安裝」按鈕也是用這個）
@@ -8614,10 +8748,17 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
 $cmd = if ($args.Count -gt 0) { [string]$args[0] } else { '' }
 $rest = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
 # programs read JSON: list/agents/push/files --json, status, and collect/new --look print only JSON on stdout (errors too)
+# kit add / rm / sync tell the open agents what changed for them (Tell-After); --no-tell: not this time, --json: who was told
+if (@('add', 'rm', 'remove', 'sync') -ccontains $cmd) {
+    $script:TellJson = @($rest) -ccontains '--json'; $script:NoTell = @($rest) -ccontains '--no-tell'
+    $rest = @($rest | Where-Object { $_ -cne '--json' -and $_ -cne '--no-tell' })
+    if ($script:TellJson) { $script:JsonOut = $true }
+}
 if ((@('list', 'ls', 'agents', 'push', 'files', 'used', 'place') -ccontains $cmd -and @($rest) -ccontains '--json') -or (@('collect', 'new') -ccontains $cmd -and @($rest) -ccontains '--look') -or $cmd -ceq 'status') { $script:JsonOut = $true }
 try {
     # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook / --bg take it themselves)
     if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent', 'install-deps', 'place') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
+    if (@('add', 'rm', 'remove', 'sync') -ccontains $cmd) { $script:TellBefore = Tell-Ver }   # (what the tools have before: Tell-After)
     switch ($cmd) {
         'init' { Cmd-Init $rest }
         'sync' {
@@ -8631,7 +8772,7 @@ try {
                         if ($i -ne 0 -or $a.Count -ne 2 -or -not $a[1]) { Die-C 'usage' '用法：kit sync --only <種類>:<名字>' }
                         $ok = $a[1].Split(':', 2); if ($ok.Count -ne 2 -or $ok[0] -cnotin 'rule', 'skill', 'mcp', 'plugin') { Die-C 'usage' 'kit sync --only rule|skill|mcp|plugin:<名字>' }
                         Need-Init; if (-not (Find-Item $ok[0] $ok[1])) { Die-C 'not_found' "找不到 $($a[1])（打 kit list 看有哪些）" }
-                        $script:Only = $a[1]; Cmd-Sync; exit 0 }
+                        $script:Only = $a[1]; Cmd-Sync; Tell-After 'sync'; exit 0 }
                     '--dry-run' { $dry = 'dry' }
                     '--expect' { if ($i + 1 -ge $a.Count -or -not $a[$i + 1]) { Die-C 'usage' "用法：$use" }; $i++; $expect = $a[$i] }
                     default { Die-C 'usage' "用法：$use" }
@@ -8639,10 +8780,11 @@ try {
             }
             if ($dry -and $expect) { Die-C 'usage' '--dry-run 和 --expect 不能一起用' }
             $script:All = $true; Cmd-Sync $dry $expect                # typed: everything to the source's newest
+            Tell-After 'sync'
         }
         { $_ -in 'list', 'ls' } { Cmd-List $rest }
         'hold' { Cmd-Hold $rest }
-        'add' { Cmd-AddRm 'add' $rest }
+        'add' { Cmd-AddRm 'add' $rest; Tell-After 'add' }
         'tools' { Cmd-Tools $rest }
         'install-tool' { Cmd-InstallTool $rest }
         'install-deps' { Cmd-InstallDeps $rest }
@@ -8656,7 +8798,7 @@ try {
         'statusline' { Cmd-Statusline }
         'handoff-hook' { Cmd-HandoffHook }
         'codex-guard' { Cmd-CodexGuard }
-        { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest }
+        { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest; Tell-After 'rm' }
         'run' { Cmd-Run $rest }
         'place' { Cmd-Place $rest }
         'agents' { Cmd-Agents $rest }

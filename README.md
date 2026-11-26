@@ -39,6 +39,7 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
     kit sync --expect <雜湊>       照那份清單改；清單變了（來源更新、你又改了 skill）就什麼都不改
     kit sync --only <種類>:<名字>  只把這一個換成來源最新的（rule、skill、mcp、plugin），別的不動
     kit hold <種類> <名字> [--off]  固定在這台現在用的這一版：連 kit sync 都不換它（--off 取消）
+    kit add|rm|sync … --no-tell   這次不告訴開著的 agent（見下面）
     kit self-update               更新 kit 本身
     kit status --json             這個帳號用哪一版：kit 和每個來源的 commit、核准的 commit（給程式讀）
     kit uninstall [--self]        移除
@@ -61,6 +62,8 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | `~/.omp/agent/hooks/pre/kit.js`（kit 0.6.7 起） |
 
 Codex 自己新增的設定（例如信任某個資料夾的 `[projects."…"]`）會加在 `config.toml` 最後面、落進 kit 那段裡；kit 記得自己上次寫了什麼（`~/.config/agentkit/codex-block.toml`），`kit sync` 時把不是它寫的搬到那段外面，不會洗掉。改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。想先看清楚再動手：`kit sync --dry-run`（或 `kit sync --force --dry-run`）列出每個 skill 會新增、更新、拿掉、跳過、還是先備份再換，不改任何檔案（來源的最新版抓到一份暫存的複本裡看，你這台的來源和 `machine.yaml` 不動，所以規則也不會先換；0.10.0 起），最後印一個雜湊；確定了打 `kit sync --expect <雜湊>`（有 `--force` 就兩次都加）。到時候 kit 重算一次，來源更新了或你又改了某個 skill、清單不一樣了，就什麼都不改（錯誤代碼 `plan-changed`），請你再看一次。只管 skill；rule、MCP 等照常更新。**預設不換**（0.13.0 起）：自動的同步（Claude 開啟時）、`kit add`／`kit rm`、`kit run`、`kit place` 順便做的那次，只裝新加的、拿掉不要的，**這台已經在用的規則、技能、MCP、外掛都不換**，來源改了也一樣；要換：`kit sync --only <種類>:<名字>` 只換那一個，自己打 `kit sync` 全部換。規則和 MCP 由 kit 先存一份在 `~/.config/agentkit/store/`，Claude 的規則也 `@` 這一份（以前直接讀來源裡的檔，來源一改就生效），一台只有一份（帳號和資料夾用同一份）；`kit rm` 再 `kit add` 一個規則或 MCP 會拿來源最新的。`kit hold <種類> <名字>` 把這一版固定住（記在 `state.tsv`），連打 `kit sync` 都不換它、`--dry-run` 寫「固定在這一版」；`--only` 照樣換（換完還是固定）；`kit hold … --off` 取消。`kit run <agent>` 例外：每次開都從來源複製一份新的。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。Codex、omp 也一樣（kit 0.6.7 起）：Codex 是 `~/.codex/hooks.json` 裡同樣的 hook（Codex 第一次看到新的 hook 要你信任：在 Codex 打 `/hooks`；kit 寫進新的或改過的 hook 時先問 Codex，Codex 已經信任就不提，還沒信任才用 `kit pending` 提醒你，你信任之後下一次 `kit sync` 收掉提醒），omp 是 `~/.omp/agent/hooks/pre/kit.js`（kit 寫的檔，第一行有標記；同名的檔是你自己的就不動）。context 快滿時提醒寫 HANDOFF.md 的 hook（`kit handoff-hook`）Codex 也有，數字從它的對話檔讀；omp 還沒有。
+
+**改了之後告訴開著的 agent**（0.14.0 起）：`kit add`、`kit rm`、`kit sync`（自己打的和 Claude 開啟時自動的）改到開著的 agent 用的東西時，kit 自己告訴這台每個開著的 agent（Herdr 的 `hc ls` 列出的；用別的帳號跑的、例如 `sudo -i` 的 root 不算）。哪個工具要做什麼跟 Herdr 的 Kit 面板同一張表：Claude 的外掛、kit-mcp 的 MCP，omp 的技能、外掛、MCP 打 `/reload-plugins`；拿掉的東西、`kit add` 加的規則用一句話告訴它（「kit 剛從整個帳號拿掉技能 x：之後不要再用它」「kit 剛把規則 x 加到整個帳號（這個對話開始時還沒有）：請先讀 …，之後照它做」）；只在對話開始時讀的（Claude 的規則、`~/.claude.json` 的 MCP，Codex 的 MCP、外掛，omp 的規則、有 hook 的外掛）kit 不幫你關，記一筆 `kit pending`（`relaunch`：「要你同意：重開 N 個 agent（…）才讀得到新的…」）等你點頭。`--dir` 的只告訴在那個資料夾（含子資料夾）開的。用 `hc send --queue --key reload` 送：agent 在忙時 Herdr 先留著，它停下來才打進去，同一件事只留一份；這台的 hc 還不認得 `--queue`（舊的 Herdr core）就只送給閒著的（`--if idle`），在忙的寫在輸出裡，要的話自己打。沒有 `hc` 就不送。`--no-tell` 這次不說（例如畫面程式自己送的時候）；`--json` 印出告訴了誰（見「給程式讀的介面」）。
 
 **Claude 沒在存對話紀錄時提醒你**：在另一個 Claude 的終端機裡開的 Claude（例如 Claude 幫你開新視窗）會帶著 `CLAUDE_CODE_CHILD_SESSION=1`，
 這樣它不寫對話紀錄，關掉後 `/resume` 找不回來。kit 的 SessionStart hook（就是上面那個自動同步）每次 Claude 開啟時會看
@@ -453,10 +456,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.16
+    kit api        →  1.19
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.18（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.19（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份；1.19：`kit add|rm|sync` 告訴開著的 agent，`--json` 印出告訴了誰，`--no-tell`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -731,11 +734,22 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - Windows 版的 kit 沒有核准紀錄的功能：`approvals` 和每個 `approved` 一律是 `null`（machine.yaml 有設 `approvals` 時，stderr 會說）。
 - 參數不對（沒有 `--json` 也算）：exit 1，`{"error": {"code": "usage", ...}}`。
 
+### `kit add|rm [--dir 資料夾] <種類> <名字>… --json`、`kit sync … --json`（1.19 起）
+
+做的事跟不加 `--json` 一樣，最後印一行：這次告訴了這台哪些開著的 agent（見「改了之後告訴開著的 agent」）：
+
+    {"kit": "0.14.0", "agents": [{"address": "t3", "tool": "omp", "need": "reload", "sent": false, "queued": true}]}
+
+- `agents`：這次的改動碰得到的每個開著的 agent（Herdr 的位址、`claude`／`codex`／`omp`），沒改到什麼、沒有 `hc`、或加了 `--no-tell` 是 `[]`。
+- `need`：`"reload"`（送 `/reload-plugins` 或一句話）、`"relaunch"`（要重開才讀得到：kit 記了 `kit pending` 的 `relaunch`，不送 `/reload-plugins`；加的規則照樣送那句話）、`"none"`（它自己會看到）。
+- `queued`：Herdr 留著，它停下來就打進去（`hc send --queue`）；`sent`：已經打進去了（舊的 hc：只送給閒著的）。兩個都是 `false` 而 `need` 不是 `"none"`：沒送出（在忙、或 hc 失敗），stderr 有要自己打的字。
+- 畫面程式自己送 `/reload-plugins` 的話加 `--no-tell`，免得送兩次；或改成讀這裡的結果。
+
 ### 動作類指令
 
 這些印給人看的字（不要解析），程式只看 exit code（0＝成功），失敗時把 stdout、stderr 顯示給人看：
 
-    kit add|rm [--dir 資料夾] rule|skill|mcp|plugin <名字>
+    kit add|rm [--dir 資料夾] rule|skill|mcp|plugin <名字>   （要知道告訴了哪些 agent 的話加 --json，見上面）
     kit agent <名字> add|rm rule|skill|mcp <東西>
     kit new rule|skill|mcp|agent <名字> [--to 來源]
     kit new mcp [名字] --config <檔案|-> [--to 來源]
