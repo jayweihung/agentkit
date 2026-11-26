@@ -6816,7 +6816,7 @@ function Sign-Json { # ,"sign": the approvals repo this computer signs with (kit
 }
 # Changes kit push would send, kept in a source for 30 minutes: other machines can't have them. kit list --json (which
 # a screen like the Kit panel asks every few minutes) keeps since when in $Unsent ("name TAB since (ms) TAB reminded
-# until (ms)") and puts a notice in Herdr (hc doc set notice/kit-unsent, the Kit panel's 有改動 30 分鐘還沒送出),
+# until (ms)") and puts a notice in Herdr (hc doc set notice.kit-unsent, the Kit panel's 有改動 30 分鐘還沒送出),
 # again 2 hours later while unsent; an hc without hc doc: nothing. (The same as unix/kit's unsent_step.)
 $script:Unsent = Join-Path $KitConf 'unsent.tsv'
 function Unsent-Step([long]$now, $old, $new) { # NEW's rows reminded when due, written over OLD's
@@ -6827,7 +6827,7 @@ function Unsent-Step([long]$now, $old, $new) { # NEW's rows reminded when due, w
             $m = [long][Math]::Floor(($now - $since) / 60000)
             $j = '{"id":' + (Json-S "${n}:$since") + ',"title":"Kit 來源還沒送出","body":' + (Json-S "${n} 有改動 ${m} 分鐘還沒送出：其他機器拿不到（kit push --to ${n}）") + '}'
             $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; $script:OutputEncoding = $Utf8   # (on stdin, as UTF-8: a Windows command line would lose the quotes; the script's: Windows PowerShell 5.1 does not use a function's own)
-            try { $j | & hc doc set notice/kit-unsent - *> $null; if ($LASTEXITCODE -eq 0) { $until = $now + 7200000 } } finally { $ErrorActionPreference = $eap }
+            try { $j | & hc doc set notice.kit-unsent - *> $null; if ($LASTEXITCODE -eq 0) { $until = $now + 7200000 } } finally { $ErrorActionPreference = $eap }
         }
         $out.Add("$n`t$since`t$until")
     }

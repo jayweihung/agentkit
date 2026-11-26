@@ -4,6 +4,12 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.17.3（2026-11-27）
+
+更新後要做：`kit self-update`（每台）。
+
+- 「有改動 30 分鐘還沒送出」的 Herdr 提醒改叫 `notice.kit-unsent`（原本 `notice/kit-unsent`）。Herdr core 的文件名稱跟終端機名稱同規則、不能有 `/`，舊名字一直寫不進去，提醒從來沒出現；手機 App 已經改看 `notice.<名字>`。
+
 ## 0.17.2（2026-11-27）
 
 更新後要做：Windows 的電腦 `kit self-update`。Mac、Linux 不用。

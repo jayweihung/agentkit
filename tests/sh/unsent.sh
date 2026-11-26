@@ -28,7 +28,7 @@ kit list --json > "$T/l2.json" 2>/dev/null
 check "unsent: changed: dirty_since is when kit first saw it (ms), the same next time (kept in unsent.tsv)" '[ "$s1" -ge "$t0" ] && [ "$s1" -le "$t1" ] && [ "$(src "$T/l2.json")" = "$s1" ] && grep -qx "src-u	$s1	0" "$UN" && [ ! -s "$FH/log" ]'
 old=$((s1 - 31 * 60000)); printf 'src-u\t%s\t0\n' "$old" > "$UN"
 n0=$(( $(date +%s) * 1000 )); kit list --json > "$T/l3.json" 2>/dev/null; now=$(( $(date +%s) * 1000 + 1000 ))
-check "unsent: 30 minutes and more: a notice in Herdr (hc doc set notice/kit-unsent, on stdin), reminded again in 2 hours" 'grep -qx "doc set notice/kit-unsent -" "$FH/log" && mj "$FH/doc" "assert d == {\"id\": \"src-u:$old\", \"title\": \"Kit 來源還沒送出\", \"body\": \"src-u 有改動 31 分鐘還沒送出：其他機器拿不到（kit push --to src-u）\"}, d" && u=$(cut -f 3 "$UN") && [ "$u" -ge $((n0 + 7200000)) ] && [ "$u" -le $((now + 7200000)) ]'
+check "unsent: 30 minutes and more: a notice in Herdr (hc doc set notice.kit-unsent, on stdin), reminded again in 2 hours" 'grep -qx "doc set notice.kit-unsent -" "$FH/log" && mj "$FH/doc" "assert d == {\"id\": \"src-u:$old\", \"title\": \"Kit 來源還沒送出\", \"body\": \"src-u 有改動 31 分鐘還沒送出：其他機器拿不到（kit push --to src-u）\"}, d" && u=$(cut -f 3 "$UN") && [ "$u" -ge $((n0 + 7200000)) ] && [ "$u" -le $((now + 7200000)) ]'
 : > "$FH/log"; kit list --json > /dev/null 2>&1
 check "unsent: within the 2 hours: not again" '[ ! -s "$FH/log" ]'
 printf 'src-u\t%s\t0\n' "$old" > "$UN"; touch "$FH/old"; : > "$FH/log"

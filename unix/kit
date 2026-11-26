@@ -5250,7 +5250,7 @@ EOF
 
 # Changes kit push would send, kept in a source for 30 minutes: other machines can't have them. kit list --json (which
 # a screen like the Kit panel asks every few minutes) keeps since when in $UNSENT ("name TAB since (ms) TAB reminded
-# until (ms)") and puts a notice in Herdr (hc doc set notice/kit-unsent, the Kit panel's 有改動 30 分鐘還沒送出),
+# until (ms)") and puts a notice in Herdr (hc doc set notice.kit-unsent, the Kit panel's 有改動 30 分鐘還沒送出),
 # again 2 hours later while unsent; an hc without hc doc: nothing.
 UNSENT="$KIT_CONF/unsent.tsv"
 unsent_step() { # unsent_step NOW_MS OLD NEW : NEW's rows reminded when due, written over OLD's
@@ -5260,7 +5260,7 @@ unsent_step() { # unsent_step NOW_MS OLD NEW : NEW's rows reminded when due, wri
         if [ $((now - since)) -ge 1800000 ] && [ "$now" -ge "$until" ] && command -v hc >/dev/null 2>&1; then
             m=$(( (now - since) / 60000 ))
             printf '{"id":%s,"title":"Kit 來源還沒送出","body":%s}' "$(json_s "$n:$since")" "$(json_s "${n} 有改動 ${m} 分鐘還沒送出：其他機器拿不到（kit push --to ${n}）")" |
-                hc doc set notice/kit-unsent - >/dev/null 2>&1 && until=$((now + 7200000))   # (on stdin: a Windows command line would lose the quotes)
+                hc doc set notice.kit-unsent - >/dev/null 2>&1 && until=$((now + 7200000))   # (on stdin: a Windows command line would lose the quotes)
         fi
         out="$out$n$TAB$since$TAB$until$LF"
     done <<< "$3"

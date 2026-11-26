@@ -22,7 +22,7 @@ $src = @(($out | ConvertFrom-Json).sources | Where-Object { $_.name -ceq 'src-u'
 Check 'unsent: a source with changes to send: dirty_since (ms), kept in unsent.tsv' { $src.dirty_since -ge $t0 -and (ReadT $UN).StartsWith("src-u`t$($src.dirty_since)`t0") }
 $old = $src.dirty_since - 31 * 60000; W $UN "src-u`t$old`t0`n"
 KitJ list --json
-Check 'unsent: 30 minutes and more: hc doc set notice/kit-unsent, as the Kit panel words it' {
+Check 'unsent: 30 minutes and more: hc doc set notice.kit-unsent, as the Kit panel words it' {
     $d = (ReadT "$FH/doc") | ConvertFrom-Json
     $d.id -ceq "src-u:$old" -and $d.title -ceq 'Kit 來源還沒送出' -and $d.body -ceq 'src-u 有改動 31 分鐘還沒送出：其他機器拿不到（kit push --to src-u）' -and [long]((ReadT $UN).Trim().Split("`t")[2]) -gt $old }
 } finally { Done }
