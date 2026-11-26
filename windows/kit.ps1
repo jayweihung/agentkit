@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.19'
+$script:KitApi = '1.20'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -6796,18 +6796,46 @@ function Sign-Json { # ,"sign": the approvals repo this computer signs with (kit
     $sj = if ("$serial" -match '^[0-9]+$') { [string][long]$serial } else { 'null' }
     ",`n  `"sign`": {`"approvals`": $(Json-S $d), `"serial`": $sj, `"approved`": [$($ap.ToArray() -join ', ')]}"
 }
+# Changes kit push would send, kept in a source for 30 minutes: other machines can't have them. kit list --json (which
+# a screen like the Kit panel asks every few minutes) keeps since when in $Unsent ("name TAB since (ms) TAB reminded
+# until (ms)") and puts a notice in Herdr (hc doc set notice/kit-unsent, the Kit panel's 有改動 30 分鐘還沒送出),
+# again 2 hours later while unsent; an hc without hc doc: nothing. (The same as unix/kit's unsent_step.)
+$script:Unsent = Join-Path $KitConf 'unsent.tsv'
+function Unsent-Step([long]$now, $old, $new) { # NEW's rows reminded when due, written over OLD's
+    $out = New-List
+    foreach ($r in $new) {
+        $f = $r.Split("`t"); $n = $f[0]; $since = [long]$f[1]; $until = [long]$f[2]
+        if ($now - $since -ge 1800000 -and $now -ge $until -and (Has-Command 'hc')) {
+            $m = [long][Math]::Floor(($now - $since) / 60000)
+            $j = '{"id":' + (Json-S "${n}:$since") + ',"title":"Kit 來源還沒送出","body":' + (Json-S "${n} 有改動 ${m} 分鐘還沒送出：其他機器拿不到（kit push --to ${n}）") + '}'
+            $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; $OutputEncoding = $Utf8   # (on stdin, as UTF-8: a Windows command line would lose the quotes)
+            try { $j | & hc doc set notice/kit-unsent - *> $null; if ($LASTEXITCODE -eq 0) { $until = $now + 7200000 } } finally { $ErrorActionPreference = $eap }
+        }
+        $out.Add("$n`t$since`t$until")
+    }
+    if (($out -join "`n") -ceq (@($old) -join "`n")) { return }
+    if ($out.Count -eq 0) { Remove-Item -LiteralPath $Unsent -Force -ErrorAction SilentlyContinue; return }
+    Ensure-Dir $KitConf; $t = Temp-Next $Unsent; Write-Text $t (($out -join "`n") + "`n"); Move-Over $t $Unsent
+}
 function Cmd-ListJson([string]$hereDir = '', [string]$herePid = '', [string]$hereTool = '') { # what kit list shows, as JSON for programs (a screen like a kit panel); unix/kit prints the same
     $want = Wanted; $req = Kit-Items 'required'
     $vc = Ver-Prep $hereDir $herePid $hereTool $want
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("{`n  `"kit`": $(Json-S $KitVersion),`n  `"sources`": [")
     $first = $true; $chg = @{}
+    $nowMs = (Unix-Now) * 1000; $unOld = @(if (Test-Path -LiteralPath $Unsent) { (Read-Text $Unsent) -split "`n" | Where-Object { $_ } }); $unNew = New-List
     foreach ($s in @(M-Sources)) {
         if (-not $s) { continue }
         if (-not $first) { [void]$sb.Append(',') }; $first = $false
         $d = Src-Dir $s; $sf = @(Send-Files $d); $chg[$d] = $sf      # what kit push would send from it
-        [void]$sb.Append("`n    {`"name`": $(Json-S (Src-Name $s)), `"source`": $(Json-S (Url-Safe $s)), `"dir`": $(Json-S $d), `"push`": $(Json-S (Push-Mode $d)), `"changed`": $(Json-Arr $sf)}")
+        $n = Src-Name $s; $since = 'null'
+        if ($sf.Count) {                                         # since when (first seen by a kit list --json), and reminded until
+            $o = @($unOld | Where-Object { $_.StartsWith("$n`t", $Ord) } | Select-Object -First 1)
+            $row = if ($o.Count) { $o[0] } else { "$n`t$nowMs`t0" }; $unNew.Add($row); $since = $row.Split("`t")[1]
+        }
+        [void]$sb.Append("`n    {`"name`": $(Json-S $n), `"source`": $(Json-S (Url-Safe $s)), `"dir`": $(Json-S $d), `"push`": $(Json-S (Push-Mode $d)), `"changed`": $(Json-Arr $sf), `"dirty_since`": $since}")
     }
+    Unsent-Step $nowMs $unOld $unNew
     $tools = '"claude"'; if (Has-Codex) { $tools += ', "codex"' }; if (Has-Omp) { $tools += ', "omp"' }
     # claude_mcp (api 1.15): kit.ps1 keeps Claude's MCP in ~/.claude.json (no kit-mcp plugin yet), so a change needs a restart
     [void]$sb.Append("`n  ],`n  `"tools`": [$tools],`n  `"claude_mcp`": `"config`",`n  `"items`": [")

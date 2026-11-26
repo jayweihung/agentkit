@@ -456,10 +456,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.19
+    kit api        →  1.20
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.19（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份；1.19：`kit add|rm|sync` 告訴開著的 agent，`--json` 印出告訴了誰，`--no-tell`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.20（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份；1.19：`kit add|rm|sync` 告訴開著的 agent，`--json` 印出告訴了誰，`--no-tell`；1.20：`kit list --json` 的 `sources[].dirty_since`，有改動 30 分鐘還沒送出時在 Herdr 提醒）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -514,7 +514,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
     {
       "kit": "0.4.0",
       "sources": [
-        {"name": "team", "source": "<網址或資料夾>", "dir": "<clone 的資料夾>", "push": "pr", "changed": ["rules/a.md", "skills/b/SKILL.md"]}],
+        {"name": "team", "source": "<網址或資料夾>", "dir": "<clone 的資料夾>", "push": "pr", "changed": ["rules/a.md", "skills/b/SKILL.md"], "dirty_since": 1795690000000}],
       "tools": ["claude", "codex", "omp"],
       "items": [
         {"kind": "skill", "name": "b", "status": "used", "new": false, "changed": true, "source": "team", "description": "…", "path": "<檔案>",
@@ -523,7 +523,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
       "kit_version_wanted": ""
     }
 
-- `sources[].push`：`pr`（送出要開 PR）或 `direct`（直接推）。`sources[].changed`：`kit push --to <name>` 會送的檔案（相對來源資料夾，`/` 分隔；改過的 rule、skill、mcp、agent、外掛、`third_party.lock`、`descriptions-zh.txt`，加上只改了 `collect_sources` 的 `kit.yaml`）；沒有就是 `[]`，不是 git repo 也是 `[]`。
+- `sources[].push`：`pr`（送出要開 PR）或 `direct`（直接推）。`sources[].changed`：`kit push --to <name>` 會送的檔案（相對來源資料夾，`/` 分隔；改過的 rule、skill、mcp、agent、外掛、`third_party.lock`、`descriptions-zh.txt`，加上只改了 `collect_sources` 的 `kit.yaml`）；沒有就是 `[]`，不是 git repo 也是 `[]`。`sources[].dirty_since`（1.20 起）：`changed` 不是 `[]` 時，kit 第一次看到它有東西要送的時間（1970 起的毫秒，記在 `~/.config/agentkit/unsent.tsv`，下次照樣是同一個值）；送完（`changed` 變回 `[]`）是 `null`，kit 也忘掉它。同一次 `kit list --json` 也提醒：有改動 30 分鐘還沒送出、2 小時內沒提醒過，就在 Herdr 寫一份提醒（`hc doc set notice/kit-unsent`：`{"id": "<來源>:<dirty_since>", "title": "Kit 來源還沒送出", "body": "<來源> 有改動 N 分鐘還沒送出：其他機器拿不到（kit push --to <來源>）"}`）；這台的 hc 沒有 `doc`（舊的 Herdr core）或沒有 hc 就不提醒，下次再試。
 - `claude_mcp`（1.15 起）：一定有。這個帳號的 Claude 怎麼拿到 kit 的 MCP：`"plugin"`（kit 的外掛 `kit-mcp`：改了打 `/reload-plugins` 就生效）或 `"config"`（寫在 `~/.claude.json`：沒裝 Claude、Claude 太舊、或裝外掛失敗；改了要重開 Claude）。畫面程式照它選 reload 還是重開。Windows 的 kit（kit.ps1）還沒做 `kit-mcp`，一律是 `"config"`。
 - `items[].kind`：`rule`、`skill`、`mcp`、`agent`、`plugin`（1.9 起）。`description`：skill、agent 是 frontmatter 的、mcp 是 yaml 的 `description:`、外掛是 `plugin.json` 的、規則是檔案第一行 `# ` 標題（1.9 起）。`description_zh`（1.9 起）：有人用 `kit describe` 寫了這個說明的中文版才有，畫面程式優先顯示它（見「中文說明」）。`status`：`required`（團隊必備）、`used`、`unused`、`agent`。`new`：還沒在 `kit list` 看過。`changed`：`kit push` 會送它（skill：它資料夾裡任何一個檔案）。
 - `needs` 只有 skill、mcp 和外掛有（外掛的是它的 hook 要跑的程式），`packages` 只有 skill 和 mcp 有。skill 的 `packages` 沒有要裝的就不出現，見「skill 需要的程式」。

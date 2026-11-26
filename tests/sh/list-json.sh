@@ -7,7 +7,7 @@ mkdir -p "$TEAM/skills/team-build"; printf -- '---\nname: team-build\ndescriptio
 mkdir -p "$TEAM/skills/quote"; printf -- '---\nname: quote\ndescription: 中文 "引號" \\ 和\ttab\n---\nx\n' > "$TEAM/skills/quote/SKILL.md"
 kit list --json > "$T/list.json" 2>&1; rc=$?
 check "list --json: exit 0, valid JSON" '[ $rc -eq 0 ] && LC_ALL=C awk -f "$JA" "$T/list.json" > /dev/null'
-check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"$(cat "$HERE/../VERSION")\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\", \"push\": \"pr\", \"changed\": []}" "$T/list.json"'
+check "list --json: version and source" '[ "$(jget "$T/list.json" kit)" = "\"$(cat "$HERE/../VERSION")\"" ] && grep -qF "{\"name\": \"team\", \"source\": \"$TEAM\", \"dir\": \"$TEAM\", \"push\": \"pr\", \"changed\": [], \"dirty_since\": null}" "$T/list.json"'
 check "list --json: required, used, unused" 'grep -qF "{\"kind\": \"rule\", \"name\": \"security\", \"status\": \"required\", \"new\": false, \"changed\": false, \"source\": \"team\", \"description\": \"\", \"path\": " "$T/list.json" &&
     grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"changed\": false, \"source\": \"team\", \"description\": \"review a change\", \"path\": " "$T/list.json" &&
     grep -qF "{\"kind\": \"skill\", \"name\": \"gerrit-workflow\", \"status\": \"unused\", \"new\": false, \"changed\": false, \"source\": \"third-party\", \"description\": \"upstream\", \"path\": " "$T/list.json"'
@@ -74,7 +74,7 @@ if [ -n "$PWSH" ]; then
 fi
 echo more >>"$TEAM/skills/quote/SKILL.md"; echo x > "$TEAM/skills/gerrit-review/notes.md"; echo y >> "$TEAM/rules/security.md"; echo z > "$TEAM/README.md"
 kit list --json > "$T/list-chg.json" 2>/dev/null
-check "list --json: changed files of a source (only what kit push sends)" 'grep -qF "\"push\": \"pr\", \"changed\": [\"rules/security.md\", \"skills/quote/SKILL.md\", \"skills/gerrit-review/notes.md\"]}" "$T/list-chg.json"'
+check "list --json: changed files of a source (only what kit push sends)" 'grep -qF "\"push\": \"pr\", \"changed\": [\"rules/security.md\", \"skills/quote/SKILL.md\", \"skills/gerrit-review/notes.md\"], \"dirty_since\": " "$T/list-chg.json"'
 check "list --json: changed items (a skill by any file in its folder), the rest not" 'grep -qF "\"name\": \"security\", \"status\": \"required\", \"new\": false, \"changed\": true," "$T/list-chg.json" &&
     grep -qF "\"name\": \"quote\", \"status\": \"unused\", \"new\": true, \"changed\": true," "$T/list-chg.json" &&
     grep -qF "\"name\": \"gerrit-review\", \"status\": \"used\", \"new\": false, \"changed\": true," "$T/list-chg.json" &&

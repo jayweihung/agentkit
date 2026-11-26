@@ -9,7 +9,7 @@ Kit list --json; $lj = $out; $ljrc = $rc
 W "$T/list.json" "$lj`n"
 $teamJ = (Resolve-Path -LiteralPath $TEAM).ProviderPath.Replace('\', '\\')
 Check 'list --json: exit 0, valid JSON' { $ljrc -eq 0 -and $null -ne (JGet "$T/list.json" 'kit') }
-Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq ('"' + $KitVer + '"') -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`", `"push`": `"pr`", `"changed`": []}") }
+Check 'list --json: version and source' { (JGet "$T/list.json" 'kit') -eq ('"' + $KitVer + '"') -and $lj.Contains("{`"name`": `"team`", `"source`": `"$teamJ`", `"dir`": `"$teamJ`", `"push`": `"pr`", `"changed`": [], `"dirty_since`": null}") }
 Check 'list --json: required, used, unused' {
     $lj.Contains('{"kind": "rule", "name": "security", "status": "required", "new": false, "changed": false, "source": "team", "description": "", "path": ') -and
     $lj.Contains('{"kind": "skill", "name": "gerrit-review", "status": "used", "new": false, "changed": false, "source": "team", "description": "review a change", "path": ') -and

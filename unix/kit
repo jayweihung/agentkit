@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.19
+KIT_API=1.20
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -5169,15 +5169,24 @@ cmd_list_json() { # what kit list shows, as JSON for programs (a screen like a k
     ver_list_prep
     printf '{\n  "kit": %s,\n  "sources": [' "$(json_s "$KIT_VERSION")"
     first=1
+    local un_old="" un_new="" now_ms since; now_ms=$(( $(date +%s) * 1000 ))
+    [ -f "$UNSENT" ] && un_old=$(cat "$UNSENT")
     while IFS= read -r s; do
         [ -n "$s" ] || continue
         [ $first = 1 ] || printf ','; first=0
         d=$(src_dir "$s"); sf=$(cd "$d" 2>/dev/null && send_files)    # what kit push would send from it
         [ -z "$sf" ] || while IFS= read -r f; do chg="$chg$TAB$d/$f$LF"; done <<< "$sf"
-        printf '\n    {"name": %s, "source": %s, "dir": %s, "push": %s, "changed": %s}' "$(json_s "$(src_name "$s")")" "$(json_s "$(url_safe "$s")")" "$(json_s "$d")" "$(json_s "$(push_mode "$d")")" "$(printf '%s\n' "$sf" | json_arr)"
+        n=$(src_name "$s"); since=null
+        if [ -n "$sf" ]; then                                # since when (first seen by a kit list --json), and reminded until
+            since=$(printf '%s\n' "$un_old" | awk -F'\t' -v n="$n" '$1 == n { print $2 "\t" $3; exit }')
+            [ -n "$since" ] || since="$now_ms${TAB}0"
+            un_new="$un_new$n$TAB$since$LF"; since=${since%%"$TAB"*}
+        fi
+        printf '\n    {"name": %s, "source": %s, "dir": %s, "push": %s, "changed": %s, "dirty_since": %s}' "$(json_s "$n")" "$(json_s "$(url_safe "$s")")" "$(json_s "$d")" "$(json_s "$(push_mode "$d")")" "$(printf '%s\n' "$sf" | json_arr)" "$since"
     done <<EOF
 $(m_sources)
 EOF
+    unsent_step "$now_ms" "$un_old" "$un_new"
     tools='"claude"'; has_codex && tools="$tools, \"codex\""; has_omp && tools="$tools, \"omp\""
     # how Claude gets kit's MCP: plugin (kit-mcp: /reload-plugins brings a change), config (~/.claude.json: a restart)
     local cm; cm=$(state_get claude_mcp account); [ -n "$cm" ] || cm=config   # (kit sync writes it: no claude run here)
@@ -5237,6 +5246,26 @@ EOF
     sign_json
     [ -n "${HERE_DIR:-}" ] && here_json "$HERE_DIR" "${HERE_PID:-}"
     printf '\n}\n'
+}
+
+# Changes kit push would send, kept in a source for 30 minutes: other machines can't have them. kit list --json (which
+# a screen like the Kit panel asks every few minutes) keeps since when in $UNSENT ("name TAB since (ms) TAB reminded
+# until (ms)") and puts a notice in Herdr (hc doc set notice/kit-unsent, the Kit panel's 有改動 30 分鐘還沒送出),
+# again 2 hours later while unsent; an hc without hc doc: nothing.
+UNSENT="$KIT_CONF/unsent.tsv"
+unsent_step() { # unsent_step NOW_MS OLD NEW : NEW's rows reminded when due, written over OLD's
+    local now=$1 n since until m out=""
+    while IFS="$TAB" read -r n since until; do
+        [ -n "$n" ] || continue
+        if [ $((now - since)) -ge 1800000 ] && [ "$now" -ge "$until" ] && command -v hc >/dev/null 2>&1; then
+            m=$(( (now - since) / 60000 ))
+            printf '{"id":%s,"title":"Kit 來源還沒送出","body":%s}' "$(json_s "$n:$since")" "$(json_s "${n} 有改動 ${m} 分鐘還沒送出：其他機器拿不到（kit push --to ${n}）")" |
+                hc doc set notice/kit-unsent - >/dev/null 2>&1 && until=$((now + 7200000))   # (on stdin: a Windows command line would lose the quotes)
+        fi
+        out="$out$n$TAB$since$TAB$until$LF"
+    done <<< "$3"
+    [ "$out" = "${2:+$2$LF}" ] && return 0
+    if [ -z "$out" ]; then rm -f "$UNSENT"; else printf '%s' "$out" > "$UNSENT.$$" && mv -f "$UNSENT.$$" "$UNSENT" || rm -f "$UNSENT.$$"; fi
 }
 
 cmd_list() {

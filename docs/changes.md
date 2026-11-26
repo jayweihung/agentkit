@@ -4,6 +4,13 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.15.0（2026-11-26）
+
+更新後要做：每台 `kit self-update`（Windows 也要）。Herdr core 有 `hc doc` 的版本才看得到提醒。
+
+- `kit list --json` 的來源多了 `dirty_since`：kit 第一次看到這個來源有東西要送（`changed` 不是空的）的時間（毫秒），記在 `~/.config/agentkit/unsent.tsv`，跨次執行都一樣；送完是 `null`（kit api 1.20）。
+- 有改動 30 分鐘還沒送出時，`kit list --json` 順便在 Herdr 寫一份提醒（`hc doc set notice/kit-unsent`：「Kit 來源還沒送出」「<來源> 有改動 N 分鐘還沒送出：其他機器拿不到（kit push --to <來源>）」），2 小時後還沒送再提醒一次。以前只有 Kit 面板開著時才提醒，手機、沒開面板的時候都不會。hc 沒有 `doc`（舊的 Herdr core）就不提醒。
+
 ## 0.14.0（2026-11-26）
 
 更新後要做：每台跑 agent 的電腦 `kit self-update`（Windows 也要）。Herdr core 有 `hc send --queue` 的版本，在忙的 agent 才會排隊收到；舊的只送給閒著的。
