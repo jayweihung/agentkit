@@ -49,6 +49,9 @@ $script:Quiet = $false
 $script:Force = $false
 $script:LogPath = $null
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+# a console in UTF-8 (chcp 65001): Windows PowerShell's .NET puts a BOM on the stdin of every program kit starts (git
+# hash-object --stdin-paths then misses the first file); the same code page, without the BOM
+try { if ([Console]::InputEncoding.CodePage -eq 65001) { [Console]::InputEncoding = $Utf8 } } catch { }
 
 # ---------- small helpers ----------
 # With --json (list, agents, push, files) or collect --look, stdout carries only JSON: kit's words go to stderr, and a stop is
@@ -604,9 +607,10 @@ function Ssh-Keygen($a, [string]$in) { # ssh-keygen ARGS with file IN on its std
     $c = @(Get-Command ssh-keygen -CommandType Application -ErrorAction SilentlyContinue); if ($c.Count -eq 0) { return @(-1, '') }
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = [string]$c[0].Path; $psi.Arguments = (@(foreach ($x in $a) { Ctx-Arg "$x" }) -join ' ')
-    $win = $in -and $script:OnWindows
-    if ($win) {   # the file itself through cmd's <: Windows' ssh-keygen (Win32-OpenSSH 9.5) misreads data from a pipe ("incorrect signature")
-        $psi.Arguments = '/d /s /c ""' + $psi.FileName + '" ' + $psi.Arguments + ' < "' + $in + '""'; $psi.FileName = $env:ComSpec
+    $win = $script:OnWindows
+    if ($win) {   # through cmd: the file itself with < (Windows' ssh-keygen, Win32-OpenSSH 9.5, misreads data from a pipe: "incorrect
+        # signature"), what it says on stderr to NUL (written to a pipe, as when a signature is wrong, it can wait there for minutes)
+        $psi.Arguments = '/d /s /c ""' + $psi.FileName + '" ' + $psi.Arguments + ' < "' + $(if ($in) { $in } else { 'NUL' }) + '" 2>NUL"'; $psi.FileName = $env:ComSpec
     }
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
     $psi.RedirectStandardInput = -not $win; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
@@ -4446,7 +4450,18 @@ function Ctx-Arg([string]$a) { # one argument on a command line (Windows rules; 
 function Ctx-Kill($p) { # the process and what it started
     try {
         if ($p.HasExited) { return }
-        if ($OnWindows) { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null; return }
+        if ($OnWindows -and [IntPtr]::Size -ne 8) { & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null; return }   # (Win-Peb reads 64-bit only)
+        if ($OnWindows) {   # not taskkill /T: it asks WMI, which an account without it (a service's, no desktop) is refused, and kills nothing
+            $up = @{}   # each process's parent (Win-Peb) and start; one started before its "parent" is not its child (a reused pid)
+            foreach ($x in @(Get-Process)) { try { $s = $x.StartTime; $q = Win-Peb $x.Id $false; if ($q) { $up[$x.Id] = @($q, $s) } } catch { } }
+            $tree = New-List 'int'; $tree.Add($p.Id)
+            for ($i = 0; $i -lt $tree.Count; $i++) {
+                $t = $up[$tree[$i]]; if (-not $t) { continue }
+                foreach ($k in $up.Keys) { if ($up[$k][0] -eq $tree[$i] -and $up[$k][1] -ge $t[1] -and -not $tree.Contains($k)) { $tree.Add($k) } }
+            }
+            foreach ($k in $tree) { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue }
+            return
+        }
         if ($p.GetType().GetMethod('Kill', [Type[]]@([bool]))) { $p.Kill($true) } else { $p.Kill() }
     } catch { }
 }
@@ -5876,12 +5891,6 @@ function Item-File([string]$k, [string]$n) { # a rule's or MCP's file the tools 
     }
     $s
 }
-function File-Blob8([string]$f) { # git hash-object of the file (no filters), its first 8
-    $b = [IO.File]::ReadAllBytes($f); $h = [Text.Encoding]::ASCII.GetBytes("blob $($b.Length)`0")
-    $sha = [Security.Cryptography.SHA1]::Create()
-    try { [void]$sha.TransformBlock($h, 0, $h.Length, $null, 0); [void]$sha.TransformFinalBlock($b, 0, $b.Length); $x = $sha.Hash } finally { $sha.Dispose() }
-    [BitConverter]::ToString($x, 0, 4).Replace('-', '').ToLowerInvariant()
-}
 function Cmd-Hold($a) { # kit hold KIND NAME [--off]
     $a = @($a | Where-Object { $null -ne $_ }); $use = '用法：kit hold rule|skill|mcp|plugin <名字> [--off]'
     if (-not ($a.Count -eq 2 -or ($a.Count -eq 3 -and $a[2] -ceq '--off')) -or -not $a[1]) { Die-C 'usage' $use }
@@ -6648,9 +6657,11 @@ function Ver-Record { # after kit wrote the tools' files: the "ver" lines of sta
     }
     $first = $old.Count -eq 0
     $w = (Ver-All)[1]; $now = [string](Unix-Now); $done = New-Dict 'int'
-    foreach ($k in 'rule', 'mcp') {                           # rules, MCP: what kit's copy is
+    foreach ($k in 'rule', 'mcp') {                           # rules, MCP: what kit's copy is, as git hashes it (core.autocrlf: without CR, like the source's id)
         $sd = Join-Path $script:StoreDir $(if ($k -ceq 'rule') { 'rules' } else { $k }); if (-not (Test-Path -LiteralPath $sd -PathType Container)) { continue }
-        foreach ($x in @(Get-ChildItem -LiteralPath $sd -File -Filter $(if ($k -ceq 'rule') { '*.md' } else { '*.yaml' }))) { $w["${k}:$([IO.Path]::GetFileNameWithoutExtension($x.Name))"] = @('', (File-Blob8 $x.FullName)) }
+        $fs = @(Get-ChildItem -LiteralPath $sd -File -Filter $(if ($k -ceq 'rule') { '*.md' } else { '*.yaml' })); if ($fs.Count -eq 0) { continue }
+        $hs = @(Git-In $sd @('hash-object', '--stdin-paths') (($fs | ForEach-Object { "$($_.Name)`n" }) -join '')); if ($hs.Count -ne $fs.Count) { continue }
+        for ($j = 0; $j -lt $fs.Count; $j++) { $w["${k}:$([IO.Path]::GetFileNameWithoutExtension($fs[$j].Name))"] = @('', $hs[$j].Trim().Substring(0, 8)) }
     }
     foreach ($t in (Ver-Targets)) {
         $key = $t[0] + "`t" + $t[1]; if ($done.ContainsKey($key)) { continue }; $done[$key] = 1
@@ -6815,7 +6826,7 @@ function Unsent-Step([long]$now, $old, $new) { # NEW's rows reminded when due, w
         if ($now - $since -ge 1800000 -and $now -ge $until -and (Has-Command 'hc')) {
             $m = [long][Math]::Floor(($now - $since) / 60000)
             $j = '{"id":' + (Json-S "${n}:$since") + ',"title":"Kit 來源還沒送出","body":' + (Json-S "${n} 有改動 ${m} 分鐘還沒送出：其他機器拿不到（kit push --to ${n}）") + '}'
-            $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; $OutputEncoding = $Utf8   # (on stdin, as UTF-8: a Windows command line would lose the quotes)
+            $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; $script:OutputEncoding = $Utf8   # (on stdin, as UTF-8: a Windows command line would lose the quotes; the script's: Windows PowerShell 5.1 does not use a function's own)
             try { $j | & hc doc set notice/kit-unsent - *> $null; if ($LASTEXITCODE -eq 0) { $until = $now + 7200000 } } finally { $ErrorActionPreference = $eap }
         }
         $out.Add("$n`t$since`t$until")

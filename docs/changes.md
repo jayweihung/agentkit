@@ -4,6 +4,15 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.17.2（2026-11-27）
+
+更新後要做：Windows 的電腦 `kit self-update`。Mac、Linux 不用。
+
+- Windows：主控台是 UTF-8 時（`chcp 65001`，或 Windows 設定開了「使用 Unicode UTF-8」），kit 交給 git 的檔案清單前面多了 BOM，第一個檔找不到：不是 git repo 的來源算不出版本，`kit add|rm|sync` 也沒告訴開著的 agent。
+- Windows：git 設了 `core.autocrlf=true`（Git for Windows 的預設）時，規則和 MCP 的 `installed` 照 CRLF 的檔案算，跟 `version` 永遠對不上（一直像「這台還沒同步」）。現在跟 unix/kit 一樣用 `git hash-object` 算。
+- Windows：「有改動 30 分鐘還沒送出」的 Herdr 提醒，中文變成問號。
+- Windows：kit 等太久要停掉的程式（問 Claude 的 context、檢查簽章的 ssh-keygen、Codex）在不能問 WMI 的帳號停不掉（`taskkill /T` 要問 WMI），現在不問 WMI。簽章不對時 ssh-keygen 會卡好幾分鐘（錯誤訊息寫進 pipe 時卡住），現在它的錯誤訊息直接丟掉。
+
 ## 0.17.1（2026-11-27）
 
 更新後要做：Windows 的電腦 `kit self-update`。Mac、Linux 不用。
