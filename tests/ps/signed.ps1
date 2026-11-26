@@ -8,7 +8,9 @@ function SshK([string]$a) { # ssh-keygen with that command line (an empty "" sta
     $c = @(Get-Command ssh-keygen -CommandType Application -ErrorAction SilentlyContinue); if ($c.Count -eq 0) { return 1 }
     $psi = New-Object Diagnostics.ProcessStartInfo ([string]$c[0].Path), $a
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-    $p = [Diagnostics.Process]::Start($psi); $p.StandardInput.Close(); $e = $p.StandardError.ReadToEndAsync(); [void]$p.StandardOutput.ReadToEnd(); $p.WaitForExit(); [void]$e.Result; $p.ExitCode
+    $p = [Diagnostics.Process]::Start($psi); $p.StandardInput.Close(); $e = $p.StandardError.ReadToEndAsync(); $o = $p.StandardOutput.ReadToEndAsync()
+    # no desktop (Session 0): ssh-keygen can wait for a console that is not there; like kit.ps1, 30 s and it counts as missing
+    if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch { }; return 1 }; $p.WaitForExit(); [void]$e.Result; [void]$o.Result; $p.ExitCode
 }
 function ApprSign([string]$dir, [string]$key, [string]$text) { # approved.txt with TEXT, signed by KEY (what kit approve writes)
     W "$dir/approved.txt" $text; Remove-Item -LiteralPath "$dir/approved.txt.sig" -Force -ErrorAction SilentlyContinue
