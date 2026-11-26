@@ -95,7 +95,7 @@ Check 'install-deps, dry run: only says the command' { $out.Contains('執行 npm
 $S7 = Join-Path $H '.config/agentkit/deps/packed'; $C7 = Join-Path $H '.claude/skills/packed'
 Kit install-deps packed
 Check 'install-deps: npm ci in a new folder next to kit''s, not the source, without the skill''s .npmrc' { $rc -eq 0 -and (ReadT "$T/npm7.log").Trim().Replace('\', '/') -match '\.config/agentkit/deps/packed\.new\.[a-z0-9]+ ci --ignore-scripts --omit=dev --no-audit --no-fund$' -and (Test-Path "$S7/node_modules/left-pad/index.js") -and -not (Test-Path "$NT/skills/packed/node_modules") -and -not (Test-Path "$S7/.npmrc") -and @(Get-ChildItem -LiteralPath (Split-Path -Parent $S7) -Filter 'packed.new.*').Count -eq 0 }
-Check 'install-deps: the copy kit put gets node_modules linked to it' { (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType -and (Test-Path "$C7/node_modules/left-pad/index.js") }
+Check 'install-deps: the copy kit put gets node_modules linked to it' { (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType -and (-not (Links-Follow) -or (Test-Path "$C7/node_modules/left-pad/index.js")) }
 Kit list --json
 Check 'packages: installed now' { (PkOf 'packed') -eq '{"kind": "npm", "ok": true, "had": true, "install": "npm ci --ignore-scripts --omit=dev --no-audit --no-fund", "bad": ""}' }
 Kit sync
@@ -108,7 +108,8 @@ Check 'run, dry run: the agent''s folder to look at, without kit''s links' { (Te
 Remove-Item -LiteralPath $rt -Recurse -Force
 $SR = Join-Path ([IO.Path]::GetTempPath()) "kit-run.kittest$PID"; [void](New-Item -ItemType Directory -Force -Path "$SR/x"); W "$SR/.kit-pid" "999999`n"
 [void](New-Item -ItemType $(if ($OnWindows) { 'Junction' } else { 'SymbolicLink' }) -Path "$SR/x/node_modules" -Target "$S7/node_modules")
-if ($OnWindows) { W "$FB7/claude.cmd" "@echo off`r`necho %*> `"$T\claude.args`"`r`nif not exist `"%2\.claude\skills\packed\node_modules\left-pad`" exit /b 4`r`nexit /b 3`r`n" }
+# (the link itself, as -L: dir /aL lists it without going through it, which RedirectionGuard may refuse: Links-Follow)
+if ($OnWindows) { W "$FB7/claude.cmd" "@echo off`r`necho %*> `"$T\claude.args`"`r`ndir /b /aL `"%2\.claude\skills\packed`" 2>nul | findstr /x /c:node_modules >nul || exit /b 4`r`nexit /b 3`r`n" }
 else { W "$FB7/claude" "#!/bin/sh`necho `"`$*`" > '$T/claude.args'`n[ -L `"`$2/.claude/skills/packed/node_modules`" ] || exit 4`nexit 3`n"; & chmod +x "$FB7/claude" }
 Kit run packer
 $rt = ([regex]::Match((ReadT "$T/claude.args"), '--add-dir (\S+)')).Groups[1].Value.Trim('"')

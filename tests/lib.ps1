@@ -40,6 +40,12 @@ function JGet([string]$file, [string]$path) {
     if ($LASTEXITCODE -ne 0) { return $null }; $o
 }
 function Flat([string]$s) { if ($null -eq $s) { return $null }; ($s -replace '\s', '') }
+function Links-Follow { # a junction this account makes can be followed: not in a process from Windows' OpenSSH server, whose
+    # RedirectionGuard refuses one a non-admin made ("untrusted mount point"); elsewhere always
+    if (-not $OnWindows) { return $true }
+    $l = Join-Path $T 'link-probe'; if (Test-Path -LiteralPath "$l.t") { return Test-Path -LiteralPath "$l/x" }
+    W "$l.t/x" "x`n"; try { [void](New-Item -ItemType Junction -Path $l -Target "$l.t" -ErrorAction Stop); Test-Path -LiteralPath "$l/x" } catch { $false }
+}
 function SameBytes([string]$a, [string]$b) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($a)) -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes($b)) }
 
 foreach ($v in 'CLAUDE_CONFIG_DIR', 'AGENTKIT_CONFIG', 'AGENTKIT_SOURCES', 'CODEX_HOME', 'PI_CODING_AGENT_DIR', 'KIT_DRY_RUN') { Remove-Item "env:$v" -ErrorAction SilentlyContinue }

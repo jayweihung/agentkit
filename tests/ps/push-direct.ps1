@@ -68,6 +68,8 @@ Check "push direct: a commit hook refusing: its words shown, nothing committed o
 Remove-Item -Force "$DW/.git/hooks/pre-commit"
 
 # ---------- a source set up through a link (on macOS /tmp is really /private/tmp; on Windows a junction): still one source ----------
+if (-not (Links-Follow)) { [Console]::WriteLine('skipped: a source through a link (a junction made here cannot be followed: RedirectionGuard)') }
+else {
 $hSave = $H; Set-Home (Join-Path $T 'home-linked')
 $LK = Join-Path $T 'pd-link'; [void](New-Item -ItemType $(if ($OnWindows) { 'Junction' } else { 'SymbolicLink' }) -Path $LK -Target $D)
 $LW = Join-Path $LK 'work'
@@ -103,6 +105,7 @@ Kit update rule linked --from "$T/linked.md" --to $LW
 Check 'upgrade: kit update finds what kit new remembered under the link' { (ReadT $LS).Contains("from`trule:linked@$LW`t") -and $rc -eq 0 -and (ReadT "$DW/rules/linked.md").Contains('Linked, newer') }
 Remove-Item -Force "$DW/rules/linked.md"
 Set-Home $hSave
+}
 Pop-Location
 
 } finally { Done }
