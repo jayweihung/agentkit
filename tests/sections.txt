@@ -92,3 +92,4 @@ hold dry-run : unix/kit:is_held unix/kit:cmd_hold unix/kit:cmd_sync_only windows
 tell : unix/kit:tell_ver unix/kit:tell_send unix/kit:tell_after unix/kit:tool_title_of windows/kit.ps1:Tell-Ver windows/kit.ps1:Tell-Send
     windows/kit.ps1:Tell-Norm windows/kit.ps1:Tell-Need windows/kit.ps1:Tell-After windows/kit.ps1:Tool-TitleOf
 unsent : unix/kit:unsent_step windows/kit.ps1:Unsent-Step
+open : unix/kit:open_* windows/kit.ps1:Open-* windows/kit.ps1:Cmd-AgentsOpen

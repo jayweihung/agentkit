@@ -4,6 +4,12 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.16.0（2026-11-26）
+
+更新後要做：每台 `kit self-update`（Windows 也要）。
+
+- `kit agents --open --json`：這台開著的 agent（Herdr），每個一筆 `{address, tool, waiting, busy}`：哪個在等你（`blocked` 10 分鐘以上、做完了最後一句在問你、你看過了還沒回、它記了 `kit pending`；`hot`：等了 10 分鐘以上）、做完了但自己的背景 shell 或子 agent 還在跑（`busy`）。跟 Herdr 的 Kit 面板同一套判斷，以前只有桌面的面板算得出來，手機現在透過 `machine.exec` 叫它就拿得到（kit api 1.21）。
+
 ## 0.15.0（2026-11-26）
 
 更新後要做：每台 `kit self-update`（Windows 也要）。Herdr core 有 `hc doc` 的版本才看得到提醒。

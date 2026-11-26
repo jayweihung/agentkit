@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.20'
+$script:KitApi = '1.21'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -8539,9 +8539,224 @@ function Agent-Body([string]$f) { # the lines after the frontmatter
     foreach ($l in $lines) { $l = $l.TrimEnd("`r"); if ($c -ge 2) { $out += $l }; if ($l -eq '---') { $c++ } }
     ($out -join "`n").TrimEnd("`n")
 }
+# ---------- kit agents --open --json: this machine's open agents, who waits for you and what still runs ----------
+# The same as unix/kit's open_json (Herdr's Kit panel: agents.js waitingNow, said.js busyOf). Windows: no background
+# shells of Claude Code or Codex (no ps there, as in the panel); Codex's rollout by its folder (nothing tells which files
+# a process holds open).
+$script:OpenLong = 600000       # LONG_WAIT (ms): waiting this long is hot (red)
+function Open-Chars([string]$s) { [regex]::Matches($s, '(?s)[\uD800-\uDBFF][\uDC00-\uDFFF]|.') }   # its characters (code points)
+function Open-Squash([string]$s) { ($s -replace '[ \t\r\n\f\v]+', ' ') -replace '^ | $', '' }
+function Open-Cut([string]$s, [int]$n) { # said.js cut: one line of at most N characters (N-1 and … when longer)
+    $s = Open-Squash $s; $c = Open-Chars $s
+    if ($c.Count -le $n) { return $s }
+    $s.Substring(0, $c[$n - 1].Index) + '…'
+}
+function Open-Line([string]$s) { $s = Open-Squash $s; $c = Open-Chars $s; if ($c.Count -le 200) { $s } else { $s.Substring(0, $c[200].Index) } }   # agents.js oneLine
+function Open-Asks([string]$line) { # a line that asks you something (said.js asks)
+    foreach ($x in ($line -split '[。！!；;\n]+')) {
+        if ($x.Contains('？') -or $x.Contains('?')) { return $true }
+        $t = $x -replace '^[ \t]+|[ \t]+$', ''
+        if ($t -cmatch '跟我說|告訴我|回我|要不要|你決定|你選|請(你)?(確認|決定|選)|嗎$' -and $x -cnotmatch '之後|以後|隨時|有需要|有問題|再(跟我說|告訴我|回我)|(到了|到貨|來了|收到|好了|弄好|裝好|做完|完成)[^，,]{0,4}(跟我說|告訴我|回我)') { return $true }
+    }
+    $false
+}
+function Open-Dec([string]$b) { try { [string]('"' + $b + '"' | ConvertFrom-Json) } catch { $b } }   # a JSON string's inside -> its text
+function Open-Tail([string]$f, [int]$n) { # the last N bytes of F, as text ('' if unreadable)
+    try {
+        $fs = New-Object IO.FileStream($f, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try { if ($fs.Length -gt $n) { [void]$fs.Seek(-$n, [IO.SeekOrigin]::End) }; (New-Object IO.StreamReader($fs, $Utf8)).ReadToEnd() } finally { $fs.Dispose() }
+    } catch { '' }
+}
+function Open-Head1([string]$f) { try { $r = New-Object IO.StreamReader($f, $Utf8); try { [string]$r.ReadLine() } finally { $r.Dispose() } } catch { '' } }   # its first line
+function Open-Mtime([string]$f) { try { [DateTimeOffset]::new([IO.File]::GetLastWriteTimeUtc($f)).ToUnixTimeSeconds() } catch { 0 } }
+function Open-Said([string[]]$files) { # what that agent said last (said.js saidOf): the last line of its last words that asks something, else the last one
+    $last = ''
+    $texts = { param($l, $re) (@([regex]::Matches($l, $re) | ForEach-Object { Open-Dec $_.Groups[1].Value }) -join "`n") }
+    foreach ($f in $files) {
+        $o = Ctx-Open $f 65536; if (-not $o) { continue }
+        try {
+            while ($null -ne ($l = $o[0].ReadLine())) {
+                if ($l.Contains('"type":"event_msg"') -and $l.Contains('"type":"task_complete"')) { $m = [regex]::Match($l, '"last_agent_message":"((?:[^"\\]|\\.)*)"'); if ($m.Success) { $last = Open-Dec $m.Groups[1].Value }; continue }
+                if ($l.Contains('"type":"response_item"')) { if ($l.Contains('"type":"message"') -and $l.Contains('"role":"assistant"')) { $t = & $texts $l '"text":"((?:[^"\\]|\\.)*)"'; if ($t) { $last = $t } }; continue }
+                if ($l.Contains('"type":"progress"')) { continue }
+                if ($l.Contains('"type":"assistant"') -or ($l.Contains('"type":"message"') -and $l.Contains('"role":"assistant"'))) { $t = & $texts $l '"type":"text","text":"((?:[^"\\]|\\.)*)"'; if ($t) { $last = $t } }
+            }
+        } finally { $o[0].Dispose() }
+    }
+    $pick = ''; $ask = ''
+    foreach ($l in $last.Split("`n")) {
+        $l = (($l -replace '\*\*', '') -replace '`', '') -replace '^[ \t]*[#>*-]+[ \t]*', '' -replace '^[ \t]*[0-9]+[.)][ \t]+', '' -replace '^[ \t\r]+|[ \t\r]+$', ''
+        if (-not $l -or $l.StartsWith('|')) { continue }
+        $pick = $l; if ($l.Contains('？') -or $l.Contains('?')) { $ask = $l }
+    }
+    Open-Cut $(if ($ask) { $ask } else { $pick }) 200
+}
+function Open-Bg([string]$p, [string]$kind) { # the newest background shell that process runs (Claude Code: sh -c of its shell-snapshots; Codex: <shell> -lc)
+    if ($OnWindows -or $p -notmatch '^[0-9]+\z') { return '' }
+    foreach ($l in @(& ps -A -ww -o 'ppid=,command=' 2>$null)) {
+        $c = "$l" -replace '^[ \t]+', ''; $m = [regex]::Match($c, '^([^ \t]*)[ \t]*(.*)$'); if ($m.Groups[1].Value -cne $p) { continue }
+        $c = $m.Groups[2].Value
+        if ($kind -ceq 'codex') {
+            $x = [regex]::Match($c, '(^|[ \t/])(z|ba|da|k|fi)?sh[ \t]+-lc[ \t]+')
+            if ($x.Success) { $j = $c.Substring($x.Index + $x.Length) } elseif ($c -cmatch '(^|[ \t/])(sandbox-exec|codex-linux-sandbox)([ \t]|$)') { $j = 'shell' } else { continue }
+        } else {
+            if ($c -cnotmatch 'shell-snapshots' -or $c -cnotmatch '(^|/)(z|ba)?sh[ \t]+-c[ \t]') { continue }
+            $j = 'shell'; $i = $c.IndexOf("eval '", $Ord)
+            if ($i -ge 0) { $r = $c.Substring($i + 6); $e = $r.IndexOf("' < /dev/null", $Ord); if ($e -ge 0) { $j = $r.Substring(0, $e).Replace("'`"'`"'", "'") } }
+        }
+        return (Open-Cut $j 60)
+    }
+    ''
+}
+function Open-Iso([string]$t) { # an ISO time (as omp writes it) -> ms, 0 if not one
+    if ($t -notmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}') { return [long]0 }
+    try { $d = [DateTime]::ParseExact($t.Substring(0, 19), 'yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AssumeUniversal, AdjustToUniversal') } catch { return [long]0 }
+    $ms = 0; if ($t.Length -gt 20 -and $t[19] -eq '.') { $f = [regex]::Match($t.Substring(20), '^[0-9]*').Value; $ms = [int](($f + '000').Substring(0, 3)) }
+    [DateTimeOffset]::new($d).ToUnixTimeMilliseconds() + $ms
+}
+function Open-Omp([string]$s) { # @(running sub-agents, its newest background job) (said.js OMP_SH, ompJobs)
+    $d = $s -replace '\.jsonl\z', ''; $run = 0; $now = (Unix-Now) * 1000
+    if (Test-Path -LiteralPath $d -PathType Container) {
+        $since = (Get-Date).AddMinutes(-30)
+        foreach ($x in @(Get-ChildItem -LiteralPath $d -File -Filter '*.jsonl' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $since } | Select-Object -First 20)) {
+            $n = $x.BaseName; $md = Join-Path $d "$n.md"
+            if (Test-Path -LiteralPath (Join-Path $d "$n.tombstone")) { continue }
+            if ((Open-Tail $x.FullName 4096).Contains('"customType":"session_exit"')) { continue }
+            if ((Test-Path -LiteralPath $md) -and $x.LastWriteTimeUtc -le (Get-Item -LiteralPath $md).LastWriteTimeUtc) { continue }
+            $run++
+        }
+    }
+    $lines = @(try { [IO.File]::ReadAllLines($s, $Utf8) } catch { @() }) | Where-Object { $_ -cmatch '"toolName":"bash","startedAt"|"async":\{"state"|"customType":"async-result"|"op":"wait"|proc://' } | Select-Object -Last 400
+    $cmd = @{}; $u = @{}; $lab = @{}; $seq = @{}; $k = 0
+    foreach ($l in @($lines)) {
+        $recs = New-List object
+        if ($l.Contains('"customType":"tool_execution_start"')) {
+            $m = [regex]::Match($l, '"toolCallId":"([^"]*)"'); if ($m.Success) { $c = [regex]::Match($l, '"command":"(?:[^"\\]|\\.)*'); if ($c.Success) { $cmd[$m.Groups[1].Value] = $c.Value.Substring(0, [Math]::Min(220, $c.Value.Length)) } }
+            continue
+        } elseif ($l -cmatch '"async":\{"state":"') {
+            $id = [regex]::Match($l, '"toolCallId":"([^"]*)"').Groups[1].Value; $ts = [regex]::Match($l, '"timestamp":"([^"]*)"').Groups[1].Value; $to = [regex]::Match($l, '"timeoutSeconds":([0-9]+)').Groups[1].Value
+            $m = [regex]::Match($l, '"async":\{"state":"([a-z]*)","jobId":"([^"]*)","type":"([a-z]*)"')
+            if ($m.Success) { $recs.Add(@('start', $m.Groups[2].Value, $m.Groups[1].Value, $m.Groups[3].Value, $ts, $to, [string]$cmd[$id])) }
+        } else {
+            foreach ($m in [regex]::Matches($l, '"(?:id|jobId)":"([^"]*)","type":"[a-z]*","status":"([a-z]*)"')) { $recs.Add(@('end', $m.Groups[1].Value, $m.Groups[2].Value)) }
+            foreach ($m in [regex]::Matches($l, 'proc://([^"/]*)/kill')) { $recs.Add(@('kill', $m.Groups[1].Value)) }
+        }
+        foreach ($f in $recs) {
+            if ($f[0] -ceq 'start' -and $f[1]) {
+                $u.Remove($f[1]); if ($f[2] -cne 'running' -or $f[3] -ceq 'task') { continue }
+                $t = if ($f[5] -eq '') { 600 } elseif ([long]$f[5] -gt 0) { [long]$f[5] } else { 21600 }
+                $at = Open-Iso $f[4]; if (-not $at) { $at = $now }
+                $b = ''; $c = [regex]::Match($f[6], '^"[A-Za-z0-9_]+":"')
+                if ($c.Success) {
+                    $b = ($f[6].Substring($c.Length) -replace '"\z', '') -replace '\\u[0-9a-fA-F]{0,3}\z', ''
+                    if (([regex]::Match($b, '\\*\z').Length % 2) -eq 1) { $b = $b.Substring(0, $b.Length - 1) }
+                    $b = (Open-Dec $b) -replace '(?s)\n.*', ''
+                }
+                $b = Open-Cut $b 60; $u[$f[1]] = $at + $t * 1000 + 60000; $lab[$f[1]] = $(if ($b) { $b } else { $f[1] }); $seq[$f[1]] = ++$k
+            } elseif (($f[0] -ceq 'end' -and $f[2] -and $f[2] -cne 'running') -or $f[0] -ceq 'kill') { $u.Remove($f[1]) }
+        }
+    }
+    $o = ''; $best = 0
+    foreach ($j in @($u.Keys)) { if ($u[$j] -gt $now -and $seq[$j] -gt $best) { $best = $seq[$j]; $o = $lab[$j] } }
+    , @($run, $o)
+}
+function Open-Codex([string]$p, [string]$dir) { # @(its own threads' rollouts, running sub-agents) (said.js CODEX_SH: the rollouts of the last
+    # 30 minutes whose parent_thread_id leads to its threads; done: task_complete or turn_aborted after the last task_started, or nothing for 10 minutes)
+    $root = Join-Path $CodexDir 'sessions'
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return , @(@(), 0) }
+    $own = New-List
+    if (-not $OnWindows -and $p -match '^[0-9]+\z') {
+        $ls = if (Test-Path -LiteralPath "/proc/$p/fd") { foreach ($l in @(Get-ChildItem -LiteralPath "/proc/$p/fd" -ErrorAction SilentlyContinue)) { "$(& readlink $l.FullName 2>$null)" } }
+            elseif (Get-Command lsof -ErrorAction SilentlyContinue) { foreach ($l in @(& lsof -n -P -b -w -a -p $p -d '^txt,^mem' -Fn 2>$null)) { if ("$l".StartsWith('n')) { "$l".Substring(1) } } }
+        $all = [string[]]@($ls | Where-Object { "$_" -match '/sessions/.*/rollout-[^/]*\.jsonl\z' } | Select-Object -Unique); [Array]::Sort($all, [StringComparer]::Ordinal)
+        foreach ($x in $all) { if (-not (Open-Head1 $x).Contains('"parent_thread_id"')) { $own.Add($x) } }
+    }
+    if ($own.Count -eq 0 -and $dir) {
+        $want = '"cwd":' + (Json-S $dir)
+        foreach ($x in Newest-Files $root 'rollout-*.jsonl') { $h = Open-Head1 $x; if ($h.Contains($want) -and -not $h.Contains('"parent_thread_id"')) { $own.Add($x); break } }
+    }
+    if ($own.Count -eq 0) { return , @(@(), 0) }
+    $ok = @{}; $roots = @{}
+    foreach ($x in $own) { $m = [regex]::Match((Open-Head1 $x), '"id":"([^"]*)'); $ok[$m.Groups[1].Value] = 1; $roots[$m.Groups[1].Value] = 1 }
+    $now = Unix-Now; $two = (Get-Date).AddDays(-2); $half = (Get-Date).AddMinutes(-30); $subs = New-List object
+    $days = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } | Where-Object { $_.LastWriteTime -gt $two })
+    foreach ($x in @($days | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Filter 'rollout-*.jsonl' -ErrorAction SilentlyContinue } | Where-Object { $_.LastWriteTime -gt $half } | Select-Object -First 40)) {
+        $h = Open-Head1 $x.FullName; if (-not $h.Contains('"parent_thread_id":"')) { continue }
+        $s = 0; $e = 0; $i = 0
+        foreach ($l in (Open-Tail $x.FullName 16384).Split("`n")) { $i++; if ($l.Contains('"type":"task_started"')) { $s = $i }; if ($l -cmatch '"type":"task_complete"|"type":"turn_aborted"') { $e = $i } }
+        $mt = Open-Mtime $x.FullName
+        $subs.Add(@([regex]::Match($h, '"id":"([^"]*)').Groups[1].Value, [regex]::Match($h, '"parent_thread_id":"([^"]*)').Groups[1].Value, ($e -gt $s -or ($s -eq 0 -and $now - $mt -gt 600))))
+    }
+    for ($g = $true; $g; ) { $g = $false; foreach ($x in $subs) { if (-not $ok[$x[0]] -and $ok[$x[1]]) { $ok[$x[0]] = 1; $g = $true } } }
+    , @($own.ToArray(), @($subs | Where-Object { $ok[$_[0]] -and -not $roots[$_[0]] -and -not $_[2] }).Count)
+}
+function Cmd-AgentsOpen { # kit agents --open --json
+    $now = (Unix-Now) * 1000
+    $terms = @(foreach ($t in @(Hc-Terms)) { $tool = Hc-Tool $t.agent; if ($tool) { $g = Hc-Get $t.address; $g.address = $t.address; $g.tool = $tool; $g.st = $(if ($t.status) { $t.status } else { $g.status }); $g } })
+    # each kit pending's terminal: the one whose process (or its program's) is the agent's or above it (agents.js whoTick: one in the item's folder first)
+    $pend = New-List object
+    foreach ($id in @(Pend-Ids)) {
+        $r = Pend-Read $id; if (-not $r) { continue }
+        $up = " $($r[0]) $($r[4]) "; $who = ''
+        foreach ($t in $terms) { if (($t.pid -and $up.Contains(" $($t.pid) ")) -or ($t.fpid -and $up.Contains(" $($t.fpid) "))) { if ($t.cwd -ceq $r[1]) { $who = $t.address; break }; if (-not $who) { $who = $t.address } } }
+        if ($who) { $pend.Add(@($who, ([long]("0$($r[2])") * 1000), $r[3])) }
+    }
+    $out = New-List
+    foreach ($t in $terms) {
+        $st = $t.st; $ms = if ($t.ms -match '^[0-9]+\z') { [long]$t.ms } else { [long]0 }
+        $said = ''; $sat = [long]0; $run = 0; $job = ''; $pp = $(if ($t.fpid) { $t.fpid } else { $t.pid })
+        switch ($t.tool) {
+            'claude' {
+                $x = Join-Path $UserHome ".cache/nvim-jay/said/$($t.address)"
+                if (Test-Path -LiteralPath $x -PathType Leaf) {
+                    $b = Read-Text $x; $m = [regex]::Match($b, '"text":"((?:[^"\\]|\\.)*)"'); $a = [regex]::Match($b, '"at":([0-9.]+)')
+                    if ($m.Success -and $a.Success -and [double]$a.Groups[1].Value -gt 0) { $said = Open-Cut (Open-Dec $m.Groups[1].Value) 200; if ($said) { $sat = [long][Math]::Round([double]$a.Groups[1].Value) } }
+                }
+                $x = Join-Path $UserHome ".cache/nvim-jay/subs/$($t.address)"
+                if (Test-Path -LiteralPath $x -PathType Leaf) {
+                    $j = $null; try { $j = (Read-Text $x) | ConvertFrom-Json } catch { }
+                    $at = 0; try { $at = [double](Jp $j 'at') } catch { }
+                    if ($at -gt 0 -and $now - $at -le 1800000) { $run = @(@(Jp $j 'list') | Where-Object { (Jp $_ 'id') -is [string] } | Select-Object -First 12 | Where-Object { (Jp $_ 'done') -ne $true }).Count }
+                }
+                if ($st -ceq 'done') { $job = Open-Bg $pp 'claude' }
+            }
+            'omp' {
+                $x = Omp-Session $pp $t.cwd
+                if ($x -and (Test-Path -LiteralPath $x -PathType Leaf)) {
+                    $w = Open-Omp $x; $run = $w[0]; $job = $w[1]
+                    if ($st -ceq 'done' -or $st -ceq 'idle') { $said = Open-Said @($x); $sat = (Open-Mtime $x) * 1000 }
+                }
+            }
+            'codex' {
+                $w = Open-Codex $t.fpid $t.cwd; $run = $w[1]
+                if (@($w[0]).Count -and ($st -ceq 'done' -or $st -ceq 'idle')) { $said = Open-Said @($w[0]); $sat = [long](@($w[0] | ForEach-Object { Open-Mtime $_ }) | Measure-Object -Maximum).Maximum * 1000 }
+                if ($st -ceq 'done') { $job = Open-Bg $pp 'codex' }
+            }
+        }
+        # agents.js waitingNow
+        $ws = $null; $wh = $false; $wy = ''
+        if ($st -ceq 'blocked' -and $ms -gt 0 -and $now - $ms -ge $OpenLong) { $ws = $ms; $wh = $true; $wy = '在等你允許或回答它（畫面上的提問）' }
+        if ($st -ceq 'done' -and -not $job) {
+            $l = $t.msg; if ($said -and ($ms -eq 0 -or $sat -ge $ms - 120000)) { $l = $said }
+            if (Open-Asks $l) { $ws = $ms; $wh = ($ms -gt 0 -and $now - $ms -ge $OpenLong); $wy = Open-Line $l }
+        }
+        if ($st -ceq 'idle' -and $said -and (Open-Asks $said)) { $ws = $(if ($sat -gt 0) { $sat } else { $ms }); $wh = ($ws -gt 0 -and $now - $ws -ge $OpenLong); $wy = Open-Line $said }
+        foreach ($p in $pend) {
+            if ($p[0] -cne $t.address) { continue }
+            if ($p[1] -gt 0 -and $now - $p[1] -ge $OpenLong) { $wh = $true }
+            $ws = $p[1]; $l = Open-Line $p[2]; if ($l) { $wy = $l }
+        }
+        $wj = if ($null -ne $ws) { '{"since": ' + $ws + ', "hot": ' + $(if ($wh) { 'true' } else { 'false' }) + ', "why": ' + (Json-S $wy) + '}' } else { 'null' }
+        # said.js busyOf: a done agent whose own work still runs
+        $bz = ''; if ($st -ceq 'done') { if ($job) { $bz = $job } elseif ($run -gt 0) { $bz = "子 agent $run 個" } }
+        $out.Add('{"address": ' + (Json-S $t.address) + ', "tool": ' + (Json-S $t.tool) + ', "waiting": ' + $wj + ', "busy": ' + (Json-OrNull $bz) + '}')
+    }
+    Out-Json ('{"kit": ' + (Json-S $KitVersion) + ', "agents": [' + ($out -join ', ') + ']}')
+}
 function Cmd-Agents($rest) {
     $rest = @($rest | Where-Object { $null -ne $_ })
-    if ($rest.Count -ne 1 -or $rest[0] -ne '--json') { Die-C usage '用法：kit agents --json' }
+    if ($rest.Count -eq 2 -and $rest -ccontains '--open' -and $rest -ccontains '--json') { Cmd-AgentsOpen; return }
+    if ($rest.Count -ne 1 -or $rest[0] -ne '--json') { Die-C usage '用法：kit agents --json | kit agents --open --json' }
     Need-Init
     $items = @(Available)
     $pick = { param($k) @($items | Where-Object { $_.StartsWith("${k}:") } | ForEach-Object { $_.Substring($k.Length + 1) }) }
@@ -8697,6 +8912,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
      --json --dir 資料夾 [--pid 程式編號]
                                     再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（JSON，給畫面程式用）
+  kit agents --open --json          這台開著的 agent：哪個在等你、做完了還有什麼在跑（Herdr；給手機這種沒有 Kit 面板的畫面）
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
   kit add rule|skill|mcp <名字>     開始用（整個帳號：每個資料夾、每個 agent 都有）
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）

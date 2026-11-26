@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.20
+KIT_API=1.21
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -7061,7 +7061,8 @@ git_state() { # git_state DIR FILE : "new", "changed" or "" (or "no-git")
     esac
 }
 cmd_agents() {
-    [ "${1:-}" = --json ] || die_c usage "用法：kit agents --json"
+    case "${1:-} ${2:-}" in "--open --json"|"--json --open") [ $# -eq 2 ] && { open_json >&3; return 0; };; esac
+    [ "${1:-}" = --json ] && [ $# -eq 1 ] || die_c usage "用法：kit agents --json | kit agents --open --json"
     need_init
     agents_json >&3
 }
@@ -7099,6 +7100,228 @@ fm_set_list() { # fm_set_list FILE KEY "a, b" : KEY: [a, b] in the file's frontm
         infm && index(l, key ":") == 1 { print key ": " val eol; done = 1; if (substr(l, length(key) + 2) ~ /^[ \t]*(#.*)?$/) skip = 1; next }
         { print }' "$1" > "$tmp" && mv "$tmp" "$1" || { rm -f "$tmp"; die "沒辦法改 $1"; }
 }
+# ---------- kit agents --open --json: this machine's open agents, who waits for you and what still runs ----------
+# The same as Herdr's Kit panel (agents.js waitingNow, said.js busyOf), for a screen that has no panel (the phone asks it
+# through machine.exec). waiting: blocked 10 minutes and more; done (and nothing of its own still running) or idle with
+# last words that ask you; a kit pending of the agent in that terminal. busy (done ones only): its newest background
+# shell, else its running sub-agents. What it said: Claude Code's reply hook (nvim-jay, ~/.cache/nvim-jay/said|subs/<id>);
+# omp's and Codex's own files (their session, rollouts). Background shells: ps (Claude Code's from its shell-snapshots,
+# Codex's -lc ones); omp's jobs from its session.
+OPEN_LONG=600000       # LONG_WAIT (ms): waiting this long is hot (red)
+OPEN_AWK='function clen(b) { return b < "\200" ? 1 : b < "\340" ? 2 : b < "\360" ? 3 : 4 }
+function squash(s) { gsub(/[ \t\r\n\f\v]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); return s }
+function ucut(s, n,   i, k, m) { s = squash(s); i = 1; k = 0
+    while (i <= length(s)) { k++; if (k == n) m = i; i += clen(substr(s, i, 1)) }
+    return k <= n ? s : substr(s, 1, m - 1) "…" }
+function uhead(s, n,   i, k) { i = 1; k = 0; while (i <= length(s) && k < n) { i += clen(substr(s, i, 1)); k++ }; return substr(s, 1, i - 1) }
+function hex(h,   i, v) { v = 0; h = tolower(h); for (i = 1; i <= 4; i++) v = v * 16 + index("0123456789abcdef", substr(h, i, 1)) - 1; return v }
+function uchr(n) { if (n < 1) return ""; if (n < 128) return sprintf("%c", n); if (n < 2048) return sprintf("%c%c", 192 + int(n / 64), 128 + n % 64)
+    return sprintf("%c%c%c", 224 + int(n / 4096), 128 + int(n / 64) % 64, 128 + n % 64) }
+function jdec(s,   o, i, c) { o = ""
+    for (i = 1; i <= length(s); i++) { c = substr(s, i, 1)
+        if (c != "\\") { o = o c; continue }
+        i++; c = substr(s, i, 1)
+        if (c == "n") o = o "\n"; else if (c == "t") o = o "\t"; else if (c == "r") o = o "\r"; else if (c == "b" || c == "f") o = o " "
+        else if (c == "u") { o = o uchr(hex(substr(s, i + 1, 4))); i += 4 } else o = o c }
+    return o }
+function later(x,   r, w, k, c) {
+    if (x ~ /之後|以後|隨時|有需要|有問題|再(跟我說|告訴我|回我)/) return 1
+    r = x
+    while (match(r, /到了|到貨|來了|收到|好了|弄好|裝好|做完|完成/)) {
+        w = substr(r, RSTART + RLENGTH); r = substr(r, RSTART + 1)
+        for (k = 0; k <= 4; k++) {
+            if (w ~ /^(跟我說|告訴我|回我)/) return 1
+            if (w == "") break
+            c = substr(w, 1, clen(substr(w, 1, 1))); if (c == "，" || c == ",") break
+            w = substr(w, length(c) + 1) } }
+    return 0 }
+function asks(line,   n, p, i, t) {
+    gsub(/(。|！|!|；|;|\n)+/, "\n", line); n = split(line, p, "\n")
+    for (i = 1; i <= n; i++) {
+        if (index(p[i], "？") || index(p[i], "?")) return 1
+        t = p[i]; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+        if (t ~ /跟我說|告訴我|回我|要不要|你決定|你選|請(你)?(確認|決定|選)|嗎$/ && !later(p[i])) return 1 }
+    return 0 }
+function iso(t,   y, m, d, e, yoe, doy, ms) {
+    if (t !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) return 0
+    y = substr(t, 1, 4) + 0; m = substr(t, 6, 2) + 0; d = substr(t, 9, 2) + 0; ms = 0
+    if (substr(t, 20, 1) == ".") { ms = substr(t, 21); sub(/[^0-9].*/, "", ms); ms = substr(ms "000", 1, 3) + 0 }
+    if (m <= 2) y--; e = int(y / 400); yoe = y - e * 400; doy = int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
+    d = e * 146097 + yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy - 719468
+    return ((d * 24 + substr(t, 12, 2)) * 60 + substr(t, 15, 2)) * 60000 + substr(t, 18, 2) * 1000 + ms }'
+# a transcript's tail -> what it last said, in one line: the last line of its last words that asks something, else the
+# last one (said.js saidOf). Claude Code and omp: an assistant message's text blocks; Codex: task_complete's
+# last_agent_message, or an assistant message (response_item)
+OPEN_SAID_AWK='function texts(l, re, sk,   o, n) { o = ""; n = 0
+        while (match(l, re)) { o = o (n++ ? "\n" : "") jdec(substr(l, RSTART + sk, RLENGTH - sk - 1)); l = substr(l, RSTART + RLENGTH) }
+        return o }
+    index($0, "\"type\":\"event_msg\"") && index($0, "\"type\":\"task_complete\"") { if (match($0, /"last_agent_message":"([^"\\]|\\.)*"/)) last = jdec(substr($0, RSTART + 22, RLENGTH - 23)); next }
+    index($0, "\"type\":\"response_item\"") { if (index($0, "\"type\":\"message\"") && index($0, "\"role\":\"assistant\"")) { t = texts($0, "\"text\":\"([^\"\\\\]|\\\\.)*\"", 8); if (t != "") last = t }; next }
+    index($0, "\"type\":\"progress\"") { next }
+    index($0, "\"type\":\"assistant\"") || (index($0, "\"type\":\"message\"") && index($0, "\"role\":\"assistant\"")) {
+        t = texts($0, "\"type\":\"text\",\"text\":\"([^\"\\\\]|\\\\.)*\"", 22); if (t != "") last = t }
+    END { n = split(last, p, "\n"); pick = ""; ask = ""
+        for (i = 1; i <= n; i++) { l = p[i]; gsub(/\*\*/, "", l); gsub(/`/, "", l); sub(/^[ \t]*[#>*-]+[ \t]*/, "", l); sub(/^[ \t]*[0-9]+[.)][ \t]+/, "", l)
+            sub(/^[ \t\r]+/, "", l); sub(/[ \t\r]+$/, "", l)
+            if (l == "" || substr(l, 1, 1) == "|") continue
+            pick = l; if (index(l, "？") || index(l, "?")) ask = l }
+        print ucut(ask != "" ? ask : pick, 200) }'
+open_said() { # open_said FILE... : what that agent said last (its transcript, or several: one after the other)
+    local f
+    for f in "$@"; do
+        [ -f "$f" ] || continue
+        if [ "$(wc -c < "$f")" -gt 65536 ]; then tail -c 65536 "$f" | sed 1d; else cat "$f"; fi; echo   # (the first line cut: not read)
+    done | LC_ALL=C awk "$OPEN_AWK$OPEN_SAID_AWK"
+}
+open_bg() { # open_bg PID TOOL : the newest background shell that process runs (Claude Code: sh -c of its shell-snapshots; Codex: <shell> -lc)
+    ps -A -ww -o ppid=,command= 2>/dev/null | LC_ALL=C awk -v p="$1" -v kind="$2" "$OPEN_AWK"'
+        { c = $0; sub(/^[ \t]+/, "", c); pp = c; sub(/[ \t].*/, "", pp); if (pp != p) next; sub(/^[0-9]+[ \t]+/, "", c)
+          if (kind == "codex") { if (match(c, /(^|[ \t\/])(z|ba|da|k|fi)?sh[ \t]+-lc[ \t]+/)) j = substr(c, RSTART + RLENGTH)
+                                 else if (c ~ /(^|[ \t\/])(sandbox-exec|codex-linux-sandbox)([ \t]|$)/) j = "shell"; else next }
+          else { if (c !~ /shell-snapshots/ || c !~ /(^|\/)(z|ba)?sh[ \t]+-c[ \t]/) next
+                 j = "shell"; i = index(c, "eval '\''")
+                 if (i) { r = substr(c, i + 6); e = index(r, "'\'' < /dev/null"); if (e) { j = substr(r, 1, e - 1); gsub(/'\''"'\''"'\''/, "'\''", j) } } }
+          print ucut(j, 60); exit }'
+}
+open_omp() { # open_omp SESSION : "running sub-agents TAB its newest background job" (said.js OMP_SH, ompJobs)
+    local s=$1 d x n run=0 now
+    d=${s%.jsonl}; now=$(( $(date +%s) * 1000 ))
+    [ -d "$d" ] && while IFS= read -r x; do
+        [ -n "$x" ] || continue; n=${x##*/}; n=${n%.jsonl}
+        [ -e "$d/$n.tombstone" ] || tail -c 4096 "$x" | grep -q '"customType":"session_exit"' || { [ -e "$d/$n.md" ] && ! [ "$x" -nt "$d/$n.md" ]; } || run=$((run + 1))
+    done <<EOF
+$(find "$d" -maxdepth 1 -name '*.jsonl' -mmin -30 2>/dev/null | head -n 20)
+EOF
+    printf '%s\t' "$run"
+    grep -E '"toolName":"bash","startedAt"|"async":\{"state"|"customType":"async-result"|"op":"wait"|proc://' "$s" 2>/dev/null | tail -n 400 | LC_ALL=C awk '
+/"customType":"tool_execution_start"/ { if (match($0, /"toolCallId":"[^"]*"/)) { id = substr($0, RSTART + 14, RLENGTH - 15); if (match($0, /"command":"([^"\\]|\\.)*/)) cmd[id] = substr($0, RSTART, RLENGTH < 220 ? RLENGTH : 220) } next }
+/"async":\{"state":"/ {
+  id = ""; ts = ""; to = ""
+  if (match($0, /"toolCallId":"[^"]*"/)) id = substr($0, RSTART + 14, RLENGTH - 15)
+  if (match($0, /"timestamp":"[^"]*"/)) ts = substr($0, RSTART + 13, RLENGTH - 14)
+  if (match($0, /"timeoutSeconds":[0-9]+/)) to = substr($0, RSTART + 17, RLENGTH - 17)
+  if (match($0, /"async":\{"state":"[a-z]*","jobId":"[^"]*","type":"[a-z]*"/)) { split(substr($0, RSTART, RLENGTH), p, "\""); print "start\t" p[10] "\t" p[6] "\t" p[14] "\t" ts "\t" to "\t" cmd[id] }
+  next
+}
+{ s = $0; while (match(s, /"(id|jobId)":"[^"]*","type":"[a-z]*","status":"[a-z]*"/)) { split(substr(s, RSTART, RLENGTH), p, "\""); print "end\t" p[4] "\t" p[12]; s = substr(s, RSTART + RLENGTH) }
+  s = $0; while (match(s, /proc:\/\/[^"\/]*\/kill/)) { print "kill\t" substr(s, RSTART + 7, RLENGTH - 12); s = substr(s, RSTART + RLENGTH) } }' |
+    LC_ALL=C awk -F'\t' -v now="$now" "$OPEN_AWK"'
+        $1 == "start" && $2 != "" { delete u[$2]; if ($3 != "running" || $4 == "task") next
+            to = $6 == "" ? 600 : $6 + 0 > 0 ? $6 + 0 : 21600; at = iso($5); if (!at) at = now
+            c = $0; for (i = 1; i <= 6; i++) sub(/^[^\t]*\t/, "", c); b = ""
+            if (match(c, /^"[A-Za-z0-9_]+":"/)) { b = substr(c, RLENGTH + 1); sub(/"$/, "", b); sub(/\\u[0-9a-fA-F]?[0-9a-fA-F]?[0-9a-fA-F]?$/, "", b)
+                e = b; sub(/\\*$/, "", e); if ((length(b) - length(e)) % 2) b = substr(b, 1, length(b) - 1); b = jdec(b); sub(/\n.*/, "", b) }
+            b = ucut(b, 60); u[$2] = at + to * 1000 + 60000; lab[$2] = b != "" ? b : $2; seq[$2] = ++k; next }
+        ($1 == "end" && $3 != "" && $3 != "running") || $1 == "kill" { delete u[$2] }
+        END { best = 0; for (j in u) if (u[j] > now && seq[j] > best) { best = seq[j]; o = lab[j] }; print o }'
+}
+open_codex() { # open_codex PID DIR : its own threads' rollouts (the ones its process has open, without parent_thread_id; else
+    # the newest of DIR), one per line, then "@@kit-run@@ TAB" its running sub-agents (said.js CODEX_SH: the rollouts of
+    # the last 30 minutes whose parent_thread_id leads to its threads; done: task_complete or turn_aborted after the last
+    # task_started, or nothing for 10 minutes)
+    local p=$1 x own="" ids="" want now
+    [ -d "$CODEX_DIR/sessions" ] || return 0
+    now=$(date +%s)
+    case $p in ""|*[!0-9]*) ;; *)
+        own=$( { if [ -d "/proc/$p/fd" ]; then for x in /proc/"$p"/fd/*; do readlink "$x" 2>/dev/null; done
+                 elif command -v lsof >/dev/null 2>&1; then lsof -n -P -b -w -a -p "$p" -d '^txt,^mem' -Fn 2>/dev/null | sed -n 's/^n//p'; fi; } |
+            grep '/sessions/.*/rollout-[^/]*\.jsonl$' | sort -u | while IFS= read -r x; do head -n 1 "$x" | grep -q '"parent_thread_id"' || printf '%s\n' "$x"; done);;
+    esac
+    if [ -z "$own" ] && [ -n "$2" ]; then
+        want="\"cwd\":$(json_s "$2")"
+        while IFS= read -r x; do [ -n "$x" ] && head -n 1 "$x" | grep -F "$want" | grep -vq '"parent_thread_id"' && { own=$x; break; }; done <<EOF
+$(newest_files "$CODEX_DIR/sessions" 'rollout-*.jsonl')
+EOF
+    fi
+    [ -n "$own" ] || return 0
+    printf '%s\n' "$own"
+    ids=$(printf '%s\n' "$own" | while IFS= read -r x; do head -n 1 "$x" | grep -oE '"id":"[^"]*' | head -n 1 | cut -d'"' -f4; done | paste -sd' ' -)
+    find "$CODEX_DIR/sessions" -mindepth 3 -maxdepth 3 -type d -mtime -2 2>/dev/null | while IFS= read -r x; do find "$x" -name 'rollout-*.jsonl' -mmin -30 2>/dev/null; done | head -n 40 |
+        while IFS= read -r x; do
+            h=$(head -n 1 "$x"); case $h in *'"parent_thread_id":"'*) ;; *) continue;; esac
+            printf '%s\t%s\t%s\t%s\n' "$(printf '%s' "$h" | grep -oE '"id":"[^"]*' | head -n 1 | cut -d'"' -f4)" "$(printf '%s' "$h" | grep -oE '"parent_thread_id":"[^"]*' | head -n 1 | cut -d'"' -f4)" \
+                "$(mtime_s "$x")" "$(tail -c 16384 "$x" | awk '/"type":"task_started"/ { s = NR } /"type":"task_complete"|"type":"turn_aborted"/ { e = NR } END { d = e > s ? 1 : (s ? 0 : -1); print d }')"
+        done | awk -F'\t' -v roots="$ids" -v now="$now" '
+            BEGIN { n = split(roots, r, " "); for (i = 1; i <= n; i++) { ok[r[i]] = 1; root[r[i]] = 1 } }
+            { id[NR] = $1; par[NR] = $2; dn[NR] = $4 == 1 || ($4 == -1 && now - $3 > 600) }
+            END { for (g = 1; g; ) { g = 0; for (i = 1; i <= NR; i++) if (!ok[id[i]] && ok[par[i]]) { ok[id[i]] = 1; g = 1 } }
+                  for (i = 1; i <= NR; i++) if (ok[id[i]] && !root[id[i]] && !dn[i]) c++
+                  printf "@@kit-run@@\t%d\n", c }'
+}
+open_json() { # the agents, as kit agents --open --json prints them
+    local now a g st tool rec pid fp cwd hst ms msg first=1 pend="" id who x said sat run job w ws wh wy t
+    now=$(( $(date +%s) * 1000 ))
+    local terms; terms=$(hc_terms | while IFS="$TAB" read -r a g st; do
+        tool=$(hc_tool "$g"); [ -n "$tool" ] || continue
+        printf '%s\037%s\037%s\037%s\n' "$a" "$tool" "$st" "$(hc_get "$a")"
+    done)
+    # each kit pending's terminal: the one whose process (or its program's) is the agent's or above it (agents.js whoTick:
+    # one in the item's folder first)
+    pend=$(pend_ids | while IFS= read -r id; do
+        pend_read "$id" || continue
+        who=$(printf '%s\n' "$terms" | D="$P_DIR" LC_ALL=C awk -F'\037' -v up=" $P_PID $P_UP " '
+            NF && (index(up, " " $4 " ") && $4 != "" || index(up, " " $5 " ") && $5 != "") { if ($6 == ENVIRON["D"]) { print $1; f = 1; exit } if (o == "") o = $1 }
+            END { if (!f && o != "") print o }')
+        [ -z "$who" ] || printf '%s\t%s\t%s\n' "$who" "$(( ${P_AT:-0} * 1000 ))" "$P_WHAT"
+    done)
+    printf '{"kit": %s, "agents": [' "$(json_s "$KIT_VERSION")"
+    [ -z "$terms" ] || while IFS="$US" read -r a tool st pid fp cwd hst ms msg; do
+        [ -n "$st" ] || st=$hst; case $ms in ""|*[!0-9]*) ms=0;; esac
+        said=""; sat=0; run=0; job=""
+        case $tool in
+            claude)
+                x="$HOME/.cache/nvim-jay/said/$a"
+                [ -f "$x" ] && { said=$(LC_ALL=C awk "$OPEN_AWK"'{ b = b $0 "\n" } END { if (match(b, /"text":"([^"\\]|\\.)*"/)) t = ucut(jdec(substr(b, RSTART + 8, RLENGTH - 9)), 200)
+                        if (match(b, /"at":[0-9.]+/)) at = substr(b, RSTART + 5, RLENGTH - 5) + 0; if (t != "" && at > 0) printf "%.0f\t%s\n", at, t }' "$x")
+                    sat=${said%%"$TAB"*}; said=${said#*"$TAB"}; [ -n "$said" ] || sat=0; }
+                x="$HOME/.cache/nvim-jay/subs/$a"
+                [ -f "$x" ] && run=$(LC_ALL=C awk -f "$KIT_LIB/json.awk" -v leaves=1 "$x" 2>/dev/null | LC_ALL=C awk -F'\t' -v now="$now" '
+                    $1 == "at" && NF == 2 { at = $2 + 0 } $1 == "list" && NF == 4 { i = $2 + 0; if (i > n) n = i; if ($3 == "id" && $4 ~ /^"/) id[i] = 1; if ($3 == "done" && $4 == "true") d[i] = 1 }
+                    END { if (at <= 0 || now - at > 1800000) { print 0; exit } for (i = 0; i <= n; i++) if (id[i] && k++ < 12 && !d[i]) c++; print c + 0 }')
+                [ "$st" != done ] || job=$(open_bg "${fp:-$pid}" claude);;
+            omp)
+                x=$(omp_session "${fp:-$pid}" "$cwd")
+                if [ -n "$x" ] && [ -f "$x" ]; then
+                    w=$(open_omp "$x"); run=${w%%"$TAB"*}; job=${w#*"$TAB"}
+                    case $st in done|idle) said=$(open_said "$x"); sat=$(( $(mtime_s "$x") * 1000 ));; esac
+                fi;;
+            codex)
+                w=$(open_codex "$fp" "$cwd")
+                x=$(printf '%s\n' "$w" | awk -F'\t' '$1 == "@@kit-run@@" { print $2 }'); run=${x:-0}
+                x=$(printf '%s\n' "$w" | grep -v '^@@kit-run@@')
+                if [ -n "$x" ]; then case $st in done|idle)
+                    said=$(IFS=$LF; set -f; open_said $x)
+                    sat=$(( $(printf '%s\n' "$x" | while IFS= read -r t; do mtime_s "$t"; echo; done | awk '$1 > m { m = $1 } END { print m + 0 }') * 1000 ));; esac; fi
+                [ "$st" != done ] || job=$(open_bg "${fp:-$pid}" codex);;
+        esac
+        # agents.js waitingNow
+        ws=""; wh=false; wy=""
+        if [ "$st" = blocked ] && [ "$ms" -gt 0 ] && [ $((now - ms)) -ge $OPEN_LONG ]; then ws=$ms; wh=true; wy="在等你允許或回答它（畫面上的提問）"; fi
+        if [ "$st" = done ] && [ -z "$job" ]; then
+            t=$msg; [ -n "$said" ] && { [ "$ms" = 0 ] || [ "$sat" -ge $((ms - 120000)) ]; } && t=$said
+            if open_asks "$t"; then ws=$ms; wh=false; [ "$ms" -gt 0 ] && [ $((now - ms)) -ge $OPEN_LONG ] && wh=true; wy=$(open_line "$t"); fi
+        fi
+        if [ "$st" = idle ] && [ -n "$said" ] && open_asks "$said"; then
+            ws=$sat; [ "$ws" -gt 0 ] || ws=$ms; wh=false; [ "$ws" -gt 0 ] && [ $((now - ws)) -ge $OPEN_LONG ] && wh=true; wy=$(open_line "$said")
+        fi
+        while IFS="$TAB" read -r who x t; do
+            [ "$who" = "$a" ] || continue
+            [ "$x" -gt 0 ] && [ $((now - x)) -ge $OPEN_LONG ] && wh=true
+            ws=$x; t=$(open_line "$t"); [ -n "$t" ] && wy=$t
+        done <<< "$pend"
+        [ $first = 1 ] || printf ', '; first=0
+        printf '{"address": %s, "tool": %s, "waiting": ' "$(json_s "$a")" "$(json_s "$tool")"
+        if [ -n "$ws" ]; then printf '{"since": %s, "hot": %s, "why": %s}' "$ws" "$wh" "$(json_s "$wy")"; else printf null; fi
+        # said.js busyOf: a done agent whose own work still runs
+        x=""; [ "$st" != done ] || { if [ -n "$job" ]; then x=$job; elif [ "${run:-0}" -gt 0 ]; then x="子 agent ${run} 個"; fi; }
+        printf ', "busy": %s}' "$(json_or_null "$x")"
+    done <<< "$terms"
+    printf ']}\n'
+}
+open_asks() { S=$1 LC_ALL=C awk "$OPEN_AWK"' BEGIN { exit !asks(ENVIRON["S"]) }' </dev/null; }   # a line that asks you something (said.js asks)
+open_line() { S=$1 LC_ALL=C awk "$OPEN_AWK"' BEGIN { print uhead(squash(ENVIRON["S"]), 200) }' </dev/null; }   # agents.js oneLine
+mtime_s() { local m; m=$(mtimes "$1"); m=${m##*"$TAB"}; printf '%s' "${m:-0}"; }   # mtime_s FILE : its last change (seconds since 1970)
+
 cmd_agent() { # kit agent <name> add|rm rule|skill|mcp <item>
     [ $# -eq 4 ] || die "用法：kit agent <名字> add|rm rule|skill|mcp <東西>"
     need_init
@@ -7133,6 +7356,7 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
      --json --dir 資料夾 [--pid 程式編號]
                                     再列出在那個資料夾開的 agent 另外會讀到的（不是 kit 管的）
   kit agents --json                 每個 agent 用了哪些 rule、skill、MCP（JSON，給畫面程式用）
+  kit agents --open --json          這台開著的 agent：哪個在等你、做完了還有什麼在跑（Herdr；給手機這種沒有 Kit 面板的畫面）
   kit agent <名字> add|rm rule|skill|mcp <東西>   改 agent 用的東西（改來源裡的檔案，再用 kit push 送出）
   kit add rule|skill|mcp <名字>     開始用（整個帳號：每個資料夾、每個 agent 都有）
   kit rm  rule|skill|mcp <名字>     不用了（之後 sync 也不會加回來）

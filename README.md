@@ -456,10 +456,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.20
+    kit api        →  1.21
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.20（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份；1.19：`kit add|rm|sync` 告訴開著的 agent，`--json` 印出告訴了誰，`--no-tell`；1.20：`kit list --json` 的 `sources[].dirty_since`，有改動 30 分鐘還沒送出時在 Herdr 提醒）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.21（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份；1.19：`kit add|rm|sync` 告訴開著的 agent，`--json` 印出告訴了誰，`--no-tell`；1.20：`kit list --json` 的 `sources[].dirty_since`，有改動 30 分鐘還沒送出時在 Herdr 提醒；1.21：`kit agents --open --json`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -553,6 +553,19 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
      "agents": [{"name", "description", "source", "path", "git", "rules", "skills", "mcp", "tools_only", "tools_deny", "prompt"}]}
 
 `git`：`new`（還沒 commit）、`changed`（改過）、`""`（沒改）、`no-git`。
+
+### `kit agents --open --json`（1.21 起）
+
+這台開著的 agent（Herdr 的 `hc ls` 列出、有跑 agent 的；別台機器的不算），哪個在等你、哪個做完了但自己的工作還在跑。跟 Herdr 的 Kit 面板（Agents 清單的「等你」「背景工作中」）同一套判斷，給沒有那個面板的畫面用（例如手機透過 `machine.exec` 叫它）。不用先 `kit init`；沒有 `hc` 是 `[]`。
+
+    {"kit": "0.16.0", "agents": [
+      {"address": "t1", "tool": "claude", "waiting": {"since": 1795690000000, "hot": false, "why": "要推上去嗎？"}, "busy": "子 agent 1 個"},
+      {"address": "t3", "tool": "omp", "waiting": null, "busy": "npm run build"}]}
+
+- `tool`：`claude`、`codex`、`omp`。照 `hc ls` 的順序。
+- `waiting`：在等你就有，不然是 `null`。`since`：從什麼時候（1970 起的毫秒）；`hot`：等了 10 分鐘以上（畫面標紅）；`why`：一行字說等什麼。算法：`blocked`（畫面上在問你、要你允許）10 分鐘以上（`why`：「在等你允許或回答它（畫面上的提問）」）；`done` 而且自己沒有背景 shell 在跑、最後一句在問你（從它停下來算）；`idle`（你看過了）但最後一句在問你、你還沒回（從它說那句話算）；這個終端的 agent 記了 `kit pending`（`why` 是那一筆的字，`since` 是記的時間）。「在問你」：有問號，或「跟我說」「告訴我」「回我」「要不要」「你決定」「你選」「請確認」、句尾「嗎」，但「之後再跟我說」「有需要隨時告訴我」「機器到了跟我說」這種不算。最後一句：Claude Code 是 nvim-jay 的回覆 hook 寫的 `~/.cache/nvim-jay/said/<終端>`；omp、Codex 從它們自己的對話檔（omp 的 session、Codex 的 rollout）讀最後的回覆，取最後一行在問的，沒有就取最後一行。
+- `busy`：只有 `done` 的才有（其他是 `null`）：它最新的背景 shell 在跑什麼（Claude Code：它的 Bash 工具丟到背景的；Codex：還開著的 `-lc` 終端；omp：它的 bash 背景工作），沒有就是還在跑的子 agent（「子 agent N 個」：Claude Code 從 hook 寫的 `~/.cache/nvim-jay/subs/<終端>`，omp 從 session 旁邊的子 agent 檔，Codex 從 `parent_thread_id` 接到它的 rollout）。
+- Windows（kit.ps1）：沒有 `ps`，Claude Code、Codex 的背景 shell 看不到（跟 Kit 面板一樣）；Codex 的 rollout 照它的資料夾找最新的。
 
 ### `kit push [--to 來源] [--dry-run] --json`
 
