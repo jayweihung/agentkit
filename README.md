@@ -33,6 +33,8 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
     kit add --dir <資料夾> skill <名字>   只加到這個資料夾（在這裡和子資料夾開的 agent 才有）
     kit rm  --dir <資料夾> skill <名字>
     kit run <agent> [--tool codex|omp]   開一個做好的 agent（預設 Claude）
+    kit open claude [--agent <名字>] --tab <分頁>   這個分頁自己一份規則、技能、MCP、外掛、記憶（給 Herdr 這種畫面程式用）
+    kit add --tab <分頁> skill <名字>  只加到這個分頁
     kit place <agent> <資料夾> [--tool codex|omp]   這個資料夾就是那個 agent（在那裡開的就是它）
     kit sync                      全部換成來源最新的（自動的同步不換已經在用的）
     kit sync --dry-run            先看 skill 會怎麼改（不動任何檔案），最後給一個雜湊
@@ -84,6 +86,36 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 | Claude | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Codex | ✅ | ✅（列在提示裡，用到時才讀） | ✅ | ✗ | 只限 MCP 工具 |
 | omp | ✅ | ✅ | ✅（一個暫時的 plugin 資料夾，`--plugin-dir`；工具名字前面多 `kit:`） | ✅（換成 omp 的工具名字） | ✅（一個暫時的 omp 擴充，`--extension`） |
+
+### 每個分頁自己一份：`kit open --tab`（0.17.0 起）
+
+    kit open claude --tab t12                     這個分頁的 Claude，用分頁 t12 那一份
+    kit open claude --agent hello --tab t12       新的分頁一開始放 hello 的規則、技能、MCP、提示、工具限制
+    kit open codex --tab-env HC_TERMINAL_ID -- resume <id>   分頁名稱從這個環境變數拿；-- 後面是工具自己的參數
+    kit add --tab t12 skill zh-docs               只有這個分頁有（kit rm --tab 拿掉）
+    kit tab show t12 [--json]                     這個分頁、它的資料夾、整個帳號各有什麼
+    kit tab rm t12                                分頁關掉了：清掉它那一份；kit tab keep t1 t3：留這些和還在跑的，別的清掉
+
+同一個資料夾開好幾個分頁，每個分頁還是各自一份。給 Herdr 這種一個分頁一個終端機的畫面程式用：它每開一個分頁就用
+`kit open` 開，把分頁的名字交給 kit（kit 只把它當名字，不認識畫面程式），分頁關掉時叫 `kit tab rm`。
+
+- 一個分頁讀到三層：分頁自己的（`~/.config/agentkit/tabs/<分頁>/`，kit 用參數帶進去）、資料夾的（`kit add --dir`）、整個帳號的（`kit add`）。
+  下面兩層工具本來就讀；分頁裡的哪一項下面已經有，開的時候就不帶（技能先放在分頁的 `hidden/`，下面拿掉了再拿回來），
+  `kit add --tab` 也不讓你加（錯誤代碼 `below`）。
+- `--agent` 只決定新分頁一開始有什麼：agent 檔複製一份到分頁（`agent.md`），它的規則、技能、MCP 各複製一份。之後改 agent 檔，已經開過的分頁不變；
+  在分頁加的、拿掉的也不會改到 agent。分頁名稱已經有了就照它原本的，`--agent` 不看。
+- 每個分頁各自的東西都是加的那時候這台的那一版，`kit sync` 不換；要新的就開一個新分頁。
+- Claude 的記憶也放在分頁裡（`--settings` 的 `autoMemoryDirectory`），分頁清掉就沒了。Codex、omp 的記憶照它們自己的設定。
+- 同一個分頁再開一次（例如關掉 Claude 再 `kit open claude --tab t12 -- --resume <id>` 接回對話）拿回同一份。
+- 開著時加了東西：Claude 的技能下一句就讀得到，其他（規則、MCP、外掛；Codex、omp 的技能）要重開那個 agent。
+- macOS、Linux：kit 最後把自己換成工具（exec），畫面程式看到的就是工具本身。Windows 沒有 exec，kit 開工具、等它結束。
+- 沒給分頁名稱（或 `--tab-env` 的變數是空的）：跟 `kit run` 一樣用一個暫時的資料夾，工具結束就刪。
+
+| | 規則 + 提示 | 技能 | MCP | 外掛 | 記憶 | tools.only / deny |
+|---|---|---|---|---|---|---|
+| Claude | ✅ | ✅ | ✅ | ✅（`--plugin-dir`） | ✅ | ✅ |
+| Codex | ✅ | ✅（列在提示裡，用到時才讀） | ✅ | ✗（Codex 只能整個帳號裝） | 照 Codex 的設定 | 跟 `kit run` 一樣 |
+| omp | ✅ | ✅ | ✅ | ✅（`--plugin-dir`） | 照 omp 的設定 | ✅ |
 
 ### 一個資料夾就是一個 agent：`kit place`
 
@@ -456,10 +488,10 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
 ### 版本：`kit api`
 
-    kit api        →  1.21
+    kit api        →  1.22
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.21（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份；1.19：`kit add|rm|sync` 告訴開著的 agent，`--json` 印出告訴了誰，`--no-tell`；1.20：`kit list --json` 的 `sources[].dirty_since`，有改動 30 分鐘還沒送出時在 Herdr 提醒；1.21：`kit agents --open --json`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.22（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份；1.19：`kit add|rm|sync` 告訴開著的 agent，`--json` 印出告訴了誰，`--no-tell`；1.20：`kit list --json` 的 `sources[].dirty_since`，有改動 30 分鐘還沒送出時在 Herdr 提醒；1.21：`kit agents --open --json`；1.22：`kit open`、`kit add|rm --tab`、`kit tab list|show --json`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -566,6 +598,27 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - `waiting`：在等你就有，不然是 `null`。`since`：從什麼時候（1970 起的毫秒）；`hot`：等了 10 分鐘以上（畫面標紅）；`why`：一行字說等什麼。算法：`blocked`（畫面上在問你、要你允許）10 分鐘以上（`why`：「在等你允許或回答它（畫面上的提問）」）；`done` 而且自己沒有背景 shell 在跑、最後一句在問你（從它停下來算）；`idle`（你看過了）但最後一句在問你、你還沒回（從它說那句話算）；這個終端的 agent 記了 `kit pending`（`why` 是那一筆的字，`since` 是記的時間）。「在問你」：有問號，或「跟我說」「告訴我」「回我」「要不要」「你決定」「你選」「請確認」、句尾「嗎」，但「之後再跟我說」「有需要隨時告訴我」「機器到了跟我說」這種不算。最後一句：Claude Code 是 nvim-jay 的回覆 hook 寫的 `~/.cache/nvim-jay/said/<終端>`；omp、Codex 從它們自己的對話檔（omp 的 session、Codex 的 rollout）讀最後的回覆，取最後一行在問的，沒有就取最後一行。
 - `busy`：只有 `done` 的才有（其他是 `null`）：它最新的背景 shell 在跑什麼（Claude Code：它的 Bash 工具丟到背景的；Codex：還開著的 `-lc` 終端；omp：它的 bash 背景工作），沒有就是還在跑的子 agent（「子 agent N 個」：Claude Code 從 hook 寫的 `~/.cache/nvim-jay/subs/<終端>`，omp 從 session 旁邊的子 agent 檔，Codex 從 `parent_thread_id` 接到它的 rollout）。
 - Windows（kit.ps1）：沒有 `ps`，Claude Code、Codex 的背景 shell 看不到（跟 Kit 面板一樣）；Codex 的 rollout 照它的資料夾找最新的。
+
+### `kit tab list --json`、`kit tab show <分頁> --json`（1.22 起）
+
+    kit tab list --json
+    {"kit": "0.17.0", "api": "1.22", "tabs": [
+      {"tab": "t12", "tool": "claude", "agent": "hello", "dir": "/Users/me/ai", "made": 1795690000, "live": true, "items": 3}]}
+
+    kit tab show t12 --json
+    {"kit": "0.17.0", "api": "1.22", "tab": "t12", "tool": "claude", "agent": "hello", "dir": "/Users/me/ai", "made": 1795690000, "live": true,
+     "items": [
+      {"kind": "skill", "name": "kit-hello", "from": "agent", "below": null, "restart": false},
+      {"kind": "mcp", "name": "gerrit", "from": "tab", "below": null, "restart": true}],
+     "folder": {"dir": "/Users/me/ai", "items": [{"kind": "rule", "name": "ai-notes"}]},
+     "account": [{"kind": "rule", "name": "zh-tw"}]}
+
+- `tool`：上次用哪個工具開；`agent`：一開始從哪個 agent 開（`--agent`），沒有是 `null`；`dir`：上次開在哪個資料夾；`made`：建立的時間（Unix 秒數）；
+  `live`：上次開的工具還在跑（macOS、Linux 是工具本身，Windows 是等它的 kit）。
+- `items`：分頁自己的。`from`：`agent`（一開始那個 agent 帶的）或 `tab`（`kit add --tab` 加的）。`below`：資料夾（`folder`）或整個帳號（`account`）也有，開的時候不帶，不然是 `null`。
+  `restart`：開著時改了它，要重開那個 agent 才讀得到（Claude 的技能是 `false`）。
+- `folder`：分頁開在的資料夾自己加的（`kit add --dir`；沒有是 `{"dir": null, "items": []}`）。`account`：整個帳號的（`kit add`、團隊必備的）。
+- 錯誤代碼：`no_tab`（沒有這個分頁）、`below`（`kit add --tab` 下面已經有）、`usage`（分頁名稱只能有英文字母、數字、`. _ -`，最多 64 個字）。
 
 ### `kit push [--to 來源] [--dry-run] --json`
 

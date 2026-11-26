@@ -5,6 +5,9 @@
 #   <sections> : <files, or FILE:FUNCTION; * and ? match anything>   (a line starting with a space goes on)
 #   "-" for no section; "always" for every change
 export-self code : always
+tabs hook tools mcp : unix/kit:launch_args unix/kit:open_temp unix/kit:cmd_run unix/kit:cmd_open unix/kit:tab_* unix/kit:cmd_tab
+    windows/kit.ps1:New-Launch windows/kit.ps1:Launch-* windows/kit.ps1:Open-Temp windows/kit.ps1:Cmd-Run windows/kit.ps1:Cmd-Open
+    windows/kit.ps1:Tab-* windows/kit.ps1:Cmd-Tab tests/sh/tabs.sh
 - : tests/json_test.sh
 export-self : *.md docs/* LICENSE
 install hook : templates/gitea-kit-check.yaml

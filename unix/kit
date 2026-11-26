@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.21
+KIT_API=1.22
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -5317,13 +5317,15 @@ EOF
 cmd_add_rm() {
     [ "${1:-}" != add ] || [ $# -lt 3 ] || case $2 in rule|mcp) for x in "${@:3}"; do case $x in --*) ;; *) rm -f "$STORE_DIR/${2/rule/rules}/$x".*;; esac; done;; esac
     local verb=$1; shift
-    local dir=""
-    if [ "${1:-}" = --dir ]; then [ $# -ge 2 ] || die "--dir 後面要接資料夾"; dir=$2; shift 2; fi
-    [ $# -ge 2 ] && { [ -z "$dir" ] || [ $# -eq 2 ]; } || die "用法：kit $verb [--dir 資料夾] rule|skill|mcp|plugin <名字>（整個帳號可以一次給好幾個名字）"
+    local dir="" tab=""
+    if [ "${1:-}" = --dir ]; then [ $# -ge 2 ] || die "--dir 後面要接資料夾"; dir=$2; shift 2
+    elif [ "${1:-}" = --tab ]; then [ $# -ge 2 ] || die_c usage "--tab 後面要接分頁"; tab=$2; shift 2; fi
+    [ $# -ge 2 ] && { [ -z "$dir$tab" ] || [ $# -eq 2 ]; } || die_c usage "用法：kit $verb [--dir 資料夾 | --tab 分頁] rule|skill|mcp|plugin <名字>（整個帳號可以一次給好幾個名字）"
     need_init
     local k=$1 n i added removed; shift
     case " rule skill mcp plugin " in *" $k "*) ;; *) die "種類只能是 rule、skill、mcp、plugin";; esac
     if [ -n "$dir" ]; then dir_add_rm "$verb" "$dir" "$k" "$1"; return; fi
+    if [ -n "$tab" ]; then tab_add_rm "$verb" "$tab" "$k" "$1"; return; fi
     local acct; acct=$(wanted)
     for n in "$@"; do
         # taking one out: one the account has goes even when no source has it any more
@@ -5397,6 +5399,77 @@ EOF
     printf '{%s, default_tools_approval_mode="approve"}' "$out"
 }
 
+# ---------- what a tool gets for an agent or a tab: one way to start it (kit run, kit open) ----------
+# launch_args TOOL OUT SKDIR : the tool's arguments in LA, for L_RULES (rule files, one per line), L_SKILLS (names, each
+# a folder in SKDIR), L_MCP (name TAB file, one per line), L_PLUGINS (plugin folders, one per line), L_BODY (the agent's
+# file: its prompt), L_ONLY, L_DENY (its tool limits), L_MEM (Claude's memory folder); the files they need go in OUT
+launch_args() {
+    local tool=$1 out=$2 skdir=$3 n f k d t first mcps=""
+    mkdir -p "$out" "$skdir"
+    {
+        while IFS= read -r f; do [ -n "$f" ] && { cat "$f"; echo; }; done <<< "$L_RULES"
+        py_hint $L_SKILLS
+        [ -z "$L_BODY" ] || fm_body "$L_BODY"
+        if [ $tool = codex ] && [ -n "${L_SKILLS// /}" ]; then
+            # Codex cannot load skills from an extra folder: list them, it reads one when needed
+            echo; echo "## Skills"
+            echo "Skills you have. Before doing a task one of them covers, read its SKILL.md and follow it."
+            for n in $L_SKILLS; do
+                d="$skdir/$n/"
+                printf -- '- %s: %s (%sSKILL.md)\n' "$n" "$(LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$d/SKILL.md" 2>/dev/null | awk -F'\t' '$1 == "description" { print $2 }')" "$d"
+            done
+        fi
+    } > "$out/prompt.md"
+    LA=()
+    if [ $tool != codex ]; then                              # Claude: --mcp-config; omp: a plugin folder's .mcp.json
+        first=1
+        while IFS="$TAB" read -r n f; do
+            [ -n "$n" ] || continue
+            k=$(mcp_json "$f") || continue
+            [ $first = 1 ] || mcps="$mcps,"; first=0
+            mcps="$mcps$(json_str "$n"):$k"
+        done <<< "$L_MCP"
+        printf '{"mcpServers":{%s}}\n' "$mcps" > "$out/mcp.json"
+    fi
+    case $tool in
+    claude)
+        LA=(--add-dir "${skdir%/.claude/skills}" --append-system-prompt-file "$out/prompt.md" --mcp-config "$out/mcp.json")
+        [ -n "$L_ONLY" ] && LA+=(--tools "$L_ONLY")
+        while IFS= read -r d; do [ -n "$d" ] && LA+=(--disallowedTools "$d"); done <<< "$L_DENY"
+        while IFS= read -r d; do [ -n "$d" ] && LA+=(--plugin-dir "$d"); done <<< "$L_PLUGINS"
+        [ -z "$L_MEM" ] || LA+=(--settings "{\"autoMemoryDirectory\":$(json_str "$L_MEM")}")
+        ;;
+    codex)
+        LA=(-c "developer_instructions=$(toml_str "$(cat "$out/prompt.md")")")
+        while IFS="$TAB" read -r n f; do
+            [ -n "$n" ] || continue
+            k=$(mcp_toml_inline "$f" "$n") || continue
+            t=""; first=1
+            while IFS= read -r d; do case $d in "mcp__${n}__"*) [ $first = 1 ] || t="$t, "; first=0; t="$t$(toml_str "${d#mcp__${n}__}")";; esac; done <<< "$L_DENY"
+            [ -n "$t" ] && k="${k%\}}, disabled_tools=[$t]}"
+            LA+=(-c "mcp_servers.$(toml_key "$n")=$k")
+        done <<< "$L_MCP"
+        while IFS= read -r d; do [ -n "$d" ] && warn "Codex 只能整個帳號裝外掛：這個 Codex 沒有外掛 ${d##*/}（要的話：kit add plugin ${d##*/}）"; done <<< "$L_PLUGINS"
+        # tools.only, tools.deny: kit codex-guard (Codex's PreToolUse hook) reads them from this Codex's environment
+        codex_limits_warn "$L_ONLY" "$L_DENY" | while IFS= read -r d; do warn "$d"; done
+        ;;
+    omp)
+        printf 'skills:\n  customDirectories:\n    - %s\n' "$(toml_str "$skdir")" > "$out/omp.yml"
+        LA=(--config "$out/omp.yml" --append-system-prompt "$out/prompt.md")
+        [ -n "$L_ONLY" ] && LA+=(--tools "$(omp_tool_names "$L_ONLY")")
+        if [ -n "$mcps" ]; then                              # omp loads a plugin folder's .mcp.json (--plugin-dir): its tools are kit:<name>
+            mkdir -p "$out/omp-plugin/.claude-plugin" && printf '{"name": "kit", "version": "0.0.0"}\n' > "$out/omp-plugin/.claude-plugin/plugin.json" &&
+                cp "$out/mcp.json" "$out/omp-plugin/.mcp.json" && LA+=(--plugin-dir "$out/omp-plugin")
+        fi
+        while IFS= read -r d; do [ -n "$d" ] && LA+=(--plugin-dir "$d"); done <<< "$L_PLUGINS"
+        if [ -n "$L_DENY" ]; then                             # tools.deny: kit's hook module, --extension
+            omp_hook_js "" "" "$L_DENY" > "$out/kit-tools.js" && LA+=(--extension "$out/kit-tools.js")
+            omp_limits_warn "" "$L_DENY" | while IFS= read -r d; do warn "$d"; done
+        fi
+        ;;
+    esac
+}
+
 cmd_run() {
     [ $# -ge 1 ] || die "用法：kit run <agent> [--tool claude|codex|omp] [工具的參數...]"
     need_init
@@ -5404,106 +5477,274 @@ cmd_run() {
     local tool=claude
     if [ "${1:-}" = --tool ]; then tool=${2:-}; shift 2 || die "--tool 後面要接 claude、codex 或 omp"; fi
     case $tool in claude|codex|omp) ;; *) die "--tool 只能是 claude、codex 或 omp";; esac
-    local f; f=$(find_item agent "$name") || die "找不到 agent ${name}（打 kit list 看有哪些）"
+    find_item agent "$name" >/dev/null || die "找不到 agent ${name}（打 kit list 看有哪些）"
+    open_temp "$tool" "$name" "$@"
+}
+
+open_temp() { # open_temp TOOL AGENT [ARGS...] : the tool in a folder of its own, gone when it ends (kit run; kit open without a tab)
+    local tool=$1 name=$2; shift 2
+    local f="" fm="" n p d
+    [ -z "$name" ] || { f=$(find_item agent "$name") || die_c no_agent "找不到 agent ${name}（打 kit list 看有哪些）"; }
     if take_lock soft; then ( QUIET=1 cmd_sync ) 2>/dev/null; release_lock; fi   # busy (another kit is syncing): start as it is
 
     # the agent's folder, gone when kit ends (also on Ctrl-C); a dry run keeps it to look at, without kit's links in it.
     # Folders of runs that were killed (their kit is gone) go now.
-    local d; for d in "${TMPDIR:-/tmp}"/kit-run.*; do
-        [ -f "$d/.kit-pid" ] && ! kill -0 "$(cat "$d/.kit-pid")" 2>/dev/null && rm -rf "$d"
+    for d in "${TMPDIR:-/tmp}"/kit-run.*; do
+        [ -f "$d/.kit-pid" ] && ! kill -0 "$(cat "$d/.kit-pid")" 2>/dev/null && rm -rf "${d:?}"
     done
     local tmp; tmp=$(mktemp -d "${TMPDIR:-/tmp}/kit-run.XXXXXX") || die "沒辦法建立暫存資料夾"
     [ -n "${KIT_DRY_RUN:-}" ] || { KIT_RUN_TMP=$tmp; echo $$ > "$tmp/.kit-pid"; }
-    local n p k
-    local fm; fm=$(LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$f") || die "bad header in $f"
-    fmget() { printf '%s\n' "$fm" | awk -F'\t' -v p="$1" '$1 == p || $1 == p "[]" { sub(/^[^\t]*\t/, ""); print }'; }
+    [ -z "$f" ] || fm=$(fm_of "$f") || die "bad header in $f"
 
-    # the agent's skills, each in its own folder
     local skdir="$tmp/skills"; [ $tool = claude ] && skdir="$tmp/.claude/skills"
     mkdir -p "$skdir"
-    for n in $(fmget skills); do
+    L_RULES=; L_SKILLS=; L_MCP=; L_PLUGINS=; L_BODY=$f; L_MEM=
+    for n in $(fm_val "$fm" skills); do                     # the agent's skills, each in its own folder
         p=$(find_item skill "$n") || { warn "skill $n not found"; continue; }
         cp -R "$(dirname "$p")" "$skdir/$n"; drop_caches "$skdir/$n"; [ -n "${KIT_DRY_RUN:-}" ] || link_deps "$n" "$skdir/$n"
+        L_SKILLS="$L_SKILLS $n"
     done
-    # the agent's rules + its prompt
-    {
-        for n in $(fmget rules); do
-            p=$(find_item rule "$n") || { warn "rule $n not found"; continue; }
-            cat "$p"; echo
-        done
-        py_hint $(fmget skills)
-        fm_body "$f"
-        if [ $tool = codex ] && [ -n "$(ls "$skdir")" ]; then
-            # Codex cannot load skills from an extra folder: list them, it reads one when needed
-            echo; echo "## Skills"
-            echo "Skills you have. Before doing a task one of them covers, read its SKILL.md and follow it."
-            for d in "$skdir"/*/; do
-                n=$(basename "$d")
-                printf -- '- %s: %s (%sSKILL.md)\n' "$n" "$(LC_ALL=C awk -f "$KIT_LIB/yaml.awk" -v frontmatter=1 "$d/SKILL.md" 2>/dev/null | awk -F'\t' '$1 == "description" { print $2 }')" "$d"
-            done
-        fi
-    } > "$tmp/prompt.md"
-    local only deny; only=$(fmget tools.only | paste -sd, -); deny=$(fmget tools.deny)
-
-    local args=()
-    if [ $tool != codex ]; then                              # Claude: --mcp-config; omp: a plugin folder's .mcp.json
-        local mcps="" first=1
-        for n in $(fmget mcp); do
-            p=$(find_item mcp "$n") || { warn "mcp $n not found"; continue; }
-            k=$(mcp_json "$p") || continue
-            [ $first = 1 ] || mcps="$mcps,"; first=0
-            mcps="$mcps$(json_str "$n"):$k"
-        done
-        printf '{"mcpServers":{%s}}\n' "$mcps" > "$tmp/mcp.json"
-    fi
-    case $tool in
-    claude)
-        args=(--add-dir "$tmp" --append-system-prompt-file "$tmp/prompt.md" --mcp-config "$tmp/mcp.json")
-        [ -n "$only" ] && args+=(--tools "$only")
-        while IFS= read -r d; do [ -n "$d" ] && args+=(--disallowedTools "$d"); done <<EOF
-$deny
-EOF
-        ;;
-    codex)
-        args=(-c "developer_instructions=$(toml_str "$(cat "$tmp/prompt.md")")")
-        for n in $(fmget mcp); do
-            p=$(find_item mcp "$n") || { warn "mcp $n not found"; continue; }
-            k=$(mcp_toml_inline "$p" "$n") || continue
-            local t="" first=1
-            while IFS= read -r d; do case $d in "mcp__${n}__"*) [ $first = 1 ] || t="$t, "; first=0; t="$t$(toml_str "${d#mcp__${n}__}")";; esac; done <<EOF
-$deny
-EOF
-            [ -n "$t" ] && k="${k%\}}, disabled_tools=[$t]}"
-            args+=(-c "mcp_servers.$(toml_key "$n")=$k")
-        done
-        # tools.only, tools.deny: kit codex-guard (Codex's PreToolUse hook) reads them from this Codex's environment
-        codex_limits_warn "$only" "$deny" | while IFS= read -r a; do warn "$a"; done
-        ;;
-    omp)
-        printf 'skills:\n  customDirectories:\n    - %s\n' "$(toml_str "$skdir")" > "$tmp/omp.yml"
-        args=(--config "$tmp/omp.yml" --append-system-prompt "$tmp/prompt.md")
-        [ -n "$only" ] && args+=(--tools "$(omp_tool_names "$only")")
-        if [ -n "$mcps" ]; then                              # omp loads a plugin folder's .mcp.json (--plugin-dir): its tools are kit:<name>
-            mkdir -p "$tmp/omp-plugin/.claude-plugin" && printf '{"name": "kit", "version": "0.0.0"}\n' > "$tmp/omp-plugin/.claude-plugin/plugin.json" &&
-                cp "$tmp/mcp.json" "$tmp/omp-plugin/.mcp.json" && args+=(--plugin-dir "$tmp/omp-plugin")
-        fi
-        if [ -n "$deny" ]; then                               # tools.deny: kit's hook module, --extension
-            omp_hook_js "" "" "$deny" > "$tmp/kit-tools.js" && args+=(--extension "$tmp/kit-tools.js")
-            omp_limits_warn "" "$deny" | while IFS= read -r a; do warn "$a"; done
-        fi
-        ;;
-    esac
-    set -- "${args[@]}" "$@"
+    for n in $(fm_val "$fm" rules); do
+        if p=$(find_item rule "$n"); then L_RULES="$L_RULES$p$LF"; else warn "rule $n not found"; fi
+    done
+    for n in $(fm_val "$fm" mcp); do
+        if p=$(find_item mcp "$n"); then L_MCP="$L_MCP$n$TAB$p$LF"; else warn "mcp $n not found"; fi
+    done
+    L_ONLY=$(fm_val "$fm" tools.only | paste -sd, -); L_DENY=$(fm_val "$fm" tools.deny)
+    launch_args "$tool" "$tmp" "$skdir"
+    set -- "${LA[@]}" "$@"
     [ -n "${KIT_DRY_RUN:-}" ] && { printf '%s\n' "$tool" "$@"; printf 'tmp=%s\n' "$tmp"; return 0; }
     # a marker (this process -> agent name), so a program showing the pane can tell which agent runs in it
-    mkdir -p "$KIT_CONF/run" 2>/dev/null && printf '%s\n' "$name" > "$KIT_CONF/run/$$"
+    [ -z "$name" ] || { mkdir -p "$KIT_CONF/run" 2>/dev/null && printf '%s\n' "$name" > "$KIT_CONF/run/$$"; }
     trap : INT                                               # Ctrl-C is the agent's; kit cleans up when it ends
-    if [ $tool = codex ]; then KIT_CODEX_ONLY=$only KIT_CODEX_DENY=$deny "$tool" "$@"; else "$tool" "$@"; fi
+    if [ $tool = codex ]; then KIT_CODEX_ONLY=$L_ONLY KIT_CODEX_DENY=$L_DENY "$tool" "$@"; else "$tool" "$@"; fi
     local rc=$?
     trap 'exit 130' INT
-    rm -rf "$tmp"; rm -f "$KIT_CONF/run/$$"; KIT_RUN_TMP=
+    rm -rf "${tmp:?}"; rm -f "$KIT_CONF/run/$$"; KIT_RUN_TMP=
     return $rc
 }
+
+# ---------- a tab of its own (kit open --tab): each terminal its own rules, skills, MCP, plugins, memory ----------
+# A program that shows terminals (Herdr) starts each one through kit open with the terminal's id; kit only takes it as
+# a name. $KIT_CONF/tabs/<id>/: tab.tsv (agent, made, tool, dir, pid; item KIND NAME agent|tab), this machine's copy of
+# each item (.claude/skills/, rules/, mcp/, plugins/; hidden/: a skill a layer below has too), agent.md (the agent it
+# started from: its prompt, tool limits), memory/ (Claude's), run/ (what kit open writes each time). The account's and
+# the folder's own (kit add, kit add --dir) the tools read themselves; a tab's item one of those has too is left out.
+# The tab goes when the program says the terminal closed (kit tab rm, kit tab keep).
+tab_dir() { printf '%s/tabs/%s\n' "$KIT_CONF" "$1"; }
+tab_ok() { # tab_ok ID : a tab id: letters, digits, . _ -, 1 to 64, not starting with . or -
+    case $1 in ""|[.-]*|*[!A-Za-z0-9._-]*) die_c usage "分頁名稱只能有英文字母、數字、. _ -（不能用 . 或 - 開頭）：$1";; esac
+    [ ${#1} -le 64 ] || die_c usage "分頁名稱太長（最多 64 個字）：$1"
+}
+tab_get() { awk -F'\t' -v k="$2" '$1 == k { print $2; exit }' "$1/tab.tsv" 2>/dev/null; }    # tab_get TABDIR KEY
+tab_items() { awk -F'\t' '$1 == "item" { print $2 "\t" $3 "\t" $4 }' "$1/tab.tsv" 2>/dev/null; }   # KIND TAB NAME TAB FROM
+tab_has() { tab_items "$1" | awk -F'\t' -v k="$2" -v n="$3" '$1 == k && $2 == n { f = 1 } END { exit !f }'; }
+tab_set() { # tab_set TABDIR KEY VALUE
+    awk -F'\t' -v k="$2" -v v="$3" 'BEGIN { OFS = "\t" } $1 == k { if (!d) print k, v; d = 1; next } { print } END { if (!d) print k, v }' \
+        "$1/tab.tsv" > "$1/tab.tsv.$$" && mv "$1/tab.tsv.$$" "$1/tab.tsv"
+}
+tab_item() { # tab_item TABDIR KIND NAME [FROM] : record it (FROM agent|tab), or without FROM take it out
+    awk -F'\t' -v k="$2" -v n="$3" -v f="${4:-}" 'BEGIN { OFS = "\t" } $1 == "item" && $2 == k && $3 == n { next } { print }
+        END { if (f != "") print "item", k, n, f }' "$1/tab.tsv" > "$1/tab.tsv.$$" && mv "$1/tab.tsv.$$" "$1/tab.tsv"
+}
+tab_copy() { # tab_copy TABDIR KIND NAME : this machine's copy of it into the tab (1: no source has it)
+    local t=${1:?} k=$2 n=${3:?} p
+    p=$(find_item "$k" "$n") || return 1
+    case $k in
+    skill) mkdir -p "$t/.claude/skills"; rm -rf "$t/.claude/skills/$n" "$t/hidden/$n"
+           cp -R "$(dirname "$p")" "$t/.claude/skills/$n"; drop_caches "$t/.claude/skills/$n"; link_deps "$n" "$t/.claude/skills/$n";;
+    rule)  mkdir -p "$t/rules"; cp "$p" "$t/rules/$n.md";;
+    mcp)   mkdir -p "$t/mcp"; rm -f "$t/mcp/$n".*; cp "$p" "$t/mcp/${p##*/}";;
+    plugin) mkdir -p "$t/plugins"; rm -rf "$t/plugins/$n"; cp -R "${p%/.claude-plugin/plugin.json}" "$t/plugins/$n";;
+    esac
+}
+tab_uncopy() { # tab_uncopy TABDIR KIND NAME
+    local t=${1:?} n=${3:?}
+    rm -rf "$t/.claude/skills/$n" "$t/hidden/$n" "$t/plugins/$n"; rm -f "$t/rules/$n.md" "$t/mcp/$n".*
+}
+tab_folder() { local r; r=$(dir_root "$1" 2>/dev/null) && [ -f "$r/$DIR_FILE" ] && printf '%s\n' "$r"; return 0; }   # the folder's own, if any
+tab_below() { # tab_below TABDIR KIND:NAME [ACCOUNT FOLDER_ITEMS] : account / folder when a layer below has it too
+    local a f
+    if [ $# -ge 4 ]; then a=$3; f=$4
+    else a=$(wanted); f=$(tab_folder "$(tab_get "$1" dir)"); [ -z "$f" ] || f=$(dir_items "$f"); fi
+    printf '%s\n' "$a" | grep -qxF "$2" && { echo account; return 0; }
+    printf '%s\n' "$f" | grep -qxF "$2" && echo folder
+    return 0
+}
+tab_restart() { [ "$1" = claude ] && [ "$2" = skill ] && return 1; return 0; }   # tab_restart TOOL KIND : a change needs it started again
+tab_load() { # tab_load TOOL TABDIR : L_* for what the tab has and no layer below has (such a skill waits in hidden/)
+    local tool=$1 t=${2:?} k n from acct fi fm f
+    acct=$(wanted); fi=$(tab_folder "$(tab_get "$t" dir)"); [ -z "$fi" ] || fi=$(dir_items "$fi")
+    L_RULES=; L_SKILLS=; L_MCP=; L_PLUGINS=; L_BODY=; L_ONLY=; L_DENY=; L_MEM=
+    mkdir -p "$t/.claude/skills"
+    while IFS="$TAB" read -r k n from; do
+        [ -n "$k" ] && [ -n "$n" ] || continue
+        if [ -n "$(tab_below "$t" "$k:$n" "$acct" "$fi")" ]; then
+            if [ "$k" = skill ] && [ -d "$t/.claude/skills/$n" ]; then
+                mkdir -p "$t/hidden"; rm -rf "$t/hidden/$n"; mv "$t/.claude/skills/$n" "$t/hidden/$n"
+            fi
+            continue
+        fi
+        case $k in
+        rule)  [ -f "$t/rules/$n.md" ] && L_RULES="$L_RULES$t/rules/$n.md$LF";;
+        skill) [ -d "$t/.claude/skills/$n" ] || { [ -d "$t/hidden/$n" ] && mv "$t/hidden/$n" "$t/.claude/skills/$n"; }
+               [ -d "$t/.claude/skills/$n" ] && L_SKILLS="$L_SKILLS $n";;
+        mcp)   for f in "$t/mcp/$n".*; do [ -f "$f" ] && L_MCP="$L_MCP$n$TAB$f$LF"; done;;
+        plugin) [ -d "$t/plugins/$n" ] && L_PLUGINS="$L_PLUGINS$t/plugins/$n$LF";;
+        esac
+    done <<< "$(tab_items "$t")"
+    if [ -f "$t/agent.md" ]; then
+        L_BODY=$t/agent.md; fm=$(fm_of "$t/agent.md")
+        L_ONLY=$(fm_val "$fm" tools.only | paste -sd, -); L_DENY=$(fm_val "$fm" tools.deny)
+    fi
+    [ "$tool" != claude ] || { L_MEM=$t/memory; mkdir -p "$L_MEM"; }
+}
+
+cmd_open() { # kit open claude|codex|omp [--agent NAME] [--tab ID | --tab-env VAR] [-- ARGS...]
+    local use="用法：kit open claude|codex|omp [--agent <名字>] [--tab <分頁> | --tab-env <變數>] [--] [工具的參數...]"
+    local tool=${1:-} agent="" id="" t f="" fm k n a items="" ag
+    case $tool in claude|codex|omp) shift;; *) die_c usage "$use";; esac
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --agent) [ $# -ge 2 ] && [ -n "$2" ] || die_c usage "$use"; agent=$2; shift 2;;
+            --tab) [ $# -ge 2 ] || die_c usage "$use"; tab_ok "$2"; id=$2; shift 2;;
+            --tab-env) [ $# -ge 2 ] || die_c usage "$use"
+                       case $2 in ""|[0-9]*|*[!A-Za-z0-9_]*) die_c usage "$use";; esac
+                       id=${!2:-}; [ -z "$id" ] || tab_ok "$id"; shift 2;;
+            --) shift; break;;
+            *) break;;                                       # the tool's own
+        esac
+    done
+    need_init
+    [ -n "$id" ] || { open_temp "$tool" "$agent" "$@"; return; }
+    if take_lock soft; then ( QUIET=1 cmd_sync ) 2>/dev/null; release_lock; fi   # busy (another kit is syncing): start as it is
+    t=$(tab_dir "$id")
+    if [ ! -f "$t/tab.tsv" ]; then                           # a new tab: what its agent has (the agent decides only this)
+        [ -z "$agent" ] || { f=$(find_item agent "$agent") || die_c no_agent "找不到 agent ${agent}（打 kit list 看有哪些）"; }
+        rm -rf "${t:?}"; mkdir -p "$t" || die "沒辦法建立 $t"
+        if [ -n "$agent" ]; then
+            cp "$f" "$t/agent.md"; fm=$(fm_of "$f")
+            for a in rule:rules skill:skills mcp:mcp; do
+                k=${a%%:*}
+                for n in $(fm_val "$fm" "${a#*:}"); do
+                    if tab_copy "$t" "$k" "$n"; then items="$items${LF}item$TAB$k$TAB$n${TAB}agent"
+                    else warn "$k $n 不在任何來源裡：沒有放進來"; fi
+                done
+            done
+        fi
+        printf 'agent\t%s\nmade\t%s%s\n' "$agent" "$(date +%s)" "$items" > "$t/tab.tsv"
+    fi
+    tab_set "$t" tool "$tool"; tab_set "$t" dir "$(pwd -P)"; tab_set "$t" pid "$$"
+    tab_load "$tool" "$t"
+    rm -rf "${t:?}/run"; launch_args "$tool" "$t/run" "$t/.claude/skills"
+    set -- "${LA[@]}" "$@"
+    [ -n "${KIT_DRY_RUN:-}" ] && { printf '%s\n' "$tool" "$@"; printf 'tab=%s\n' "$t"; return 0; }
+    ag=$(tab_get "$t" agent)
+    [ -z "$ag" ] || { mkdir -p "$KIT_CONF/run" 2>/dev/null && printf '%s\n' "$ag" > "$KIT_CONF/run/$$"; }   # (as kit run's)
+    export KIT_TAB=$id
+    [ $tool != codex ] || export KIT_CODEX_ONLY=$L_ONLY KIT_CODEX_DENY=$L_DENY
+    exec "$tool" "$@"                                         # the tool itself in this process: the terminal sees it
+}
+
+tab_add_rm() { # tab_add_rm add|rm ID KIND NAME : only that tab has it, or no longer
+    local verb=$1 id=$2 k=$3 n=$4 i="$3:$4" t tool b when
+    tab_ok "$id"; t=$(tab_dir "$id")
+    [ -f "$t/tab.tsv" ] || die_c no_tab "沒有分頁 ${id}（kit open --tab 開過、還沒清掉的才有）"
+    tool=$(tab_get "$t" tool)
+    when="；重開這個分頁的 agent 才會換"; tab_restart "$tool" "$k" || when="；開著的 Claude 自己會讀到"
+    if [ "$verb" = add ]; then
+        find_item "$k" "$n" > /dev/null || die_c not_found "找不到 ${i}（打 kit list 看有哪些）"
+        tab_has "$t" "$k" "$n" && { say "kit：分頁 $id 已經有 $i"; return 0; }
+        b=$(tab_below "$t" "$i")
+        [ "$b" != account ] || die_c below "整個帳號已經有 ${i}：這個分頁本來就讀得到"
+        [ "$b" != folder ] || die_c below "$(tab_folder "$(tab_get "$t" dir)") 已經有 ${i}：開在那裡的分頁本來就讀得到"
+        tab_copy "$t" "$k" "$n" || die "沒辦法把 $i 放進分頁 $id"
+        tab_item "$t" "$k" "$n" tab
+        say "kit：$i 加到分頁 ${id}（只有這個分頁有）$when"
+        [ "$k" != plugin ] || [ "$tool" != codex ] || say "     Codex 只能整個帳號裝外掛：這個分頁的 Codex 讀不到 ${n}"
+    else
+        tab_has "$t" "$k" "$n" || die_c not_found "分頁 $id 沒有 ${i}"
+        tab_item "$t" "$k" "$n"; tab_uncopy "$t" "$k" "$n"
+        say "kit：$i 從分頁 $id 拿掉了$when"
+    fi
+}
+
+tab_alive() { local p; p=$(tab_get "$1" pid); [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }   # its tool still runs
+tab_null() { if [ -n "$1" ]; then json_s "$1"; else echo null; fi; }    # a JSON string, null when empty
+cmd_tab() { # kit tab list [--json] | show ID [--json] | rm ID... | keep [ID...]
+    local use="用法：kit tab list [--json] | kit tab show <分頁> [--json] | kit tab rm <分頁>... | kit tab keep [<分頁>...]"
+    local sub=${1:-} json="" a t id ids="" n=0 first k nm from b acct fo fi out tool
+    [ $# -gt 0 ] && shift
+    for a in "$@"; do case $a in --json) json=1;; -*) die_c usage "$use";; *) tab_ok "$a"; ids="$ids$a$LF";; esac; done
+    [ -z "$json" ] || json_mode
+    need_init
+    case $sub in
+    list)
+        [ -z "$ids" ] || die_c usage "$use"
+        out=""; first=1
+        for t in "$KIT_CONF"/tabs/*/; do
+            t=${t%/}; [ -f "$t/tab.tsv" ] || continue; id=${t##*/}
+            if [ -n "$json" ]; then
+                [ $first = 1 ] || out="$out,"; first=0
+                out="$out$LF  {\"tab\": $(json_s "$id"), \"tool\": $(tab_null "$(tab_get "$t" tool)"), \"agent\": $(tab_null "$(tab_get "$t" agent)"), \"dir\": $(tab_null "$(tab_get "$t" dir)"), \"made\": $(a=$(tab_get "$t" made); echo "${a:-0}"), \"live\": $(tab_alive "$t" && echo true || echo false), \"items\": $(tab_items "$t" | grep -c .)}"
+            else
+                a=$(tab_get "$t" agent)
+                printf '%s\t%s\t%s\t%s\t%s 項%s\n' "$id" "$(tab_get "$t" tool)" "${a:--}" "$(tab_get "$t" dir)" "$(tab_items "$t" | grep -c .)" "$(tab_alive "$t" || echo '（沒在跑）')"
+            fi
+        done
+        [ -z "$json" ] || printf '{"kit": %s, "api": %s, "tabs": [%s%s]}\n' "$(json_s "$KIT_VERSION")" "$(json_s "$KIT_API")" "$out" "${out:+$LF}" >&3
+        ;;
+    show)
+        [ "$(printf '%s' "$ids" | grep -c .)" = 1 ] || die_c usage "$use"
+        id=${ids%"$LF"}; t=$(tab_dir "$id")
+        [ -f "$t/tab.tsv" ] || die_c no_tab "沒有分頁 ${id}（kit open --tab 開過、還沒清掉的才有）"
+        acct=$(wanted); fo=$(tab_folder "$(tab_get "$t" dir)"); fi=""; [ -z "$fo" ] || fi=$(dir_items "$fo")
+        tool=$(tab_get "$t" tool); a=$(tab_get "$t" agent)
+        if [ -z "$json" ]; then
+            say "分頁 ${id}：${tool}$([ -z "$a" ] || echo "，從 agent $a 開")，在 $(tab_get "$t" dir)"
+            say "這個分頁的（只有它有，分頁關掉就清掉）："
+            while IFS="$TAB" read -r k nm from; do
+                [ -n "$k" ] || continue
+                b=$(tab_below "$t" "$k:$nm" "$acct" "$fi")
+                say "  $k $nm$([ "$from" != agent ] || echo "（$a 帶的）")$([ -z "$b" ] || echo "（下面一層也有，開的時候不帶）")"
+            done <<< "$(tab_items "$t")"
+            [ -z "$fo" ] || { say "$fo 的（kit add --dir 改）："; printf '%s\n' "$fi" | awk 'NF { print "  " $0 }'; }
+            say "整個帳號的（kit add 改）："; printf '%s\n' "$acct" | awk 'NF { print "  " $0 }'
+            return 0
+        fi
+        out=""; first=1
+        while IFS="$TAB" read -r k nm from; do
+            [ -n "$k" ] || continue
+            b=$(tab_below "$t" "$k:$nm" "$acct" "$fi")
+            [ $first = 1 ] || out="$out,"; first=0
+            out="$out$LF  {\"kind\": $(json_s "$k"), \"name\": $(json_s "$nm"), \"from\": $(json_s "$from"), \"below\": $(tab_null "$b"), \"restart\": $(tab_restart "$tool" "$k" && echo true || echo false)}"
+        done <<< "$(tab_items "$t")"
+        printf '{"kit": %s, "api": %s, "tab": %s, "tool": %s, "agent": %s, "dir": %s, "made": %s, "live": %s,\n "items": [%s%s],\n "folder": {"dir": %s, "items": [%s]},\n "account": [%s]}\n' \
+            "$(json_s "$KIT_VERSION")" "$(json_s "$KIT_API")" "$(json_s "$id")" "$(tab_null "$tool")" "$(tab_null "$a")" \
+            "$(tab_null "$(tab_get "$t" dir)")" "$(b=$(tab_get "$t" made); echo "${b:-0}")" "$(tab_alive "$t" && echo true || echo false)" \
+            "$out" "${out:+$LF }" "$(tab_null "$fo")" "$(tab_kinds "$fi")" "$(tab_kinds "$acct")" >&3
+        ;;
+    rm)
+        [ -n "$ids" ] || die_c usage "$use"
+        while IFS= read -r id; do
+            [ -n "$id" ] || continue; t=$(tab_dir "$id")
+            if [ -d "$t" ]; then rm -rf "${t:?}" && n=$((n + 1)); fi
+        done <<< "$ids"
+        say "kit：清掉 $n 個分頁"
+        ;;
+    keep)                                                    # every other tab whose tool no longer runs goes
+        for t in "$KIT_CONF"/tabs/*/; do
+            t=${t%/}; [ -d "$t" ] || continue; id=${t##*/}
+            printf '%s' "$ids" | grep -qxF "$id" && continue
+            tab_alive "$t" && continue
+            rm -rf "${t:?}" && n=$((n + 1))
+        done
+        say "kit：清掉 $n 個分頁"
+        ;;
+    *) die_c usage "$use";;
+    esac
+}
+tab_kinds() { printf '%s\n' "$1" | awk -F: 'NF == 2 { printf "%s{\"kind\": \"%s\", \"name\": \"%s\"}", (n++ ? ", " : ""), $1, $2 }'; }   # kind:name lines -> JSON objects
 
 cmd_place() { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR becomes that agent's own folder
     # Built on a folder's own (kit add --dir): .agentkit lists the agent's rules, skills and MCP, and says which agent it is
@@ -7387,6 +7628,11 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                     agent 或服務在等你同意時記一筆（畫面程式會提醒你）；kit pending done <名字> 拿掉
   kit pending                       列出這個帳號在等你的事
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
+  kit open claude|codex|omp [--agent <名字>] [--tab <分頁> | --tab-env <變數>] [-- 參數]
+                                    開工具，這個分頁自己一份規則、技能、MCP、外掛、記憶（--agent：一開始放那個 agent 的）
+  kit add|rm --tab <分頁> <種類> <名字>   只改這個分頁（下面的資料夾或帳號已經有的不加）
+  kit tab list|show <分頁> [--json]   有哪些分頁、一個分頁三層各有什麼
+  kit tab rm <分頁>... | kit tab keep [<分頁>...]   分頁關掉了：清掉它那一份（keep：留這些和還在跑的，別的清掉）
   kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]
                                     讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
                                     （建立最後一層資料夾；之後用 kit add|rm --dir 改，每個資料夾各自獨立）
@@ -7471,6 +7717,8 @@ case ${1:-} in
     add)       shift; cmd_add_rm add "$@"; tell_after add;;
     rm|remove) shift; cmd_add_rm rm "$@"; tell_after rm;;
     run)       shift; cmd_run "$@";;
+    open)      shift; cmd_open "$@";;
+    tab)       shift; cmd_tab "$@";;
     place)     shift; cmd_place "$@";;
     agents)    shift; cmd_agents "$@";;
     agent)     shift; cmd_agent "$@";;

@@ -4,6 +4,17 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.17.0（2026-11-26）
+
+更新後要做：每台跑 agent 的電腦 `kit self-update`（Windows 也要）。Herdr 那邊還沒改成用它之前，什麼都不會變。
+
+- `kit open claude|codex|omp --tab <分頁>`：每個分頁自己一份規則、技能、MCP、外掛、Claude 的記憶，同一個資料夾開好幾個也各自獨立。
+  `--agent <名字>`：新的分頁一開始放那個 agent 的；`--tab-env <變數>`：分頁名稱從環境變數拿（Herdr 的 `HC_TERMINAL_ID`）。
+  資料夾或整個帳號已經有的不重複帶。macOS、Linux 最後把自己換成工具（exec）；Windows 開工具等它結束。
+- `kit add|rm --tab <分頁> <種類> <名字>`：只改這個分頁；下面已經有的不讓加（錯誤代碼 `below`）。
+- `kit tab list|show [--json]`、`kit tab rm <分頁>...`、`kit tab keep [<分頁>...]`：給畫面程式看三層各有什麼、分頁關掉時清掉（kit api 1.22）。
+- `kit run` 改走同一套程式（行為不變）。
+
 ## 0.16.0（2026-11-26）
 
 更新後要做：每台 `kit self-update`（Windows 也要）。

@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.21'
+$script:KitApi = '1.22'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -6917,16 +6917,20 @@ function Cmd-List($rest) {
 function Cmd-AddRm([string]$verb, $rest) {
     # a rule or MCP added again starts from the source's newest (kit's copy goes)
     if ($verb -ceq 'add' -and @($rest).Count -ge 2 -and $rest[0] -cin 'rule', 'mcp') { foreach ($x in @($rest[1..($rest.Count - 1)])) { if ($x -and -not $x.StartsWith('--')) { Remove-Item -Path (Join-Path (Join-Path $script:StoreDir $(if ($rest[0] -ceq 'rule') { 'rules' } else { 'mcp' })) "$x.*") -Force -ErrorAction SilentlyContinue } } }
-    $rest = @($rest); $dir = ''
+    $rest = @($rest); $dir = ''; $tab = ''
     if ($rest.Count -gt 0 -and $rest[0] -eq '--dir') {
         if ($rest.Count -lt 2) { Die '--dir 後面要接資料夾' }
         $dir = $rest[1]; $rest = @(if ($rest.Count -gt 2) { $rest[2..($rest.Count - 1)] })
+    } elseif ($rest.Count -gt 0 -and $rest[0] -ceq '--tab') {
+        if ($rest.Count -lt 2) { Die-C usage '--tab 後面要接分頁' }
+        $tab = [string]$rest[1]; $rest = @(if ($rest.Count -gt 2) { $rest[2..($rest.Count - 1)] })
     }
-    if ($rest.Count -lt 2 -or ($dir -and $rest.Count -ne 2)) { Die "用法：kit $verb [--dir 資料夾] rule|skill|mcp|plugin <名字>（整個帳號可以一次給好幾個名字）" }
+    if ($rest.Count -lt 2 -or (($dir -or $tab) -and $rest.Count -ne 2)) { Die-C usage "用法：kit $verb [--dir 資料夾 | --tab 分頁] rule|skill|mcp|plugin <名字>（整個帳號可以一次給好幾個名字）" }
     Need-Init
     $k = $rest[0]; $names = @($rest[1..($rest.Count - 1)])
     if (@('rule', 'skill', 'mcp', 'plugin') -notcontains $k) { Die '種類只能是 rule、skill、mcp、plugin' }
     if ($dir) { Dir-AddRm $verb $dir $k $names[0]; return }
+    if ($tab) { Tab-AddRm $verb $tab $k $names[0]; return }
     $acct = @(Wanted)
     foreach ($n in $names) {
         # taking one out: one the account has goes even when no source has it any more
@@ -6956,6 +6960,92 @@ function Arg-TomlStr([string]$s) { # a TOML string safe to pass as ONE argument 
     '\"' + $sb.ToString() + '\"'
 }
 function Arg-TomlKey([string]$k) { if ($k -match '^[A-Za-z0-9_-]+$') { $k } else { Arg-TomlStr $k } }
+# ---------- what a tool gets for an agent or a tab: one way to start it (kit run, kit open; the same as unix/kit) ----------
+# Launch-Args TOOL OUT SKDIR : the tool's arguments for $script:L (Rules: rule files; Skills: names, each a folder in SKDIR;
+# Mcp: @(name, file) each; Plugins: plugin folders; Body: the agent's file (its prompt); Only, Deny: its tool limits;
+# Mem: Claude's memory folder); the files they need go in OUT
+function New-Launch { $script:L = @{ Rules = @(); Skills = @(); Mcp = @(); Plugins = @(); Body = ''; Only = @(); Deny = @(); Mem = '' } }
+function Launch-Args([string]$tool, [string]$out, [string]$skdir) {
+    $lc = $script:L   # ($L would be $l: PowerShell names ignore case)
+    Ensure-Dir $out; Ensure-Dir $skdir
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($p in $lc.Rules) { [void]$sb.Append((Read-Text $p)).Append("`n") }
+    [void]$sb.Append((Py-Hint $lc.Skills))
+    if ($lc.Body) { $c = 0; foreach ($l in (Read-Text $lc.Body) -split "`n") { if ($c -ge 2) { [void]$sb.Append($l.TrimEnd("`r")).Append("`n") }; if ($l.TrimEnd("`r") -eq '---') { $c++ } } }
+    if ($tool -eq 'codex' -and @($lc.Skills).Count -gt 0) {
+        # Codex cannot load skills from an extra folder: list them, it reads one when needed
+        [void]$sb.Append("`n## Skills`nSkills you have. Before doing a task one of them covers, read its SKILL.md and follow it.`n")
+        foreach ($n in $lc.Skills) {
+            $sk = Join-Path (Join-Path $skdir $n) 'SKILL.md'; $desc = ''
+            try { $desc = @(YGet-From (Yaml-Lines $sk -Frontmatter) 'description')[0] } catch { }
+            [void]$sb.Append("- ${n}: $desc ($sk)`n")
+        }
+    }
+    $prompt = $sb.ToString()
+    Write-Text (Join-Path $out 'prompt.md') $prompt
+    $only = @($lc.Only); $deny = @($lc.Deny)
+    $a = New-Object System.Collections.Generic.List[string]
+    $mcps = @()
+    if ($tool -ne 'codex') {   # Claude: --mcp-config; omp: a plugin folder's .mcp.json
+        $mcps = @(foreach ($m in $lc.Mcp) { $k = Mcp-Json $m[1]; if ($k) { (Json-Str $m[0]) + ':' + $k } })
+        Write-Text (Join-Path $out 'mcp.json') ('{"mcpServers":{' + ($mcps -join ',') + "}}`n")
+    }
+    switch ($tool) {
+        'claude' {
+            $add = if ($skdir -match '[\\/]\.claude[\\/]skills$') { Split-Path -Parent (Split-Path -Parent $skdir) } else { $out }
+            $a.AddRange([string[]]@('--add-dir', $add, '--append-system-prompt-file', (Join-Path $out 'prompt.md'), '--mcp-config', (Join-Path $out 'mcp.json')))
+            if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add($only -join ',') }
+            foreach ($d in $deny) { $a.Add('--disallowedTools'); $a.Add($d) }
+            foreach ($d in $lc.Plugins) { $a.Add('--plugin-dir'); $a.Add($d) }
+            if ($lc.Mem) { $a.Add('--settings'); $a.Add('{\"autoMemoryDirectory\":' + ((Json-Str $lc.Mem) -replace '"', '\"') + '}') }
+        }
+        'codex' {
+            $a.Add('-c'); $a.Add('developer_instructions=' + (Arg-TomlStr $prompt))
+            foreach ($m in $lc.Mcp) {
+                $n = $m[0]
+                $fl = Codex-Mcp-Fields $m[1] $n ${function:Arg-TomlStr} ${function:Arg-TomlKey} '=' ','
+                if ($null -eq $fl) { continue }
+                $parts = @(); $envs = @()
+                foreach ($x in $fl) { if ($x[0].StartsWith('env.')) { $envs += (Arg-TomlKey $x[0].Substring(4)) + '=' + $x[1] } else { $parts += $x[0] + '=' + $x[1] } }
+                $v = '{' + ($parts -join ',')
+                if ($envs.Count -gt 0) { $v += ',env={' + ($envs -join ',') + '}' }
+                $v += ',default_tools_approval_mode=' + (Arg-TomlStr 'approve')
+                $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Arg-TomlStr $d.Substring("mcp__${n}__".Length) } })
+                if ($tools.Count -gt 0) { $v += ',disabled_tools=[' + ($tools -join ',') + ']' }
+                $a.Add('-c'); $a.Add("mcp_servers.$(Arg-TomlKey $n)=$v}")
+            }
+            foreach ($d in $lc.Plugins) { $pn = Split-Path -Leaf $d; Warn "Codex 只能整個帳號裝外掛：這個 Codex 沒有外掛 ${pn}（要的話：kit add plugin ${pn}）" }
+            # tools.only, tools.deny: kit codex-guard (Codex's PreToolUse hook) reads them from this Codex's environment
+            foreach ($w in @(Codex-LimitsWarn $only $deny)) { Warn $w }
+        }
+        'omp' {
+            Write-Text (Join-Path $out 'omp.yml') ("skills:`n  customDirectories:`n    - " + (Json-Str $skdir) + "`n")
+            $a.AddRange([string[]]@('--config', (Join-Path $out 'omp.yml'), '--append-system-prompt', (Join-Path $out 'prompt.md')))
+            if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add((Omp-ToolNames $only)) }
+            if ($mcps.Count -gt 0) {   # omp loads a plugin folder's .mcp.json (--plugin-dir): its tools are kit:<name>
+                $pd = Join-Path $out 'omp-plugin'; $cp = Join-Path $pd '.claude-plugin'
+                [void](New-Item -ItemType Directory -Force -Path $cp)
+                Write-Text (Join-Path $cp 'plugin.json') "{`"name`": `"kit`", `"version`": `"0.0.0`"}`n"
+                Copy-Item -LiteralPath (Join-Path $out 'mcp.json') -Destination (Join-Path $pd '.mcp.json')
+                $a.Add('--plugin-dir'); $a.Add($pd)
+            }
+            foreach ($d in $lc.Plugins) { $a.Add('--plugin-dir'); $a.Add($d) }
+            if ($deny.Count -gt 0) {   # tools.deny: kit's hook module, --extension
+                $kt = Join-Path $out 'kit-tools.js'; Write-Text $kt ((Omp-HookJs '' @() $deny) + "`n"); $a.Add('--extension'); $a.Add($kt)
+                foreach ($w in @(Omp-LimitsWarn @() $deny)) { Warn $w }
+            }
+        }
+    }
+    , $a
+}
+function Launch-Tool([string]$tool, $a, [string]$mark, [string]$name) { # start it and wait ($LASTEXITCODE: its exit code; not captured, so it has the terminal)
+    # the same quoting rules on PowerShell 5.1 and 7 (Arg-TomlStr is written for them)
+    $PSNativeCommandArgumentPassing = 'Legacy'
+    # a marker (this process -> agent name), so a program showing the pane can tell which agent runs in it
+    if ($name) { try { Ensure-Dir (Join-Path $KitConf 'run'); Write-Text $mark "$name`n" } catch { } }
+    if ($tool -eq 'codex') { $env:KIT_CODEX_ONLY = @($script:L.Only) -join ','; $env:KIT_CODEX_DENY = @($script:L.Deny) -join "`n" }
+    & $tool @($a.ToArray())
+}
 function Cmd-Run($rest) {
     $rest = @($rest)
     if ($rest.Count -lt 1) { Die '用法：kit run <agent> [--tool claude|codex|omp] [工具的參數...]' }
@@ -6967,7 +7057,12 @@ function Cmd-Run($rest) {
         $tool = $extra[1]; $extra = @(if ($extra.Count -gt 2) { $extra[2..($extra.Count - 1)] })
     }
     if (@('claude', 'codex', 'omp') -notcontains $tool) { Die '--tool 只能是 claude、codex 或 omp' }
-    $f = Find-Item 'agent' $name; if (-not $f) { Die "找不到 agent ${name}（打 kit list 看有哪些）" }
+    if (-not (Find-Item 'agent' $name)) { Die "找不到 agent ${name}（打 kit list 看有哪些）" }
+    Open-Temp $tool $name $extra
+}
+function Open-Temp([string]$tool, [string]$name, $extra) { # the tool in a folder of its own, gone when it ends (kit run; kit open without a tab)
+    $f = ''
+    if ($name) { $f = Find-Item 'agent' $name; if (-not $f) { Die-C no_agent "找不到 agent ${name}（打 kit list 看有哪些）" } }
     if (Take-Lock -Soft) { $script:Quiet = $true; try { Cmd-Sync } catch { } finally { $script:Quiet = $false; Release-Lock } }   # busy (another kit is syncing): start as it is
 
     # the agent's folder, gone when kit ends (also on Ctrl-C); a dry run keeps it to look at, without kit's links in it.
@@ -6985,95 +7080,22 @@ function Cmd-Run($rest) {
     Ensure-Dir $skdir
     if (-not $dry) { Write-Text (Join-Path $tmp '.kit-pid') "$PID`n" }
     try {
-        $fm = $null
-        try { $fm = Yaml-Lines $f -Frontmatter } catch { Die "bad header in $f" }
-        $skills = @()
+        $fm = @()
+        if ($f) { try { $fm = Yaml-Lines $f -Frontmatter } catch { Die "bad header in $f" } }
+        New-Launch; $script:L.Body = $f
         foreach ($n in YGet-From $fm 'skills') {
             $p = Find-Item 'skill' $n; if (-not $p) { Warn "skill $n not found"; continue }
             Copy-Item -LiteralPath (Split-Path -Parent $p) -Destination (Join-Path $skdir $n) -Recurse; Drop-Caches (Join-Path $skdir $n)
             if (-not $dry) { Link-Deps $n (Join-Path $skdir $n) }
-            $skills += $n
+            $script:L.Skills += $n
         }
-        $sb = New-Object System.Text.StringBuilder
-        foreach ($n in YGet-From $fm 'rules') {
-            $p = Find-Item 'rule' $n; if (-not $p) { Warn "rule $n not found"; continue }
-            [void]$sb.Append((Read-Text $p)).Append("`n")
-        }
-        [void]$sb.Append((Py-Hint (YGet-From $fm 'skills')))
-        $c = 0; foreach ($l in (Read-Text $f) -split "`n") { if ($c -ge 2) { [void]$sb.Append($l.TrimEnd("`r")).Append("`n") }; if ($l.TrimEnd("`r") -eq '---') { $c++ } }
-        if ($tool -eq 'codex' -and $skills.Count -gt 0) {
-            # Codex cannot load skills from an extra folder: list them, it reads one when needed
-            [void]$sb.Append("`n## Skills`nSkills you have. Before doing a task one of them covers, read its SKILL.md and follow it.`n")
-            foreach ($n in $skills) {
-                $sk = Join-Path (Join-Path $skdir $n) 'SKILL.md'; $desc = ''
-                try { $desc = @(YGet-From (Yaml-Lines $sk -Frontmatter) 'description')[0] } catch { }
-                [void]$sb.Append("- ${n}: $desc ($sk)`n")
-            }
-        }
-        $prompt = $sb.ToString()
-        Write-Text (Join-Path $tmp 'prompt.md') $prompt
-        $only = @(YGet-From $fm 'tools.only'); $deny = @(YGet-From $fm 'tools.deny')
-        $mcpNames = @(YGet-From $fm 'mcp')
-
-        $a = New-Object System.Collections.Generic.List[string]
-        $mcps = @()
-        if ($tool -ne 'codex') {   # Claude: --mcp-config; omp: a plugin folder's .mcp.json
-            $mcps = @(foreach ($n in $mcpNames) {
-                $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
-                $k = Mcp-Json $p; if ($k) { (Json-Str $n) + ':' + $k }
-            })
-            Write-Text (Join-Path $tmp 'mcp.json') ('{"mcpServers":{' + ($mcps -join ',') + "}}`n")
-        }
-        switch ($tool) {
-            'claude' {
-                $a.AddRange([string[]]@('--add-dir', $tmp, '--append-system-prompt-file', (Join-Path $tmp 'prompt.md'), '--mcp-config', (Join-Path $tmp 'mcp.json')))
-                if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add($only -join ',') }
-                foreach ($d in $deny) { $a.Add('--disallowedTools'); $a.Add($d) }
-            }
-            'codex' {
-                $a.Add('-c'); $a.Add('developer_instructions=' + (Arg-TomlStr $prompt))
-                foreach ($n in $mcpNames) {
-                    $p = Find-Item 'mcp' $n; if (-not $p) { Warn "mcp $n not found"; continue }
-                    $fl = Codex-Mcp-Fields $p $n ${function:Arg-TomlStr} ${function:Arg-TomlKey} '=' ','
-                    if ($null -eq $fl) { continue }
-                    $parts = @(); $envs = @()
-                    foreach ($x in $fl) { if ($x[0].StartsWith('env.')) { $envs += (Arg-TomlKey $x[0].Substring(4)) + '=' + $x[1] } else { $parts += $x[0] + '=' + $x[1] } }
-                    $v = '{' + ($parts -join ',')
-                    if ($envs.Count -gt 0) { $v += ',env={' + ($envs -join ',') + '}' }
-                    $v += ',default_tools_approval_mode=' + (Arg-TomlStr 'approve')
-                    $tools = @(foreach ($d in $deny) { if ($d.StartsWith("mcp__${n}__")) { Arg-TomlStr $d.Substring("mcp__${n}__".Length) } })
-                    if ($tools.Count -gt 0) { $v += ',disabled_tools=[' + ($tools -join ',') + ']' }
-                    $a.Add('-c'); $a.Add("mcp_servers.$(Arg-TomlKey $n)=$v}")
-                }
-                # tools.only, tools.deny: kit codex-guard (Codex's PreToolUse hook) reads them from this Codex's environment
-                foreach ($w in @(Codex-LimitsWarn $only $deny)) { Warn $w }
-            }
-            'omp' {
-                Write-Text (Join-Path $tmp 'omp.yml') ("skills:`n  customDirectories:`n    - " + (Json-Str $skdir) + "`n")
-                $a.AddRange([string[]]@('--config', (Join-Path $tmp 'omp.yml'), '--append-system-prompt', (Join-Path $tmp 'prompt.md')))
-                if ($only.Count -gt 0) { $a.Add('--tools'); $a.Add((Omp-ToolNames $only)) }
-                if ($mcps.Count -gt 0) {   # omp loads a plugin folder's .mcp.json (--plugin-dir): its tools are kit:<name>
-                    $pd = Join-Path $tmp 'omp-plugin'; $cp = Join-Path $pd '.claude-plugin'
-                    [void](New-Item -ItemType Directory -Force -Path $cp)
-                    Write-Text (Join-Path $cp 'plugin.json') "{`"name`": `"kit`", `"version`": `"0.0.0`"}`n"
-                    Copy-Item -LiteralPath (Join-Path $tmp 'mcp.json') -Destination (Join-Path $pd '.mcp.json')
-                    $a.Add('--plugin-dir'); $a.Add($pd)
-                }
-                if ($deny.Count -gt 0) {   # tools.deny: kit's hook module, --extension
-                    $kt = Join-Path $tmp 'kit-tools.js'; Write-Text $kt ((Omp-HookJs '' @() $deny) + "`n"); $a.Add('--extension'); $a.Add($kt)
-                    foreach ($w in @(Omp-LimitsWarn @() $deny)) { Warn $w }
-                }
-            }
-        }
-        foreach ($x in $extra) { $a.Add($x) }
+        foreach ($n in YGet-From $fm 'rules') { $p = Find-Item 'rule' $n; if ($p) { $script:L.Rules += $p } else { Warn "rule $n not found" } }
+        foreach ($n in YGet-From $fm 'mcp') { $p = Find-Item 'mcp' $n; if ($p) { $script:L.Mcp += , @($n, $p) } else { Warn "mcp $n not found" } }
+        $script:L.Only = @(YGet-From $fm 'tools.only'); $script:L.Deny = @(YGet-From $fm 'tools.deny')
+        $a = Launch-Args $tool $tmp $skdir
+        foreach ($x in @($extra)) { if ($null -ne $x) { $a.Add($x) } }
         if ($dry) { Say $tool; foreach ($x in $a) { Say $x }; Say "tmp=$tmp"; return }
-        # the same quoting rules on PowerShell 5.1 and 7 (Arg-TomlStr is written for them)
-        $PSNativeCommandArgumentPassing = 'Legacy'
-        # a marker (this process -> agent name), so a program showing the pane can tell which agent runs in it
-        try { Ensure-Dir (Join-Path $KitConf 'run'); Write-Text $mark "$name`n" } catch { }
-        if ($tool -eq 'codex') { $env:KIT_CODEX_ONLY = $only -join ','; $env:KIT_CODEX_DENY = $deny -join "`n" }
-        & $tool @($a.ToArray())
-        $rc = $LASTEXITCODE
+        Launch-Tool $tool $a $mark $name; $rc = $LASTEXITCODE
     } finally {
         # (on PowerShell 5.1 Remove-Item -Recurse would go into the junctions to kit's packages: they come out first)
         if (-not $dry) {
@@ -7083,6 +7105,216 @@ function Cmd-Run($rest) {
         }
     }
     exit $rc
+}
+
+# ---------- a tab of its own (kit open --tab): each terminal its own rules, skills, MCP, plugins, memory ----------
+# (as unix/kit: $KitConf/tabs/<id>/ with tab.tsv, the copies, agent.md, memory/, run/; Windows has no exec, so kit waits
+# for the tool, and the tab's pid is kit's)
+function Tab-Dir([string]$id) { Join-Path (Join-Path $KitConf 'tabs') $id }
+function Tab-Ok([string]$id) { # a tab id: letters, digits, . _ -, 1 to 64, not starting with . or -
+    if ($id -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$') { Die-C usage "分頁名稱只能有英文字母、數字、. _ -（不能用 . 或 - 開頭，最多 64 個字）：$id" }
+}
+function Tab-Lines([string]$t) { $f = Join-Path $t 'tab.tsv'; if (Test-Path -LiteralPath $f -PathType Leaf) { @((Read-Text $f) -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ }) } else { @() } }
+function Tab-Get([string]$t, [string]$k) { foreach ($l in @(Tab-Lines $t)) { $c = $l.Split("`t"); if ($c[0] -ceq $k) { return $(if ($c.Count -gt 1) { $c[1] } else { '' }) } }; '' }
+function Tab-Items([string]$t) { @(foreach ($l in @(Tab-Lines $t)) { $c = $l.Split("`t"); if ($c[0] -ceq 'item' -and $c.Count -ge 4) { , @($c[1], $c[2], $c[3]) } }) }
+function Tab-Has([string]$t, [string]$k, [string]$n) { foreach ($i in @(Tab-Items $t)) { if ($i[0] -ceq $k -and $i[1] -ceq $n) { return $true } }; $false }
+function Tab-Write([string]$t, $lines) { Write-Text (Join-Path $t 'tab.tsv') ((@($lines) -join "`n") + "`n") }
+function Tab-Set([string]$t, [string]$k, [string]$v) {
+    $done = $false
+    $ls = @(foreach ($l in @(Tab-Lines $t)) { if ($l.Split("`t")[0] -ceq $k) { if (-not $done) { "$k`t$v"; $done = $true } } else { $l } })
+    if (-not $done) { $ls += "$k`t$v" }
+    Tab-Write $t $ls
+}
+function Tab-Item([string]$t, [string]$k, [string]$n, [string]$from = '') { # record it (FROM agent|tab), or without FROM take it out
+    $ls = @(foreach ($l in @(Tab-Lines $t)) { $c = $l.Split("`t"); if (-not ($c[0] -ceq 'item' -and $c.Count -ge 3 -and $c[1] -ceq $k -and $c[2] -ceq $n)) { $l } })
+    if ($from) { $ls += "item`t$k`t$n`t$from" }
+    Tab-Write $t $ls
+}
+function Tab-Copy([string]$t, [string]$k, [string]$n) { # this machine's copy of it into the tab ($false: no source has it)
+    $p = Find-Item $k $n; if (-not $p) { return $false }
+    switch ($k) {
+        'skill' {
+            $sd = Join-Path $t '.claude/skills'; Ensure-Dir $sd; $dst = Join-Path $sd $n
+            foreach ($x in @($dst, (Join-Path (Join-Path $t 'hidden') $n))) { if (Test-Path -LiteralPath $x) { Remove-Tree $x } }
+            Copy-Item -LiteralPath (Split-Path -Parent $p) -Destination $dst -Recurse; Drop-Caches $dst; Link-Deps $n $dst
+        }
+        'rule' { $d = Join-Path $t 'rules'; Ensure-Dir $d; Copy-Item -LiteralPath $p -Destination (Join-Path $d "$n.md") -Force }
+        'mcp' { $d = Join-Path $t 'mcp'; Ensure-Dir $d; Remove-Item -Path (Join-Path $d "$n.*") -Force -ErrorAction SilentlyContinue; Copy-Item -LiteralPath $p -Destination (Join-Path $d (Split-Path -Leaf $p)) -Force }
+        'plugin' {
+            $d = Join-Path $t 'plugins'; Ensure-Dir $d; $dst = Join-Path $d $n
+            if (Test-Path -LiteralPath $dst) { Remove-Tree $dst }
+            Copy-Item -LiteralPath (Split-Path -Parent (Split-Path -Parent $p)) -Destination $dst -Recurse
+        }
+    }
+    $true
+}
+function Tab-Uncopy([string]$t, [string]$k, [string]$n) {
+    foreach ($x in @((Join-Path (Join-Path $t '.claude/skills') $n), (Join-Path (Join-Path $t 'hidden') $n), (Join-Path (Join-Path $t 'plugins') $n))) { if (Test-Path -LiteralPath $x) { Remove-Tree $x } }
+    Remove-Item -LiteralPath (Join-Path (Join-Path $t 'rules') "$n.md") -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path (Join-Path (Join-Path $t 'mcp') "$n.*") -Force -ErrorAction SilentlyContinue
+}
+function Tab-Folder([string]$d) { # the folder's own (kit add --dir), if any
+    if (-not $d -or -not (Test-Path -LiteralPath $d -PathType Container)) { return '' }
+    $r = Dir-Root $d; if (Test-Path -LiteralPath (Join-Path $r $DirFile) -PathType Leaf) { $r } else { '' }
+}
+function Tab-Below([string]$i, $acct, $folder) { if (@($acct) -ccontains $i) { 'account' } elseif (@($folder) -ccontains $i) { 'folder' } else { '' } }   # a layer below has it too
+function Tab-Restart([string]$tool, [string]$k) { -not ($tool -eq 'claude' -and $k -eq 'skill') }   # a change needs it started again
+function Tab-Load([string]$tool, [string]$t) { # $script:L for what the tab has and no layer below has (such a skill waits in hidden/)
+    $acct = @(Wanted); $fo = Tab-Folder (Tab-Get $t 'dir'); $fi = @(if ($fo) { Dir-Items $fo })
+    New-Launch
+    $sd = Join-Path $t '.claude/skills'; $hd = Join-Path $t 'hidden'; Ensure-Dir $sd
+    foreach ($i in @(Tab-Items $t)) {
+        $k = $i[0]; $n = $i[1]
+        if (Tab-Below "${k}:$n" $acct $fi) {
+            if ($k -eq 'skill' -and (Test-Path -LiteralPath (Join-Path $sd $n))) {
+                Ensure-Dir $hd; if (Test-Path -LiteralPath (Join-Path $hd $n)) { Remove-Tree (Join-Path $hd $n) }
+                Move-Item -LiteralPath (Join-Path $sd $n) -Destination (Join-Path $hd $n)
+            }
+            continue
+        }
+        switch ($k) {
+            'rule' { $p = Join-Path (Join-Path $t 'rules') "$n.md"; if (Test-Path -LiteralPath $p) { $script:L.Rules += $p } }
+            'skill' {
+                if (-not (Test-Path -LiteralPath (Join-Path $sd $n)) -and (Test-Path -LiteralPath (Join-Path $hd $n))) { Move-Item -LiteralPath (Join-Path $hd $n) -Destination (Join-Path $sd $n) }
+                if (Test-Path -LiteralPath (Join-Path $sd $n)) { $script:L.Skills += $n }
+            }
+            'mcp' { foreach ($x in @(Get-ChildItem -Path (Join-Path (Join-Path $t 'mcp') "$n.*") -File -ErrorAction SilentlyContinue)) { $script:L.Mcp += , @($n, $x.FullName) } }
+            'plugin' { $p = Join-Path (Join-Path $t 'plugins') $n; if (Test-Path -LiteralPath $p) { $script:L.Plugins += $p } }
+        }
+    }
+    $af = Join-Path $t 'agent.md'
+    if (Test-Path -LiteralPath $af -PathType Leaf) {
+        $script:L.Body = $af; $fm = @(); try { $fm = @(Yaml-Lines $af -Frontmatter) } catch { }
+        $script:L.Only = @(YGet-From $fm 'tools.only'); $script:L.Deny = @(YGet-From $fm 'tools.deny')
+    }
+    if ($tool -eq 'claude') { $script:L.Mem = Join-Path $t 'memory'; Ensure-Dir $script:L.Mem }
+}
+function Cmd-Open($rest) { # kit open claude|codex|omp [--agent NAME] [--tab ID | --tab-env VAR] [-- ARGS...]
+    $rest = @($rest | Where-Object { $null -ne $_ })
+    $use = '用法：kit open claude|codex|omp [--agent <名字>] [--tab <分頁> | --tab-env <變數>] [--] [工具的參數...]'
+    if ($rest.Count -lt 1 -or @('claude', 'codex', 'omp') -cnotcontains $rest[0]) { Die-C usage $use }
+    $tool = $rest[0]; $agent = ''; $id = ''; $i = 1
+    for (; $i -lt $rest.Count; $i++) {
+        $a = [string]$rest[$i]
+        if ($a -ceq '--agent') { if ($i + 1 -ge $rest.Count -or -not $rest[$i + 1]) { Die-C usage $use }; $i++; $agent = [string]$rest[$i] }
+        elseif ($a -ceq '--tab') { if ($i + 1 -ge $rest.Count) { Die-C usage $use }; $i++; Tab-Ok $rest[$i]; $id = [string]$rest[$i] }
+        elseif ($a -ceq '--tab-env') {
+            if ($i + 1 -ge $rest.Count -or [string]$rest[$i + 1] -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Die-C usage $use }
+            $i++; $id = [string][Environment]::GetEnvironmentVariable([string]$rest[$i]); if ($id) { Tab-Ok $id }
+        }
+        elseif ($a -ceq '--') { $i++; break }
+        else { break }   # the tool's own
+    }
+    $extra = @(if ($i -lt $rest.Count) { $rest[$i..($rest.Count - 1)] })
+    Need-Init
+    if (-not $id) { Open-Temp $tool $agent $extra; return }
+    if (Take-Lock -Soft) { $script:Quiet = $true; try { Cmd-Sync } catch { } finally { $script:Quiet = $false; Release-Lock } }   # busy (another kit is syncing): start as it is
+    $t = Tab-Dir $id
+    if (-not (Test-Path -LiteralPath (Join-Path $t 'tab.tsv') -PathType Leaf)) {   # a new tab: what its agent has (the agent decides only this)
+        $f = ''; if ($agent) { $f = Find-Item 'agent' $agent; if (-not $f) { Die-C no_agent "找不到 agent ${agent}（打 kit list 看有哪些）" } }
+        if (Test-Path -LiteralPath $t) { Remove-Tree $t }
+        Ensure-Dir $t
+        $ls = @("agent`t$agent", "made`t$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())")
+        if ($f) {
+            Copy-Item -LiteralPath $f -Destination (Join-Path $t 'agent.md')
+            $fm = @(); try { $fm = @(Yaml-Lines $f -Frontmatter) } catch { }
+            foreach ($kk in @(@('rule', 'rules'), @('skill', 'skills'), @('mcp', 'mcp'))) {
+                foreach ($n in @(YGet-From $fm $kk[1])) {
+                    if (Tab-Copy $t $kk[0] $n) { $ls += "item`t$($kk[0])`t$n`tagent" } else { Warn "$($kk[0]) $n 不在任何來源裡：沒有放進來" }
+                }
+            }
+        }
+        Tab-Write $t $ls
+    }
+    Tab-Set $t 'tool' $tool; Tab-Set $t 'dir' (Canon-Dir (Get-Location).ProviderPath); Tab-Set $t 'pid' "$PID"
+    Tab-Load $tool $t
+    $run = Join-Path $t 'run'; if (Test-Path -LiteralPath $run) { Remove-Tree $run }
+    $a = Launch-Args $tool $run (Join-Path $t '.claude/skills')
+    foreach ($x in $extra) { $a.Add($x) }
+    if ($env:KIT_DRY_RUN) { Say $tool; foreach ($x in $a) { Say $x }; Say "tab=$t"; return }
+    $mark = Join-Path (Join-Path $KitConf 'run') "$PID"
+    $env:KIT_TAB = $id
+    try { Launch-Tool $tool $a $mark (Tab-Get $t 'agent'); $rc = $LASTEXITCODE }   # Windows has no exec: kit waits for it
+    finally { Remove-Item Env:KIT_CODEX_ONLY, Env:KIT_CODEX_DENY -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $mark -Force -ErrorAction SilentlyContinue }
+    exit $rc
+}
+function Tab-AddRm([string]$verb, [string]$id, [string]$k, [string]$n) { # only that tab has it, or no longer
+    Tab-Ok $id; $t = Tab-Dir $id; $i = "${k}:$n"
+    if (-not (Test-Path -LiteralPath (Join-Path $t 'tab.tsv') -PathType Leaf)) { Die-C no_tab "沒有分頁 ${id}（kit open --tab 開過、還沒清掉的才有）" }
+    $tool = Tab-Get $t 'tool'
+    $when = if (Tab-Restart $tool $k) { '；重開這個分頁的 agent 才會換' } else { '；開著的 Claude 自己會讀到' }
+    if ($verb -eq 'add') {
+        if (-not (Find-Item $k $n)) { Die-C not_found "找不到 ${i}（打 kit list 看有哪些）" }
+        if (Tab-Has $t $k $n) { Say "kit：分頁 $id 已經有 $i"; return }
+        $fo = Tab-Folder (Tab-Get $t 'dir'); $b = Tab-Below $i @(Wanted) @(if ($fo) { Dir-Items $fo })
+        if ($b -eq 'account') { Die-C below "整個帳號已經有 ${i}：這個分頁本來就讀得到" }
+        if ($b -eq 'folder') { Die-C below "$fo 已經有 ${i}：開在那裡的分頁本來就讀得到" }
+        if (-not (Tab-Copy $t $k $n)) { Die "沒辦法把 $i 放進分頁 $id" }
+        Tab-Item $t $k $n 'tab'
+        Say "kit：$i 加到分頁 ${id}（只有這個分頁有）$when"
+        if ($k -eq 'plugin' -and $tool -eq 'codex') { Say "     Codex 只能整個帳號裝外掛：這個分頁的 Codex 讀不到 ${n}" }
+    } else {
+        if (-not (Tab-Has $t $k $n)) { Die-C not_found "分頁 $id 沒有 ${i}" }
+        Tab-Item $t $k $n; Tab-Uncopy $t $k $n
+        Say "kit：$i 從分頁 $id 拿掉了$when"
+    }
+}
+function Tab-Alive([string]$t) { $p = Tab-Get $t 'pid'; $p -match '^[0-9]+$' -and [bool](Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue) }   # its tool still runs
+function Tab-Null([string]$s) { if ($s) { Json-S $s } else { 'null' } }
+function Tab-Kinds($items) { (@($items | Where-Object { $_ -match '^[^:]+:[^:]+$' } | ForEach-Object { $c = $_.Split(':'); "{`"kind`": $(Json-S $c[0]), `"name`": $(Json-S $c[1])}" }) -join ', ') }
+function Cmd-Tab($rest) { # kit tab list [--json] | show ID [--json] | rm ID... | keep [ID...]
+    $rest = @($rest | Where-Object { $null -ne $_ })
+    $use = '用法：kit tab list [--json] | kit tab show <分頁> [--json] | kit tab rm <分頁>... | kit tab keep [<分頁>...]'
+    $sub = if ($rest.Count) { [string]$rest[0] } else { '' }; $json = $false; $ids = @()
+    foreach ($a in @(if ($rest.Count -gt 1) { $rest[1..($rest.Count - 1)] })) { if ($a -ceq '--json') { $json = $true } elseif ($a.StartsWith('-')) { Die-C usage $use } else { Tab-Ok $a; $ids += $a } }
+    if ($json) { $script:JsonOut = $true }
+    Need-Init
+    $all = @(Get-ChildItem -LiteralPath (Join-Path $KitConf 'tabs') -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+    switch ($sub) {
+        'list' {
+            if ($ids.Count) { Die-C usage $use }
+            $rows = @()
+            foreach ($d in $all) {
+                $t = $d.FullName; if (-not (Test-Path -LiteralPath (Join-Path $t 'tab.tsv'))) { continue }
+                $mk = Tab-Get $t 'made'; if (-not $mk) { $mk = '0' }
+                if ($json) { $rows += "`n  {`"tab`": $(Json-S $d.Name), `"tool`": $(Tab-Null (Tab-Get $t 'tool')), `"agent`": $(Tab-Null (Tab-Get $t 'agent')), `"dir`": $(Tab-Null (Tab-Get $t 'dir')), `"made`": $mk, `"live`": $(if (Tab-Alive $t) { 'true' } else { 'false' }), `"items`": $(@(Tab-Items $t).Count)}" }
+                else { $ag = Tab-Get $t 'agent'; Say ("{0}`t{1}`t{2}`t{3}`t{4} 項{5}" -f $d.Name, (Tab-Get $t 'tool'), $(if ($ag) { $ag } else { '-' }), (Tab-Get $t 'dir'), @(Tab-Items $t).Count, $(if (Tab-Alive $t) { '' } else { '（沒在跑）' })) }
+            }
+            if ($json) { Out-Json ("{`"kit`": $(Json-S $KitVersion), `"api`": $(Json-S $KitApi), `"tabs`": [" + ($rows -join ',') + $(if ($rows.Count) { "`n" } else { '' }) + ']}') }
+        }
+        'show' {
+            if ($ids.Count -ne 1) { Die-C usage $use }
+            $id = $ids[0]; $t = Tab-Dir $id
+            if (-not (Test-Path -LiteralPath (Join-Path $t 'tab.tsv') -PathType Leaf)) { Die-C no_tab "沒有分頁 ${id}（kit open --tab 開過、還沒清掉的才有）" }
+            $acct = @(Wanted); $fo = Tab-Folder (Tab-Get $t 'dir'); $fi = @(if ($fo) { Dir-Items $fo })
+            $tool = Tab-Get $t 'tool'; $ag = Tab-Get $t 'agent'
+            if (-not $json) {
+                Say "分頁 ${id}：$tool$(if ($ag) { "，從 agent $ag 開" })，在 $(Tab-Get $t 'dir')"
+                Say '這個分頁的（只有它有，分頁關掉就清掉）：'
+                foreach ($i in @(Tab-Items $t)) { $b = Tab-Below "$($i[0]):$($i[1])" $acct $fi; Say "  $($i[0]) $($i[1])$(if ($i[2] -eq 'agent') { "（$ag 帶的）" })$(if ($b) { '（下面一層也有，開的時候不帶）' })" }
+                if ($fo) { Say "$fo 的（kit add --dir 改）："; foreach ($x in $fi) { Say "  $x" } }
+                Say '整個帳號的（kit add 改）：'; foreach ($x in $acct) { Say "  $x" }
+                return
+            }
+            $items = @(foreach ($i in @(Tab-Items $t)) {
+                $b = Tab-Below "$($i[0]):$($i[1])" $acct $fi
+                "`n  {`"kind`": $(Json-S $i[0]), `"name`": $(Json-S $i[1]), `"from`": $(Json-S $i[2]), `"below`": $(Tab-Null $b), `"restart`": $(if (Tab-Restart $tool $i[0]) { 'true' } else { 'false' })}"
+            })
+            $mk = Tab-Get $t 'made'; if (-not $mk) { $mk = '0' }
+            Out-Json ("{`"kit`": $(Json-S $KitVersion), `"api`": $(Json-S $KitApi), `"tab`": $(Json-S $id), `"tool`": $(Tab-Null $tool), `"agent`": $(Tab-Null $ag), `"dir`": $(Tab-Null (Tab-Get $t 'dir')), `"made`": $mk, `"live`": $(if (Tab-Alive $t) { 'true' } else { 'false' }),`n `"items`": [" + ($items -join ',') + $(if ($items.Count) { "`n " } else { '' }) + "],`n `"folder`": {`"dir`": $(Tab-Null $fo), `"items`": [$(Tab-Kinds $fi)]},`n `"account`": [$(Tab-Kinds $acct)]}")
+        }
+        'rm' {
+            if (-not $ids.Count) { Die-C usage $use }
+            $n = 0; foreach ($id in $ids) { $t = Tab-Dir $id; if (Test-Path -LiteralPath $t) { Remove-Tree $t; $n++ } }
+            Say "kit：清掉 $n 個分頁"
+        }
+        'keep' {   # every other tab whose tool no longer runs goes
+            $n = 0
+            foreach ($d in $all) { if ($ids -ccontains $d.Name -or (Tab-Alive $d.FullName)) { continue }; Remove-Tree $d.FullName; $n++ }
+            Say "kit：清掉 $n 個分頁"
+        }
+        default { Die-C usage $use }
+    }
 }
 function Cmd-Place($rest) { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR becomes that agent's own folder
     # Built on a folder's own (kit add --dir): .agentkit lists the agent's rules, skills and MCP, and says which agent it is
@@ -8943,6 +9175,11 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
                                     agent 或服務在等你同意時記一筆（畫面程式會提醒你）；kit pending done <名字> 拿掉
   kit pending                       列出這個帳號在等你的事
   kit run <agent> [--tool codex|omp] [參數]   開一個做好的 agent（預設用 Claude）
+  kit open claude|codex|omp [--agent <名字>] [--tab <分頁> | --tab-env <變數>] [-- 參數]
+                                    開工具，這個分頁自己一份規則、技能、MCP、外掛、記憶（--agent：一開始放那個 agent 的）
+  kit add|rm --tab <分頁> <種類> <名字>   只改這個分頁（下面的資料夾或帳號已經有的不加）
+  kit tab list|show <分頁> [--json]   有哪些分頁、一個分頁三層各有什麼
+  kit tab rm <分頁>... | kit tab keep [<分頁>...]   分頁關掉了：清掉它那一份（keep：留這些和還在跑的，別的清掉）
   kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]
                                     讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
                                     （建立最後一層資料夾；之後用 kit add|rm --dir 改，每個資料夾各自獨立）
@@ -9044,6 +9281,8 @@ try {
         'codex-guard' { Cmd-CodexGuard }
         { $_ -in 'rm', 'remove' } { Cmd-AddRm 'rm' $rest; Tell-After 'rm' }
         'run' { Cmd-Run $rest }
+        'open' { Cmd-Open $rest }
+        'tab' { Cmd-Tab $rest }
         'place' { Cmd-Place $rest }
         'agents' { Cmd-Agents $rest }
         'agent' { Cmd-Agent $rest }
