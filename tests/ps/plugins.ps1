@@ -8,7 +8,7 @@ function SshK([string]$a) { # ssh-keygen with that command line (an empty "" sta
     $psi = New-Object Diagnostics.ProcessStartInfo ([string]$c[0].Path), $a
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $p = [Diagnostics.Process]::Start($psi); $p.StandardInput.Close(); $e = $p.StandardError.ReadToEndAsync(); $o = $p.StandardOutput.ReadToEndAsync()
-    # no desktop (Session 0): ssh-keygen can wait for a console that is not there; like kit.ps1, 30 s and it counts as missing
+    # Windows' ssh-keygen that writes to stderr through a pipe can wait there for minutes; like kit.ps1, 30 s and it counts as missing
     if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch { }; return 1 }; $p.WaitForExit(); [void]$e.Result; [void]$o.Result; $p.ExitCode
 }
 function ApprSign([string]$dir, [string]$key, [string]$text) { # approved.txt with TEXT, signed by KEY (what kit approve writes)

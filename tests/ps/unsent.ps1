@@ -8,7 +8,8 @@ if ($args[0] -ne 'doc') { exit 1 }
 [IO.File]::WriteAllText((Join-Path $env:FH 'doc'), [Console]::In.ReadToEnd())
 exit 0
 '@
-if ($OnWindows) { W "$FH/bin/hc.cmd" "@`"$Exe`" -NoProfile -ExecutionPolicy Bypass -File `"$FH\fake.ps1`" %*`r`n" }
+# (Windows: only its first word; Windows PowerShell's -File takes the last one, "-", for a parameter's name and stops)
+if ($OnWindows) { W "$FH/bin/hc.cmd" "@`"$Exe`" -NoProfile -ExecutionPolicy Bypass -File `"$FH\fake.ps1`" %1`r`n" }
 else { W "$FH/bin/hc" "#!/bin/sh`nexec '$Exe' -NoProfile -File '$FH/fake.ps1' `"`$@`"`n"; & chmod +x "$FH/bin/hc" }
 $env:FH = $FH; $env:PATH = (Join-Path $FH 'bin') + $sep + $env:PATH
 W "$S/rules/ur.md" "Rule.`n"
