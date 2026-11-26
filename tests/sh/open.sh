@@ -20,9 +20,9 @@ export FH PATH="$FH/bin:$PATH"
 printf '#!/bin/bash\nexec -a "$1" sleep "$2"\n' > "$T/bg"; chmod +x "$T/bg"
 now=$(( $(date +%s) * 1000 ))
 sleep 300 & P1=$!
-bash -c '"$0" "$1" 301 & wait' "$T/bg" "/bin/zsh -c source $HOME/.claude/shell-snapshots/snapshot-zsh-1.sh && eval 'npm run dev' < /dev/null" & P2=$!
+bash -c '"$0" "$1" 301 & wait' "$T/bg" "/bin/zsh -c source $HOME/.claude/shell-snapshots/snapshot-zsh-1.sh && eval 'npm run dev' < /dev/null" 2>/dev/null & P2=$!
 sleep 300 & P3=$!; sleep 300 & P4=$!; sleep 300 & P5=$!
-bash -c '"$0" "$1" 302 & wait' "$T/bg" "/bin/zsh -lc npm test --watch" & P6=$!
+bash -c '"$0" "$1" 302 & wait' "$T/bg" "/bin/zsh -lc npm test --watch" 2>/dev/null & P6=$!
 sleep 300 & P7=$!; sleep 300 & P8=$!
 D="$T/w"; mkdir -p "$D"/{1,2,3,4,5,6,7,8}
 m1=$((now - 60000)); m3=$((now - 11 * 60000))

@@ -48,7 +48,10 @@ run() { # run TAG COMMAND
     check "$tag: kit add mcp: Claude (kit-mcp not used here) and Codex need a relaunch: not sent, a kit pending for your OK; omp /reload-plugins" 'mj "$T/$tag-m.json" "a = {x[\"address\"]: x[\"need\"] for x in d[\"agents\"]}; assert a == {\"t1\": \"relaunch\", \"t2\": \"relaunch\", \"t3\": \"reload\", \"t4\": \"relaunch\"}, a" && [ "$(grep -c "^send" "$FH/log")" = 1 ] && grep -q "要你同意：重開 3 個 agent（t1 Claude Code、t2 Codex、t4 Claude Code）才讀得到新的MCP" "$H/.config/agentkit/notes/pending/relaunch"'
     : > "$FH/log"
     $k add plugin tp >/dev/null 2>&1
-    check "$tag: kit add plugin with hooks: Claude /reload-plugins, omp and Codex a relaunch" 'grep -qx "send --json --queue --key reload t1 /reload-plugins" "$FH/log" && grep -qx "send --json --queue --key reload t4 /reload-plugins" "$FH/log" && [ "$(grep -c "^send" "$FH/log")" = 2 ] && grep -q "t2 Codex、t3 omp" "$H/.config/agentkit/notes/pending/relaunch"'
+    # kit places a plugin through the tools' own CLIs (claude/codex/omp plugin install): a machine without them gets none
+    if command -v claude >/dev/null && command -v codex >/dev/null && command -v omp >/dev/null; then
+        check "$tag: kit add plugin with hooks: Claude /reload-plugins, omp and Codex a relaunch" 'grep -qx "send --json --queue --key reload t1 /reload-plugins" "$FH/log" && grep -qx "send --json --queue --key reload t4 /reload-plugins" "$FH/log" && [ "$(grep -c "^send" "$FH/log")" = 2 ] && grep -q "t2 Codex、t3 omp" "$H/.config/agentkit/notes/pending/relaunch"'
+    else echo "skip: $tag: kit add plugin (claude, codex and omp are not all installed here)"; fi
     : > "$FH/log"; echo idle > "$FH/status-t1"; touch "$FH/old"
     $k rm skill ts --json > "$T/$tag-r.json" 2>"$T/$tag-r.err"
     check "$tag: an hc without --queue: typed with --if idle to the idle one (t1), the busy ones left and said" 'grep -qx "send --json --if idle t1 kit 剛從整個帳號拿掉技能 ts：之後不要再用它" "$FH/log" && mj "$T/$tag-r.json" "a = {x[\"address\"]: x for x in d[\"agents\"]}; assert a[\"t1\"][\"sent\"] and not a[\"t1\"][\"queued\"] and not a[\"t3\"][\"sent\"] and a[\"t3\"][\"need\"] == \"reload\"" && grep -q "在忙的沒告訴" "$T/$tag-r.err" && grep -q "t3：kit 剛從整個帳號拿掉技能 ts" "$T/$tag-r.err"'
