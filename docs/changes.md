@@ -4,6 +4,12 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.17.1（2026-11-27）
+
+更新後要做：Windows 的電腦 `kit self-update`。Mac、Linux 不用。
+
+- Windows：Claude 每次送出時 kit 的提醒（context 快滿要寫 HANDOFF.md）在有些帳號會逾時（`kit.ps1 handoff-hook timed out after 5s`，紅字）。原因是找 Claude 的程式要問 WMI，有些帳號問了要等 5 秒才被拒。現在改用 Claude 給的對話 ID 找 status line 的記錄，不問 WMI。
+
 ## 0.17.0（2026-11-26）
 
 更新後要做：每台跑 agent 的電腦 `kit self-update`（Windows 也要）。Herdr 那邊還沒改成用它之前，什麼都不會變。

@@ -357,7 +357,7 @@ check "sync: kit's statusLine in settings.json" 'jget "$H7/.claude/settings.json
 check "sync: kit's UserPromptSubmit hook (handoff-hook) in settings.json, next to SessionStart's" 'jget "$H7/.claude/settings.json" hooks.UserPromptSubmit | grep -q "handoff-hook" && jget "$H7/.claude/settings.json" hooks.SessionStart | grep -q "sync --hook"'
 mkdir -p "$T/fbh"; cat > "$T/fbh/claude" <<'FAKE'
 #!/bin/sh
-echo "{\"pid\": $$, \"used\": $USED, \"window\": 1000000, \"model\": \"claude-opus-5-5\"}" > "$HOME/.config/agentkit/ctx/claude-$$.json"
+echo "{\"pid\": $$, \"session\": \"s-7\", \"used\": $USED, \"window\": 1000000, \"model\": \"claude-opus-5-5\"}" > "$HOME/.config/agentkit/ctx/claude-$$.json"
 echo '{"session_id":"s-7","prompt":"hi"}' | sh -c "$HK handoff-hook"
 FAKE
 chmod +x "$T/fbh/claude"

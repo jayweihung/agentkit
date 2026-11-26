@@ -3746,8 +3746,15 @@ function Cmd-HandoffHook { # Claude's UserPromptSubmit hook (the same as unix/ki
         if (-not $u -or -not $w -or [long]$w -le 0) { return }
         $pct = [long](Codex-Pct ([long]$u) ([long]$w))
     } else {
-        $cp = Claude-Pid; if (-not $cp) { return }
-        $f = Join-Path $CtxDir "claude-$cp.json"; if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return }
+        # by its session in the status line's records: Claude-Pid asks WMI, which some accounts wait 5 s on and are
+        # refused (Claude's 5 s hook timeout); the newest record of that session, or the pid's when Claude gives none
+        $f = $null; $cp = ''
+        if ($sid) {
+            $f = @(Get-ChildItem -LiteralPath $CtxDir -Filter 'claude-*.json' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
+                Where-Object { (Read-Text $_.FullName).Contains('"session": "' + $sid + '"') } | Select-Object -First 1 | ForEach-Object { $_.FullName })[0]
+            if (-not $f) { return }
+        } else { $cp = Claude-Pid; if (-not $cp) { return }; $f = Join-Path $CtxDir "claude-$cp.json" }
+        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return }
         $j = Read-Text $f; $u = Num-Of 'used' $j; $m = Str-Of 'model' $j; $w = Setting-Window $m
         if (-not $w) { $w = Num-Of 'window' $j }
         if (-not $u -or -not $w -or [long]$w -le 0) { return }

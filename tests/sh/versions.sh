@@ -87,8 +87,9 @@ check "installed --dir: the folder's own copy (its state.tsv line)" '[ -n "$fl" 
 awk -F'\t' '$1 != "ver" && $1 !~ /:ver$/' "$HV/.config/agentkit/state.tsv" > "$T/st" && cp "$T/st" "$HV/.config/agentkit/state.tsv"
 touch -t 202001020304 "$HV/.claude/skills/vt"; kit sync >/dev/null 2>&1; kit list --json > "$T/v9.json" 2>/dev/null
 check "installed: an old state.tsv: the first sync takes each one's time from its file" '[ "$(vj "$T/v9.json" skill vt installed.claude.at)" -lt 1600000000 ] && [ "$(vj "$T/v9.json" skill vt installed.claude.id)" = "$(vj "$T/v9.json" skill vt version.id)" ]'
-if [ -n "$PWSH" ]; then   # kit.ps1's sync keeps the same ver lines (nothing changed), and fills them in the same way
-    grep -E '^(ver|dir:.*:ver)	' "$HV/.config/agentkit/state.tsv" > "$T/vl1"; kps sync >/dev/null 2>&1; grep -E '^(ver|dir:.*:ver)	' "$HV/.config/agentkit/state.tsv" > "$T/vl2"
+if [ -n "$PWSH" ]; then   # kit.ps1's sync keeps its own ver lines (nothing changed), and fills them in the same way
+    # (its marks are its own hash of the copy, not unix/kit's cksum: a machine has one kit, so the first kps sync writes its own)
+    kps sync >/dev/null 2>&1; grep -E '^(ver|dir:.*:ver)	' "$HV/.config/agentkit/state.tsv" > "$T/vl1"; kps sync >/dev/null 2>&1; grep -E '^(ver|dir:.*:ver)	' "$HV/.config/agentkit/state.tsv" > "$T/vl2"
     check "kit.ps1 sync: the same ver lines kept" '[ -s "$T/vl1" ] && cmp -s "$T/vl1" "$T/vl2"'
     awk -F'\t' '$1 != "ver" && $1 !~ /:ver$/' "$HV/.config/agentkit/state.tsv" > "$T/st" && cp "$T/st" "$HV/.config/agentkit/state.tsv"
     touch -t 202001020304 "$HV/.claude/skills/vt"; kps sync >/dev/null 2>&1; kps list --json > "$T/v10.json" 2>/dev/null
