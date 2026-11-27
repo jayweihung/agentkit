@@ -7223,9 +7223,8 @@ function Tab-AddRm([string]$verb, [string]$id, [string]$k, [string]$n) { # only 
         Say "kit：$i 從分頁 $id 拿掉了$when"
     }
 }
-function Proc-Start($p) { try { [string](Get-Process -Id ([int]$p) -ErrorAction Stop).StartTime.ToUniversalTime().Ticks } catch { '' } }   # '' gone or another account's
 # its tool still runs: that pid, started when kit open ran (Windows soon gives an ended process's pid to a new one); a tab before 0.18.1 has no start
-function Tab-Alive([string]$t) { $p = Tab-Get $t 'pid'; $s = Tab-Get $t 'start'; if ($p -notmatch '^[0-9]+$') { return $false }; $n = Proc-Start $p; [bool]$n -and (-not $s -or $n -ceq $s) }
+function Tab-Alive([string]$t) { $p = Tab-Get $t 'pid'; $s = Tab-Get $t 'start'; if ($p -notmatch '^[0-9]+$' -or -not (Proc-Alive $p)) { return $false }; $n = Proc-Start $p; -not $s -or -not $n -or $n -ceq $s }
 function Tab-Null([string]$s) { if ($s) { Json-S $s } else { 'null' } }
 function Tab-Kinds($items) { (@($items | Where-Object { $_ -match '^[^:]+:[^:]+$' } | ForEach-Object { $c = $_.Split(':'); "{`"kind`": $(Json-S $c[0]), `"name`": $(Json-S $c[1])}" }) -join ', ') }
 function Cmd-Tab($rest) { # kit tab list [--json] | show ID [--json] | rm ID... | keep [ID...]
