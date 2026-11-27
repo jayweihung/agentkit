@@ -12,7 +12,7 @@ function TC([hashtable]$envs, [switch]$HookChild) { # kit sync --hook run by the
     $names = 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_FORCE_SESSION_PERSISTENCE', 'KIT_TRANSCRIPT_CHECK'
     $keep = @{}; foreach ($v in $names + 'HOME', 'USERPROFILE') { $keep[$v] = [Environment]::GetEnvironmentVariable($v) }
     foreach ($v in $names) { [Environment]::SetEnvironmentVariable($v, $null) }
-    $env:HOME = $TH; $env:USERPROFILE = $TH
+    $env:HOME = $TH; $env:USERPROFILE = $TH; if ($OnWindows) { [void](New-Item -ItemType Directory -Force -Path (Join-Path $TH 'AppData\Local')) }
     foreach ($k in $envs.Keys) { [Environment]::SetEnvironmentVariable($k, $envs[$k]) }
     $o = Join-Path $T 'tc.out'; Remove-Item -LiteralPath $o -ErrorAction SilentlyContinue
     try {   # -HookChild: the hook's own environment has CHILD_SESSION=1 (Claude gives it to every hook)

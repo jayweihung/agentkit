@@ -25,6 +25,8 @@ function Check([string]$name, [scriptblock]$test) {
 }
 function Set-Home([string]$h) {
     [void](New-Item -ItemType Directory -Force -Path $h)
+    # without it Windows gives "" for LocalApplicationData and PowerShell writes its ModuleAnalysisCache under the current folder
+    if ($OnWindows) { [void](New-Item -ItemType Directory -Force -Path (Join-Path $h 'AppData\Local')) }
     $env:HOME = $h; $env:USERPROFILE = $h; $script:H = $h
 }
 function Kit {   # run kit in a new process; output (stdout+stderr) in $script:out, exit code in $script:rc
