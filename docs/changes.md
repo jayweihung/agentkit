@@ -4,6 +4,12 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.18.1（2026-11-28）
+
+更新後要做：Windows 的電腦 `kit self-update`。
+
+- Windows：`kit tab list|show` 的 `live`（分頁的工具還在跑）不會再把已經結束的分頁說成還在跑。Windows 很快就把結束的程序的 pid 給新的程序，kit 以前只看那個 pid 有沒有程序；現在 `kit open` 也記下程序的啟動時間，兩個都對得上才算。0.18.1 以前開的分頁沒有記，照舊只看 pid。`kit tab keep` 也因此會清掉這種分頁。
+
 ## 0.18.0（2026-11-28）
 
 更新後要做：每台 `kit self-update`，再 `kit sync`。kit api 1.23。

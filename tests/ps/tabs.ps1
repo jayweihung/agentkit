@@ -32,6 +32,14 @@ try {
     KitJ tab show t1 --json
     $d = $out | ConvertFrom-Json
     Check 'tabs: tab show --json: the agent''s items, the account''s; not running' { $rc -eq 0 -and $d.agent -ceq 'hello' -and -not $d.live -and @($d.items).Count -eq 3 -and @($d.account | Where-Object { $_.name -ceq 'tb' }).Count -eq 1 }
+    # a pid Windows gave to another process since (here: this test's own) is not the tab's tool: its start time differs
+    $tf = Join-Path $TB 't1/tab.tsv'; $own = [string](Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
+    $base = ((ReadT $tf) -split "`n" | Where-Object { $_ -and $_ -notmatch '^(pid|start)\t' }) -join "`n"
+    W $tf "$base`npid`t$PID`nstart`t1`n"; KitJ tab show t1 --json; $l1 = ($out | ConvertFrom-Json).live
+    W $tf "$base`npid`t$PID`nstart`t$own`n"; KitJ tab show t1 --json; $l2 = ($out | ConvertFrom-Json).live
+    W $tf "$base`npid`t$PID`n"; KitJ tab show t1 --json; $l3 = ($out | ConvertFrom-Json).live
+    Check 'tabs: live: the pid and its start time (a pid given to a new process is not running; a tab from before 0.18.1, no start: the pid alone)' { -not $l1 -and $l2 -and $l3 }
+    W $tf "$base`n"
     Kit tab rm t1
     Check 'tabs: tab rm: its folder goes' { $rc -eq 0 -and -not (Test-Path (Join-Path $TB 't1')) }
 } finally { Pop-Location }
