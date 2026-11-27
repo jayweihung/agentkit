@@ -21,7 +21,7 @@ foreach ($v in @((Join-Path $KitLib 'VERSION'), (Join-Path (Split-Path -Parent $
 }
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. unix/kit has the same.
-$script:KitApi = '1.22'
+$script:KitApi = '1.23'
 function Env-Or($name, $default) { $v = [Environment]::GetEnvironmentVariable($name); if ($v) { $v } else { $default } }
 $script:KitConf = Env-Or 'AGENTKIT_CONFIG' (Join-Path $UserHome '.config/agentkit')
 $script:KitSrc = Env-Or 'AGENTKIT_SOURCES' (Join-Path $UserHome 'agentkit')
@@ -408,8 +408,13 @@ function Is-Cache([string]$name) { $name -cmatch $CacheRe }   # a file or folder
 function Drop-Caches([string]$dir) { # DIR is kit's new copy
     foreach ($e in @(Walk-Tree $dir -Caches)) { if (Is-Cache $e.Name) { Remove-Tree $e.FullName } }
 }
+# Windows: a skill copy gets kit's packages as a copy (node_modules / .venv with this file in it: where from, which
+# packages), not a junction: a process Windows' OpenSSH server started, or a task run with S4U, may not follow a
+# junction (RedirectionGuard), and the skill would find no packages.
+$script:DepsMark = '.kit-copy'
 function Dir-Hash([string]$dir) { # content hash of a directory: its files, not what links (junctions) point at
-    # (like find -type f; PowerShell 5.1 -Recurse goes into junctions: node_modules / .venv would count as hand edits)
+    # (like find -type f; PowerShell 5.1 -Recurse goes into junctions: node_modules / .venv would count as hand edits;
+    # kit's copy of the packages, with its Deps-Mark, does not count either)
     $base = (Resolve-Path -LiteralPath $dir).ProviderPath.TrimEnd('\', '/')
     $sha = [Security.Cryptography.SHA256]::Create()
     $stack = New-Object System.Collections.Stack; $stack.Push($base)
@@ -417,7 +422,7 @@ function Dir-Hash([string]$dir) { # content hash of a directory: its files, not 
         foreach ($e in @(Get-ChildItem -LiteralPath $stack.Pop() -Force)) {
             if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
             if (Is-Cache $e.Name) { continue }
-            if ($e.PSIsContainer) { $stack.Push($e.FullName); continue }
+            if ($e.PSIsContainer) { if (-not (Test-Path -LiteralPath (Join-Path $e.FullName $DepsMark) -PathType Leaf)) { $stack.Push($e.FullName) }; continue }
             if ($e.Name -eq '.DS_Store') { continue }
             $e.FullName.Substring($base.Length + 1).Replace('\', '/') + ' ' + [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($e.FullName)))
         }
@@ -1488,10 +1493,10 @@ function Codex-Mcp-Fields([string]$f, [string]$n, [scriptblock]$q, [scriptblock]
     foreach ($e in $envs) { $out.Add($e) }
     , $out
 }
-function Codex-Mcp-Toml($names, [string]$cfg = '', $more = @()) { # [mcp_servers.x] tables for Codex (CFG: whose config.toml to check for the user's own; MORE: kit place's agent's denies)
+function Codex-Mcp-Toml($names, [string]$cfg = '') { # [mcp_servers.x] tables for Codex (CFG: whose config.toml to check for the user's own)
     if (-not $cfg) { $cfg = Join-Path $CodexDir 'config.toml' }
     $user = @(Toml-User $cfg)
-    $deny = Uniq (@(Required-Deny) + @($more))
+    $deny = Uniq @(Required-Deny)
     $sb = New-Object System.Text.StringBuilder
     foreach ($n in @($names | Where-Object { $_ })) {
         $p = Item-File 'mcp' $n; if (-not $p) { Warn "mcp $n not found in any source"; continue }
@@ -2407,8 +2412,8 @@ function Codex-Hooks {
 }
 # What kit holds back in Codex (the same as unix/kit's codex-guard). Codex hands its PreToolUse hook the shell command
 # it is about to run (tool Bash) and its patches (apply_patch: adding a file is Write; changing, moving or deleting one
-# is Edit). kit codex-guard says no to what tools.only and tools.deny leave out: the team's, a placed folder's agent's
-# (Codex opened there or below), kit run's (KIT_CODEX_ONLY, KIT_CODEX_DENY). A command is checked a piece at a time
+# is Edit). kit codex-guard says no to what tools.only and tools.deny leave out: the team's, kit run's
+# (KIT_CODEX_ONLY, KIT_CODEX_DENY). A command is checked a piece at a time
 # (split at && || ; |, new lines, & ( ) and `), each piece from its start. MCP tools: disabled_tools in config.toml.
 function Codex-GuardSays([string]$tool, [string]$cmd, $only, $deny) { # why Codex may not ('': it may)
     $ws = " `t`r`n".ToCharArray()
@@ -2440,22 +2445,11 @@ function Cmd-CodexGuard { # Codex's PreToolUse hook (~/.codex/hooks.json): what 
     $in = Read-Stdin; $tool = Str-Of 'tool_name' $in
     if ($tool -cne 'Bash' -and $tool -cne 'apply_patch') { return }
     $j = $null; try { $j = $in | ConvertFrom-Json } catch { return }
-    $cmd = "$($j.tool_input.command)"; $cwd = "$($j.cwd)"
+    $cmd = "$($j.tool_input.command)"
     $deny = @(); $rd = Join-Path $CtxDir 'required-deny.txt'
     if (Test-Path -LiteralPath $rd) { $deny = @((Read-Text $rd) -split "`r?`n") }
     elseif (Test-Path -LiteralPath $Machine) { try { $deny = @(Required-Deny) } catch { } }
-    $only = @()
-    if ($cwd -and (Test-Path -LiteralPath $cwd -PathType Container)) {
-        $r = Dir-Root $cwd
-        if ($r -and (Dir-Mark $r 'agent')) {
-            $pf = Placed-File $r
-            if ($null -ne $pf) {
-                $fm = $null; try { $fm = Yaml-Lines $pf[0] -Frontmatter } catch { }
-                if ($fm) { $only = @(YGet-From $fm 'tools.only'); $deny += @(YGet-From $fm 'tools.deny') }
-            }
-        }
-    }
-    $why = Codex-GuardSays $tool $cmd $only $deny
+    $why = Codex-GuardSays $tool $cmd @() $deny
     if (-not $why -and ($env:KIT_CODEX_ONLY -or $env:KIT_CODEX_DENY)) { $why = Codex-GuardSays $tool $cmd @("$env:KIT_CODEX_ONLY") @("$env:KIT_CODEX_DENY") }
     if (-not $why) { return }
     [Console]::Out.Write('{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": ' + (Json-S $why) + "}}`n")
@@ -2473,8 +2467,8 @@ function Codex-LimitsWarn($only, $deny) { # what kit codex-guard cannot apply, o
     }
 }
 # omp: kit's hook module (templates/omp-hook.txt, filled in): ~/.omp/agent/hooks/pre/kit.js runs kit sync --hook when a
-# session starts and applies the team's tools.deny (required.tools.deny, Claude's spelling); a placed agent's folder gets
-# <folder>/.omp/hooks/pre/kit.js with its tools.only and tools.deny; kit run passes one with --extension. Only a file kit
+# session starts and applies the team's tools.deny (required.tools.deny, Claude's spelling); kit run passes one with
+# --extension (kit place, gone, put one in <folder>/.omp/hooks/pre/kit.js: kit sync takes it out). Only a file kit
 # wrote (its first line) is replaced or removed.
 $script:OmpHookHead = "// kit's omp hook: written by kit (agentkit); edits here are overwritten."
 $script:OmpTools = @('Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob', 'LS', 'Task', 'Agent', 'TodoWrite', 'WebSearch', 'AskUserQuestion')
@@ -2656,11 +2650,11 @@ function Dir-Root([string]$d) { # the folder kit uses for D: the nearest one at 
     }
     $d
 }
-# A placed folder (kit place) gets its agent's rules, skills and MCP from the agent file each time (kit sync), so a
-# change to the agent reaches it. .agentkit keeps only what you changed: kind:name you added (kit add --dir), and
-# not:kind:name, one of the agent's you took out (kit rm --dir; it stays out until you kit add --dir it again).
-# Kit keeps a copy of the agent file ($KitConf/placed/): when the agent cannot be found or read (renamed, its source
-# gone), the folder stays as it was, the prompt and tool limits too. (unix/kit does the same.)
+# kit place (gone in 0.18.0) left folders whose .agentkit says agent:NAME and tool:TOOL, has not:kind:name for the agent's
+# you took out, and a copy of the agent file in $KitConf/placed/. Dir-Unplace turns one into a plain folder: what it had
+# (the agent's rules, skills and MCP less the ones taken out, and what you added) becomes its own; the agent's prompt and
+# tool limits go. (unix/kit does the same.) shortcut: the helpers down to Dir-Mark are only for that, drop them once no
+# machine has such a folder.
 function Dir-Lines([string]$d) {
     $f = Join-Path $d $DirFile
     if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return @() }
@@ -2691,27 +2685,25 @@ function Dir-Marks([string]$d) { # kit place's lines (agent:NAME, tool:TOOL)
     @(foreach ($l in (Read-Text $f) -split "`n") { $l = $l.TrimEnd("`r"); if ($l -match '^(agent|tool):[^ ]+$') { $l } })
 }
 function Dir-Mark([string]$d, [string]$k) { foreach ($l in @(Dir-Marks $d)) { if ($l.StartsWith("${k}:")) { return $l.Substring($k.Length + 1) } }; '' }   # the agent kit place put there, its tool
+function Dir-Unplace([string]$d) { # a folder kit place made becomes a plain one (kit sync, kit add|rm --dir)
+    $a = Dir-Mark $d 'agent'; if (-not $a) { return }
+    Dir-Write $d @(Dir-Items $d); $c = Placed-Copy $d; if (Test-Path -LiteralPath $c) { Remove-Item -LiteralPath $c -Force }; State-Del 'told' "placed:$d"
+    Say "kit：$d 不再是 agent ${a}（kit place 拿掉了）：它的規則、技能、MCP 留著，是這個資料夾自己的；要開 ${a}：kit open <工具> --agent $a"
+}
 function Dir-Kind([string]$d, [string]$k) { "dir:${d}:$k" }   # state.tsv kind for a folder's own (kit keeps it with the rest)
 function Dirs-Registered { if (Test-Path -LiteralPath $DirsList) { Uniq @((Read-Text $DirsList) -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ }) } else { @() } }
 function Dirs-With([string]$i) { @(Dirs-Registered | Where-Object { (Test-Path -LiteralPath $_ -PathType Container) -and (@(Dir-Items $_) -contains $i) }) }   # the folders whose list has KIND:NAME
 function Dirs-Set([string]$d, [string]$how) { # the list of folders kit has to keep up to date
-    if ($how -ne 'add') { $c = Placed-Copy $d; if (Test-Path -LiteralPath $c) { Remove-Item -LiteralPath $c -Force } }
     $rows = @(Dirs-Registered | Where-Object { $_ -ne $d }); if ($how -eq 'add') { $rows += $d }
     if ($rows.Count -eq 0) { if (Test-Path -LiteralPath $DirsList) { Remove-Item -LiteralPath $DirsList -Force }; return }
     Ensure-Dir $KitConf; $t = Temp-Next $DirsList
     Write-Text $t (($rows | ForEach-Object { "$_`n" }) -join ''); Swap-In $t $DirsList $false
 }
-function Dir-Write([string]$d, $items, $marks = $null) { # the folder's .agentkit (gone when nothing is left); kit place's lines kept
+function Dir-Write([string]$d, $items) { # the folder's .agentkit (gone when nothing is left)
     $f = Join-Path $d $DirFile; $items = @($items | Where-Object { $_ })
-    if ($null -eq $marks) { $marks = @(Dir-Marks $d) }; $marks = @($marks | Where-Object { $_ })
-    if ($items.Count -eq 0 -and $marks.Count -eq 0) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }; return }
+    if ($items.Count -eq 0) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }; return }
     $t = "# kit：這個資料夾自己的規則、skill、MCP、外掛。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。`n"
     $t += "# 用  kit add --dir <資料夾> 種類 名字  /  kit rm --dir …  改。`n"
-    if ($marks.Count -gt 0) {
-        $t += "# kit place：這個資料夾就是下面這個 agent（在這裡開的 claude、codex、omp 都是它）。`n"
-        $t += "# agent 的規則、skill、MCP 每次 kit sync 照 agent 檔放；下面的 種類:名字 是你另外加的，not:種類:名字 是你拿掉的 agent 的。`n"
-        $t += (($marks | ForEach-Object { "$_`n" }) -join '')
-    }
     Write-Text $f ($t + (($items | ForEach-Object { "$_`n" }) -join ''))
 }
 function Drop-Made([string]$f) { # a JSON file kit made that is empty again goes away
@@ -2746,7 +2738,7 @@ function Dir-ClaudeAllow([string]$dir, $names) { # MCP names -> .claude/settings
     }
     Drop-Made $f
 }
-function Dir-ClaudeDeny([string]$dir, $names) { # deny rules -> .claude/settings.local.json permissions.deny (kit place)
+function Dir-ClaudeDeny([string]$dir, $names) { # deny rules -> .claude/settings.local.json permissions.deny
     # (one the file already has is yours: kit does not count it as its own, so never takes it out)
     $f = Join-Path (Join-Path $dir '.claude') 'settings.local.json'
     $kd = Dir-Kind $dir 'deny'; $have = @(Json-Strs $f 'permissions.deny')
@@ -2793,27 +2785,6 @@ function Dir-ClaudeTrust([string]$dir) { # the folder trusted in ~/.claude.json 
         State-Del $kt 'claude'
     }
 }
-# Claude Code's own tools that kit knows: a placed agent's tools.only becomes deny rules for the others (Claude's settings
-# have no "only these"; a tool Claude adds later is not in the list). unix/kit has the same list.
-$ClaudeTools = @('Agent', 'Bash', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'Read', 'Task', 'TodoWrite', 'WebFetch', 'WebSearch', 'Write')
-function Place-Deny($only, $deny) { # the deny rules of a placed agent's folder (Claude): DENY, and with ONLY the other built-in tools
-    $only = @($only | Where-Object { $_ })
-    $out = @($deny | Where-Object { $_ })
-    if ($only.Count -gt 0) { $out += @($ClaudeTools | Where-Object { $only -cnotcontains $_ }) }
-    Uniq $out
-}
-function Place-More([string]$name, [string]$f, [bool]$rules) { # the agent's prompt, after the folder's rules in its CLAUDE.md / AGENTS.md
-    $c = 0; $lines = New-Object System.Collections.Generic.List[string]
-    foreach ($l in (Read-Text $f) -split "`n") {
-        $l = $l.TrimEnd("`r")
-        if ($c -ge 2) { if ($lines.Count -gt 0 -or $l.Trim()) { $lines.Add($l) }; continue }
-        if ($l -eq '---') { $c++ }
-    }
-    $b = ($lines.ToArray() -join "`n").TrimEnd("`n")
-    if (-not $b) { return '' }
-    $pre = ''; if ($rules) { $pre = "`n" }
-    $pre + "<!-- agent: $name -->`n$b`n"
-}
 # A folder's plugins (kit add --dir D plugin N): each tool's own folder scope, run in D. Codex has none (only the account).
 # As unix/kit's dir_plugins: Claude --scope local (.claude/settings.local.json of Claude's project: the git repo's top, else
 # D), omp --scope project with a D/.omp (D/.omp/plugins/). That file tracked by git: kit leaves the tool out there.
@@ -2855,62 +2826,34 @@ function Dir-Plugins([string]$dir) { # the folder's plugins installed (again whe
         elseif (@(Json-Keys $f @('plugins')).Count -eq 0) { Remove-Tree (Split-Path -Parent $f); State-Del 'made' $f }
     }
 }
-function Apply-Dir([string]$dir) { # the folder's .agentkit (and its agent) -> the tools' files in it
-    # kit place: the agent's rules, skills, MCP, its prompt after the rules, its tool limits into the tools' settings
-    # (read from the agent each time, so kit sync brings a change). An agent kit cannot read: kit's copy from the last
-    # time (the folder stays as it was), said once; no copy either: kit leaves the folder alone.
-    $agent = Dir-Mark $dir 'agent'; $tool = Dir-Mark $dir 'tool'; $more = ''; $deny = @(); $cdeny = @(); $af = ''
-    if ($agent) {
-        $pf = Placed-File $dir; $c = Placed-Copy $dir
-        if ($null -ne $pf -and $pf[1] -eq 0) {
-            $af = $pf[0]
-            if (-not ((Test-Path -LiteralPath $c -PathType Leaf) -and (Same-Bytes $af $c))) { Ensure-Dir (Split-Path -Parent $c); Copy-Item -LiteralPath $af -Destination $c -Force }
-            State-Del 'told' "placed:$dir"
-        } else {
-            if ($null -eq (State-Get 'told' "placed:$dir")) {
-                Warn "agent $agent 找不到或讀不懂（改了名字、來源不在、或核准的版本沒有它）：${dir} 先照上次的樣子不動，修好後 kit sync（只提醒這一次）"
-                State-Set 'told' "placed:$dir" 1
-            }
-            if ($null -eq $pf) { return }
-            $af = $pf[0]
-        }
-    }
+function Apply-Dir([string]$dir) { # the folder's .agentkit -> the tools' files in it
+    Dir-Unplace $dir
     $want = @(Dir-Items $dir)
     $rules = Of-Kind $want 'rule'; $skills = Of-Kind $want 'skill'; $mcps = Of-Kind $want 'mcp'
     $mj = Join-Path $dir '.mcp.json'
-    if ($af) {
-        $fm = @(); try { $fm = Yaml-Lines $af -Frontmatter } catch { }
-        $more = Place-More $agent $af (@($rules).Count -gt 0)
-        $deny = @(YGet-From $fm 'tools.deny'); $cdeny = @(Place-Deny @(YGet-From $fm 'tools.only') $deny)
-    }
-    Set-Rules (Join-Path $dir 'CLAUDE.md') $rules 'import' $more
+    Set-Rules (Join-Path $dir 'CLAUDE.md') $rules 'import' ''
     Sync-Skills (Join-Path (Join-Path $dir '.claude') 'skills') (Dir-Kind $dir 'skill') $skills
     if (-not (Test-Path -LiteralPath $mj) -and @($mcps).Count -gt 0) { State-Set 'made' $mj 1 }
     Sync-McpJson $mj (Dir-Kind $dir 'mcp') $mcps; Mcp-VarsWarn $mcps
     Drop-Made $mj
     Dir-ClaudeAllow $dir $mcps
     Dir-ClaudeTrust $dir
-    Dir-ClaudeDeny $dir $cdeny
+    Dir-ClaudeDeny $dir @()                                    # the tool limits kit place put there go
     Dir-Plugins $dir
     # kit's backups of the user's own files go when kit has nothing left in them
     if (@(State-List (Dir-Kind $dir 'mcp')).Count -eq 0 -and (Test-Path -LiteralPath "$mj.kit-backup")) { Remove-Item -LiteralPath "$mj.kit-backup" -Force }
     $sl = Join-Path (Join-Path $dir '.claude') 'settings.local.json.kit-backup'
     if (@(State-List (Dir-Kind $dir 'allow')).Count -eq 0 -and @(State-List (Dir-Kind $dir 'deny')).Count -eq 0 -and (Test-Path -LiteralPath $sl)) { Remove-Item -LiteralPath $sl -Force }
     $am = Join-Path $dir 'AGENTS.md'
-    if ((Has-Codex) -or (Has-Omp) -or $tool -eq 'codex' -or $tool -eq 'omp' -or @(State-List (Dir-Kind $dir 'skill.agents')).Count -gt 0) {
-        Set-Rules $am $rules 'inline' $more
+    if ((Has-Codex) -or (Has-Omp) -or @(State-List (Dir-Kind $dir 'skill.agents')).Count -gt 0) {
+        Set-Rules $am $rules 'inline' ''
         Sync-Skills (Join-Path (Join-Path $dir '.agents') 'skills') (Dir-Kind $dir 'skill.agents') $skills
     } elseif ((Test-Path -LiteralPath $am -PathType Leaf) -and @((Read-Text $am) -split "`n" | Where-Object { $_.TrimEnd("`r") -eq $BeginMark }).Count -gt 0) {
-        Set-Rules $am $rules 'inline' $more                    # kit wrote it before (kit place --tool codex): keep it up to date
+        Set-Rules $am $rules 'inline' ''                       # kit wrote it before (kit place --tool codex did): keep it up to date
     }
     $ct = Join-Path (Join-Path $dir '.codex') 'config.toml'
-    if ((Has-Codex) -or $tool -eq 'codex' -or (Test-Path -LiteralPath $ct)) { [void](Replace-Block $ct $TomlBegin $TomlEnd (Codex-Mcp-Toml $mcps $ct $deny).TrimEnd("`n")) }
-    # omp: the agent's tool limits through kit's hook module in the folder (none: kit's module goes)
-    $oo = @(); if ($af) { $oo = @(YGet-From $fm 'tools.only' | Where-Object { $_ }) }
-    $oh = Join-Path $dir '.omp/hooks/pre/kit.js'
-    if (((Has-Omp) -or $tool -eq 'omp') -and ($oo.Count -gt 0 -or @($deny | Where-Object { $_ }).Count -gt 0)) {
-        if (-not (Omp-HookPut $oh (Omp-HookJs '' $oo $deny))) { Warn "$oh 是你自己的檔：kit 不動它，omp 在這裡不會照 agent 的 tools.only、tools.deny" }
-    } else { [void](Omp-HookPut $oh) }
+    if ((Has-Codex) -or (Test-Path -LiteralPath $ct)) { [void](Replace-Block $ct $TomlBegin $TomlEnd (Codex-Mcp-Toml $mcps $ct).TrimEnd("`n")) }
+    [void](Omp-HookPut (Join-Path $dir '.omp/hooks/pre/kit.js'))   # the tool limits kit place put there go
     foreach ($x in @('.claude/skills', '.agents/skills', '.claude', '.agents', '.codex', '.omp/hooks/pre', '.omp/hooks', '.omp')) {
         $p = Join-Path $dir $x
         if ((Test-Path -LiteralPath $p -PathType Container) -and -not (Get-ChildItem -LiteralPath $p -Force | Select-Object -First 1)) { Remove-Item -LiteralPath $p -Force }
@@ -2919,7 +2862,7 @@ function Apply-Dir([string]$dir) { # the folder's .agentkit (and its agent) -> t
 function Apply-Dirs { # kit sync: every folder with its own; a folder that is gone (or has no .agentkit any more) leaves the list
     foreach ($d in @(Dirs-Registered)) {
         if (Test-Path -LiteralPath $d -PathType Container) { Apply-Dir $d }
-        if (@(Dir-Items $d).Count -eq 0 -and -not (Dir-Mark $d 'agent')) { Dirs-Set $d 'rm' }
+        if (@(Dir-Items $d).Count -eq 0) { Dirs-Set $d 'rm' }
     }
 }
 function Codex-Trust { # [projects."DIR"] trust for each folder with its own MCP (Codex reads a folder's config.toml only then)
@@ -2997,25 +2940,21 @@ function Codex-Top { # project_root_markers with .agentkit, so Codex started in 
     "project_root_markers = [`".git`", `"$DirFile`"]`n"
 }
 function Dir-AddRm([string]$verb, [string]$dir, [string]$k, [string]$n) { # only that folder (and below it) gets it, or no longer
-    # (a placed folder: taking out one of its agent's is kept as not:KIND:NAME, adding it again takes that away)
     $i = "${k}:$n"
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { Die "找不到資料夾 $dir" }
     $root = Dir-Root $dir
     $why = Dir-WhyNot $root; if ($why) { Die "${root}：$why" }
-    $own = @(Dir-Own $root); $nots = @(Dir-Nots $root); $ag = @(Dir-AgentItems $root); $have = @(Dir-Items $root)
+    Dir-Unplace $root; $items = @(Dir-Items $root)
     if ($verb -eq 'add') {
         if (-not (Find-Item $k $n)) { Die "找不到 ${i}（打 kit list 看有哪些）" }
-        if ($have -ccontains $i) { Say "kit：$root 已經有 $i"; return }
-        $nots = @($nots | Where-Object { $_ -cne $i })
-        if ($ag -cnotcontains $i) { $own += $i }
+        if ($items -ccontains $i) { Say "kit：$root 已經有 $i"; return }
+        $items += $i
     } else {
-        if ($have -cnotcontains $i) { Die "$root 沒有加 ${i}（這個資料夾自己加的才拿得掉）" }
-        $own = @($own | Where-Object { $_ -cne $i })
-        if ($ag -ccontains $i) { $nots += $i }
+        if ($items -cnotcontains $i) { Die "$root 沒有加 ${i}（這個資料夾自己加的才拿得掉）" }
+        $items = @($items | Where-Object { $_ -cne $i })
     }
-    $items = @(@($own) + @($nots | ForEach-Object { "not:$_" }) | Where-Object { $_ })
     Dir-Write $root $items
-    if ($items.Count -gt 0 -or (Dir-Mark $root 'agent')) { Dirs-Set $root 'add' } else { Dirs-Set $root 'rm' }
+    if ($items.Count -gt 0) { Dirs-Set $root 'add' } else { Dirs-Set $root 'rm' }
     Apply-Dir $root
     # Codex: the folder's trust and the root marker; a plugin: kit's copy and what is blocked (a folder's plugin is kit's)
     if ((Has-Codex) -or $k -eq 'plugin') { Apply-All } else { Ver-Record }
@@ -3420,11 +3359,21 @@ function Drop-DepsLink([string]$dst) { # take the links out of a skill copy firs
         if ($i -and $i.LinkType) { [IO.Directory]::Delete($l) }
     }
 }
-function Link-One([string]$l, [string]$target) {
+function Link-One([string]$l, [string]$target) { # L shows kit's packages TARGET: a link, on Windows a copy (see Deps-Mark)
     $i = Get-Item -LiteralPath $l -Force -ErrorAction SilentlyContinue
-    if ($i) { if (-not $i.LinkType) { return }; [IO.Directory]::Delete($l) }        # the skill brings its own
-    $type = if ($OnWindows) { 'Junction' } else { 'SymbolicLink' }
-    try { New-Item -ItemType $type -Path $l -Target $target -ErrorAction Stop | Out-Null } catch { Warn "沒辦法連上套件 ${l}：$($_.Exception.Message)" }
+    $m = Join-Path $l $DepsMark; $want = "$target`n" + (Dir-Hash (Join-Path (Split-Path -Parent $target) '.kit-src'))
+    if ($i -and -not $i.LinkType) {
+        if (-not (Test-Path -LiteralPath $m -PathType Leaf)) { return }                # the skill brings its own
+        if ((Read-Text $m) -ceq $want) { return }                                       # kit's copy of these packages
+        Remove-Tree $l
+    } elseif ($i) { [IO.Directory]::Delete($l) }
+    if (-not $OnWindows) {
+        try { New-Item -ItemType SymbolicLink -Path $l -Target $target -ErrorAction Stop | Out-Null } catch { Warn "沒辦法連上套件 ${l}：$($_.Exception.Message)" }
+        return
+    }
+    $t = "$l.kit-tmp"; if (Test-Path -LiteralPath $t) { Remove-Tree $t }
+    try { Copy-Item -LiteralPath $target -Destination $t -Recurse -Force -ErrorAction Stop; Write-Text (Join-Path $t $DepsMark) $want; Rename-Item -LiteralPath $t -NewName (Split-Path -Leaf $l) -ErrorAction Stop }
+    catch { if (Test-Path -LiteralPath $t) { Remove-Tree $t }; Warn "沒辦法複製套件到 ${l}：$($_.Exception.Message)" }
 }
 function Link-Deps([string]$n, [string]$dst) { # the packages kit installed for skill N show in its copy DST
     $s = Deps-Store $n
@@ -5827,12 +5776,10 @@ function Plan-All { # what kit sync will do with skills, everywhere it puts them
     $in = { param($d, $k, $names) foreach ($r in @(Skills-Plan $d $k $names)) { "$d`t$($r.a)`t$($r.n)`t$($r.sum)" } }
     foreach ($d in @(Dirs-Registered)) {                      # the folders' own first, as kit sync does
         if (-not (Test-Path -LiteralPath $d -PathType Container)) { continue }
-        $agent = Dir-Mark $d 'agent'; $tool = Dir-Mark $d 'tool'
-        if ($agent -and $null -eq (Placed-File $d)) { continue }
         $skills = Of-Kind @(Dir-Items $d) 'skill'
         & $in (Join-Path (Join-Path $d '.claude') 'skills') (Dir-Kind $d 'skill') $skills
         $kd = Dir-Kind $d 'skill.agents'
-        if ((Has-Codex) -or (Has-Omp) -or $tool -eq 'codex' -or $tool -eq 'omp' -or @(State-List $kd).Count -gt 0) { & $in (Join-Path (Join-Path $d '.agents') 'skills') $kd $skills }
+        if ((Has-Codex) -or (Has-Omp) -or @(State-List $kd).Count -gt 0) { & $in (Join-Path (Join-Path $d '.agents') 'skills') $kd $skills }
     }
     $skills = Of-Kind (Wanted) 'skill'
     & $in (Join-Path $ClaudeDir 'skills') 'skill' $skills
@@ -6451,10 +6398,9 @@ function Here-Json([string]$dir, [string]$hpid) { # the "here" part of kit list 
     if ($user) { return $out + ', "items": []}' }
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $out + ", `"error`": $(Json-S '找不到這個資料夾'), `"items`": []}" }
     $froot = Dir-Root $dir
-    $fa = Dir-Mark $froot 'agent'
     $fp = @(foreach ($pn in @(Of-Kind @(Dir-Items $froot) 'plugin')) {   # which tools have each folder plugin
         "{`"name`": $(Json-S $pn), `"tools`": $(Json-Arr @(foreach ($t in 'claude', 'omp') { if ($null -ne (State-Get (Dir-Kind $froot "plugin.$t") $pn)) { $t } })), `"note`": $(Json-S 'Codex 只能整個帳號裝')}" })
-    $out += ", `"folder`": {`"dir`": $(Json-S $froot), `"why`": $(Json-S (Dir-WhyNot $froot)), `"items`": $(Json-Arr @(Dir-Items $froot)), `"agent`": $(if ($fa) { Json-S $fa } else { 'null' }), `"plugins`": [$($fp -join ', ')]}"
+    $out += ", `"folder`": {`"dir`": $(Json-S $froot), `"why`": $(Json-S (Dir-WhyNot $froot)), `"items`": $(Json-Arr @(Dir-Items $froot)), `"agent`": null, `"plugins`": [$($fp -join ', ')]}"
     $out += ', "items": ['
     $first = $true
     foreach ($r in Here-Rows $dir) {
@@ -7334,64 +7280,6 @@ function Cmd-Tab($rest) { # kit tab list [--json] | show ID [--json] | rm ID... 
         default { Die-C usage $use }
     }
 }
-function Cmd-Place($rest) { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR becomes that agent's own folder
-    # Built on a folder's own (kit add --dir): .agentkit lists the agent's rules, skills and MCP, and says which agent it is
-    # (agent:NAME, tool:TOOL); kit sync puts the agent's prompt and tool limits in. Afterwards claude / codex / omp started
-    # there is that agent, and kit add|rm --dir changes only this folder.
-    $rest = @($rest | Where-Object { $null -ne $_ }); $name = ''; $dir = ''; $tool = 'claude'; $json = $false
-    $use = '用法：kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]'
-    for ($i = 0; $i -lt $rest.Count; $i++) {
-        $a = [string]$rest[$i]
-        if ($a -ceq '--tool') { if ($i + 1 -ge $rest.Count) { Die-C usage '--tool 後面要接 claude、codex 或 omp' }; $i++; $tool = [string]$rest[$i] }
-        elseif ($a -ceq '--json') { $json = $true }
-        elseif ($a.StartsWith('-')) { Die-C usage $use }
-        elseif (-not $name) { $name = $a } elseif (-not $dir) { $dir = $a } else { Die-C usage $use }
-    }
-    if (-not $name -or -not $dir) { Die-C usage $use }
-    if (@('claude', 'codex', 'omp') -cnotcontains $tool) { Die-C usage '--tool 只能是 claude、codex 或 omp' }
-    Need-Init
-    $f = Find-Item 'agent' $name; if (-not $f) { Die-C no_agent "找不到 agent ${name}（打 kit list 看有哪些）" }
-    $t = $dir.TrimEnd('\', '/'); if ($t -and -not ($t -match '^[A-Za-z]:$')) { $dir = $t }
-    if (Test-Path -LiteralPath $dir -PathType Container) { $d = Real-Dir $dir }
-    else {
-        if (Test-Path -LiteralPath $dir) { Die-C bad_dir "$dir 不是資料夾" }
-        $parent = Split-Path -Parent $dir; if (-not $parent) { $parent = '.' }
-        if (-not (Test-Path -LiteralPath $parent -PathType Container)) { Die-C no_parent "上一層資料夾不在：${parent}（kit 只建最後一層）" }
-        $d = Join-Path (Real-Dir $parent) (Split-Path -Leaf $dir)
-    }
-    $why = Dir-WhyNot $d; if ($why) { Die-C bad_dir "${d}：$why" }
-    if (Test-Path -LiteralPath $d -PathType Container) {
-        $old = Dir-Mark $d 'agent'
-        if ($old -and $old -cne $name) { Die-C other_agent "$d 已經是 agent ${old}：換一個資料夾，或先把它的 .agentkit 拿掉" }
-        if (-not $old -and (Get-ChildItem -LiteralPath $d -Force | Select-Object -First 1)) { Die-C not_empty "$d 已經有東西（不是 kit place 放的）：kit 只放在新的或空的資料夾" }
-    } else {
-        try { [void](New-Item -ItemType Directory -Path $d -ErrorAction Stop) } catch { Die "沒辦法建立資料夾 $d" }
-    }
-    $fm = $null; try { $fm = Yaml-Lines $f -Frontmatter } catch { Die "bad header in $f" }
-    # .agentkit: which agent, and what you changed there before (placed again); the agent's own come from it each time
-    $items = @(Dir-Lines $d); $warns = @()
-    foreach ($kk in @(@('rule', 'rules'), @('skill', 'skills'), @('mcp', 'mcp'))) {
-        foreach ($n in @(YGet-From $fm $kk[1])) { if ($n -and -not (Find-Item $kk[0] $n)) { $warns += "$($kk[0]) $n 不在任何來源裡：沒有放進來" } }
-    }
-    Dir-Write $d $items @("agent:$name", "tool:$tool")
-    Dirs-Set $d 'add'
-    Apply-Dir $d
-    if (Has-Codex) { Apply-All } else { Ver-Record }          # Codex: the folder's trust and the root marker
-    # what this tool cannot take from the agent in a folder (the README's table)
-    $only = @(YGet-From $fm 'tools.only'); $deny = @(YGet-From $fm 'tools.deny')
-    switch ($tool) {
-        'claude' { }                                     # tools.only: deny for the others (kit check tells the author)
-        'codex' {
-            $warns += @(Codex-LimitsWarn $only $deny)
-        }
-        'omp' {
-            $warns += @(Omp-LimitsWarn $only $deny)
-        }
-    }
-    foreach ($w in $warns) { Warn $w }
-    if ($json) { Out-Json "{`"dir`": $(Json-S $d), `"agent`": $(Json-S $name), `"tool`": $(Json-S $tool), `"command`": $(Json-Arr @($tool)), `"warnings`": $(Json-Arr $warns)}" }
-    else { Say "kit：$d 是 agent $name 了（在這裡打 $tool 開的就是它；之後用 kit add|rm --dir 改這個資料夾）" }
-}
 function Cmd-Uninstall($rest) {
     $self = (@($rest) -contains '--self')
     $left = $false
@@ -7717,8 +7605,6 @@ function Check-Dirs($dirs, [bool]$loud = $true) { # print problems; $true when t
                     $key = if ($k -eq 'mcp') { 'mcp' } else { "${k}s" }
                     foreach ($r in @(YGet-From $fm $key)) { if ($r -and -not $where.Contains("${k}:$r")) { Problem "${rel}: 找不到 ${k}:$r" } }
                 }
-                # for whoever writes it, not a problem: what tools.only can't do in Claude Code
-                if ($loud -and @(YGet-From $fm 'tools.only').Count -gt 0) { Warn "${rel}: tools.only 在 Claude 是把其他內建工具寫進 deny：Claude 之後新加的內建工具擋不到（要擋就寫進 tools.deny）" }
             }
         }
         foreach ($n in Plugin-Names $d) { if (-not (Valid-Name $n)) { Problem "plugins/${n}: 名字只能用小寫英文、數字和 -" } }
@@ -9198,9 +9084,6 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit add|rm --tab <分頁> <種類> <名字>   只改這個分頁（下面的資料夾或帳號已經有的不加）
   kit tab list|show <分頁> [--json]   有哪些分頁、一個分頁三層各有什麼
   kit tab rm <分頁>... | kit tab keep [<分頁>...]   分頁關掉了：清掉它那一份（keep：留這些和還在跑的，別的清掉）
-  kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]
-                                    讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
-                                    （建立最後一層資料夾；之後用 kit add|rm --dir 改，每個資料夾各自獨立）
   kit sync [--force]                全部換成來源最新的（自動的同步只裝新加的、拿掉不要的，已經在用的不換）
   kit sync --dry-run                先看 skill 會怎麼改，給一個雜湊；kit sync --expect 雜湊：清單一樣才改
   kit sync --only <種類>:<名字>     只把這一個換成來源最新的（rule、skill、mcp、plugin），別的不動
@@ -9253,10 +9136,10 @@ if (@('add', 'rm', 'remove', 'sync') -ccontains $cmd) {
     $rest = @($rest | Where-Object { $_ -cne '--json' -and $_ -cne '--no-tell' })
     if ($script:TellJson) { $script:JsonOut = $true }
 }
-if ((@('list', 'ls', 'agents', 'push', 'files', 'used', 'place') -ccontains $cmd -and @($rest) -ccontains '--json') -or (@('collect', 'new') -ccontains $cmd -and @($rest) -ccontains '--look') -or $cmd -ceq 'status') { $script:JsonOut = $true }
+if ((@('list', 'ls', 'agents', 'push', 'files', 'used') -ccontains $cmd -and @($rest) -ccontains '--json') -or (@('collect', 'new') -ccontains $cmd -and @($rest) -ccontains '--look') -or $cmd -ceq 'status') { $script:JsonOut = $true }
 try {
     # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook / --bg take it themselves)
-    if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent', 'install-deps', 'place') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
+    if (@('init', 'sync', 'add', 'rm', 'remove', 'uninstall', 'push', 'agent', 'install-deps') -contains $cmd -and -not (@($rest) -contains '--hook' -or @($rest) -contains '--bg')) { [void](Take-Lock) }
     if (@('add', 'rm', 'remove', 'sync') -ccontains $cmd) { $script:TellBefore = Tell-Ver }   # (what the tools have before: Tell-After)
     switch ($cmd) {
         'init' { Cmd-Init $rest }
@@ -9301,7 +9184,7 @@ try {
         'run' { Cmd-Run $rest }
         'open' { Cmd-Open $rest }
         'tab' { Cmd-Tab $rest }
-        'place' { Cmd-Place $rest }
+        'place' { Die "kit place 拿掉了（0.18.0）：開 agent 用  kit open <工具> --agent <名字>；放過的資料夾 kit sync 時變成普通資料夾，東西都留著" }
         'agents' { Cmd-Agents $rest }
         'agent' { Cmd-Agent $rest }
         'new' { Cmd-New $rest }

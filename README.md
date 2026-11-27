@@ -35,7 +35,6 @@ Windows（Windows PowerShell 5.1 內建就有，不用管理員權限）：
     kit run <agent> [--tool codex|omp]   開一個做好的 agent（預設 Claude）
     kit open claude [--agent <名字>] --tab <分頁>   這個分頁自己一份規則、技能、MCP、外掛、記憶（給 Herdr 這種畫面程式用）
     kit add --tab <分頁> skill <名字>  只加到這個分頁
-    kit place <agent> <資料夾> [--tool codex|omp]   這個資料夾就是那個 agent（在那裡開的就是它）
     kit sync                      全部換成來源最新的（自動的同步不換已經在用的）
     kit sync --dry-run            先看 skill 會怎麼改（不動任何檔案），最後給一個雜湊
     kit sync --expect <雜湊>       照那份清單改；清單變了（來源更新、你又改了 skill）就什麼都不改
@@ -63,7 +62,7 @@ kit 只改自己加的部分，而且只寫這台電腦有裝的工具：
 | Codex | `~/.codex/AGENTS.md`（標記之間，內容直接放進去） | `~/.agents/skills/` | `~/.codex/config.toml`（標記之間） | MCP 工具 → `disabled_tools`；shell、改檔 → `~/.codex/hooks.json` 的 `kit codex-guard`（kit 0.6.7 起） |
 | omp | `~/.omp/agent/AGENTS.md`（同上） | `~/.agents/skills/` | `~/.omp/agent/mcp.json` | `~/.omp/agent/hooks/pre/kit.js`（kit 0.6.7 起） |
 
-Codex 自己新增的設定（例如信任某個資料夾的 `[projects."…"]`）會加在 `config.toml` 最後面、落進 kit 那段裡；kit 記得自己上次寫了什麼（`~/.config/agentkit/codex-block.toml`），`kit sync` 時把不是它寫的搬到那段外面，不會洗掉。改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。想先看清楚再動手：`kit sync --dry-run`（或 `kit sync --force --dry-run`）列出每個 skill 會新增、更新、拿掉、跳過、還是先備份再換，不改任何檔案（來源的最新版抓到一份暫存的複本裡看，你這台的來源和 `machine.yaml` 不動，所以規則也不會先換；0.10.0 起），最後印一個雜湊；確定了打 `kit sync --expect <雜湊>`（有 `--force` 就兩次都加）。到時候 kit 重算一次，來源更新了或你又改了某個 skill、清單不一樣了，就什麼都不改（錯誤代碼 `plan-changed`），請你再看一次。只管 skill；rule、MCP 等照常更新。**預設不換**（0.13.0 起）：自動的同步（Claude 開啟時）、`kit add`／`kit rm`、`kit run`、`kit place` 順便做的那次，只裝新加的、拿掉不要的，**這台已經在用的規則、技能、MCP、外掛都不換**，來源改了也一樣；要換：`kit sync --only <種類>:<名字>` 只換那一個，自己打 `kit sync` 全部換。規則和 MCP 由 kit 先存一份在 `~/.config/agentkit/store/`，Claude 的規則也 `@` 這一份（以前直接讀來源裡的檔，來源一改就生效），一台只有一份（帳號和資料夾用同一份）；`kit rm` 再 `kit add` 一個規則或 MCP 會拿來源最新的。`kit hold <種類> <名字>` 把這一版固定住（記在 `state.tsv`），連打 `kit sync` 都不換它、`--dry-run` 寫「固定在這一版」；`--only` 照樣換（換完還是固定）；`kit hold … --off` 取消。`kit run <agent>` 例外：每次開都從來源複製一份新的。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。Codex、omp 也一樣（kit 0.6.7 起）：Codex 是 `~/.codex/hooks.json` 裡同樣的 hook（Codex 第一次看到新的 hook 要你信任：在 Codex 打 `/hooks`；kit 寫進新的或改過的 hook 時先問 Codex，Codex 已經信任就不提，還沒信任才用 `kit pending` 提醒你，你信任之後下一次 `kit sync` 收掉提醒），omp 是 `~/.omp/agent/hooks/pre/kit.js`（kit 寫的檔，第一行有標記；同名的檔是你自己的就不動）。context 快滿時提醒寫 HANDOFF.md 的 hook（`kit handoff-hook`）Codex 也有，數字從它的對話檔讀；omp 還沒有。
+Codex 自己新增的設定（例如信任某個資料夾的 `[projects."…"]`）會加在 `config.toml` 最後面、落進 kit 那段裡；kit 記得自己上次寫了什麼（`~/.config/agentkit/codex-block.toml`），`kit sync` 時把不是它寫的搬到那段外面，不會洗掉。改 JSON 前會留一份 `.kit-backup`。kit 放的 skill 你改過，kit 就不蓋、也不刪：`kit sync` 跳過它並提醒；`kit rm` 或 agent 不再要它時留著，之後歸你管；`kit sync --force` 會先把你改的那份搬到 `~/.config/agentkit/backups/skills/<名字>-<時間>/` 再換上新的。想先看清楚再動手：`kit sync --dry-run`（或 `kit sync --force --dry-run`）列出每個 skill 會新增、更新、拿掉、跳過、還是先備份再換，不改任何檔案（來源的最新版抓到一份暫存的複本裡看，你這台的來源和 `machine.yaml` 不動，所以規則也不會先換；0.10.0 起），最後印一個雜湊；確定了打 `kit sync --expect <雜湊>`（有 `--force` 就兩次都加）。到時候 kit 重算一次，來源更新了或你又改了某個 skill、清單不一樣了，就什麼都不改（錯誤代碼 `plan-changed`），請你再看一次。只管 skill；rule、MCP 等照常更新。**預設不換**（0.13.0 起）：自動的同步（Claude 開啟時）、`kit add`／`kit rm`、`kit run` 順便做的那次，只裝新加的、拿掉不要的，**這台已經在用的規則、技能、MCP、外掛都不換**，來源改了也一樣；要換：`kit sync --only <種類>:<名字>` 只換那一個，自己打 `kit sync` 全部換。規則和 MCP 由 kit 先存一份在 `~/.config/agentkit/store/`，Claude 的規則也 `@` 這一份（以前直接讀來源裡的檔，來源一改就生效），一台只有一份（帳號和資料夾用同一份）；`kit rm` 再 `kit add` 一個規則或 MCP 會拿來源最新的。`kit hold <種類> <名字>` 把這一版固定住（記在 `state.tsv`），連打 `kit sync` 都不換它、`--dry-run` 寫「固定在這一版」；`--only` 照樣換（換完還是固定）；`kit hold … --off` 取消。`kit run <agent>` 例外：每次開都從來源複製一份新的。Claude 開啟時會在背景自動 `kit sync`（最多每 10 分鐘一次）。Codex、omp 也一樣（kit 0.6.7 起）：Codex 是 `~/.codex/hooks.json` 裡同樣的 hook（Codex 第一次看到新的 hook 要你信任：在 Codex 打 `/hooks`；kit 寫進新的或改過的 hook 時先問 Codex，Codex 已經信任就不提，還沒信任才用 `kit pending` 提醒你，你信任之後下一次 `kit sync` 收掉提醒），omp 是 `~/.omp/agent/hooks/pre/kit.js`（kit 寫的檔，第一行有標記；同名的檔是你自己的就不動）。context 快滿時提醒寫 HANDOFF.md 的 hook（`kit handoff-hook`）Codex 也有，數字從它的對話檔讀；omp 還沒有。
 
 **改了之後告訴開著的 agent**（0.14.0 起）：`kit add`、`kit rm`、`kit sync`（自己打的和 Claude 開啟時自動的）改到開著的 agent 用的東西時，kit 自己告訴這台每個開著的 agent（Herdr 的 `hc ls` 列出的；用別的帳號跑的、例如 `sudo -i` 的 root 不算）。哪個工具要做什麼跟 Herdr 的 Kit 面板同一張表：Claude 的外掛、kit-mcp 的 MCP，omp 的技能、外掛、MCP 打 `/reload-plugins`；拿掉的東西、`kit add` 加的規則用一句話告訴它（「kit 剛從整個帳號拿掉技能 x：之後不要再用它」「kit 剛把規則 x 加到整個帳號（這個對話開始時還沒有）：請先讀 …，之後照它做」）；只在對話開始時讀的（Claude 的規則、`~/.claude.json` 的 MCP，Codex 的 MCP、外掛，omp 的規則、有 hook 的外掛）kit 不幫你關，記一筆 `kit pending`（`relaunch`：「要你同意：重開 N 個 agent（…）才讀得到新的…」）等你點頭。`--dir` 的只告訴在那個資料夾（含子資料夾）開的。用 `hc send --queue --key reload` 送：agent 在忙時 Herdr 先留著，它停下來才打進去，同一件事只留一份；這台的 hc 還不認得 `--queue`（舊的 Herdr core）就只送給閒著的（`--if idle`），在忙的寫在輸出裡，要的話自己打。沒有 `hc` 就不送。`--no-tell` 這次不說（例如畫面程式自己送的時候）；`--json` 印出告訴了誰（見「給程式讀的介面」）。
 
@@ -117,32 +116,13 @@ Claude 本身啟動時的環境（不是 hook 自己的，Claude 給每個 hook 
 | Codex | ✅ | ✅（列在提示裡，用到時才讀） | ✅ | ✗（Codex 只能整個帳號裝） | 照 Codex 的設定 | 跟 `kit run` 一樣 |
 | omp | ✅ | ✅ | ✅ | ✅（`--plugin-dir`） | 照 omp 的設定 | ✅ |
 
-### 一個資料夾就是一個 agent：`kit place`
+### `kit place`（0.18.0 拿掉了）
 
-    kit place reviewer ~/work/reviewer             以後在 ~/work/reviewer 打 claude，開的就是 reviewer
-    kit place reviewer ~/work/reviewer --tool codex   打算用 Codex 開（提示也寫進 AGENTS.md）
+要開某個 agent：`kit open <工具> --agent <名字>`（Herdr 的 Agents 面板拖 hello 就是這樣開）。以前 `kit place` 放過的資料夾，
+下一次 `kit sync`（或對它 `kit add|rm --dir`）時變成普通資料夾：它那時有的規則、skill、MCP（agent 的，扣掉你拿掉的，加上你加的）
+都留著，寫進 `.agentkit` 變成這個資料夾自己的；agent 的提示和工具限制拿掉。kit 說一次是哪個資料夾。
 
-- 建好那個資料夾（上一層要已經在；kit 只建最後一層），把 agent 的規則、skill、MCP 加到這個資料夾（跟 `kit add --dir` 一樣），
-  提示寫進資料夾的 `CLAUDE.md`／`AGENTS.md` 的 kit 區塊，工具限制寫進資料夾的 `.claude/settings.local.json`。
-  資料夾的 `.agentkit` 記著它是哪個 agent；`kit sync` 會照 agent 檔現在的樣子更新：提示、工具限制，
-  還有 agent 的規則、skill、MCP（agent 檔新加的會放進來，拿掉的會拿掉）。
-- 之後就是平常的 `claude`、`codex`、`omp`，不用 `kit run`。`kit add|rm --dir <資料夾> …` 只改這個資料夾，
-  而且 `kit sync` 不會蓋掉：`.agentkit` 只記你改過的，`種類:名字` 是你另外加的，`not:種類:名字` 是你用 `kit rm --dir` 拿掉的 agent 的
-  （agent 檔還有它也不會放回來，要再 `kit add --dir` 才回來）。agent 本身的規則、skill、MCP 不寫在 `.agentkit`，每次照 agent 檔放。
-- agent 檔找不到或讀不懂（改了名字、來源不在、只用核准的版本時那一版沒有它、檔頭寫錯）：那個資料夾照上次的樣子不動
-  （提示、工具限制、規則、skill、MCP 都留著；kit 留著上次 agent 檔的一份在 `~/.config/agentkit/placed/`），說一次，修好後 `kit sync` 就照常。
-- 同一個 agent 再 place 一次：只同步，什麼都不會多。資料夾已經是別的 agent，或裡面已經有不是 kit place 放的東西：kit 不動它，直接說。
-- 好幾個 agent 就是好幾個資料夾。`kit uninstall` 會把每個資料夾放的東西拿掉（`.agentkit` 也拿掉）。
-
-工具做得到的不一樣（做不到的 kit 會說）：
-
-| | rule + 提示 | skill | MCP | tools.only | tools.deny |
-|---|---|---|---|---|---|
-| Claude | ✅ | ✅ | ✅ | 改成把其他內建工具寫進 deny | ✅ |
-| Codex | ✅ | ✅ | ✅ | 只管 shell（Bash）和改檔（Edit、Write） | MCP 工具、`Bash`、`Bash(...)`、`Edit`、`Write` |
-| omp | ✅ | ✅ | ✅（資料夾的 `.mcp.json`；omp 只在這個資料夾本身開時讀，子資料夾裡開的讀不到） | ✅（`.omp/hooks/pre/kit.js`） | ✅（同一個檔） |
-
-資料夾的 MCP（`kit add --dir`、`kit place`）kit 寫進資料夾 `.claude/settings.local.json` 的 `enabledMcpjsonServers`，
+資料夾的 MCP（`kit add --dir`）kit 寫進資料夾 `.claude/settings.local.json` 的 `enabledMcpjsonServers`，
 並在 `~/.claude.json` 把這個資料夾設成 Claude 信任的（`projects["<資料夾>"].hasTrustDialogAccepted`），開 Claude 就直接用，不會問。
 （Claude 只有在信任「這個資料夾本身」時才讀 `settings.local.json` 的這個設定；只信任上層資料夾〔例如家目錄〕、資料夾又不是 git 的話，每次開都會問「New MCP server found」。）
 只動 kit 放的 MCP，信任也只給這個資料夾；資料夾裡沒有 kit 放的 MCP 了，kit 把信任改回原來的樣子。
@@ -159,16 +139,13 @@ Codex 一樣：kit 在 `~/.codex/config.toml` 信任這個資料夾（`[projects
 
 omp 的工具限制：kit 把 Claude 的工具名字換成 omp 做同樣事的工具（例如 Read → read，Bash → bash 和 eval，Grep → grep 和 ast_grep），
 omp 要用被擋的工具時會被拒絕並說原因。tools.deny 的 `Bash(git push:*)` 這種寫法 omp 也照樣擋；別的工具的 `( )` 寫法（例如 `Read(./secret/**)`）omp 擋不到，kit 會說。
-omp 只在這個資料夾本身開時讀 `.omp/hooks/pre/kit.js`（跟 `.mcp.json` 一樣），在子資料夾裡開的 omp 沒有這些限制。
 團隊規定一定要擋的（required 的 deny）也寫進 `~/.omp/agent/hooks/pre/kit.js`，每個 omp 都擋。
 
 Codex 的工具限制（kit 0.6.7 起）：Codex 要跑 shell 指令、要改檔案前，會先問 `~/.codex/hooks.json` 裡 kit 的 hook（`kit codex-guard`，在 Codex 打 `/hooks` 信任一次）。
-kit 照 Claude 的寫法看：團隊規定一定要擋的、`kit place` 放的資料夾（在它或它的子資料夾裡開的 Codex）那個 agent 的、`kit run --tool codex` 那個 agent 的。
+kit 照 Claude 的寫法看：團隊規定一定要擋的、`kit run --tool codex` 那個 agent 的。
 `Bash(git push:*)` 這種逐段比：指令在 `&&`、`||`、`;`、`|`、`&`、括號、反引號、換行切開，每一段從頭比（`cd x && git push` 也擋）。
 Codex 改檔案是一個 patch：新增檔案算 `Write`，改、刪、搬檔案算 `Edit`。Codex 讀檔、找檔也是用 shell，所以 tools.only 沒有 `Bash` 的 agent 在 Codex 裡連檔案都不能讀；
 Codex 其他的內建工具（例如搜尋網路、開子 agent）擋不到，`Read(./secret/**)` 這種別的工具的 `( )` 寫法也擋不到，kit 會說。MCP 的工具照樣寫進 `disabled_tools`。
-
-Claude 的 tools.only：Claude 之後新加的內建工具不在 kit 的清單裡，擋不到（要擋就寫進 tools.deny）。這件事放 agent 的人不會看到，寫 agent 檔的人跑 `kit check` 時會看到一行提醒。
 
 ## skill 需要的程式（node、python…）
 
@@ -207,7 +184,7 @@ Claude 的 tools.only：Claude 之後新加的內建工具不在 kit 的清單�
     skills/foo/package-lock.json        ├─ npm ci --ignore-scripts --omit=dev
                                         └─ node_modules/
                                               ▲
-    ~/.claude/skills/foo/node_modules ────────┘ 連過去（Windows 是 junction，不用管理員）
+    ~/.claude/skills/foo/node_modules ────────┘ 連過去（Windows 是複製一份，0.18.0 起）
     ~/.agents/skills/foo/node_modules ────────┘
     ~/ai/.claude/skills/foo/node_modules ─────┘
 
@@ -455,7 +432,7 @@ skill、MCP、外掛只有兩種會被 Claude Code、Codex、omp 載入：**kit 
 
   各工具都是照名字關，所以跟 kit 的或公司的同名的不擋（不然會連它們一起關掉）。
 - **你自己寫的設定不會不見**：kit 把它寫的每一項、和那裡原本的值記在 `~/.config/agentkit/blocked.tsv`；東西收進 kit、變成公司的、或 `kit uninstall` 時，把那一項拿掉、原本的值放回去。agent 把關掉的設定改回來，下一次 `kit sync` 再關掉。
-- **看哪些資料夾**：整個帳號，加上開工具時所在的專案（`kit sync --hook`；在 git 裡就是整個 repo），和 kit 已經知道的資料夾（`kit add --dir`、`kit place`）。不掃整台電腦。
+- **看哪些資料夾**：整個帳號，加上開工具時所在的專案（`kit sync --hook`；在 git 裡就是整個 repo），和 kit 已經知道的資料夾（`kit add --dir`）。不掃整台電腦。
 - **擋了什麼**：擋下新的東西時 `kit sync` 會列出來；全部列在 `kit list --json` 的 `blocked`（Kit 面板也會列）。
 - **要用被擋下的**：收進 kit，再加：有原本網址的用 `kit collect <網址>`，沒有的用 `kit new skill <名字> --from <資料夾>`（在來源的說明寫它從哪裡來），然後 `kit add skill <名字>`。kit 要放的地方已經有一個不是 kit 放的同名資料夾時（例如 `~/.claude/skills/<名字>`），kit 先把它備份到 `~/.config/agentkit/backups/skills/`，再換成 kit 的（跟 `kit sync --force` 一樣）；git 有記錄的（專案 commit 的）不換。
 
@@ -491,7 +468,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
     kit api        →  1.22
 
 印一行 `major.minor`。major 加一＝不相容的改變（欄位拿掉或改意思、錯誤 code 改意思）；minor 加一＝新增欄位或指令（舊程式照樣讀得懂）。
-畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.22（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份；1.19：`kit add|rm|sync` 告訴開著的 agent，`--json` 印出告訴了誰，`--no-tell`；1.20：`kit list --json` 的 `sources[].dirty_since`，有改動 30 分鐘還沒送出時在 Herdr 提醒；1.21：`kit agents --open --json`；1.22：`kit open`、`kit add|rm --tab`、`kit tab list|show --json`）。
+畫面程式先跑它：major 不是自己認得的（或指令不存在＝很舊的 kit），就請使用者更新 kit 或畫面程式。這一節寫的就是 1.23（1.1：1.0 加上 `kit files`，要用它的程式先確認 minor 至少是 1；1.2：`kit files` 加上 `turns`，要用它的程式先確認 minor 至少是 2；1.3：`kit new mcp --config … --look`、`kit place … --json`、`kit list --json` 的 mcp 多了 `type`、`vars`、`needs`、`packages`，`here.folder` 多了 `agent`，要用的程式先確認 minor 至少是 3；1.4：`kit note`，要用它的程式先確認 minor 至少是 4；1.5：`kit note` 的 JSON 多了 `session`，`pid` 可能是 `null`；1.6：`kit status --json` 多了 `pending`，`kit pending`；1.7：`kit usage`，`kit context` 撞到用量上限時多了 `limit`；1.8：`kit list --json` 的 `sign`、`kit pending` 的 `up`、`kit add|rm skill` 一次多個、`kit outdated --json`；1.9：`kit list --json` 的 `kind` 多了 `plugin`、多了 `description_zh`，`kit describe`；1.10：`kit used`；1.11：`kit list --json` 的外掛多了 `parts`；1.12：`kit list --json` 多了 `blocked`；1.13：`kit add|rm --dir … plugin`，`kit list --json --dir` 的 `here.folder.plugins`；1.14：`kit list --json` 每一項的 `version`、`upstream`、`installed`、`held`，`--pid` 時的 `loaded` 和 `--tool`，`kit collect --dates`；1.15：Claude 的 MCP 改放在 kit 的外掛 `kit-mcp`，改了打 `/reload-plugins` 就生效，不用重開；`kit list --json` 多了 `claude_mcp`；1.16：`kit outdated --diff`；1.17：`kit hold`、`kit sync --only`，`kit list --json` 的 `held` 是 `true`（固定了）或 `null`；1.18：自動的同步不換已經在用的，`kit sync --only` 四種都可以，Claude 的規則的 `installed` 是 kit 存的那份；1.19：`kit add|rm|sync` 告訴開著的 agent，`--json` 印出告訴了誰，`--no-tell`；1.20：`kit list --json` 的 `sources[].dirty_since`，有改動 30 分鐘還沒送出時在 Herdr 提醒；1.21：`kit agents --open --json`；1.22：`kit open`、`kit add|rm --tab`、`kit tab list|show --json`；1.23：`kit place` 拿掉了，`here.folder.agent` 一律是 `null`）。
 `kit status --json`（1.3 起）：要用它的程式先確認 minor 至少是 3。
 
 ### 共同規則
@@ -530,11 +507,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
   | `no_name` | `new mcp --config`：設定裡沒有名字（只有一個 `{...}`），要寫名字 |
   | `bad_name` | `new mcp --config`：名字只能用小寫英文、數字和 `-` |
   | `exists` | `new mcp --config`（不加 `--look`）：已經有這個名字的 mcp |
-  | `no_agent` | `place`：來源裡沒有這個 agent |
-  | `no_parent` | `place`：資料夾的上一層不在（kit 只建最後一層） |
-  | `other_agent` | `place`：那個資料夾已經是別的 agent |
-  | `not_empty` | `place`：那個資料夾已經有東西，不是 `kit place` 放的 |
-  | `bad_dir` | `place`：不是資料夾，或不能放在那裡（例如家目錄） |
+  | `no_agent` | `open`：來源裡沒有這個 agent |
   | `error` | 其他 |
 
   之後可能加新的 code（minor 加一）：不認得的 code 當作 `error`。
@@ -564,7 +537,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - mcp（1.3 起）一定有：`"type"`（`stdio`、`http`、`sse`）、`"vars": [{"name": "GITHUB_TOKEN", "set": false}]`（它要的環境變數，這台電腦有沒有設）、`"needs"`（同 skill）、`"packages"`：沒有套件是 `[]`，有的話一個
   `{"kind": "npm", "package": "@scope/server", "version": "1.2.3", "ok": false, "had": false, "install": "<要跑的指令>", "bad": ""}`（`kind` 是 `npm` 或 `pip`；`ok`：裝好了，設定會直接跑裝好的；`bad` 不是空的就是 kit 不幫它裝的原因，它照樣在啟動時下載）。按「安裝」跑 `kit install-deps mcp <名字>`。
 - `sign`（1.8 起）：這台電腦簽過核准（`kit approve` 記下的核准紀錄還在）才有：`{"approvals": "<核准紀錄的 clone>", "serial": 19, "approved": [{"name": "team", "commit": "<40 字的 commit>"}]}`，畫面程式拿它說「已經簽了，等那台同步」、給簽章的指令。
-- `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items", "agent", "plugins"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。`here.folder.agent`（1.3 起）：那個資料夾是 `kit place` 放的 agent 時是它的名字，不是就 `null`；這時 `here.folder.items` 是 agent 的規則、skill、MCP（不含用 `kit rm --dir` 拿掉的）再加上另外加的。
+- `--dir`：多一個 `"here": {"dir", "user", "agent", "folder": {"dir", "why", "items", "agent", "plugins"}, "items": [{"scope", "kind", "name", "path", "tools", "description"}]}`，在那個資料夾開的 agent 另外會讀到的；資料夾不在時有 `"error"`。`--pid`：`here.agent` 是 `kit run` 在那裡開的 agent（`{"name", "source", "rules", "skills", "mcp"}`），不是就 `null`。`here.folder.agent`：1.23 起一律 `null`（`kit place` 拿掉了；1.3–1.22 是它放的 agent 的名字）。
 - 版本（1.14 起）：每一項一定有 `version`、`upstream`、`installed`、`held`（在每一項的最後面，`--pid` 時再多 `loaded`）：
 
       "version": {"id": "a1b2c3d4", "date": "2026-11-21", "n": 1, "commit": "<40 字>", "message": "rules: shorter", "dirty": false},
@@ -574,7 +547,7 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 
   - `version`：來源**最新**的那一版。「最新」＝上次 `kit sync` 抓到的遠端分支（`origin/<分支>`，這台的 clone 還沒 pull 也算）；clone 比它新（有還沒送出的 commit）或沒有遠端分支時是 clone 的 HEAD。`id`：內容的指紋（8 個 16 進位字），內容一樣，在哪台、哪個來源都一樣：規則、MCP、agent 是那個檔的 git blob hash（`git hash-object`）前 8 個字；技能、外掛是一份清單的 git blob hash 前 8 個字，清單是資料夾裡每個檔一行 `<那個檔的 git blob hash> <資料夾裡的路徑>`（`/` 分隔，照路徑的位元組排序，每行最後換行），不算 `.DS_Store`、`__pycache__/`、`.pyc`、`.pyo`。`date`：最後一次改到這一項的 commit 的日期（`YYYY-MM-DD`，commit 的時區）；`n`：那天有幾個 commit 改到它（至少 1）；`commit`、`message`：那個 commit 和它的第一行。`dirty`：來源裡這一項有還沒 commit 的改動，這時 `id` 是現在檔案的指紋、`commit` 是 `null`（`date`、`n`、`message` 還是最後一次 commit 的，沒有就是 `null`）。來源不是 git repo：`id` 照檔案算，`date`、`n`、`commit`、`message` 是 `null`。
   - `upstream`：`kit collect` 收來的技能、外掛才有（其他是 `null`）：`commit` 是收的那個原作者的 commit，`date` 是那個 commit 自己的日期（不知道是 `null`：0.9.0 以前收的，`kit collect --dates` 補），`collected` 是收進來的日期。
-  - `installed`：這台每個工具現在用的那一份，`claude`、`codex`、`omp` 三個都有，沒裝那個工具或沒給那個工具就是 `null`。`id`：那一份的指紋（跟 `version.id` 一樣算；不一樣就是「這台還沒同步」）。`at`：這台換上這個指紋的時間（1970 起的秒數，不知道是 `null`）。kit 每次寫各工具的檔案時記在 `state.tsv`；0.9.0 第一次 `kit sync` 時，已經裝的那些用它的檔案（技能的資料夾、`AGENTS.md`、`~/.claude.json` …）最後改的時間。規則和 MCP 是 kit 存的那份（`~/.config/agentkit/store/`，1.18 起；Claude 的規則也是 `@` 那一份）的指紋。`--dir`：那個資料夾自己的（`kit add --dir`、`kit place`）優先，沒有才用整個帳號的。agent 那一種一定是三個 `null`。
+  - `installed`：這台每個工具現在用的那一份，`claude`、`codex`、`omp` 三個都有，沒裝那個工具或沒給那個工具就是 `null`。`id`：那一份的指紋（跟 `version.id` 一樣算；不一樣就是「這台還沒同步」）。`at`：這台換上這個指紋的時間（1970 起的秒數，不知道是 `null`）。kit 每次寫各工具的檔案時記在 `state.tsv`；0.9.0 第一次 `kit sync` 時，已經裝的那些用它的檔案（技能的資料夾、`AGENTS.md`、`~/.claude.json` …）最後改的時間。規則和 MCP 是 kit 存的那份（`~/.config/agentkit/store/`，1.18 起；Claude 的規則也是 `@` 那一份）的指紋。`--dir`：那個資料夾自己的（`kit add --dir`）優先，沒有才用整個帳號的。agent 那一種一定是三個 `null`。
   - `held`（1.17 起有值）：`true`＝這台用 `kit hold` 固定了它，連打 `kit sync` 都不換它；`null`＝沒固定。換新的給 `kit sync --only <種類>:<名字>`。
   - `loaded`（只有 `--pid`）：這個 agent 讀到的是 `"new"`（最新裝的那份）還是 `"old"`（開始的時候還是舊的那份），`"unknown"`：看不出來（不知道是哪種 agent、找不到開始時間、或技能要看對話紀錄卻找不到）；這個工具沒有這一項是 `null`。`--tool` 指定是哪種 agent，沒給就從程式名字猜。規則、MCP、外掛在對話開始時讀：agent 開始的時間早於 `installed.<工具>.at` 就是 `old`（要開新對話；Claude 的技能、外掛也可以 `/reload-plugins`）。技能開始時只讀說明，用到才讀內容：這次對話在 `at` 之前就讀過它才是 `old`，沒讀過或之後才讀是 `new`（Codex、omp 的紀錄沒有讀的時間，用那一輪開始的時間）。
 - `here.folder.plugins`（1.13 起）：一定有（沒有就是 `[]`）。這個資料夾加的外掛（`kit add --dir … plugin`，也在 `here.folder.items` 裡，`plugin:<名字>`），一個一筆：`{"name": "unslop", "tools": ["claude", "omp"], "note": "Codex 只能整個帳號裝"}`。`tools`：kit 已經在這個資料夾幫哪些工具裝好了（`claude`、`omp`；沒裝那個工具、git 有記錄那個檔案、或裝失敗就不在裡面）；`note`：給人看的一句話，畫面程式照樣顯示（Codex 沒有資料夾的範圍，在這裡開的 Codex 沒有它）。
@@ -690,18 +663,6 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
 - `warnings`：給人看的字（略過的設定、npm 的範圍或標籤固定在哪一版等）。
 - 錯誤看上面的表（`bad_config`、`several_servers`、`not_found`、`no_name`、`bad_name`、`usage`、`not_init`、`no_source`）。`several_servers` 時讓人選一個，再帶名字跑一次。
 - 寫進去：同樣的指令拿掉 `--look`（動作類指令）。
-
-### `kit place <agent> <資料夾> [--tool claude|codex|omp] --json`（1.3 起）
-
-一行：
-
-    {"dir": "<資料夾>", "agent": "reviewer", "tool": "codex", "command": ["codex"],
-     "warnings": ["Codex 沒有 kit 擋得到、跟 WebSearch 一樣的工具：tools.deny 的這條不套用"]}
-
-- `dir`：資料夾（解開捷徑後的實際路徑）。`command`：在 `dir` 裡跑這個，開的就是那個 agent（就是 `claude`、`codex` 或 `omp`）。
-- `warnings`：給人看的字（這個工具做不到的、找不到的規則等），也印在 stderr。
-- 錯誤看上面的表（`usage`、`not_init`、`busy`、`no_agent`、`no_parent`、`other_agent`、`not_empty`、`bad_dir`）。
-- 是動作類指令：會改檔案，跟 `kit add` 一樣要拿 kit 的鎖（`busy`）。
 
 ### `kit context --pid <pid> [--tool claude|codex|omp] [--dir 資料夾] [--detail [--fresh]]`
 
@@ -821,7 +782,6 @@ kit 不附任何畫面程式，那些程式的裝法看它們自己的說明。
     kit new mcp [名字] --config <檔案|-> [--to 來源]
     kit sync [--force] [--dry-run | --expect <雜湊>]   （--expect 清單變了：exit 1，錯誤代碼 plan-changed）
     kit run <agent> [--tool codex|omp]
-    kit place <agent> <資料夾> [--tool claude|codex|omp]   （要結果的話加 --json，見上面）
     kit install-tool <程式名> [--min 版本]
     kit install-deps <skill> [npm|pip]
     kit install-deps mcp <名字>

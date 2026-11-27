@@ -11,7 +11,7 @@ KIT_LIB=$(cd "$(dirname "$0")" && pwd)
 KIT_VERSION=$(cat "$KIT_LIB/VERSION" 2>/dev/null || cat "$KIT_LIB/../VERSION" 2>/dev/null || echo dev)
 # what programs read (kit api): MAJOR.MINOR; MAJOR +1 when something changes incompatibly, MINOR +1 when fields or
 # commands are added. kit.ps1 has the same.
-KIT_API=1.22
+KIT_API=1.23
 KIT_CONF=${AGENTKIT_CONFIG:-$HOME/.config/agentkit}
 KIT_SRC=${AGENTKIT_SOURCES:-$HOME/agentkit}
 MACHINE="$KIT_CONF/machine.yaml"
@@ -682,7 +682,7 @@ EOF
 
 # ---------- Claude's MCP: a plugin of kit's ----------
 # Claude takes kit's MCP servers from a plugin in kit's marketplace: kit-mcp for the account (--scope user), kit-mcp-<id>
-# for a folder (kit add --dir, kit place: --scope local there). Claude reads a plugin of a folder marketplace from that
+# for a folder (kit add --dir: --scope local there). Claude reads a plugin of a folder marketplace from that
 # folder, so after kit rewrites its .mcp.json, /reload-plugins in a running Claude connects or drops them (no restart).
 # Their tools are mcp__plugin_<plugin>_<server>__<tool>: kit writes a deny rule for an MCP tool in both forms. A folder
 # keeps its .mcp.json for omp; Claude has kit's servers there in disabledMcpjsonServers, so it takes the plugin's. No
@@ -1030,7 +1030,7 @@ EOF
         printf 'default_tools_approval_mode = "approve"\n'
         # team deny rules for this server's tools (mcp__<server>__<tool>) become disabled_tools
         tools=""; first=1
-        for t in $( { required_deny; printf '%s\n' "${DENY_MORE:-}"; } | awk 'NF && !seen[$0]++' | sed -n "s/^mcp__${n}__//p"); do [ $first = 1 ] || tools="$tools, "; first=0; tools="$tools$(json_str "$t")"; done
+        for t in $(required_deny | awk 'NF && !seen[$0]++' | sed -n "s/^mcp__${n}__//p"); do [ $first = 1 ] || tools="$tools, "; first=0; tools="$tools$(json_str "$t")"; done
         [ -n "$tools" ] && printf 'disabled_tools = [%s]\n' "$tools"
         [ -z "$envs" ] || printf '\n[mcp_servers.%s.env]\n%s' "$(toml_key "$n")" "$envs"
         echo
@@ -1046,7 +1046,7 @@ EOF
 # TOOL KIND NAME SCOPE DIR PATH TARGET PREV (TARGET: the settings file; PREV: the value before, has, or none).
 BLOCKED="$KIT_CONF/blocked.tsv"
 KS=$'\034'                                   # joins JSON keys that may hold a "." (plugin ids)
-block_dirs() { # the folders looked at: kit's (kit add --dir, kit place), the one the tool started in (kit sync --hook),
+block_dirs() { # the folders looked at: kit's (kit add --dir), the one the tool started in (kit sync --hook),
     # and those with something blocked already (so it stays blocked when kit sync runs elsewhere)
     local d h; h=$(home_real)
     { dirs_registered
@@ -1455,7 +1455,7 @@ codex_hooks() {
 # What kit holds back in Codex. Codex hands its PreToolUse hook the shell command it is about to run (tool Bash) and
 # its patches (apply_patch: adding a file is Write; changing, moving or deleting one is Edit). kit codex-guard says no to
 # what tools.only and tools.deny leave out (Claude's spelling: "Bash", "Bash(git push:*)", "Edit", "Write"): the team's
-# (required.tools.deny), a placed folder's agent's (Codex opened there or below), kit run's (KIT_CODEX_ONLY,
+# (required.tools.deny), kit run's (KIT_CODEX_ONLY,
 # KIT_CODEX_DENY, which kit run sets for that Codex). A command is checked a piece at a time (split at && || ; |, new
 # lines, & ( ) and `), each piece from its start. MCP tools: disabled_tools in config.toml.
 CODEX_GUARD_AWK='function trim(s) { sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s }
@@ -1493,16 +1493,12 @@ codex_guard_says() { # codex_guard_says TOOL CMD ONLY DENY : why Codex may not (
     G_TOOL=$1 G_CMD=$2 G_ONLY=$3 G_DENY=$4 LC_ALL=C awk "$CODEX_GUARD_AWK"
 }
 cmd_codex_guard() { # Codex's PreToolUse hook (~/.codex/hooks.json): what it hands over on stdin
-    local in tool cmd cwd r af fm only="" deny why=""
+    local in tool cmd deny why=""
     in=$(cat); tool=$(str_of tool_name "$in")
     case $tool in Bash|apply_patch) ;; *) return 0;; esac
     cmd=$(json_unq "$(printf '%s' "$in" | json_get /dev/stdin tool_input.command)")
-    cwd=$(json_unq "$(printf '%s' "$in" | json_get /dev/stdin cwd)")
     if [ -f "$CTX_DIR/required-deny.txt" ]; then deny=$(cat "$CTX_DIR/required-deny.txt"); else deny=$( [ -f "$MACHINE" ] && required_deny 2>/dev/null); fi
-    if [ -n "$cwd" ] && [ -d "$cwd" ] && r=$(dir_root "$cwd") && [ -n "$(dir_mark "$r" agent)" ] && af=$(placed_file "$r"; [ $? != 1 ]); then
-        fm=$(fm_of "$af"); only=$(fm_val "$fm" tools.only); deny="$deny$LF$(fm_val "$fm" tools.deny)"
-    fi
-    why=$(codex_guard_says "$tool" "$cmd" "$only" "$deny")
+    why=$(codex_guard_says "$tool" "$cmd" "" "$deny")
     [ -n "$why" ] || [ -z "${KIT_CODEX_ONLY:-}${KIT_CODEX_DENY:-}" ] || why=$(codex_guard_says "$tool" "$cmd" "${KIT_CODEX_ONLY:-}" "${KIT_CODEX_DENY:-}")
     [ -n "$why" ] || return 0
     printf '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": %s}}\n' "$(json_s "$why")"
@@ -1525,8 +1521,8 @@ $2
 EOF
 }
 # omp: kit's hook module (templates/omp-hook.txt, filled in): ~/.omp/agent/hooks/pre/kit.js runs kit sync --hook when a
-# session starts and applies the team's tools.deny (required.tools.deny, Claude's spelling); a placed agent's folder gets
-# <folder>/.omp/hooks/pre/kit.js with its tools.only and tools.deny; kit run passes one with --extension. Only a file kit
+# session starts and applies the team's tools.deny (required.tools.deny, Claude's spelling); kit run passes one with
+# --extension (kit place, gone, put one in <folder>/.omp/hooks/pre/kit.js: kit sync takes it out). Only a file kit
 # wrote (its first line) is replaced or removed.
 OMP_HOOK_HEAD="// kit's omp hook: written by kit (agentkit); edits here are overwritten."
 OMP_TOOLS="Read Write Edit MultiEdit NotebookEdit Bash Grep Glob LS Task Agent TodoWrite WebSearch AskUserQuestion"
@@ -1692,11 +1688,10 @@ dir_root() { # dir_root DIR : the folder kit uses for DIR: the nearest one at or
     done
     printf '%s\n' "$d"
 }
-# A placed folder (kit place) gets its agent's rules, skills and MCP from the agent file each time (kit sync), so a
-# change to the agent reaches it. .agentkit keeps only what you changed: kind:name you added (kit add --dir), and
-# not:kind:name, one of the agent's you took out (kit rm --dir; it stays out until you kit add --dir it again).
-# Kit keeps a copy of the agent file ($KIT_CONF/placed/): when the agent cannot be found or read (renamed, its source
-# gone, an approved commit without it), the folder stays as it was, the prompt and tool limits too.
+# kit place (gone in 0.18.0) left folders whose .agentkit says agent:NAME and tool:TOOL, has not:kind:name for the agent's
+# you took out, and a copy of the agent file in $KIT_CONF/placed/. dir_unplace turns one into a plain folder: what it had
+# (the agent's rules, skills and MCP less the ones taken out, and what you added) becomes its own; the agent's prompt and
+# tool limits go. shortcut: the helpers down to dir_mark are only for that, drop them once no machine has such a folder.
 dir_lines() { [ -f "$1/$DIR_FILE" ] && awk '{ sub(/\r$/, "") } /^(not:)?(rule|skill|mcp|plugin):[^ ]+$/' "$1/$DIR_FILE" | awk '!seen[$0]++'; }
 dir_own() { dir_lines "$1" | grep -v '^not:'; }            # dir_own DIR : what you added
 dir_nots() { dir_lines "$1" | sed -n 's/^not://p'; }       # dir_nots DIR : the agent's you took out
@@ -1721,25 +1716,25 @@ dir_items() { # dir_items DIR : what the folder has: the placed agent's (less th
 }
 dir_marks() { [ -f "$1/$DIR_FILE" ] && awk '{ sub(/\r$/, "") } /^(agent|tool):[^ ]+$/' "$1/$DIR_FILE"; return 0; }   # kit place's lines
 dir_mark() { dir_marks "$1" | sed -n "s/^$2://p" | head -n 1; }   # dir_mark DIR agent|tool : the agent kit place put there, its tool
+dir_unplace() { # dir_unplace DIR : a folder kit place made becomes a plain one (kit sync, kit add|rm --dir)
+    local a; a=$(dir_mark "$1" agent); [ -n "$a" ] || return 0
+    dir_write "$1" "$(dir_items "$1")"; rm -f "$(placed_copy "$1")"; state_del told "placed:$1"
+    say "kit：$1 不再是 agent ${a}（kit place 拿掉了）：它的規則、技能、MCP 留著，是這個資料夾自己的；要開 ${a}：kit open <工具> --agent $a"
+}
 dir_kind() { printf 'dir:%s:%s' "$1" "$2"; }       # dir_kind DIR KIND : state.tsv kind for a folder's own (kit keeps it with the rest)
 dirs_registered() { [ -f "$DIRS_LIST" ] && awk 'NF && !seen[$0]++' "$DIRS_LIST"; }
 dirs_with() { local d; dirs_registered | while IFS= read -r d; do [ -d "$d" ] && dir_items "$d" | grep -qxF -- "$1" && printf '%s\n' "$d"; done; return 0; }   # dirs_with KIND:NAME : the folders whose list has it
 dirs_set() { # dirs_set DIR add|rm : the list of folders kit has to keep up to date
     local t; mkdir -p "$KIT_CONF"; touch "$DIRS_LIST"
-    [ "$2" = add ] || rm -f "$(placed_copy "$1")"
     t=$(mktemp "$DIRS_LIST.XXXXXX") || die "沒辦法寫 $DIRS_LIST"
     { grep -vxF -- "$1" "$DIRS_LIST"; [ "$2" = add ] && printf '%s\n' "$1"; } > "$t"
     if [ -s "$t" ]; then mv -f "$t" "$DIRS_LIST"; else rm -f "$t" "$DIRS_LIST"; fi
 }
-dir_write() { # dir_write DIR ITEMS [MARKS] : the folder's .agentkit (gone when nothing is left); kit place's lines kept
-    local marks; if [ $# -ge 3 ]; then marks=$3; else marks=$(dir_marks "$1"); fi
-    if [ -z "$2" ] && [ -z "$marks" ]; then rm -f "$1/$DIR_FILE"; return; fi
+dir_write() { # dir_write DIR ITEMS : the folder's .agentkit (gone when nothing is left)
+    if [ -z "$2" ]; then rm -f "$1/$DIR_FILE"; return; fi
     { printf '# kit：這個資料夾自己的規則、skill、MCP、外掛。只有在這裡（含子資料夾）開的 agent 會讀到，整個帳號和別的資料夾不受影響。\n'
       printf '# 用  kit add --dir <資料夾> 種類 名字  /  kit rm --dir …  改。\n'
-      [ -z "$marks" ] || { printf '# kit place：這個資料夾就是下面這個 agent（在這裡開的 claude、codex、omp 都是它）。\n'
-                           printf '# agent 的規則、skill、MCP 每次 kit sync 照 agent 檔放；下面的 種類:名字 是你另外加的，not:種類:名字 是你拿掉的 agent 的。\n'
-                           printf '%s\n' "$marks"; }
-      [ -z "$2" ] || printf '%s\n' "$2"; } > "$1/$DIR_FILE"
+      printf '%s\n' "$2"; } > "$1/$DIR_FILE"
 }
 drop_made() { # drop_made FILE : a JSON file kit made that is empty again goes away
     [ -n "$(state_get made "$1")" ] || return 0
@@ -1772,7 +1767,7 @@ dir_claude_allow() { # dir_claude_allow DIR : MCP names on stdin -> .claude/sett
     fi
     rm -f "$ops"; drop_made "$f"
 }
-dir_claude_deny() { # dir_claude_deny DIR : deny rules on stdin -> .claude/settings.local.json permissions.deny (kit place)
+dir_claude_deny() { # dir_claude_deny DIR : deny rules on stdin -> .claude/settings.local.json permissions.deny
     # (one the file already has is yours: kit does not count it as its own, so never takes it out)
     local dir=$1 f="$1/.claude/settings.local.json" names n ops add="" del="" kd have
     kd=$(dir_kind "$dir" deny)
@@ -1877,49 +1872,14 @@ dir_plugins() { # dir_plugins DIR : the folder's plugins installed (again when k
         esac
     done
 }
-# Claude Code's own tools that kit knows: a placed agent's tools.only becomes deny rules for the others (Claude's settings
-# have no "only these"; a tool Claude adds later is not in the list). kit.ps1 has the same list. No MultiEdit: newer
-# Claude Code has none (a deny rule for it is warned about), and in one that has it, denying Edit covers it.
-CLAUDE_TOOLS="Agent Bash Edit Glob Grep NotebookEdit Read Task TodoWrite WebFetch WebSearch Write"
-place_deny() { # place_deny ONLY DENY : the deny rules of a placed agent's folder (Claude): DENY, and with ONLY the other built-in tools
-    local t
-    { printf '%s\n' "$2"
-      [ -z "$1" ] || for t in $CLAUDE_TOOLS; do printf '%s\n' "$1" | grep -qxF "$t" || printf '%s\n' "$t"; done
-    } | awk 'NF && !seen[$0]++'
-}
-place_more() { # place_more NAME FILE RULES : the agent's prompt, after the folder's rules in its CLAUDE.md / AGENTS.md
-    local b; b=$(fm_body "$2" | awk 'NF { p = 1 } p')
-    [ -n "$b" ] || return 0
-    [ -z "$3" ] || echo
-    printf '<!-- agent: %s -->\n%s\n' "$1" "$b"
-}
-apply_dir() { # apply_dir DIR : the folder's .agentkit (and its agent) -> the tools' files in it
-    local dir=$1 want rules skills mcps d agent tool af="" rc fm more="" deny="" cdeny="" c
-    # kit place: the agent's rules, skills, MCP, its prompt after the rules, its tool limits into the tools' settings
-    # (read from the agent each time, so kit sync brings a change). An agent kit cannot read: kit's copy from the last
-    # time (the folder stays as it was), said once; no copy either: kit leaves the folder alone.
-    agent=$(dir_mark "$dir" agent); tool=$(dir_mark "$dir" tool)
-    if [ -n "$agent" ]; then
-        af=$(placed_file "$dir"); rc=$?; c=$(placed_copy "$dir")
-        if [ $rc = 0 ]; then
-            cmp -s "$af" "$c" 2>/dev/null || { mkdir -p "${c%/*}" && cp "$af" "$c"; }
-            state_del told "placed:$dir"
-        elif [ -z "$(state_get told "placed:$dir")" ]; then
-            warn "agent $agent 找不到或讀不懂（改了名字、來源不在、或核准的版本沒有它）：${dir} 先照上次的樣子不動，修好後 kit sync（只提醒這一次）"
-            state_set told "placed:$dir" 1
-        fi
-        [ $rc != 1 ] || return 0
-    fi
+apply_dir() { # apply_dir DIR : the folder's .agentkit -> the tools' files in it
+    local dir=$1 want rules skills mcps d cdeny=""
+    dir_unplace "$dir"
     want=$(dir_items "$dir")
     rules=$(printf '%s\n' "$want" | sed -n 's/^rule://p')
     skills=$(printf '%s\n' "$want" | sed -n 's/^skill://p')
     mcps=$(printf '%s\n' "$want" | sed -n 's/^mcp://p')
-    if [ -n "$af" ]; then
-        fm=$(fm_of "$af"); more=$(place_more "$agent" "$af" "$rules")
-        deny=$(fm_val "$fm" tools.deny); cdeny=$(place_deny "$(fm_val "$fm" tools.only)" "$deny")
-    fi
-    local DENY_MORE=$deny                                    # codex_mcp_toml: the agent's MCP tool denies too
-    set_rules "$dir/CLAUDE.md" import "$more" <<< "$rules"
+    set_rules "$dir/CLAUDE.md" import "" <<< "$rules"
     sync_skills "$dir/.claude/skills" "$(dir_kind "$dir" skill)" <<< "$skills"
     [ -f "$dir/.mcp.json" ] || [ -z "$mcps" ] || state_set made "$dir/.mcp.json" 1
     sync_mcp_json "$dir/.mcp.json" "$(dir_kind "$dir" mcp)" <<< "$mcps"; mcp_vars_warn <<< "$mcps"
@@ -1931,31 +1891,26 @@ apply_dir() { # apply_dir DIR : the folder's .agentkit (and its agent) -> the to
         dir_claude_off "$dir" < /dev/null; dir_claude_allow "$dir" <<< "$mcps"
     fi
     dir_claude_trust "$dir"
-    # kit's MCP plugin here: the agent's MCP denies in its names too, and the team's (the account's settings have the rest)
+    # kit's MCP plugin here: the team's MCP denies in its names too (the account's settings have the rest)
     if [ -n "$(state_list "$(dir_kind "$dir" mcp.claude)")" ]; then
-        cdeny=$( { printf '%s\n' "$cdeny" | claude_deny_forms "$(claude_mcp_name "$dir")" $( [ -z "$(state_list mcp.claude)" ] || echo kit-mcp )
-                   required_deny | claude_deny_forms "$(claude_mcp_name "$dir")" | grep '^mcp__plugin_'; } | awk 'NF && !seen[$0]++')
+        cdeny=$(required_deny | claude_deny_forms "$(claude_mcp_name "$dir")" | grep '^mcp__plugin_' | awk 'NF && !seen[$0]++')
     fi
     dir_claude_deny "$dir" <<< "$cdeny"
     dir_plugins "$dir"
     # kit's backups of the user's own files go when kit has nothing left in them
     [ -n "$(state_list "$(dir_kind "$dir" mcp)")" ] || rm -f "$dir/.mcp.json.kit-backup"
     [ -n "$(state_list "$(dir_kind "$dir" allow)")$(state_list "$(dir_kind "$dir" off)")$(state_list "$(dir_kind "$dir" deny)")" ] || rm -f "$dir/.claude/settings.local.json.kit-backup"
-    if has_codex || has_omp || [ "$tool" = codex ] || [ "$tool" = omp ] || [ -n "$(state_list "$(dir_kind "$dir" skill.agents)")" ]; then
-        set_rules "$dir/AGENTS.md" inline "$more" <<< "$rules"
+    if has_codex || has_omp || [ -n "$(state_list "$(dir_kind "$dir" skill.agents)")" ]; then
+        set_rules "$dir/AGENTS.md" inline "" <<< "$rules"
         sync_skills "$dir/.agents/skills" "$(dir_kind "$dir" skill.agents)" <<< "$skills"
     elif [ -f "$dir/AGENTS.md" ] && grep -qF -- "$BEGIN_MARK" "$dir/AGENTS.md"; then
-        set_rules "$dir/AGENTS.md" inline "$more" <<< "$rules"      # kit wrote it before (kit place --tool codex): keep it up to date
+        set_rules "$dir/AGENTS.md" inline "" <<< "$rules"      # kit wrote it before (kit place --tool codex did): keep it up to date
     fi
-    if has_codex || [ "$tool" = codex ] || [ -f "$dir/.codex/config.toml" ]; then
+    if has_codex || [ -f "$dir/.codex/config.toml" ]; then
         local CODEX_USER_TOML="$dir/.codex/config.toml"
         KIT_BLOCK=$(codex_mcp_toml <<< "$mcps") replace_block "$dir/.codex/config.toml" "$TOML_BEGIN" "$TOML_END"
     fi
-    # omp: the agent's tool limits through kit's hook module in the folder (none: kit's module goes)
-    local oo=""; [ -z "$af" ] || oo=$(fm_val "$fm" tools.only)
-    if { has_omp || [ "$tool" = omp ]; } && [ -n "$oo$deny" ]; then omp_hook_put "$dir/.omp/hooks/pre/kit.js" "$(omp_hook_js "" "$oo" "$deny")" ||
-        warn "$dir/.omp/hooks/pre/kit.js 是你自己的檔：kit 不動它，omp 在這裡不會照 agent 的 tools.only、tools.deny"
-    else omp_hook_put "$dir/.omp/hooks/pre/kit.js"; fi
+    omp_hook_put "$dir/.omp/hooks/pre/kit.js"              # the tool limits kit place put there go
     for d in .claude/skills .agents/skills .claude .agents .codex .omp/hooks/pre .omp/hooks .omp; do rmdir "$dir/$d" 2>/dev/null; done
     return 0
 }
@@ -1964,7 +1919,7 @@ apply_dirs() { # kit sync: every folder with its own; a folder that is gone (or 
     while IFS= read -r d; do
         [ -n "$d" ] || continue
         if [ -d "$d" ]; then apply_dir "$d"; fi
-        [ -n "$(dir_items "$d")$(dir_mark "$d" agent)" ] || dirs_set "$d" rm
+        [ -n "$(dir_items "$d")" ] || dirs_set "$d" rm
     done <<EOF
 $(dirs_registered)
 EOF
@@ -4381,15 +4336,13 @@ EOF
 
 plan_in() { skills_plan "$1" "$2" | while IFS="$TAB" read -r a n s _; do [ -z "$a" ] || printf '%s\t%s\t%s\t%s\n' "$1" "$a" "$n" "$s"; done; }   # plan_in DIR KIND : skills_plan's rows with DIR in front
 plan_all() { # what kit sync will do with skills, everywhere it puts them: rows DIR<TAB>ACTION<TAB>NAME<TAB>SUM (skills_plan)
-    local skills d agent tool kd
+    local skills d kd
     while IFS= read -r d; do                                 # the folders' own first, as kit sync does
         [ -n "$d" ] && [ -d "$d" ] || continue
-        agent=$(dir_mark "$d" agent); tool=$(dir_mark "$d" tool)
-        if [ -n "$agent" ]; then placed_file "$d" >/dev/null; [ $? != 1 ] || continue; fi
         skills=$(dir_items "$d" | sed -n 's/^skill://p')
         plan_in "$d/.claude/skills" "$(dir_kind "$d" skill)" <<< "$skills"
         kd=$(dir_kind "$d" skill.agents)
-        if has_codex || has_omp || [ "$tool" = codex ] || [ "$tool" = omp ] || [ -n "$(state_list "$kd")" ]; then plan_in "$d/.agents/skills" "$kd" <<< "$skills"; fi
+        if has_codex || has_omp || [ -n "$(state_list "$kd")" ]; then plan_in "$d/.agents/skills" "$kd" <<< "$skills"; fi
     done <<EOF
 $(dirs_registered)
 EOF
@@ -4843,12 +4796,11 @@ here_json() { # here_json DIR PID : the "here" part of kit list --json --dir
     if [ -n "$user" ]; then printf ', "items": []}'; return; fi
     if [ ! -d "$dir" ]; then printf ', "error": %s, "items": []}' "$(json_s "找不到這個資料夾")"; return; fi
     local froot; froot=$(dir_root "$dir")
-    local fa; fa=$(dir_mark "$froot" agent)
     local fp="" pn; for pn in $(dir_items "$froot" | sed -n 's/^plugin://p'); do   # which tools have each folder plugin
         fp="$fp${fp:+, }{\"name\": $(json_s "$pn"), \"tools\": $(for t in claude omp; do [ -z "$(state_get "$(dir_kind "$froot" "plugin.$t")" "$pn")" ] || echo $t; done | json_arr), \"note\": $(json_s "Codex 只能整個帳號裝")}"
     done
     printf ', "folder": {"dir": %s, "why": %s, "items": %s, "agent": %s, "plugins": [%s]}' "$(json_s "$froot")" "$(json_s "$(dir_why_not "$froot")")" "$(dir_items "$froot" | json_arr)" \
-        "$( [ -n "$fa" ] && json_s "$fa" || echo null)" "$fp"
+        null "$fp"
     printf ', "items": ['
     while IFS="$TAB" read -r sc k n f t; do
         [ -n "$k" ] || continue
@@ -5352,26 +5304,21 @@ cmd_add_rm() {
 }
 
 dir_add_rm() { # dir_add_rm add|rm DIR KIND NAME : only that folder (and below it) gets it, or no longer
-    # (a placed folder: taking out one of its agent's is kept as not:KIND:NAME, adding it again takes that away)
-    local verb=$1 k=$3 n=$4 i="$3:$4" root why own nots ag items
+    local verb=$1 k=$3 n=$4 i="$3:$4" root why items
     [ -d "$2" ] || die "找不到資料夾 $2"
     root=$(dir_root "$2") || die "找不到資料夾 $2"
     why=$(dir_why_not "$root"); [ -z "$why" ] || die "${root}：$why"
-    own=$(dir_own "$root"); nots=$(dir_nots "$root"); ag=$(dir_agent_items "$root")
+    dir_unplace "$root"; items=$(dir_items "$root")
     if [ "$verb" = add ]; then
         find_item "$k" "$n" > /dev/null || die "找不到 ${i}（打 kit list 看有哪些）"
-        dir_items "$root" | grep -qxF "$i" && { say "kit：$root 已經有 $i"; return 0; }
-        nots=$(printf '%s\n' "$nots" | grep -vxF "$i")
-        printf '%s\n' "$ag" | grep -qxF "$i" || own=$(printf '%s\n%s\n' "$own" "$i" | awk 'NF')
+        printf '%s\n' "$items" | grep -qxF "$i" && { say "kit：$root 已經有 $i"; return 0; }
+        items=$(printf '%s\n%s\n' "$items" "$i" | awk 'NF')
     else
-        dir_items "$root" | grep -qxF "$i" || die "$root 沒有加 ${i}（這個資料夾自己加的才拿得掉）"
-        own=$(printf '%s\n' "$own" | grep -vxF "$i")
-        printf '%s\n' "$ag" | grep -qxF "$i" && nots=$(printf '%s\n%s\n' "$nots" "$i" | awk 'NF')
+        printf '%s\n' "$items" | grep -qxF "$i" || die "$root 沒有加 ${i}（這個資料夾自己加的才拿得掉）"
+        items=$(printf '%s\n' "$items" | grep -vxF "$i")
     fi
-    items=$(printf '%s\n' "$own"; printf '%s\n' "$nots" | awk 'NF { print "not:" $0 }')
-    items=$(printf '%s\n' "$items" | awk 'NF')
     dir_write "$root" "$items"
-    if [ -n "$items$(dir_mark "$root" agent)" ]; then dirs_set "$root" add; else dirs_set "$root" rm; fi
+    if [ -n "$items" ]; then dirs_set "$root" add; else dirs_set "$root" rm; fi
     apply_dir "$root"
     # Codex: the folder's trust and the root marker; a plugin: kit's copy and what is blocked (a folder's plugin is kit's)
     if has_codex || [ "$k" = plugin ]; then apply_claude; else ver_record; fi
@@ -5746,70 +5693,6 @@ cmd_tab() { # kit tab list [--json] | show ID [--json] | rm ID... | keep [ID...]
 }
 tab_kinds() { printf '%s\n' "$1" | awk -F: 'NF == 2 { printf "%s{\"kind\": \"%s\", \"name\": \"%s\"}", (n++ ? ", " : ""), $1, $2 }'; }   # kind:name lines -> JSON objects
 
-cmd_place() { # kit place <agent> <dir> [--tool claude|codex|omp] [--json] : DIR becomes that agent's own folder
-    # Built on a folder's own (kit add --dir): .agentkit lists the agent's rules, skills and MCP, and says which agent it is
-    # (agent:NAME, tool:TOOL); kit sync puts the agent's prompt and tool limits in. Afterwards claude / codex / omp started
-    # there is that agent, and kit add|rm --dir changes only this folder.
-    local name="" dir="" tool=claude json="" a n k f fm d parent old items marks warns="" only deny
-    while [ $# -gt 0 ]; do
-        case $1 in
-            --tool) [ $# -ge 2 ] || die_c usage "--tool 後面要接 claude、codex 或 omp"; tool=$2; shift 2;;
-            --json) json=1; shift;;
-            -*) die_c usage "用法：kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]";;
-            *) if [ -z "$name" ]; then name=$1; elif [ -z "$dir" ]; then dir=$1
-               else die_c usage "用法：kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]"; fi; shift;;
-        esac
-    done
-    [ -n "$name" ] && [ -n "$dir" ] || die_c usage "用法：kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]"
-    case $tool in claude|codex|omp) ;; *) die_c usage "--tool 只能是 claude、codex 或 omp";; esac
-    need_init
-    f=$(find_item agent "$name") || die_c no_agent "找不到 agent ${name}（打 kit list 看有哪些）"
-    case $dir in /) ;; *) while [ "${dir%/}" != "$dir" ]; do dir=${dir%/}; done;; esac
-    if [ -d "$dir" ]; then d=$(cd "$dir" && pwd -P)
-    else
-        [ -e "$dir" ] && die_c bad_dir "$dir 不是資料夾"
-        parent=$(dirname "$dir")
-        [ -d "$parent" ] || die_c no_parent "上一層資料夾不在：${parent}（kit 只建最後一層）"
-        d="$(cd "$parent" && pwd -P)/$(basename "$dir")"; d=${d#/}; d="/$d"
-    fi
-    a=$(dir_why_not "$d"); [ -z "$a" ] || die_c bad_dir "${d}：$a"
-    if [ -d "$d" ]; then
-        old=$(dir_mark "$d" agent)
-        [ -z "$old" ] || [ "$old" = "$name" ] || die_c other_agent "$d 已經是 agent ${old}：換一個資料夾，或先把它的 .agentkit 拿掉"
-        [ -n "$old" ] || [ -z "$(ls -A "$d" 2>/dev/null)" ] || die_c not_empty "$d 已經有東西（不是 kit place 放的）：kit 只放在新的或空的資料夾"
-    else
-        mkdir "$d" || die "沒辦法建立資料夾 $d"
-    fi
-    fm=$(fm_of "$f") || die "bad header in $f"
-    # .agentkit: which agent, and what you changed there before (placed again); the agent's own come from it each time
-    items=$(dir_lines "$d")
-    for a in rule:rules skill:skills mcp:mcp; do
-        k=${a%%:*}
-        for n in $(fm_val "$fm" "${a#*:}"); do find_item "$k" "$n" >/dev/null || warns="$warns$k $n 不在任何來源裡：沒有放進來$LF"; done
-    done
-    marks="agent:$name${LF}tool:$tool"
-    dir_write "$d" "$items" "$marks"
-    dirs_set "$d" add
-    apply_dir "$d"
-    if has_codex; then apply_claude; else ver_record; fi      # Codex: the folder's trust and the root marker
-    # what this tool cannot take from the agent in a folder (the README's table)
-    only=$(fm_val "$fm" tools.only); deny=$(fm_val "$fm" tools.deny)
-    case $tool in
-    claude) ;;                                               # tools.only: deny for the others (kit check tells the author)
-    codex)
-        local cw; cw=$(codex_limits_warn "$only" "$deny"); [ -z "$cw" ] || warns="$warns$cw$LF";;
-    omp)
-        local ow; ow=$(omp_limits_warn "$only" "$deny"); [ -z "$ow" ] || warns="$warns$ow$LF";;
-    esac
-    [ -z "$warns" ] || printf '%s' "$warns" | while IFS= read -r a; do warn "$a"; done
-    if [ -n "$json" ]; then
-        printf '{"dir": %s, "agent": %s, "tool": %s, "command": %s, "warnings": %s}\n' "$(json_s "$d")" "$(json_s "$name")" "$(json_s "$tool")" \
-            "$(printf '%s\n' "$tool" | json_arr)" "$(printf '%s' "$warns" | json_arr)" >&3
-    else
-        say "kit：$d 是 agent $name 了（在這裡打 $tool 開的就是它；之後用 kit add|rm --dir 改這個資料夾）"
-    fi
-}
-
 cmd_uninstall() {
     local self=0; [ "${1:-}" = "--self" ] && self=1
     local n ops k v
@@ -6182,9 +6065,7 @@ check_dirs() { # check_dirs DIR... : print problems, return 1 if any
                 for k in rule skill mcp; do      # the keys: rules, skills, mcp
                     v=${k}s; [ $k = mcp ] && v=mcp
                     for ref in $(fm_val "$fm" "$v"); do grep -q "^$k:$ref$TAB" "$names" || problem "$rel: 找不到 $k:$ref"; done
-                done
-                # for whoever writes it, not a problem: what tools.only can't do in Claude Code
-                [ -z "$(fm_val "$fm" tools.only)" ] || warn "$rel: tools.only 在 Claude 是把其他內建工具寫進 deny：Claude 之後新加的內建工具擋不到（要擋就寫進 tools.deny）";;
+                done;;
             esac
         done
         for f in "$d"/plugins/*/; do [ -f "$f.claude-plugin/plugin.json" ] || continue; rel=${f#"$d"/}; valid_name "$(basename "$f")" || problem "${rel%/}: 名字只能用小寫英文、數字和 -"; done
@@ -7633,9 +7514,6 @@ kit - 管理 AI 寫程式工具的 rule、skill、MCP 和 agent
   kit add|rm --tab <分頁> <種類> <名字>   只改這個分頁（下面的資料夾或帳號已經有的不加）
   kit tab list|show <分頁> [--json]   有哪些分頁、一個分頁三層各有什麼
   kit tab rm <分頁>... | kit tab keep [<分頁>...]   分頁關掉了：清掉它那一份（keep：留這些和還在跑的，別的清掉）
-  kit place <agent> <資料夾> [--tool claude|codex|omp] [--json]
-                                    讓這個資料夾變成那個 agent：之後在這裡開的 claude、codex、omp 就是它
-                                    （建立最後一層資料夾；之後用 kit add|rm --dir 改，每個資料夾各自獨立）
   kit sync [--force]                全部換成來源最新的（自動的同步只裝新加的、拿掉不要的，已經在用的不換）
   kit sync --dry-run                先看 skill 會怎麼改，給一個雜湊；kit sync --expect 雜湊：清單一樣才改
   kit sync --only <種類>:<名字>     只把這一個換成來源最新的（rule、skill、mcp、plugin），別的不動
@@ -7689,7 +7567,7 @@ esac
 case ${1:-} in add|rm|remove|sync) TELL_JSON=; NO_TELL=
     for a in "$@"; do shift; case $a in --json) TELL_JSON=1;; --no-tell) NO_TELL=1;; *) set -- "$@" "$a";; esac; done;; esac
 # the commands that change state.tsv, the tools' files or a source: one kit at a time (sync --hook takes it itself)
-case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent|install-deps|place) [ "${2:-}" = --hook ] || take_lock;; esac
+case ${1:-} in init|sync|add|rm|remove|uninstall|push|agent|install-deps) [ "${2:-}" = --hook ] || take_lock;; esac
 case ${1:-} in add|rm|remove|sync) TELL_BEFORE=$(tell_ver);; esac       # (what the tools have before: tell_after)
 case ${1:-} in
     init)      shift; cmd_init "$@";;
@@ -7719,7 +7597,7 @@ case ${1:-} in
     run)       shift; cmd_run "$@";;
     open)      shift; cmd_open "$@";;
     tab)       shift; cmd_tab "$@";;
-    place)     shift; cmd_place "$@";;
+    place)     die "kit place 拿掉了（0.18.0）：開 agent 用  kit open <工具> --agent <名字>；放過的資料夾 kit sync 時變成普通資料夾，東西都留著";;
     agents)    shift; cmd_agents "$@";;
     agent)     shift; cmd_agent "$@";;
     new)       shift; cmd_new "$@";;

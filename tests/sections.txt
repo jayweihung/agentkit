@@ -85,7 +85,7 @@ authoring mcp push push-direct : unix/kit:state_from_old unix/kit:item_hash unix
     windows/kit.ps1:Put-Item windows/kit.ps1:Skeleton windows/kit.ps1:Parse-ItemArgs windows/kit.ps1:Guess-Kind
     windows/kit.ps1:Cmd-New windows/kit.ps1:Cmd-DiffUpdate
 authoring agents push push-direct review mcp : unix/kit:cmd_check windows/kit.ps1:Cmd-Check
-place tools : unix/kit:cmd_place windows/kit.ps1:Cmd-Place
+place : unix/kit:dir_unplace windows/kit.ps1:Dir-Unplace
 hook place : unix/kit:json_unq unix/kit:codex_guard_says unix/kit:cmd_codex_guard windows/kit.ps1:Codex-GuardSays
     windows/kit.ps1:Cmd-CodexGuard
 install hook : unix/kit:cmd_self_update unix/kit:cmd_ci_template windows/kit.ps1:Cmd-SelfUpdate

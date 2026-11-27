@@ -93,13 +93,18 @@ Kit add skill packed
 $env:KIT_DRY_RUN = '1'; Kit install-deps packed; Remove-Item env:KIT_DRY_RUN
 Check 'install-deps, dry run: only says the command' { $out.Contains('執行 npm ci --ignore-scripts --omit=dev --no-audit --no-fund') -and -not (Test-Path "$T/npm7.log") }
 $S7 = Join-Path $H '.config/agentkit/deps/packed'; $C7 = Join-Path $H '.claude/skills/packed'
+function KitDeps([string]$p) { if ($OnWindows) { Test-Path -LiteralPath (Join-Path $p '.kit-copy') -PathType Leaf } else { [bool](Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue).LinkType } }   # kit's packages in a skill copy: copied on Windows, else a link
 Kit install-deps packed
 Check 'install-deps: npm ci in a new folder next to kit''s, not the source, without the skill''s .npmrc' { $rc -eq 0 -and (ReadT "$T/npm7.log").Trim().Replace('\', '/') -match '\.config/agentkit/deps/packed\.new\.[a-z0-9]+ ci --ignore-scripts --omit=dev --no-audit --no-fund$' -and (Test-Path "$S7/node_modules/left-pad/index.js") -and -not (Test-Path "$NT/skills/packed/node_modules") -and -not (Test-Path "$S7/.npmrc") -and @(Get-ChildItem -LiteralPath (Split-Path -Parent $S7) -Filter 'packed.new.*').Count -eq 0 }
-Check 'install-deps: the copy kit put gets node_modules linked to it' { (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType -and (-not (Links-Follow) -or (Test-Path "$C7/node_modules/left-pad/index.js")) }
+Check 'install-deps: the copy kit put gets kit''s node_modules (Windows: copied, no junction; else linked)' { (KitDeps "$C7/node_modules") -and (Test-Path "$C7/node_modules/left-pad/index.js") }
 Kit list --json
 Check 'packages: installed now' { (PkOf 'packed') -eq '{"kind": "npm", "ok": true, "had": true, "install": "npm ci --ignore-scripts --omit=dev --no-audit --no-fund", "bad": ""}' }
 Kit sync
-Check 'sync: the link is not a change to the skill' { $out -notmatch '手動' -and (Get-Item -LiteralPath "$C7/node_modules" -Force).LinkType }
+Check 'sync: kit''s packages are not a change to the skill' { $out -notmatch '手動' -and (KitDeps "$C7/node_modules") }
+if ($OnWindows) {   # kit's copy of other packages (the mark says so) is put again; one the skill brings itself is never touched
+    W "$C7/node_modules/.kit-copy" "old`n"; W "$C7/node_modules/stale.js" ""; Kit sync
+    Check 'sync (Windows): kit''s copy of older packages is replaced' { -not (Test-Path "$C7/node_modules/stale.js") -and (Test-Path "$C7/node_modules/left-pad/index.js") -and $out -notmatch '手動' }
+}
 # kit run: the agent's folder gets the links too, and goes with them (never into kit's store); a dry run has none
 W "$NT/agents/packer.md" "---`nname: packer`ndescription: x`nskills: [packed]`n---`nx`n"
 $env:KIT_DRY_RUN = '1'; Kit run packer; Remove-Item env:KIT_DRY_RUN
@@ -108,8 +113,7 @@ Check 'run, dry run: the agent''s folder to look at, without kit''s links' { (Te
 Remove-Item -LiteralPath $rt -Recurse -Force
 $SR = Join-Path ([IO.Path]::GetTempPath()) "kit-run.kittest$PID"; [void](New-Item -ItemType Directory -Force -Path "$SR/x"); W "$SR/.kit-pid" "999999`n"
 [void](New-Item -ItemType $(if ($OnWindows) { 'Junction' } else { 'SymbolicLink' }) -Path "$SR/x/node_modules" -Target "$S7/node_modules")
-# (the link itself, as -L: dir /aL lists it without going through it, which RedirectionGuard may refuse: Links-Follow)
-if ($OnWindows) { W "$FB7/claude.cmd" "@echo off`r`necho %*> `"$T\claude.args`"`r`ndir /b /aL `"%2\.claude\skills\packed`" 2>nul | findstr /x /c:node_modules >nul || exit /b 4`r`nexit /b 3`r`n" }
+if ($OnWindows) { W "$FB7/claude.cmd" "@echo off`r`necho %*> `"$T\claude.args`"`r`nif not exist `"%2\.claude\skills\packed\node_modules\.kit-copy`" exit /b 4`r`nexit /b 3`r`n" }
 else { W "$FB7/claude" "#!/bin/sh`necho `"`$*`" > '$T/claude.args'`n[ -L `"`$2/.claude/skills/packed/node_modules`" ] || exit 4`nexit 3`n"; & chmod +x "$FB7/claude" }
 Kit run packer
 $rt = ([regex]::Match((ReadT "$T/claude.args"), '--add-dir (\S+)')).Groups[1].Value.Trim('"')
@@ -153,11 +157,11 @@ if (-not $OnWindows) {
     Kit install-deps pyskill pip
     $S8 = Join-Path $H '.config/agentkit/pydeps/pyskill'; $C8 = Join-Path $H '.claude/skills/pyskill'
     Check 'install-deps (pip): a venv in kit''s folder, pip run there with wheels only' { $rc -eq 0 -and (ReadT "$T/pip7.log").Trim().EndsWith('pydeps/pyskill -m pip install --only-binary=:all: --no-input --disable-pip-version-check -r requirements.txt') -and (Test-Path "$S8/venv/bin/python") -and -not (Test-Path "$NT/skills/pyskill/.venv") }
-    Check 'install-deps (pip): the copy gets .venv linked, the instructions say to use it' { (Get-Item -LiteralPath "$C8/.venv" -Force).LinkType -and (ReadT (Join-Path $H '.claude/CLAUDE.md')).Contains('.venv/bin/python') }
+    Check 'install-deps (pip): the copy gets kit''s .venv, the instructions say to use it' { (KitDeps "$C8/.venv") -and (ReadT (Join-Path $H '.claude/CLAUDE.md')).Contains('.venv/bin/python') }
     # the python line is the account's (for the account's skills), never in a folder's own files
     $PD = Join-Path $T 'pyproj'; W "$PD/CLAUDE.md" "# mine`n"; Copy-Item "$PD/CLAUDE.md" "$T/pd.orig"
     Kit add --dir $PD skill pyskill
-    Check 'add --dir with kit''s venv: the folder''s copy gets .venv, its CLAUDE.md is not touched' { (Get-Item -LiteralPath "$PD/.claude/skills/pyskill/.venv" -Force).LinkType -and (SameBytes "$T/pd.orig" "$PD/CLAUDE.md") -and -not (Test-Path "$PD/AGENTS.md") }
+    Check 'add --dir with kit''s venv: the folder''s copy gets .venv, its CLAUDE.md is not touched' { (KitDeps "$PD/.claude/skills/pyskill/.venv") -and (SameBytes "$T/pd.orig" "$PD/CLAUDE.md") -and -not (Test-Path "$PD/AGENTS.md") }
     Kit rm --dir $PD skill pyskill
     Check 'rm --dir with kit''s venv: the folder exactly as before' { (SameBytes "$T/pd.orig" "$PD/CLAUDE.md") -and ((@(Get-ChildItem -LiteralPath $PD -Force | ForEach-Object { $_.Name }) -join ' ') -eq 'CLAUDE.md') }
     Kit rm skill pyskill
@@ -183,7 +187,9 @@ $h1 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashm
 $h2 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashme" 2>&1 | ForEach-Object { "$_" }) -join ''
 W "$T/hashme/c.txt" "c`n"
 $h3 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashme" 2>&1 | ForEach-Object { "$_" }) -join ''
-Check 'skill hash: a link (junction) in it does not count, its own files do' { $h1 -match '^[0-9A-F]{16}$' -and $h1 -eq $h2 -and $h3 -ne $h1 }
+W "$T/hashme/.venv/.kit-copy" "x`n"; W "$T/hashme/.venv/lib.py" "x`n"
+$h2b = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashme" 2>&1 | ForEach-Object { "$_" }) -join ''
+Check 'skill hash: a link (junction) in it does not count, nor kit''s copy of packages (.kit-copy), its own files do' { $h1 -match '^[0-9A-F]{16}$' -and $h1 -eq $h2 -and $h3 -ne $h1 -and $h2b -eq $h3 }
 [void](New-Item -ItemType Directory -Force -Path "$T/hashme/scripts/__pycache__"); [IO.File]::WriteAllBytes("$T/hashme/scripts/__pycache__/x.cpython-314.pyc", [byte[]]@(0, 1, 2)); [IO.File]::WriteAllBytes("$T/hashme/y.pyc", [byte[]]@(0, 1, 2))
 $h4 = (& $Exe -NoProfile -ExecutionPolicy Bypass -File $Kit __dir-hash "$T/hashme" 2>&1 | ForEach-Object { "$_" }) -join ''
 Check 'skill hash: Python caches (__pycache__, .pyc) do not count' { $h4 -eq $h3 }

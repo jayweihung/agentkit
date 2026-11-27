@@ -4,6 +4,14 @@
 更新：`kit self-update`，再 `kit sync`；終端機程式整個關掉重開。
 **每台跑 agent 的電腦或主機都要更新**（例如連到的 Linux），不然那台的 agent 用不到新功能。
 
+## 0.18.0（2026-11-28）
+
+更新後要做：每台 `kit self-update`，再 `kit sync`。kit api 1.23。
+
+- **`kit place` 拿掉了**：開 agent 一律用 `kit open <工具> --agent <名字>`（Herdr 的 Agents 面板拖 hello 就是這樣開，Kit mod 1.20 起）。以前放過的資料夾（例如 `~/hello`）下一次 `kit sync` 時變成普通資料夾：它那時有的規則、skill、MCP 都留著，變成這個資料夾自己的（`.agentkit` 裡列出來，之後照樣 `kit add|rm --dir` 改）；agent 的提示（`CLAUDE.md`／`AGENTS.md` 裡的）和工具限制（`.claude/settings.local.json` 的 deny、Codex 的 codex-guard、omp 的 `.omp/hooks/pre/kit.js`）拿掉。kit 會說一次是哪個資料夾。`kit list --json --dir` 的 `here.folder.agent` 一律是 `null`。
+- **Windows：skill 的套件改成複製，不用 junction**。`kit install-deps` 裝好的 `node_modules`／`.venv`，每個放了這個 skill 的地方（帳號、資料夾、`kit run`）各複製一份（裡面有 `.kit-copy` 記著是哪一版；套件重裝了，下一次 `kit sync` 換新的）。原因：從 Windows 的 OpenSSH 開的程式、用 S4U 排程開的程式，Windows 不讓它跟著 junction 走（RedirectionGuard），skill 找不到套件，kit 也沒說。已經有的 junction 下一次 `kit sync` 換成複製。Mac、Linux 照舊用連結。
+- `kit check` 不再說「tools.only 在 Claude 是把其他內建工具寫進 deny」（那是 `kit place` 的做法；`kit run`、`kit open` 用 Claude 的 `--tools`）。
+
 ## 0.17.3（2026-11-27）
 
 更新後要做：`kit self-update`（每台）。
