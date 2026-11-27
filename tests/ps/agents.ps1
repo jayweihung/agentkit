@@ -25,7 +25,7 @@ Kit check $TEAM
 Check "check: an agent's missing MCP is reported" { $out.Contains('agents/gerrit.md: 找不到 mcp:nope') }
 W "$TEAM/agents/gerrit.md" $gBak
 Kit check $TEAM
-Check 'check: an agent with tools.only: a note for its author (what Claude can''t do), not a problem' { $out.Contains('agents/gerrit.md: tools.only 在 Claude 是把其他內建工具寫進 deny') -and -not $out.Contains('kit check: agents/gerrit.md: tools.only') }
+Check 'check: an agent with tools.only: fine, nothing said (kit run, kit open hand Claude --tools)' { -not $out.Contains('tools.only') }
 # kit run leaves a marker (process -> agent): kit list --json --pid tells the pane's agent
 $rund = Join-Path $H '.config/agentkit/run'; W (Join-Path $rund "$PID") "gerrit`n"
 $sp = @{ FilePath = $Exe; ArgumentList = @('-NoProfile', '-Command', 'exit 0'); PassThru = $true }; if ($OnWindows) { $sp['WindowStyle'] = 'Hidden' }

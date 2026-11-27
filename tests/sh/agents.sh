@@ -69,6 +69,6 @@ check "check: an agent's missing MCP is reported" 'echo "$out" | grep -qF "agent
 cp "$T/gerrit.bak" "$TEAM/agents/gerrit.md"
 rm -rf "$TEAM/skills/quote"
 out=$(kit check "$TEAM" 2>&1)
-check "check: an agent with tools.only: a note for its author (what Claude can't do), not a problem" 'echo "$out" | grep -qF "kit: agents/gerrit.md: tools.only 在 Claude 是把其他內建工具寫進 deny" && ! echo "$out" | grep -qF "kit check: agents/gerrit.md: tools.only"'
+check "check: an agent with tools.only: fine, nothing said (kit run, kit open hand Claude --tools)" '! echo "$out" | grep -qF "tools.only"'
 
 finish

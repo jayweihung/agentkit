@@ -50,7 +50,7 @@ Remove-Item -Recurse -Force "$TEAM/skills/quote"
 $teamHead = "$(& git -C $TEAM rev-parse HEAD)".Trim()
 $tpJ = (Resolve-Path -LiteralPath $TP).ProviderPath.Replace('\', '\\')
 function Snap([string]$d) { # every file (not PowerShell's own cache) with its size and time
-    (@(Get-ChildItem -LiteralPath $d -Recurse -Force -File | Where-Object { $_.FullName -notmatch '[\\/](\.cache|\.local)[\\/]' } | Sort-Object FullName |
+    (@(Get-ChildItem -LiteralPath $d -Recurse -Force -File | Where-Object { $_.FullName -notmatch '[\\/](\.cache|\.local|AppData[\\/]Local[\\/]Microsoft[\\/]Windows[\\/]PowerShell)[\\/]' } | Sort-Object FullName |
         ForEach-Object { "$($_.FullName) $($_.Length) $($_.LastWriteTimeUtc.Ticks)" })) -join "`n" }
 Kit api; $api = $out
 $snap0 = Snap $H

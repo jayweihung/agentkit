@@ -65,7 +65,7 @@ Check 'signed: local edits in the clone are reset to the approved commit' { -not
 # status --json with approvals: only the approvals clone that is here already (never pulled), nothing written
 [void](ApprSign $AW "$SA/key" "serial: 3`nsrcA $v2`n"); APush s3        # not pulled here
 function SnapS([string]$d) { # every file (not PowerShell's own cache, which each kit.ps1 run may touch) with its size and time
-    (@(Get-ChildItem -LiteralPath $d -Recurse -Force -File | Where-Object { $_.FullName -notmatch '[\\/](\.cache|\.local)[\\/]' } | Sort-Object FullName |
+    (@(Get-ChildItem -LiteralPath $d -Recurse -Force -File | Where-Object { $_.FullName -notmatch '[\\/](\.cache|\.local|AppData[\\/]Local[\\/]Microsoft[\\/]Windows[\\/]PowerShell)[\\/]' } | Sort-Object FullName |
         ForEach-Object { "$($_.FullName) $($_.Length) $($_.LastWriteTimeUtc.Ticks)" })) -join "`n" }
 $snapR = SnapS $RH
 KitJ status --json; $sjA = $out
